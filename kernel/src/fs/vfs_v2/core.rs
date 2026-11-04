@@ -203,6 +203,40 @@ pub trait VfsNode: Send + Sync + Any {
     /// Native labels belong to the inode rather than its pathname or an ABI.
     fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {None}
 
+    /// Read the persistent Shield label for one stable policy domain.
+    /// Memory-backed nodes retain the value in inode-owned RAM metadata;
+    /// persistent filesystems override these methods to use durable storage.
+    fn read_label_metadata(
+        &self,
+        domain: &[u8; 16],
+    ) -> Result<Option<Vec<u8>>, FileSystemError> {
+        let labels = self.shield_labels().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem cannot retain file labels",
+            )
+        })?;
+        labels.read_label_metadata(domain)
+    }
+
+    /// Replace the persistent Shield label for one stable policy domain. An
+    /// empty value is stored as malformed metadata, not treated as removal.
+    /// The per-inode Shield transaction lock, rather than an IRQ spin lock,
+    /// spans read/check/write operations that may perform disk I/O.
+    fn write_label_metadata(
+        &self,
+        domain: &[u8; 16],
+        value: &[u8],
+    ) -> Result<(), FileSystemError> {
+        let labels = self.shield_labels().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem cannot retain file labels",
+            )
+        })?;
+        labels.write_label_metadata(domain, value)
+    }
+
     /// Returns the unique identifier in the filesystem
     fn id(&self) -> u64;
 

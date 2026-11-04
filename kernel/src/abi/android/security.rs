@@ -423,8 +423,8 @@ struct SecurityFile {
 }
 pub(super) fn resource_context(task: &Task, node: &dyn VfsNode) -> Option<Vec<u8>> {
     let subject = task.security_subject.read().clone()?;
-    let label = subject.policy().resource_label(node)?;
-    Some(format!("{}\0", subject.policy().label(label)?).into_bytes())
+    let name = subject.policy().resource_label_name(node)?;
+    Some(format!("{}\0", name).into_bytes())
 }
 fn create_context(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     let text = core::str::from_utf8(input).map_err(|_| StreamError::InvalidArgument)?.trim_end_matches('\0');

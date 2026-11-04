@@ -10,7 +10,9 @@ use alloc::vec::Vec;
 use scarlet_abi::shield::{RawLabel, RawRule};
 pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition, RawFileCreate as FileCreate, RawFileRelabel as FileRelabel};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
-pub use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
+pub use scarlet_abi::shield::{
+    MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES, MAX_LABEL_SETS, MAX_SET_MEMBERS,
+};
 pub use scarlet_abi::shield::{RawLabelSet as LabelSet, RawSetMember as SetMember,
     RawLabelSelector as LabelSelector, RawSetGrant as SetGrant, RawSetFileRule as SetFileRule};
 
@@ -207,6 +209,21 @@ impl Policy {
         let spec=[default as u64,create.as_ptr() as u64,create.len() as u64,relabel.as_ptr() as u64,relabel.len() as u64];
         // SAFETY: fixed-width specification and borrowed arrays live through the synchronous copy.
         Self::returned(unsafe {scarlet_sys::syscall3(Syscall::ShieldFilePolicy,self.0.as_raw() as usize,spec.as_ptr() as usize,40)})
+    }
+    /// Derive a fresh policy capability whose file labels use a stable,
+    /// nonzero 16-byte domain. Management authority is checked by the kernel.
+    pub fn with_file_persistence(&self, domain: &[u8; 16]) -> HandleResult<Self> {
+        if *domain == [0; 16] {
+            return Err(HandleError::InvalidParameter);
+        }
+        // SAFETY: the domain is copied synchronously by the kernel.
+        Self::returned(unsafe {
+            syscall2(
+                Syscall::ShieldFilePersistence,
+                self.0.as_raw() as usize,
+                domain.as_ptr() as usize,
+            )
+        })
     }
     /// Bind a native inode identity to this policy until the policy is released.
     /// Requires management authority; a different existing binding is rejected.

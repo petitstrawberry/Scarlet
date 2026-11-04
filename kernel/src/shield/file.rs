@@ -1,8 +1,8 @@
 //! Policy-scoped inode labels and explicit creation/relabel rules.
 use super::{Policy, Subject};
 use crate::{
-    fs::{FileType, vfs_v2::core::VfsNode},
-    sync::IrqRwSpinLock,
+    fs::{FileSystemError, FileSystemErrorKind, FileType, vfs_v2::core::VfsNode},
+    sync::{IrqRwSpinLock, Mutex},
     task::Task,
 };
 use alloc::{
@@ -105,22 +105,40 @@ impl FilePolicy {
         Ok(())
     }
 }
+/// Maximum number of stable metadata domains retained by one inode's RAM
+/// fallback. Persistent backends enforce the same bound through the policy
+/// configuration and their xattr storage.
+pub const MAX_LABEL_DOMAINS: usize = 16;
+pub const MAX_LABEL_METADATA_BYTES: usize =
+    scarlet_abi::shield::FILE_LABEL_METADATA_MAX_BYTES;
+const MAX_POLICY_BINDINGS: usize = 16;
+
+#[derive(Default)]
+struct LabelState {
+    policies: BTreeMap<usize, (Weak<Policy>, u32)>,
+    metadata: BTreeMap<[u8; 16], Vec<u8>>,
+}
+
 /// Owned by an inode, shared by hard links and retained open files. Weak policy
 /// identities prevent cycles with policies that retain administrator-bound nodes.
 pub struct Labels {
-    entries: IrqRwSpinLock<BTreeMap<usize, (Weak<Policy>, u32)>>,
+    state: IrqRwSpinLock<LabelState>,
+    mutation: Mutex<()>,
 }
 impl Default for Labels {
     fn default() -> Self {
         Self {
-            entries: IrqRwSpinLock::new(BTreeMap::new()),
+            state: IrqRwSpinLock::new(LabelState::default()),
+            mutation: Mutex::new(()),
         }
     }
 }
 impl core::fmt::Debug for Labels {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let state = self.state.read();
         f.debug_struct("FileLabels")
-            .field("policies", &self.entries.read().len())
+            .field("policies", &state.policies.len())
+            .field("domains", &state.metadata.len())
             .finish()
     }
 }
@@ -129,24 +147,65 @@ impl Labels {
         Arc::new(Self::default())
     }
     pub fn get(&self, policy: &Policy) -> Option<u32> {
-        self.entries
+        self.state
             .read()
+            .policies
             .get(&(policy as *const Policy as usize))
             .map(|(_, label)| *label)
     }
     fn assign(&self, policy: &Arc<Policy>, label: u32, replace: bool) -> Result<(), &'static str> {
-        let mut entries = self.entries.write();
-        entries.retain(|_, (policy, _)| policy.strong_count() != 0);
+        let mut state = self.state.write();
+        state.policies.retain(|_, (policy, _)| policy.strong_count() != 0);
         let key = Arc::as_ptr(policy) as usize;
-        if let Some((_, old)) = entries.get(&key) {
+        if let Some((_, old)) = state.policies.get(&key) {
             if !replace && *old != label {
                 return Err("file already labeled");
             }
-        } else if entries.len() >= 16 {
+        } else if state.policies.len() >= MAX_POLICY_BINDINGS {
             return Err("inode policy bound");
         }
-        entries.insert(key, (Arc::downgrade(policy), label));
+        state.policies.insert(key, (Arc::downgrade(policy), label));
         Ok(())
+    }
+
+    pub fn read_label_metadata(
+        &self,
+        domain: &[u8; 16],
+    ) -> Result<Option<Vec<u8>>, FileSystemError> {
+        Ok(self.state.read().metadata.get(domain).cloned())
+    }
+
+    pub fn write_label_metadata(
+        &self,
+        domain: &[u8; 16],
+        value: &[u8],
+    ) -> Result<(), FileSystemError> {
+        if value.len() > MAX_LABEL_METADATA_BYTES {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::ValueOverflow,
+                "Persistent file label is too large",
+            ));
+        }
+        let mut state = self.state.write();
+        if !state.metadata.contains_key(domain) && state.metadata.len() >= MAX_LABEL_DOMAINS {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "Inode persistent label domain bound",
+            ));
+        }
+        state.metadata.insert(*domain, value.to_vec());
+        Ok(())
+    }
+
+    /// Serialize a complete read/check/write transaction with a sleepable
+    /// per-inode lock. Disk-backed metadata implementations must keep I/O in
+    /// this closure and out of `state`'s IRQ spin lock.
+    pub(crate) fn transaction<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        let _guard = self.mutation.lock();
+        operation()
     }
 }
 pub fn kind(file_type: &FileType) -> Result<u32, &'static str> {
@@ -210,12 +269,63 @@ impl CreateContext {
         Ok(Some(Self { policy, target }))
     }
     pub fn initialize(&self, node: &dyn VfsNode) -> Result<(), &'static str> {
-        node.shield_labels()
-            .ok_or("filesystem cannot retain file labels")?
-            .assign(&self.policy, self.target, false)
+        let labels = node.shield_labels()
+            .ok_or("filesystem cannot retain file labels")?;
+        if let Some(domain) = self.policy.file_persistence_domain() {
+            let name = self.policy.label(self.target).ok_or("unknown file label")?;
+            let value = encode_persistent_label(name.as_ref())?;
+            return node
+                .write_label_metadata(&domain, &value)
+                .map_err(|_| "persistent file label write failed");
+        }
+        labels.assign(&self.policy, self.target, false)
     }
 }
+
+fn encode_persistent_label(name: &str) -> Result<Vec<u8>, &'static str> {
+    let mut value = [0u8; MAX_LABEL_METADATA_BYTES];
+    let length = scarlet_abi::shield::encode_file_label(name, &mut value)
+        .ok_or("invalid persistent file label")?;
+    Ok(value[..length].to_vec())
+}
+
 impl Policy {
+    pub fn file_persistence_domain(&self) -> Option<[u8; 16]> {
+        self.snapshot().file_persistence
+    }
+
+    /// Derive a fresh policy identity that stores file labels as symbolic names
+    /// in the shared stable domain. The management capability is checked by the
+    /// native syscall; derivation itself does not grant authority.
+    pub fn with_file_persistence(
+        &self,
+        domain: [u8; 16],
+    ) -> Result<Arc<Self>, &'static str> {
+        if domain == [0; 16] {
+            return Err("file persistence domain must be nonzero");
+        }
+        let mut data = (*self.snapshot()).clone();
+        data.file_persistence = Some(domain);
+        data.generation = 1;
+        Ok(Self::from_data(data))
+    }
+
+    pub(crate) fn persisted_label_name(
+        &self,
+        node: &dyn VfsNode,
+        domain: &[u8; 16],
+    ) -> Result<Option<Arc<str>>, &'static str> {
+        let Some(value) = node
+            .read_label_metadata(domain)
+            .map_err(|_| "persistent file label unavailable")?
+        else {
+            return Ok(None);
+        };
+        let name = scarlet_abi::shield::decode_file_label(&value)
+            .ok_or("malformed persistent file label")?;
+        Ok(Some(Arc::from(name)))
+    }
+
     pub fn default_file_label(&self) -> Option<u32> {
         self.snapshot().files.default
     }
@@ -240,10 +350,49 @@ impl Policy {
             .shield_labels()
             .ok_or("filesystem cannot retain file labels")?;
         let kind = kind(&node.file_type().map_err(|_| "file kind unavailable")?)?;
-        let mut entries = labels.entries.write();
-        entries.retain(|_, (policy, _)| policy.strong_count() != 0);
+        if let Some(domain) = self.file_persistence_domain() {
+            return labels.transaction(|| {
+                if let Some(old) = self.bound_resource_label(node) {
+                    return if old == target {
+                        Ok(())
+                    } else {
+                        Err("administrator-pinned file label")
+                    };
+                }
+                let persisted = self.persisted_label_name(node, &domain)?;
+                let old = match persisted.as_ref() {
+                    Some(name) => self
+                        .label_id(name)
+                        .ok_or("unknown persistent file label")?,
+                    None => self
+                        .snapshot()
+                        .files
+                        .default
+                        .ok_or("file label missing")?,
+                };
+                if old != target
+                    && !self
+                        .snapshot()
+                        .relabel_allowed(subject.label(), old, kind, target)
+                {
+                    return Err("file relabel denied");
+                }
+                let target_name = self.label(target).ok_or("unknown file label")?;
+                if persisted.as_deref() == Some(target_name.as_ref()) {
+                    return Ok(());
+                }
+                let value = encode_persistent_label(target_name.as_ref())?;
+                node.write_label_metadata(&domain, &value)
+                    .map_err(|_| "persistent file label write failed")
+            });
+        }
+        let mut state = labels.state.write();
+        state
+            .policies
+            .retain(|_, (policy, _)| policy.strong_count() != 0);
         let key = Arc::as_ptr(self) as usize;
-        let old = entries
+        let old = state
+            .policies
             .get(&key)
             .map(|(_, label)| *label)
             .or(self.snapshot().files.default)
@@ -255,10 +404,10 @@ impl Policy {
         {
             return Err("file relabel denied");
         }
-        if !entries.contains_key(&key) && entries.len() >= 16 {
+        if !state.policies.contains_key(&key) && state.policies.len() >= MAX_POLICY_BINDINGS {
             return Err("inode policy bound");
         }
-        entries.insert(key, (Arc::downgrade(self), target));
+        state.policies.insert(key, (Arc::downgrade(self), target));
         Ok(())
     }
 }
@@ -486,6 +635,172 @@ mod tests {
                     vec![]
                 )
                 .is_err()
+        );
+    }
+
+    #[test_case]
+    fn persistent_file_labels_survive_policy_id_remapping_and_are_domain_scoped() {
+        let domain = [0x42; 16];
+        let other_domain = [0x24; 16];
+        let original = Policy::new(
+            vec![(1, "actor".into()), (2, "base".into()), (3, "private".into())],
+            vec![],
+        )
+        .unwrap()
+        .with_file_rules(Some(2), vec![], vec![])
+        .unwrap()
+        .with_file_persistence(domain)
+        .unwrap();
+        let fs = VfsManager::new();
+        fs.create_file("/persistent", FileType::RegularFile).unwrap();
+        let node = fs.resolve_path("/persistent").unwrap().0.node();
+        CreateContext {
+            policy: original.clone(),
+            target: 3,
+        }
+        .initialize(node.as_ref())
+        .unwrap();
+        assert_eq!(
+            node.read_label_metadata(&domain).unwrap(),
+            Some(b"SLB1private".to_vec())
+        );
+        assert_eq!(node.read_label_metadata(&other_domain).unwrap(), None);
+        assert_eq!(original.resource_label(node.as_ref()), Some(3));
+
+        let recreated = Policy::new(
+            vec![(1, "actor".into()), (2, "base".into()), (9, "private".into())],
+            vec![],
+        )
+        .unwrap()
+        .with_file_rules(Some(2), vec![], vec![])
+        .unwrap()
+        .with_file_persistence(domain)
+        .unwrap();
+        assert_eq!(recreated.resource_label(node.as_ref()), Some(9));
+        assert_eq!(recreated.resource_label_name(node.as_ref()).as_deref(), Some("private"));
+        let isolated = recreated.with_file_persistence(other_domain).unwrap();
+        assert_eq!(isolated.resource_label(node.as_ref()), Some(2));
+        assert_eq!(recreated.resource_label(node.as_ref()), Some(9));
+    }
+
+    #[test_case]
+    fn persistent_policy_creation_and_relabel_commit_symbolic_names() {
+        let domain = [0x5a; 16];
+        let policy = policy().with_file_persistence(domain).unwrap();
+        let subject = policy.subject(1).unwrap();
+        let task = Arc::new(Task::new("persistent-label".into(), 1, TaskType::User));
+        *task.security_subject.write() = Some(subject.clone());
+        set_mock_current_task(task);
+        let fs = VfsManager::new();
+        fs.create_file("/created", FileType::RegularFile).unwrap();
+        let node = fs.resolve_path("/created").unwrap().0.node();
+        assert_eq!(
+            node.read_label_metadata(&domain).unwrap(),
+            Some(b"SLB1private".to_vec())
+        );
+        policy.relabel_file(&subject, node.as_ref(), 4).unwrap();
+        assert_eq!(
+            node.read_label_metadata(&domain).unwrap(),
+            Some(b"SLB1public".to_vec())
+        );
+        assert_eq!(policy.resource_label(node.as_ref()), Some(4));
+        fs.create_file("/pinned", FileType::RegularFile).unwrap();
+        let pinned = fs.resolve_path("/pinned").unwrap().0.node();
+        policy.bind_resource(pinned.clone(), 3).unwrap();
+        assert!(policy.relabel_file(&subject, pinned.as_ref(), 4).is_err());
+        assert_eq!(
+            pinned.read_label_metadata(&domain).unwrap(),
+            Some(b"SLB1private".to_vec())
+        );
+        clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn malformed_or_unknown_persistent_names_fail_closed_and_public_xattrs_cannot_spoof_them() {
+        use crate::fs::vfs_v2::xattr::{self, SetMode};
+        let domain = [0x73; 16];
+        let policy = Policy::new(
+            vec![(1, "actor".into()), (2, "base".into()), (3, "private".into())],
+            vec![],
+        )
+        .unwrap()
+        .with_file_rules(Some(2), vec![], vec![])
+        .unwrap()
+        .with_file_persistence(domain)
+        .unwrap();
+        let fs = VfsManager::new();
+        fs.create_file("/file", FileType::RegularFile).unwrap();
+        let node = fs.resolve_path("/file").unwrap().0.node();
+        let key = xattr::label_metadata_key(&domain);
+        assert_eq!(
+            node.set_xattr(&key, b"SLB1private", SetMode::Upsert),
+            Err(xattr::Error::PermissionDenied)
+        );
+        assert_eq!(node.list_xattrs().unwrap(), Vec::<Vec<u8>>::new());
+
+        node.write_label_metadata(&domain, b"SLB1unregistered").unwrap();
+        assert_eq!(policy.resource_label(node.as_ref()), None);
+        assert_eq!(
+            policy.resource_label_name(node.as_ref()).as_deref(),
+            Some("unregistered")
+        );
+
+        node.write_label_metadata(&domain, b"3").unwrap();
+        assert_eq!(policy.resource_label(node.as_ref()), None);
+        assert_eq!(policy.resource_label_name(node.as_ref()), None);
+    }
+
+    #[test_case]
+    fn file_persistence_domain_is_carried_by_derived_and_updated_policy_snapshots() {
+        use super::super::update::PolicyUpdate;
+        let domain = [0xa5; 16];
+        let policy = policy().with_file_persistence(domain).unwrap();
+        assert_eq!(policy.snapshot().file_persistence, Some(domain));
+        let derived = policy.with_file_rules(Some(2), vec![], vec![]).unwrap();
+        assert_eq!(derived.snapshot().file_persistence, Some(domain));
+        derived
+            .extend(
+                1,
+                PolicyUpdate {
+                    labels: vec![(7, "additional".into())],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(derived.snapshot().file_persistence, Some(domain));
+        assert!(policy.with_file_persistence([0; 16]).is_err());
+    }
+
+    #[test_case]
+    fn ram_label_metadata_is_bounded_and_replaces_existing_domains() {
+        let labels = Labels::new();
+        for domain in 0..MAX_LABEL_DOMAINS as u8 {
+            let mut key = [0u8; 16];
+            key[0] = domain + 1;
+            labels
+                .write_label_metadata(&key, b"SLB1label")
+                .unwrap();
+        }
+        let mut existing = [0u8; 16];
+        existing[0] = 1;
+        labels
+            .write_label_metadata(&existing, b"SLB1replacement")
+            .unwrap();
+        assert_eq!(
+            labels.read_label_metadata(&existing).unwrap(),
+            Some(b"SLB1replacement".to_vec())
+        );
+        let extra = [0xff; 16];
+        assert_eq!(
+            labels.write_label_metadata(&extra, b"SLB1extra").unwrap_err().kind,
+            FileSystemErrorKind::NoSpace
+        );
+        assert_eq!(
+            labels
+                .write_label_metadata(&existing, &[0; 513])
+                .unwrap_err()
+                .kind,
+            FileSystemErrorKind::ValueOverflow
         );
     }
 }

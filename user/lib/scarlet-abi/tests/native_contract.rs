@@ -48,6 +48,51 @@ fn policy_update_records_and_operation_numbers_are_stable() {
     assert_eq!(abi::shield::POLICY_UPDATE_VERSION,1);
     assert_eq!(abi::Syscall::ShieldPolicyExtend as usize,1344);
     assert_eq!(abi::Syscall::ShieldPolicyGeneration as usize,1345);
+    assert_eq!(abi::Syscall::ShieldFilePersistence as usize,1346);
+}
+
+#[test]
+fn persistent_file_labels_use_symbolic_names_and_isolated_domains() {
+    let domain_a = [0x01; 16];
+    let domain_b = [0x02; 16];
+    let key_a = abi::shield::file_label_metadata_name(&domain_a);
+    let key_b = abi::shield::file_label_metadata_name(&domain_b);
+    assert_eq!(key_a.len(), 55);
+    assert_eq!(&key_a[..23], b"trusted.scarlet.shield.".as_slice());
+    assert_eq!(
+        &key_a[23..],
+        b"01010101010101010101010101010101".as_slice()
+    );
+    assert_ne!(key_a, key_b);
+    assert!(abi::shield::is_file_label_metadata_name(&key_a));
+    assert!(!abi::shield::is_file_label_metadata_name(b"trusted.scarlet.public"));
+
+    let mut value = [0u8; abi::shield::FILE_LABEL_METADATA_MAX_BYTES];
+    let length = abi::shield::encode_file_label("u:object_r:private_file:s0", &mut value).unwrap();
+    assert_eq!(
+        &value[..length],
+        b"SLB1u:object_r:private_file:s0".as_slice()
+    );
+    let decoded = abi::shield::decode_file_label(&value[..length]).unwrap();
+    assert_eq!(decoded, "u:object_r:private_file:s0");
+
+    // Policy recreation may assign a different numeric ID to the same name.
+    let old_policy = [(1, "u:r:init:s0"), (4, "u:object_r:private_file:s0")];
+    let recreated_policy = [(1, "u:r:init:s0"), (9, "u:object_r:private_file:s0")];
+    let resolve = |labels: &[(u32, &str)]| {
+        labels
+            .iter()
+            .find_map(|(id, name)| (*name == decoded).then_some(*id))
+    };
+    assert_eq!(resolve(&old_policy), Some(4));
+    assert_eq!(resolve(&recreated_policy), Some(9));
+
+    // An unknown symbolic name and malformed/versionless metadata never map to
+    // an implicit label. Generic xattr writers cannot target the reserved key.
+    assert_eq!(resolve(&[(1, "u:r:init:s0")]), None);
+    assert_eq!(abi::shield::decode_file_label(b"dangling"), None);
+    assert_eq!(abi::shield::decode_file_label(b"SLB1\0"), None);
+    assert!(abi::shield::encode_file_label("", &mut value).is_none());
 }
 
 #[test]
@@ -360,6 +405,7 @@ fn native_syscall_numbers() {
         ShieldConstrainInformation = 1318,
         ShieldInformation = 1319,
         ShieldPolicyExtend = 1344, ShieldPolicyGeneration = 1345,
+        ShieldFilePersistence = 1346,
 
     }
 }

@@ -54,6 +54,7 @@ pub struct ExecTransitionRule {
 pub(crate) struct PolicyData {
     generation: u64,
     pub(crate) files: file::FilePolicy,
+    pub(crate) file_persistence: Option<[u8; 16]>,
     sets: sets::SetPolicy,
     labels: BTreeMap<u32, Arc<str>>,
     names: BTreeMap<String, u32>,
@@ -110,6 +111,7 @@ impl Policy {
         let mut data = PolicyData {
             generation: 1,
             files: file::FilePolicy::default(),
+            file_persistence: None,
             sets: sets::SetPolicy::default(),
             labels: BTreeMap::new(),
             names: BTreeMap::new(),

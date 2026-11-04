@@ -456,6 +456,7 @@ mod tests {
         )
         .unwrap();
         assert!(apply(&task, h, 1).is_err());
+        assert!(derive_file_persistence(&task, h, usize::MAX).is_err());
         assert!(!can_create(&task));
         let h = insert(
             &task,
@@ -489,6 +490,42 @@ mod tests {
                 .special_semantics,
             Some(SpecialSemantics::CloseOnExec)
         );
+    }
+
+    #[test_case]
+    fn file_persistence_derives_a_management_policy_with_a_nonzero_domain() {
+        use alloc::vec;
+        use crate::library::std::usercopy::copy_to_user;
+        let mut task = Task::new("file-persistence".into(), 0, crate::task::TaskType::User);
+        task.set_id(60033);
+        let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        let domain = [0x6d; 16];
+        copy_to_user(&task, base, &domain).unwrap();
+        let policy = Policy::new(vec![(1, "subject".into())], Vec::new()).unwrap();
+        let admin = insert(
+            &task,
+            PolicyHandle {
+                policy,
+                administer: true,
+            },
+        )
+        .unwrap();
+        let derived = derive_file_persistence(&task, admin, base).unwrap();
+        let Some(KernelObject::ShieldPolicy(cap)) = task.handle_table.get(derived as u32) else {
+            panic!("file persistence did not return a policy capability");
+        };
+        assert!(cap.administer);
+        assert_eq!(cap.policy.file_persistence_domain(), Some(domain));
+        assert_eq!(
+            task.handle_table
+                .get_metadata(derived as u32)
+                .unwrap()
+                .special_semantics,
+            Some(SpecialSemantics::CloseOnExec)
+        );
+        copy_to_user(&task, base, &[0u8; 16]).unwrap();
+        assert!(derive_file_persistence(&task, admin, base).is_err());
     }
 }
 
@@ -553,6 +590,25 @@ pub fn sys_shield_file_policy(tf:&mut Trapframe)->usize {
         insert(&task,PolicyHandle {policy:policy.with_file_rules((default!=0).then_some(default),create,relabel)?,administer:true})
     })().unwrap_or(usize::MAX)
 }
+
+fn derive_file_persistence(
+    task: &Task,
+    handle: usize,
+    domain_ptr: usize,
+) -> Result<usize, &'static str> {
+    let policy = policy_handle(task, handle, true)?;
+    let domain = read::<16>(task, domain_ptr)?;
+    let derived = policy.with_file_persistence(domain)?;
+    insert(task, PolicyHandle { policy: derived, administer: true })
+}
+
+/// Derive a fresh management capability whose file labels use a stable
+/// 16-byte domain shared with the filesystem metadata backend.
+pub fn sys_shield_file_persistence(tf:&mut Trapframe)->usize {
+    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
+    derive_file_persistence(&task,tf.get_arg(0),tf.get_arg(1)).unwrap_or(usize::MAX)
+}
+
 pub fn sys_shield_creation_label(tf:&mut Trapframe)->usize {
     let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
     let Ok(target)=u32::try_from(tf.get_arg(0)) else {return usize::MAX;};

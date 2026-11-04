@@ -22,9 +22,11 @@ fn error(error: xattr::Error) -> usize {
         xattr::Error::Unsupported => errno::EOPNOTSUPP,
         xattr::Error::Missing => errno::ENODATA,
         xattr::Error::Exists => errno::EEXIST,
+        xattr::Error::PermissionDenied => errno::EPERM,
         xattr::Error::InvalidName => errno::EINVAL,
         xattr::Error::TooLarge => errno::E2BIG,
         xattr::Error::NoSpace => errno::ENOSPC,
+        xattr::Error::Io => errno::EIO,
     }
 }
 
@@ -89,6 +91,9 @@ fn posix_acl_name(name: &[u8]) -> bool {
 }
 
 fn supported_name(node: &dyn VfsNode, name: &[u8], write: bool) -> Result<(), usize> {
+    if scarlet_abi::shield::is_file_label_metadata_name(name) {
+        return Err(errno::EPERM);
+    }
     if name.starts_with(b"user.") && name.len() > 5 {
         if !matches!(
             node.file_type().map_err(|e| errno::from_fs_error(&e))?,
@@ -115,6 +120,22 @@ mod tests {
         assert!(super::posix_acl_name(b"system.posix_acl_default"));
         assert!(!super::posix_acl_name(b"system.posix_acl_other"));
         assert!(!super::posix_acl_name(b"system.admin"));
+    }
+
+    #[test_case]
+    fn native_metadata_errors_keep_linux_permission_and_io_semantics() {
+        assert_eq!(
+            super::error(super::xattr::Error::PermissionDenied),
+            super::errno::EPERM
+        );
+        assert_eq!(super::error(super::xattr::Error::Io), super::errno::EIO);
+        let fs = crate::fs::VfsManager::new();
+        let node = fs.resolve_path("/").unwrap().0.node();
+        let key = super::xattr::label_metadata_key(&[0x5c; 16]);
+        assert_eq!(
+            super::supported_name(node.as_ref(), &key, true),
+            Err(super::errno::EPERM)
+        );
     }
 }
 

@@ -943,6 +943,9 @@ pub enum Syscall {
     ShieldRelabelFile = 1342,
     ShieldPolicyExtend = 1344,
     ShieldPolicyGeneration = 1345,
+    /// Derive a fresh policy handle using a stable 16-byte file-label domain.
+    /// Arguments: management policy handle, pointer to `[u8; 16]`.
+    ShieldFilePersistence = 1346,
     VmLayoutConfigure = 1350,
     VmLayoutQuery = 1351,
     ShieldPolicyCreate = 1310,

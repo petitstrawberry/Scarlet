@@ -28,7 +28,38 @@ impl Policy {
         Ok(())
     }
     pub fn resource_label(&self, node: &dyn VfsNode) -> Option<u32> {
-        self.bound_resource_label(node).or_else(||node.shield_labels().and_then(|labels|labels.get(self))).or(self.default_file_label())
+        if let Some(label) = self.bound_resource_label(node) {
+            return Some(label);
+        }
+        if let Some(domain) = self.file_persistence_domain() {
+            return match self.persisted_label_name(node, &domain) {
+                Ok(Some(name)) => self.label_id(name.as_ref()),
+                Ok(None) => self.default_file_label(),
+                Err(_) => None,
+            };
+        }
+        node.shield_labels()
+            .and_then(|labels| labels.get(self))
+            .or(self.default_file_label())
+    }
+    /// Symbolic lookup is authoritative for a policy with persistent labels.
+    /// A valid stored name is returned even before this policy registers its
+    /// numeric ID; malformed metadata returns no resource label at all.
+    pub fn resource_label_name(&self, node: &dyn VfsNode) -> Option<Arc<str>> {
+        if let Some(label) = self.bound_resource_label(node) {
+            return self.label(label);
+        }
+        if let Some(domain) = self.file_persistence_domain() {
+            return match self.persisted_label_name(node, &domain) {
+                Ok(Some(name)) => Some(name),
+                Ok(None) => self.default_file_label().and_then(|label| self.label(label)),
+                Err(_) => None,
+            };
+        }
+        node.shield_labels()
+            .and_then(|labels| labels.get(self))
+            .or(self.default_file_label())
+            .and_then(|label| self.label(label))
     }
     pub(crate) fn bound_resource_label(&self, node: &dyn VfsNode) -> Option<u32> {
         let filesystem = node.filesystem()?.upgrade()?;
