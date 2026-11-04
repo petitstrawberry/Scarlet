@@ -12,9 +12,9 @@
 //! - Dirty page tracking for write operations
 //! - Object-level locking for mmap support
 //! - Flush operations for writeback
+//! - Bounded reclaim of clean, unpinned, unmapped pages
 //!
 //! Not yet implemented:
-//! - Page eviction (LRU or similar policy)
 //! - LOADING state coordination for concurrent access
 //! - Integration with filesystem read/write operations (Phase 1)
 //! - Demand paging for mmap (Phase 2)
@@ -32,9 +32,10 @@
 //! PageCacheManager::global().unpin(cache_id, page_index);
 //! ```
 
-use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::ops::Bound;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::fs::vfs_v2::cache::CacheId;
@@ -45,6 +46,9 @@ pub type PageIndex = u64;
 
 /// Physical address of a page
 pub type PhysicalAddress = u64;
+
+const RECLAIM_BATCH_PAGES: usize = 64;
+const RECLAIM_SCAN_BUDGET: usize = 256;
 
 /// Entry in the page cache representing a single cached page
 pub struct PageCacheEntry {
@@ -119,6 +123,8 @@ pub struct PageCacheManager {
     /// Object-level lock counts for eviction prevention
     /// Maps CacheId to lock count (>0 means object is unevictable)
     object_locks: IrqRwSpinLock<BTreeMap<CacheId, usize>>,
+    /// Last entry examined by clean-page reclamation.
+    reclaim_cursor: IrqSpinLock<Option<(CacheId, PageIndex)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +141,7 @@ impl PageCacheManager {
             entries: IrqRwSpinLock::new(BTreeMap::new()),
             object_metadata: IrqRwSpinLock::new(BTreeMap::new()),
             object_locks: IrqRwSpinLock::new(BTreeMap::new()),
+            reclaim_cursor: IrqSpinLock::new(None),
         }
     }
 
@@ -381,12 +388,15 @@ impl PageCacheManager {
     /// Used during mmap to keep all mapped pages resident.
     /// Phase 0: Simple implementation - lock entire object during mmap.
     pub fn set_object_locked(&self, id: CacheId, locked: bool) {
+        // Exclusive acquisition waits for reclaim's object-locks read guard,
+        // then publishes the mapping exclusion before the caller pins pages.
+        let mut locks = self.object_locks.write();
         if locked {
-            *self.object_locks.write().entry(id).or_insert(0) += 1;
-        } else if let Some(count) = self.object_locks.write().get_mut(&id) {
+            *locks.entry(id).or_insert(0) += 1;
+        } else if let Some(count) = locks.get_mut(&id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                self.object_locks.write().remove(&id);
+                locks.remove(&id);
             }
         }
     }
@@ -476,6 +486,106 @@ impl PageCacheManager {
             .read()
             .range((id, 0)..=(id, PageIndex::MAX))
             .any(|(_, entry)| entry.is_dirty())
+    }
+
+    /// Evict up to `max_pages` clean, unpinned pages from unlocked objects.
+    ///
+    /// This path may run from a VM fault retry while unrelated IRQ-safe locks
+    /// are held, so both cache-map locks are acquired nonblockingly and
+    /// contention returns zero reclaimed pages. It performs no heap allocation
+    /// and examines at most 256 entries per call. A persisted cursor resumes
+    /// after the last examined key and wraps once, preventing a large dirty or
+    /// pinned prefix from consuming every retry. Retired entries remain under
+    /// the existing retire/unpin protocol.
+    ///
+    /// Lock order is `object_locks` (read), `entries` (write), then the reclaim
+    /// cursor. The cursor is acquired after both maps and is used only here, so
+    /// it cannot form a cycle. An mmap lock acquisition takes `object_locks`
+    /// exclusively, so it either completes before this scan and excludes the
+    /// object, or waits until eviction leaves the entries map. Pin, dirty,
+    /// retire, and reload operations take an `entries` read/write guard, which
+    /// the exclusive eviction guard excludes. Evicted allocations are dropped
+    /// only after all three guards are released.
+    pub fn reclaim_clean_pages(&self, max_pages: usize) -> usize {
+        let limit = max_pages.min(RECLAIM_BATCH_PAGES);
+        if limit == 0 {
+            return 0;
+        }
+
+        let mut keys = [None; RECLAIM_BATCH_PAGES];
+        let mut evicted: [Option<PageCacheEntry>; RECLAIM_BATCH_PAGES] =
+            core::array::from_fn(|_| None);
+        let reclaimed;
+        {
+            let Some(object_locks) = self.object_locks.try_read() else {
+                return 0;
+            };
+            let Some(mut entries) = self.entries.try_write() else {
+                return 0;
+            };
+            let Some(mut cursor) = self.reclaim_cursor.try_lock() else {
+                return 0;
+            };
+
+            let resume = *cursor;
+            let mut candidates = 0;
+            {
+                let mut scanned = 0;
+                macro_rules! consider {
+                    ($key:expr, $entry:expr) => {{
+                        if scanned == RECLAIM_SCAN_BUDGET || candidates == limit {
+                            break;
+                        }
+                        let key = $key;
+                        let entry: &PageCacheEntry = $entry;
+                        scanned += 1;
+                        *cursor = Some(key);
+                        let mapped = object_locks
+                            .get(&key.0)
+                            .is_some_and(|&count| count > 0);
+                        if !entry.retired
+                            && !entry.is_dirty()
+                            && entry.pin_count() == 0
+                            && !mapped
+                        {
+                            keys[candidates] = Some(key);
+                            candidates += 1;
+                        }
+                    }};
+                };
+
+                let start = resume.map_or(Bound::Unbounded, Bound::Excluded);
+                for (&key, entry) in entries.range((start, Bound::Unbounded)) {
+                    consider!(key, entry);
+                }
+                if scanned < RECLAIM_SCAN_BUDGET && candidates < limit {
+                    if let Some(resume_key) = resume {
+                        for (&key, entry) in entries.iter() {
+                            if key > resume_key {
+                                break;
+                            }
+                            consider!(key, entry);
+                        }
+                    }
+                }
+            }
+
+            let mut removed = 0;
+            for candidate in &keys[..candidates] {
+                let Some(key) = *candidate else {
+                    continue;
+                };
+                if let Some(entry) = entries.remove(&key) {
+                    evicted[removed] = Some(entry);
+                    removed += 1;
+                }
+            }
+            reclaimed = removed;
+        }
+
+        // ContiguousPages::drop returns pages to PMM and must run unlocked.
+        drop(evicted);
+        reclaimed
     }
 
     /// Persist retained dirty pages during a serialized truncate, including
@@ -841,5 +951,132 @@ mod tests {
         assert_eq!(cache.cached_object_size(id), Some(100));
         assert_eq!(cache.cached_object_modified_time(id), None);
         assert_eq!(cache.cached_object_changed_time(id), Some(124));
+    }
+
+    #[test_case]
+    fn reclaim_evicts_only_clean_unpinned_unmapped_pages_and_reloads() {
+        let cache = PageCacheManager::new();
+        let file = CacheId::new(1);
+        let mapped_file = CacheId::new(2);
+
+        cache
+            .get_or_create_pinned(file, 0, |_| Ok(()))
+            .unwrap();
+        cache.unpin(file, 0);
+
+        cache
+            .get_or_create_pinned(file, 1, |_| Ok(()))
+            .unwrap();
+
+        cache
+            .get_or_create_pinned(file, 2, |_| Ok(()))
+            .unwrap();
+        cache.mark_dirty(file, 2);
+        cache.unpin(file, 2);
+
+        cache
+            .get_or_create_pinned(mapped_file, 0, |_| Ok(()))
+            .unwrap();
+        cache.unpin(mapped_file, 0);
+        cache.set_object_locked(mapped_file, true);
+
+        assert_eq!(cache.reclaim_clean_pages(8), 1);
+        assert!(cache.entries.read().get(&(file, 0)).is_none());
+        assert!(cache.entries.read().get(&(file, 1)).is_some());
+        assert!(cache.entries.read().get(&(file, 2)).is_some());
+        assert!(cache.entries.read().get(&(mapped_file, 0)).is_some());
+
+        let mut reloads = 0;
+        cache
+            .get_or_create_pinned(file, 0, |_| {
+                reloads += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reloads, 1);
+
+        cache.set_object_locked(mapped_file, false);
+        assert_eq!(cache.reclaim_clean_pages(8), 1);
+        assert!(cache.entries.read().get(&(mapped_file, 0)).is_none());
+
+        cache.unpin(file, 0);
+        cache.unpin(file, 1);
+    }
+
+    #[test_case]
+    fn reclaim_is_bounded_and_backs_off_from_held_cache_locks() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(3);
+        for index in 0..4 {
+            cache.get_or_create_pinned(id, index, |_| Ok(())).unwrap();
+            cache.unpin(id, index);
+        }
+
+        {
+            let _entries = cache.entries.read();
+            assert_eq!(cache.reclaim_clean_pages(4), 0);
+        }
+        assert_eq!(cache.reclaim_clean_pages(2), 2);
+        assert_eq!(cache.reclaim_clean_pages(2), 2);
+        assert!(cache.entries.read().is_empty());
+
+        cache.get_or_create_pinned(id, 0, |_| Ok(())).unwrap();
+        cache.unpin(id, 0);
+        {
+            let _object_locks = cache.object_locks.write();
+            assert_eq!(cache.reclaim_clean_pages(1), 0);
+        }
+        assert_eq!(cache.reclaim_clean_pages(1), 1);
+
+        cache.get_or_create_pinned(id, 1, |_| Ok(())).unwrap();
+        cache.unpin(id, 1);
+        {
+            let _cursor = cache.reclaim_cursor.lock();
+            assert_eq!(cache.reclaim_clean_pages(1), 0);
+        }
+        assert_eq!(cache.reclaim_clean_pages(1), 1);
+    }
+
+    #[test_case]
+    fn reclaim_cursor_advances_past_an_unreclaimable_prefix() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(5);
+        let dirty_pages = RECLAIM_SCAN_BUDGET as PageIndex + 1;
+        for index in 0..dirty_pages {
+            cache.get_or_create_pinned(id, index, |_| Ok(())).unwrap();
+            cache.mark_dirty(id, index);
+            cache.unpin(id, index);
+        }
+        let first_clean = dirty_pages;
+        for index in first_clean..first_clean + 2 {
+            cache.get_or_create_pinned(id, index, |_| Ok(())).unwrap();
+            cache.unpin(id, index);
+        }
+
+        // The first bounded pass only sees the unreclaimable prefix.
+        assert_eq!(cache.reclaim_clean_pages(2), 0);
+        assert_eq!(
+            *cache.reclaim_cursor.lock(),
+            Some((id, (RECLAIM_SCAN_BUDGET - 1) as PageIndex))
+        );
+
+        // The persisted cursor lets the next pass reach the clean suffix.
+        assert_eq!(cache.reclaim_clean_pages(2), 2);
+        assert!(cache.entries.read().get(&(id, first_clean)).is_none());
+        assert!(cache.entries.read().get(&(id, first_clean + 1)).is_none());
+    }
+
+    #[test_case]
+    fn reclaim_skips_retired_pages_until_the_final_unpin() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(4);
+        cache.get_or_create_pinned(id, 0, |_| Ok(())).unwrap();
+        cache.retire_object(id);
+
+        assert_eq!(cache.reclaim_clean_pages(1), 0);
+        assert!(cache.entries.read().get(&(id, 0)).is_some_and(|entry| entry.retired));
+
+        cache.unpin(id, 0);
+        assert!(cache.entries.read().get(&(id, 0)).is_none());
     }
 }
