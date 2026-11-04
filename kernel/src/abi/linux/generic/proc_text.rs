@@ -1,4 +1,4 @@
-//! Small read-only proc/sys text files in the Linux ABI view.
+//! Small proc/sys snapshots in the Linux ABI view.
 
 use alloc::{format, string::String, sync::Arc};
 use core::{any::Any, arch::asm};
@@ -429,6 +429,14 @@ fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
     }
 }
 
+fn snapshot_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    if path == "/proc/config.gz" {
+        Some(super::config::GZIP.to_vec())
+    } else {
+        text_content(path).map(String::into_bytes)
+    }
+}
+
 pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
     if let Some(metadata) = super::oom::path_metadata(path) {
         return Some(metadata);
@@ -436,7 +444,7 @@ pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
     if is_cpu_directory(path) {
         Some(metadata(path, 0, true))
     } else {
-        text_content(path).map(|content| metadata(path, content.len(), false))
+        snapshot_content(path).map(|content| metadata(path, content.len(), false))
     }
 }
 
@@ -457,9 +465,9 @@ pub(super) fn open_proc_text_file(
     }
     let directory = is_cpu_directory(path);
     let content = if directory {
-        String::new()
+        alloc::vec::Vec::new()
     } else {
-        text_content(path)?
+        snapshot_content(path)?
     };
     if flags & 3 == 3 || (flags & 3 != 0 && path != "/proc/sys/kernel/kptr_restrict" && layout_field(path).is_none()) {
         return Some(errno::to_result(errno::EACCES));
@@ -493,7 +501,7 @@ pub(super) fn open_proc_text_file(
 
 struct ProcTextFile {
     position: IrqRwSpinLock<usize>,
-    content: String,
+    content: alloc::vec::Vec<u8>,
     path: String,
     directory: bool,
     access: i32,
@@ -624,7 +632,7 @@ impl FileObject for ProcTextFile {
         let bytes = if let Some(layout)=&layout {layout.as_bytes()}else if self.path == "/proc/sys/kernel/kptr_restrict" {
             if crate::task::mytask().is_some_and(|task| task.execution_restrictions.read().kernel_addresses_hidden()) { b"2\n".as_slice() }
             else { b"0\n".as_slice() }
-        } else { self.content.as_bytes() };
+        } else { self.content.as_slice() };
         if start >= bytes.len() {
             return Ok(0);
         }
@@ -644,6 +652,34 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn config_gzip_has_consistent_binary_reads_metadata_and_read_only_access() {
+        use super::*;
+        let task = crate::task::new_user_task("proc-config".into(), 0);
+        let mut abi = LinuxAbi::default();
+        let fd = open_proc_text_file(&mut abi, &task, "/proc/config.gz", O_CLOEXEC).unwrap();
+        assert_eq!(abi.get_fd_flags(fd), Some(FD_CLOEXEC));
+        let object = task.handle_table.get(abi.get_handle(fd).unwrap()).unwrap();
+        let file = object.as_file().unwrap();
+        let expected = super::super::config::GZIP;
+        assert_eq!(file.metadata().unwrap().size, expected.len());
+        assert_eq!(path_metadata("/proc/config.gz").unwrap().size, expected.len());
+        let mut actual = alloc::vec::Vec::new();
+        let mut chunk = [0; 7];
+        loop {
+            let n = file.read(&mut chunk).unwrap();
+            if n == 0 { break; }
+            actual.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(file.seek(SeekFrom::Start(0)).unwrap(), 0);
+        assert_eq!(file.read(&mut chunk).unwrap(), chunk.len());
+        assert_eq!(&chunk, &expected[..7]);
+        assert!(matches!(file.write(b"CONFIG_UNIMPLEMENTED=y\n"), Err(StreamError::PermissionDenied)));
+        assert_eq!(open_proc_text_file(&mut abi, &task, "/proc/config.gz", 1), Some(errno::to_result(errno::EACCES)));
+        assert_eq!(open_proc_text_file(&mut abi, &task, "/proc/config.gz", O_DIRECTORY), Some(errno::to_result(errno::ENOTDIR)));
+    }
+
     #[test_case]
     fn proc_version_matches_uname_release() {
         let version = super::text_content("/proc/version").unwrap();
@@ -753,7 +789,7 @@ mod tests {
         use super::*;
         let task = Arc::new(crate::task::new_user_task("kptr-control".into(), 0));
         crate::task::set_mock_current_task(task.clone());
-        let file = ProcTextFile { position: IrqRwSpinLock::new(0), content: String::from("0\n"),
+        let file = ProcTextFile { position: IrqRwSpinLock::new(0), content: b"0\n".to_vec(),
             path: String::from("/proc/sys/kernel/kptr_restrict"), directory: false, access: 2 };
         assert!(file.write(b"2").is_err()); // Cannot fabricate a global policy setting.
         crate::shield::information::constrain(&task, 1).unwrap();

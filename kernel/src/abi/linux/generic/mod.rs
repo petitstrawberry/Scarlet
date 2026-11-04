@@ -20,6 +20,7 @@ mod pressure;
 pub mod proc;
 mod proc_fd;
 mod proc_text;
+mod config;
 mod oom;
 pub(crate) mod quota;
 mod mount_namespace;
