@@ -19,6 +19,19 @@ def profile():
 
 
 class BootProfileTest(unittest.TestCase):
+    def test_stock_webview_zygote_and_packages_list_rules_are_explicit(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        p["subjects"].update({"u:r:zygote:s0":3,"u:r:system_server:s0":4})
+        p["file_policy"]={"default":"u:object_r:unlabeled:s0","create":[],"relabel":[],"property_areas":[]}
+        text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
+        labels={line.split()[2]:int(line.split()[1]) for line in text.splitlines() if line.startswith("label ")}
+        self.assertEqual(len(labels),len(set(labels.values())))
+        self.assertEqual(labels["u:r:webview_zygote:s0"],5)
+        self.assertIn(f"transition {labels['u:r:zygote:s0']} 5 1053\n",text)
+        packages=labels["u:object_r:packages_list_file:s0"]
+        for old in ("u:object_r:unlabeled:s0","u:object_r:system_data_file:s0"):
+            self.assertIn(f"file-relabel 4 {labels[old]} {packages} 1\n",text)
+
     def test_keystore_grants_keep_operations_and_subjects_explicit(self):
         p = profile()
         p.update(version=2, file_labels={}, exec_transitions=[])

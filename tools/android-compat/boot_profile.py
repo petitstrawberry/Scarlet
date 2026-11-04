@@ -17,6 +17,15 @@ POLICY = "scarlet/boot/shield.policy"
 KEYSTORE_PERMISSIONS = ["add_auth", "clear_ns", "get_state", "list", "lock", "reset", "unlock",
     "change_user", "change_password", "clear_uid", "get_auth_token", "early_boot_ended",
     "report_off_body", "pull_metrics", "delete_all_keys", "get_attestation_key"]
+# Android 13's AID_WEBVIEW_ZYGOTE and its stock seapp selector/domain.
+WEBVIEW_ZYGOTE_UID = 1053
+ZYGOTE_LABEL = "u:r:zygote:s0"
+SYSTEM_SERVER_LABEL = "u:r:system_server:s0"
+WEBVIEW_ZYGOTE_LABEL = "u:r:webview_zygote:s0"
+UNLABELED_FILE = "u:object_r:unlabeled:s0"
+SYSTEM_DATA_FILE = "u:object_r:system_data_file:s0"
+# Stock plat_file_contexts assigns /data/system/packages.list this exact type.
+PACKAGES_LIST_LABEL = "u:object_r:packages_list_file:s0"
 CONTEXT = re.compile(r"u:(?:r|object_r):[A-Za-z0-9_]+:s0(?::c(?:0|[1-9][0-9]*)(?:,c(?:0|[1-9][0-9]*))*)?")
 
 
@@ -177,6 +186,33 @@ def file_rules(profile):
     return labels,sorted(create),sorted(relabel)
 
 
+def webview_and_packages_rules(profile):
+    """Translate the exact stock WebView zygote and packages.list policy records."""
+    subjects = dict(profile["subjects"])
+    labels = set()
+    transitions = []
+    relabel = set()
+    if ZYGOTE_LABEL in subjects:
+        webview = WEBVIEW_ZYGOTE_LABEL
+        if webview not in subjects:
+            identifier = max(subjects.values()) + 1
+            if identifier >= 100:
+                raise ValueError("stock runtime subject identifier bound")
+            subjects[webview] = identifier
+        transition = (ZYGOTE_LABEL, webview, WEBVIEW_ZYGOTE_UID)
+        if not any(tuple(rule) == transition for rule in profile["transitions"]):
+            transitions.append(transition)
+
+    if SYSTEM_SERVER_LABEL in subjects:
+        if "file_policy" not in profile:
+            raise ValueError("stock packages.list relabel requires file policy")
+        for old in (UNLABELED_FILE, SYSTEM_DATA_FILE):
+            labels.add(old)
+            relabel.add((SYSTEM_SERVER_LABEL, old, PACKAGES_LIST_LABEL, 1))
+        labels.add(PACKAGES_LIST_LABEL)
+    return subjects, labels, transitions, relabel
+
+
 def shield_policy(profile, contexts):
     validate_profile(profile)
     labels = set()
@@ -192,20 +228,23 @@ def shield_policy(profile, contexts):
     if any(target not in labels for targets in grants.values() for target in targets):
         raise ValueError("property grant is absent from verified contexts")
     file_labels,create,relabel=file_rules(profile) if "file_policy" in profile else (set(),[],[])
+    runtime_subjects,runtime_labels,runtime_transitions,runtime_relabel=webview_and_packages_rules(profile)
+    labels |= runtime_labels
+    relabel = set(relabel) | runtime_relabel
     labels |= file_labels
     labels |= {target for _,target,_ in profile.get("service_grants",[])}
     labels |= {target for _,target in profile.get("socket_labels",[])}
-    labels -= set(profile["subjects"])
+    labels -= set(runtime_subjects)
     # Mirrors the native Shield label bound (see kernel/src/shield/mod.rs).
-    if len(labels | set(profile.get("file_labels", {}).values())) + len(profile["subjects"]) > 1024:
+    if len(labels | set(profile.get("file_labels", {}).values())) + len(runtime_subjects) > 1024:
         raise ValueError("profile exceeds native label bound")
     labels |= set(profile.get("file_labels", {}).values())
-    identifiers = dict(profile["subjects"])
+    identifiers = dict(runtime_subjects)
     identifiers.update((label, index) for index, label in enumerate(sorted(labels), 100))
     lines = ["scarlet-android-boot-policy-v" + str(profile["version"])]
     lines += [f"label {identifier} {label}" for label, identifier in sorted(identifiers.items(), key=lambda item: item[1])]
     lines += [f"transition {identifiers[source]} {identifiers[target]} {principal}"
-              for source, target, principal in profile["transitions"]]
+              for source, target, principal in profile["transitions"] + runtime_transitions]
     lines += [f"property-set {identifiers[source]} {identifiers[target]}"
               for source, targets in sorted(grants.items()) for target in sorted(targets)]
     lines += [f"socket-create {identifiers[source]} {identifiers[target]}" for source,target in profile.get("socket_labels",[])]
