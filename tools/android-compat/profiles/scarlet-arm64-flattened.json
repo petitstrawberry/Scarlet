@@ -100,7 +100,8 @@
     "u:r:storaged:s0": 37,
     "u:r:scarlet_policy:s0": 38,
     "u:r:adbd:s0": 39,
-    "u:r:scarlet_input_bridge:s0": 40
+    "u:r:scarlet_input_bridge:s0": 40,
+    "u:r:webview_zygote:s0": 41
   },
   "transitions": [
     [
@@ -134,6 +135,15 @@
       0
     ]
   ],
+  "isolated_processes": {
+    "user": 0,
+    "first": 90000,
+    "last": 99999,
+    "sources": [
+      "u:r:zygote:s0",
+      "u:r:webview_zygote:s0"
+    ]
+  },
   "property_grants": {
     "u:r:init:s0": [
       "u:object_r:apexd_prop:s0",

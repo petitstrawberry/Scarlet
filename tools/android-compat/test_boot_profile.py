@@ -83,6 +83,27 @@ class BootProfileTest(unittest.TestCase):
         for suffix in ["c768,c512","c512,c512","c1024","c0512","c0.c3"]:
             bad=deepcopy(p);bad["subjects"]["u:r:app:s0:"+suffix]=4
             with self.subTest(suffix=suffix),self.assertRaises(ValueError):validate_profile(bad)
+
+    def test_isolated_processes_publish_explicit_full_id_ranges_only(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        p["subjects"].update({"u:r:zygote:s0":3,"u:r:webview_zygote:s0":4})
+        p["isolated_processes"]={"user":0,"first":90000,"last":99999,
+            "sources":["u:r:zygote:s0","u:r:webview_zygote:s0"]}
+        text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
+        self.assertIn("runtime-isolated 0 90000 99999 3\n",text)
+        self.assertIn("runtime-isolated 0 90000 99999 4\n",text)
+        self.assertNotIn(" u:r:isolated_app",text)
+        self.assertNotIn("isolated_app_data_file",text)
+        for change in [
+            {"user":1},{"first":99000},{"last":99000},
+            {"sources":["u:r:zygote:s0"]},
+            {"sources":["u:r:zygote:s0","u:r:unknown:s0"]},
+        ]:
+            bad=deepcopy(p);bad["isolated_processes"].update(change)
+            with self.subTest(change=change),self.assertRaises(ValueError):validate_profile(bad)
+        duplicate=deepcopy(p);duplicate["isolated_processes"]=[p["isolated_processes"]]
+        with self.assertRaises(ValueError):validate_profile(duplicate)
+
     def test_grants_are_explicit_and_not_inferred_from_registered_contexts(self):
         p = profile()
         contexts = ["ro.gsid. u:object_r:gsid_prop:s0\n* u:object_r:default_prop:s0\n"]

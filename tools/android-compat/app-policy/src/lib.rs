@@ -162,6 +162,41 @@ pub struct Mapping {
     pub domain: String,
     pub file: Option<String>,
 }
+
+const ANDROID_USER_RANGE: u32 = 100_000;
+const AID_ISOLATED_START: u32 = 90_000;
+const AID_ISOLATED_END: u32 = 99_999;
+const ISOLATED_DOMAIN: &str = "isolated_app";
+
+fn selector_matches(pattern: &str, value: &str) -> bool {
+    pattern
+        .strip_suffix('*')
+        .map_or(pattern == value, |prefix| value.starts_with(prefix))
+}
+
+impl Rule {
+    fn isolated_candidate(&self) -> bool {
+        self.user
+            .as_deref()
+            .is_some_and(|user| selector_matches(user, "_isolated"))
+            || self.domain.as_deref() == Some(ISOLATED_DOMAIN)
+    }
+
+    fn universal_isolated(&self) -> bool {
+        !self.system
+            && self.ephemeral.is_none()
+            && self.user.as_deref() == Some("_isolated")
+            && self.seinfo.is_none()
+            && self.name.is_none()
+            && self.privileged.is_none()
+            && self.minimum == 0
+            && !self.run_as
+            && self.domain.as_deref() == Some(ISOLATED_DOMAIN)
+            && self.file.is_none()
+            && self.level == "user"
+    }
+}
+
 impl Contexts {
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         if text.len() > 128 * 1024 {
@@ -181,8 +216,42 @@ impl Contexts {
         if rules.is_empty() {
             return Err("empty seapp input");
         }
+        let isolated: Vec<_> = rules.iter().filter(|rule| rule.isolated_candidate()).collect();
+        if isolated.len() > 1 {
+            return Err("ambiguous isolated seapp rule");
+        }
+        if isolated.first().is_some_and(|rule| !rule.universal_isolated()) {
+            return Err("scoped isolated seapp rule");
+        }
         Ok(Self(rules))
     }
+
+    fn isolated_rule(&self) -> Result<&Rule, &'static str> {
+        self.0
+            .iter()
+            .find(|rule| rule.isolated_candidate())
+            .ok_or("isolated seapp selector missing")
+    }
+
+    pub fn classify_isolated(&self, uid: u32) -> Result<Mapping, &'static str> {
+        let user_id = uid / ANDROID_USER_RANGE;
+        let raw_app = uid % ANDROID_USER_RANGE;
+        if !(AID_ISOLATED_START..=AID_ISOLATED_END).contains(&raw_app) || user_id >= 65_536 {
+            return Err("seapp isolated UID range");
+        }
+        self.isolated_rule()?;
+        Ok(Mapping {
+            uid,
+            domain: format!(
+                "u:r:{}:s0:c{},c{}",
+                ISOLATED_DOMAIN,
+                512 + (user_id & 255),
+                768 + ((user_id >> 8) & 255)
+            ),
+            file: None,
+        })
+    }
+
     pub fn classify(&self, name: &str, uid: u32, seinfo: &str) -> Result<Mapping, &'static str> {
         if name.len() > 255
             || name.is_empty()
@@ -206,7 +275,7 @@ impl Contexts {
             2000 => ("shell", 2000),
             10000..=19999 => ("_app", raw_app - 10000),
             20000..=89999 => ("_sdksandbox", raw_app - 20000),
-            90000..=99999 => ("_isolated", raw_app - 90000),
+            90000..=99999 => return Err("isolated app requires runtime range"),
             _ => return Err("unmapped Android AID"),
         };
         if app >= 65536 || user_id >= 65536 {
@@ -384,5 +453,38 @@ mod tests {
         assert_eq!(mapping.domain, "u:r:secure_element:s0:c44,c260,c512,c768");
         assert!(mapping.file.is_none());
         assert!(contexts.classify("example.app", 10000, "platform").is_err());
+    }
+
+    #[test]
+    fn isolated_range_uses_one_universal_stock_selector_without_a_file_label() {
+        let contexts = Contexts::parse(&alloc::format!(
+            "{RULES}user=_isolated domain=isolated_app levelFrom=user\n"
+        ))
+        .unwrap();
+        let mapping = contexts.classify_isolated(90_000).unwrap();
+        assert_eq!(mapping.domain, "u:r:isolated_app:s0:c512,c768");
+        assert!(mapping.file.is_none());
+        for uid in 90_000..=99_999 {
+            assert_eq!(contexts.classify_isolated(uid).unwrap().domain, mapping.domain);
+        }
+        assert!(contexts
+            .classify("pretend.isolated", 90_000, "default:targetSdkVersion=33")
+            .is_err());
+    }
+
+    #[test]
+    fn isolated_selectors_must_be_unique_universal_and_have_no_file_output() {
+        for rule in [
+            "user=_isolated name=example domain=isolated_app levelFrom=user",
+            "user=_isolated domain=isolated_app type=isolated_data levelFrom=user",
+            "user=_isolated domain=isolated_app levelFrom=app",
+            "user=_isol* domain=isolated_app levelFrom=user",
+            "domain=isolated_app levelFrom=user",
+        ] {
+            assert!(Contexts::parse(rule).is_err(), "{rule}");
+        }
+        let duplicate = "user=_isolated domain=isolated_app levelFrom=user\n\
+                         user=_isolated domain=other_app levelFrom=user\n";
+        assert!(Contexts::parse(duplicate).is_err());
     }
 }

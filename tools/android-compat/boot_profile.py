@@ -23,6 +23,10 @@ SHARED_RELRO_UID = 1037
 ZYGOTE_LABEL = "u:r:zygote:s0"
 SYSTEM_SERVER_LABEL = "u:r:system_server:s0"
 WEBVIEW_ZYGOTE_LABEL = "u:r:webview_zygote:s0"
+ISOLATED_SOURCES = (ZYGOTE_LABEL, WEBVIEW_ZYGOTE_LABEL)
+# Android 13's AID_ISOLATED_START/AID_ISOLATED_END, inclusive.
+AID_ISOLATED_START = 90000
+AID_ISOLATED_END = 99999
 # Stock `user=shared_relro domain=shared_relro levelFrom=all` for uid 1037.
 SHARED_RELRO_LABEL = (
     f"u:r:shared_relro:s0:c{SHARED_RELRO_UID & 0xff},"
@@ -71,6 +75,7 @@ def validate_profile(profile):
         if "service_grants" in profile: fields.add("service_grants")
         if "keystore_grants" in profile: fields.add("keystore_grants")
         if "socket_labels" in profile: fields.add("socket_labels")
+        if "isolated_processes" in profile: fields.add("isolated_processes")
         if "vintf" in profile: fields.add("vintf")
         if "host_services" in profile: fields.add("host_services")
         if "package_set" in profile: fields.add("package_set")
@@ -109,6 +114,19 @@ def validate_profile(profile):
         raise ValueError("invalid profile subjects")
     if subjects.get("u:r:init:s0") != 1:
         raise ValueError("init subject must be explicit")
+    isolated=profile.get("isolated_processes")
+    if isolated is not None and (
+            not isinstance(isolated,dict) or set(isolated)!={"user","first","last","sources"} or
+            type(isolated["user"]) is not int or isolated["user"]!=0 or
+            type(isolated["first"]) is not int or isolated["first"]!=AID_ISOLATED_START or
+            type(isolated["last"]) is not int or isolated["last"]!=AID_ISOLATED_END or
+            not isinstance(isolated["sources"],list) or
+            len(isolated["sources"])!=len(ISOLATED_SOURCES) or
+            any(not isinstance(source,str) for source in isolated["sources"]) or
+            len(isolated["sources"])!=len(set(isolated["sources"])) or
+            tuple(isolated["sources"])!=ISOLATED_SOURCES or
+            any(source not in subjects for source in isolated["sources"])):
+        raise ValueError("invalid isolated process configuration")
     seen = set()
     for transition in profile["transitions"]:
         source, target, principal = transition
@@ -269,6 +287,10 @@ def shield_policy(profile, contexts, generic_policy=None, generic_root=None):
     lines += [f"label {identifier} {label}" for label, identifier in sorted(identifiers.items(), key=lambda item: item[1])]
     lines += [f"transition {identifiers[source]} {identifiers[target]} {principal}"
               for source, target, principal in profile["transitions"] + runtime_transitions]
+    isolated = profile.get("isolated_processes")
+    if isolated is not None:
+        lines += [f"runtime-isolated {isolated['user']} {isolated['first']} {isolated['last']} {identifiers[source]}"
+                  for source in isolated["sources"]]
     lines += [f"property-set {identifiers[source]} {identifiers[target]}"
               for source, targets in sorted(grants.items()) for target in sorted(targets)]
     lines += [f"socket-create {identifiers[source]} {identifiers[target]}" for source,target in profile.get("socket_labels",[])]

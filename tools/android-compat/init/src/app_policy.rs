@@ -6,7 +6,8 @@ use scarlet_android_app_policy::{Contexts, services::Services, groups::FileBatch
 use std::{
     collections::{BTreeMap, BTreeSet},
     environment::VfsView,
-    shield::{Policy, Transition, LabelSet, SetMember, LabelSelector, SetGrant, LabelSetUpdate},
+    shield::{Policy, Transition, LabelSet, SetMember, LabelSelector, SetGrant, LabelSetUpdate,
+        PrincipalRangeTransition},
     string::String,
     sync::Arc,
     vec::Vec,
@@ -36,6 +37,14 @@ fn read(view: &VfsView, path: &str, bound: usize) -> Result<Option<String>, &'st
         .map(Some)
         .map_err(|_| "manager input encoding")
 }
+
+struct IsolatedRange {
+    user: u32,
+    first: u32,
+    last: u32,
+    source: u32,
+}
+
 struct Manager {
     policy: Policy,
     contexts: Contexts,
@@ -60,6 +69,87 @@ impl Manager {
         self.labels.insert(name.into(), id);
         added.push((id, name.into()));
         Ok(id)
+    }
+    fn domain_set(
+        &mut self,
+        context: &str,
+        source: u32,
+        added: &mut Vec<(u32, String)>,
+        sets: &mut Vec<LabelSet>,
+        members: &mut Vec<SetMember>,
+        rules: &mut Vec<SetGrant>,
+    ) -> Result<(), &'static str> {
+        let grants: Vec<_> = self.services.grants(context)?.iter()
+            .map(|grant| (grant.target.clone(), grant.class, grant.permissions)).collect();
+        let domain = context.split(':').nth(2).ok_or("manager domain type")?;
+        let group = if let Some(id) = self.domain_sets.get(domain) { *id } else {
+            let id = self.next_set;
+            self.next_set = self.next_set.checked_add(1).ok_or("manager label set identity")?;
+            sets.push(LabelSet {id,reserved:0});
+            for (name,class,permissions) in grants {
+                let target=self.label(&name,added)?;
+                rules.push(SetGrant {source:LabelSelector::set(id),target:LabelSelector::label(target),class,reserved:0,permissions});
+            }
+            self.domain_sets.insert(String::from(domain),id);
+            id
+        };
+        members.push(SetMember {set:group,label:source});
+        Ok(())
+    }
+    fn register_isolated(&mut self, records: &[IsolatedRange]) -> Result<(), &'static str> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let zygote = *self.labels.get("u:r:zygote:s0").ok_or("manager isolated Zygote subject")?;
+        let webview = *self.labels.get("u:r:webview_zygote:s0")
+            .ok_or("manager isolated WebView Zygote subject")?;
+        let allowed = BTreeSet::from([zygote, webview]);
+        let mut sources = BTreeSet::new();
+        for record in records {
+            if record.user != 0 || record.first != 90_000 || record.last != 99_999
+                || !allowed.contains(&record.source) || !sources.insert(record.source)
+            {
+                return Err("manager isolated profile record");
+            }
+        }
+        if records.len() != 2 || sources != allowed {
+            return Err("manager isolated profile sources");
+        }
+        let mapping = self.contexts.classify_isolated(90_000)?;
+        let mut added = Vec::new();
+        let mut sets = Vec::new();
+        let mut members = Vec::new();
+        let mut rules = Vec::new();
+        let target = self.label(&mapping.domain, &mut added)?;
+        let context = mapping.domain.clone();
+        self.domain_set(&context, target, &mut added, &mut sets, &mut members, &mut rules)?;
+        let ranges: Vec<_> = records.iter().map(|record| PrincipalRangeTransition {
+            source: record.source,
+            target,
+            first: record.first,
+            last: record.last,
+        }).collect();
+        let references: Vec<_> = added.iter().map(|(id, name)| (*id, name.as_str())).collect();
+        let before = self.policy.generation().map_err(|_| "manager isolated generation query")?;
+        self.policy.extend_with_principal_ranges(
+            before,
+            &references,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            LabelSetUpdate {sets:&sets,members:&members,grants:&rules,files:&[]},
+            &ranges,
+        ).map_err(|error| {
+            std::println!("SCARLET_ANDROID_APP_POLICY_ISOLATED_FAIL generation={} labels_added={} sets={} members={} grants={} ranges={} error={:?}",
+                before, references.len(), sets.len(), members.len(), rules.len(), ranges.len(), error);
+            "manager isolated policy publication"
+        })?;
+        let after = self.policy.generation().map_err(|_| "manager isolated committed generation")?;
+        std::println!("SCARLET_ANDROID_APP_POLICY_ISOLATED generation={} label={} first={} last={} sources={} grants={}",
+            after, mapping.domain, records[0].first, records[0].last, ranges.len(), rules.len());
+        Ok(())
     }
     fn register(&mut self, text: &str) -> Result<(), &'static str> {
         if !text.ends_with('\n') {
@@ -124,21 +214,7 @@ impl Manager {
         for &source in &subjects {
             let context = self.labels.iter().find(|(_, id)| **id == source)
                 .map(|(name, _)| name.clone()).ok_or("manager subject label")?;
-            let grants: Vec<_> = self.services.grants(&context)?.iter()
-                .map(|grant| (grant.target.clone(), grant.class, grant.permissions)).collect();
-            let domain = context.split(':').nth(2).ok_or("manager domain type")?;
-            let group = if let Some(id) = self.domain_sets.get(domain) { *id } else {
-                let id = self.next_set;
-                self.next_set = self.next_set.checked_add(1).ok_or("manager label set identity")?;
-                sets.push(LabelSet {id,reserved:0});
-                for (name,class,permissions) in grants {
-                    let target=self.label(&name,&mut added)?;
-                    rules.push(SetGrant {source:LabelSelector::set(id),target:LabelSelector::label(target),class,reserved:0,permissions});
-                }
-                self.domain_sets.insert(String::from(domain),id);
-                id
-            };
-            members.push(SetMember {set:group,label:source});
+            self.domain_set(&context, source, &mut added, &mut sets, &mut members, &mut rules)?;
         }
         let transitions: Vec<_> = transitions
             .into_iter()
@@ -255,6 +331,7 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
     let mut labels = BTreeMap::new();
     let mut next = 1u32;
     let mut next_set = 1u32;
+    let mut isolated = Vec::new();
     for line in text.lines() {
         let fields: Vec<_> = line.split_ascii_whitespace().collect();
         if let ["label", id, name] = fields.as_slice() {
@@ -266,6 +343,14 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
             let id=id.parse::<u32>().map_err(|_|"manager set number")?;
             next_set=next_set.max(id.checked_add(1).ok_or("manager set number")?);
         }
+        if let ["runtime-isolated", user, first, last, source] = fields.as_slice() {
+            isolated.push(IsolatedRange {
+                user: user.parse().map_err(|_| "manager isolated user")?,
+                first: first.parse().map_err(|_| "manager isolated first UID")?,
+                last: last.parse().map_err(|_| "manager isolated last UID")?,
+                source: source.parse().map_err(|_| "manager isolated source")?,
+            });
+        }
     }
     policy
         .generation()
@@ -274,20 +359,21 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
     let failed = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
     let thread_failed = failed.clone();
+    let mut manager = Manager {
+        policy,
+        contexts,
+        services,
+        labels,
+        next,
+        seen: BTreeSet::new(),
+        data_labels: BTreeSet::new(),
+        domain_sets:BTreeMap::new(),
+        next_set,
+    };
+    manager.register_isolated(&isolated)?;
     let thread = std::thread::Builder::new()
         .name("android-policy-manager")
         .spawn(move || {
-            let mut manager = Manager {
-                policy,
-                contexts,
-                services,
-                labels,
-                next,
-                seen: BTreeSet::new(),
-                data_labels: BTreeSet::new(),
-                domain_sets:BTreeMap::new(),
-                next_set,
-            };
             let mut previous = String::new();
             while !thread_stop.load(Ordering::Acquire) {
                 let result = (|| -> Result<(), &'static str> {
