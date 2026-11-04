@@ -842,6 +842,43 @@ pub struct RawMemoryInfo {
 
 const _: [(); 24] = [(); core::mem::size_of::<RawMemoryInfo>()];
 
+/// Version 1 task-capacity limits accepted by `TaskCapacityControl`.
+#[repr(C, align(8))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawTaskCapacityLimitsV1 {
+    /// Size of this record in bytes.
+    pub size: u32,
+    /// ABI version, currently one.
+    pub version: u32,
+    /// Maximum number of user tasks, including pending admissions.
+    pub max_user_tasks: u64,
+    /// Maximum number of kernel tasks, including pending admissions.
+    pub max_kernel_tasks: u64,
+    /// Maximum physical bytes reserved for task kernel stacks.
+    pub max_stack_bytes: u64,
+}
+const _: [(); 32] = [(); core::mem::size_of::<RawTaskCapacityLimitsV1>()];
+
+/// Version 1 task-capacity snapshot returned by `TaskCapacityControl`.
+#[repr(C, align(8))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawTaskCapacitySnapshotV1 {
+    /// Size of this record in bytes.
+    pub size: u32,
+    /// ABI version, currently one.
+    pub version: u32,
+    pub max_user_tasks: u64,
+    pub max_kernel_tasks: u64,
+    pub max_stack_bytes: u64,
+    pub active_user_tasks: u64,
+    pub active_kernel_tasks: u64,
+    pub pending_user_tasks: u64,
+    pub pending_kernel_tasks: u64,
+    pub stack_slots: u64,
+    pub used_stack_slots: u64,
+}
+const _: [(); 80] = [(); core::mem::size_of::<RawTaskCapacitySnapshotV1>()];
+
 /// AArch64 native synchronous-fault context, version 1 (304 bytes).
 /// The handler may change integer registers, SP, PC and NZCV before returning
 /// through NativeFaultReturn. FP/SIMD and TLS state are preserved by the kernel.
@@ -976,6 +1013,12 @@ pub enum Syscall {
     /// Copy a 24-byte RawMemoryInfo snapshot to (output, capacity).
     /// Returns 24, or usize::MAX; ignore the output on failure.
     GetMemoryInfo = 53,
+    /// Query or atomically configure bounded native task capacity. Arguments
+    /// are operation (0=query, 1=configure), record pointer, and record size
+    /// (80 for `RawTaskCapacitySnapshotV1`, 32 for `RawTaskCapacityLimitsV1`).
+    /// Configuration requires resource-management authority. Returns zero on
+    /// success or `usize::MAX` on failure.
+    TaskCapacityControl = 55,
 
     // Process information
     GetTaskInfoCount = 24,

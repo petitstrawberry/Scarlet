@@ -543,30 +543,46 @@ pub fn user_kernel_vm_init(task: &Task) {
 
 struct KernelKstackAllocator {
     slots: alloc::vec::Vec<bool>,
+    used_slots: usize,
+    limit: usize,
 }
 
 impl KernelKstackAllocator {
     fn new() -> Self {
         Self {
-            slots: alloc::vec![false; KERNEL_KSTACK_SLOTS],
+            slots: alloc::vec::Vec::new(),
+            used_slots: 0,
+            limit: crate::sched::task_capacity::default_limits(crate::mem::pmm::stats().0)
+                .stack_bytes / TASK_KERNEL_STACK_SIZE,
         }
     }
 
     fn alloc_slot(&mut self) -> Option<(usize, usize, usize)> {
-        for (idx, used) in self.slots.iter_mut().enumerate() {
-            if !*used {
-                *used = true;
-                let base = KERNEL_KSTACK_REGION_START + idx * KERNEL_KSTACK_SLOT_SIZE;
-                let top = base + KERNEL_KSTACK_SLOT_SIZE; // exclusive top
-                return Some((idx, base, top));
-            }
+        if self.used_slots >= self.limit {
+            return None;
         }
-        None
+        let idx = match self.slots.iter().position(|used| !*used) {
+            Some(idx) => idx,
+            None => {
+                let idx = self.slots.len();
+                let growth = (KERNEL_KSTACK_SLOTS - idx).min(64);
+                if growth == 0 || self.slots.try_reserve(growth).is_err() {
+                    return None;
+                }
+                self.slots.resize(idx + growth, false);
+                idx
+            }
+        };
+        self.slots[idx] = true;
+        self.used_slots += 1;
+        let base = KERNEL_KSTACK_REGION_START + idx * KERNEL_KSTACK_SLOT_SIZE;
+        Some((idx, base, base + KERNEL_KSTACK_SLOT_SIZE))
     }
 
     fn free_slot(&mut self, idx: usize) {
-        if idx < self.slots.len() {
+        if self.slots.get(idx) == Some(&true) {
             self.slots[idx] = false;
+            self.used_slots -= 1;
         }
     }
 
@@ -586,6 +602,26 @@ static KSTACK_ALLOC_ONCE: Once<IrqSpinLock<KernelKstackAllocator>> = Once::new()
 
 fn kstack_alloc() -> &'static IrqSpinLock<KernelKstackAllocator> {
     KSTACK_ALLOC_ONCE.call_once(|| IrqSpinLock::new(KernelKstackAllocator::new()))
+}
+
+// Both capacity control and stack allocation take the stack lock before the
+// task-pool lock. Publication never drops Task handles under the pool lock.
+pub(crate) fn with_kstack_capacity<R>(snapshot: impl FnOnce(usize, usize) -> R) -> R {
+    let allocator = kstack_alloc().lock();
+    snapshot(allocator.limit, allocator.used_slots)
+}
+
+pub(crate) fn configure_kstack_capacity(
+    limit: usize,
+    commit: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let mut allocator = kstack_alloc().lock();
+    if limit == 0 || limit > KERNEL_KSTACK_SLOTS || limit < allocator.used_slots {
+        return Err("kernel stack capacity is below live usage or outside virtual space");
+    }
+    commit()?;
+    allocator.limit = limit;
+    Ok(())
 }
 
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
@@ -870,4 +906,31 @@ fn phys_align_up(addr: u64, align: u64) -> u64 {
     addr.checked_add(align - 1)
         .expect("physical alignment overflows")
         & !(align - 1)
+}
+
+#[cfg(test)]
+mod stack_capacity_tests {
+    use super::*;
+
+    #[test_case]
+    fn stack_windows_grow_lazily_and_reuse_slots_within_the_live_budget() {
+        let limit = KERNEL_KSTACK_SLOTS.min(1500);
+        let mut allocator = KernelKstackAllocator { slots: alloc::vec::Vec::new(), used_slots: 0, limit };
+        assert!(allocator.slots.is_empty());
+        for expected in 0..limit {
+            let (slot, base, top) = allocator.alloc_slot().unwrap();
+            assert_eq!(slot, expected);
+            assert_eq!(allocator.slot_index_for_base(base), Some(slot));
+            assert!(base >= KERNEL_KSTACK_REGION_START);
+            assert!(top - 1 <= KERNEL_KSTACK_REGION_END);
+            assert_eq!(top - base, KERNEL_KSTACK_SLOT_SIZE);
+        }
+        assert!(allocator.alloc_slot().is_none());
+        assert_eq!(allocator.used_slots, limit);
+        allocator.free_slot(0);
+        allocator.free_slot(0);
+        assert_eq!(allocator.used_slots, limit - 1);
+        assert_eq!(allocator.alloc_slot().unwrap().0, 0);
+        assert!(allocator.alloc_slot().is_none());
+    }
 }

@@ -7,7 +7,10 @@
 extern crate alloc;
 
 use alloc::string::String;
-use scarlet_sys::{RawKernelInfo, Syscall, syscall2};
+use scarlet_abi::{RawTaskCapacityLimitsV1, RawTaskCapacitySnapshotV1};
+use scarlet_sys::{RawKernelInfo, Syscall, syscall2, syscall3};
+
+const TASK_CAPACITY_ABI_VERSION_V1: u32 = 1;
 
 /// Identity of the running Scarlet kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +69,26 @@ pub struct MemoryInfo {
     pub free_bytes: u64,
 }
 
+/// Explicit limits for user and kernel task roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCapacityLimits {
+    pub max_user_tasks: usize,
+    pub max_kernel_tasks: usize,
+    pub max_stack_bytes: usize,
+}
+
+/// Current task-capacity policy and scheduler usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCapacitySnapshot {
+    pub limits: TaskCapacityLimits,
+    pub active_user_tasks: usize,
+    pub active_kernel_tasks: usize,
+    pub pending_user_tasks: usize,
+    pub pending_kernel_tasks: usize,
+    pub stack_slots: usize,
+    pub used_stack_slots: usize,
+}
+
 /// Read physical-memory capacity and current free bytes through the native ABI.
 /// The returned snapshot does not reserve memory or guarantee a later allocation.
 pub fn memory_info() -> Result<MemoryInfo, &'static str> {
@@ -83,6 +106,92 @@ pub fn memory_info() -> Result<MemoryInfo, &'static str> {
         return Err("Memory information unavailable");
     }
     decode_memory_info(&raw)
+}
+
+/// Query the current task-capacity policy and usage.
+pub fn task_capacity() -> Result<TaskCapacitySnapshot, &'static str> {
+    let mut raw = RawTaskCapacitySnapshotV1 {
+        size: core::mem::size_of::<RawTaskCapacitySnapshotV1>() as u32,
+        version: TASK_CAPACITY_ABI_VERSION_V1,
+        ..RawTaskCapacitySnapshotV1::default()
+    };
+    // SAFETY: raw is an initialized, exclusively borrowed output record with
+    // the exact ABI layout. The synchronous kernel query retains no pointer.
+    let result = unsafe {
+        syscall3(
+            Syscall::TaskCapacityControl,
+            0,
+            core::ptr::from_mut(&mut raw) as usize,
+            core::mem::size_of_val(&raw),
+        )
+    };
+    if result != 0 {
+        return Err("Task capacity query failed");
+    }
+    decode_task_capacity_snapshot(&raw)
+}
+
+/// Atomically configure task-capacity limits within the kernel's physical and
+/// virtual stack ceilings. Failure leaves the previous policy unchanged.
+pub fn configure_task_capacity(limits: TaskCapacityLimits) -> Result<(), &'static str> {
+    let raw = encode_task_capacity_limits(limits);
+    // SAFETY: raw is an initialized, readable input record with the exact ABI
+    // layout. The synchronous kernel control copies it before returning.
+    let result = unsafe {
+        syscall3(
+            Syscall::TaskCapacityControl,
+            1,
+            core::ptr::from_ref(&raw) as usize,
+            core::mem::size_of_val(&raw),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err("Task capacity configuration denied or invalid")
+    }
+}
+
+fn encode_task_capacity_limits(limits: TaskCapacityLimits) -> RawTaskCapacityLimitsV1 {
+    RawTaskCapacityLimitsV1 {
+        size: core::mem::size_of::<RawTaskCapacityLimitsV1>() as u32,
+        version: TASK_CAPACITY_ABI_VERSION_V1,
+        max_user_tasks: limits.max_user_tasks as u64,
+        max_kernel_tasks: limits.max_kernel_tasks as u64,
+        max_stack_bytes: limits.max_stack_bytes as u64,
+    }
+}
+
+fn decode_task_capacity_snapshot(
+    raw: &RawTaskCapacitySnapshotV1,
+) -> Result<TaskCapacitySnapshot, &'static str> {
+    if raw.size as usize != core::mem::size_of::<RawTaskCapacitySnapshotV1>()
+        || raw.version != TASK_CAPACITY_ABI_VERSION_V1
+    {
+        return Err("Invalid task capacity snapshot header");
+    }
+    Ok(TaskCapacitySnapshot {
+        limits: TaskCapacityLimits {
+            max_user_tasks: usize::try_from(raw.max_user_tasks)
+                .map_err(|_| "Task capacity value exceeds usize")?,
+            max_kernel_tasks: usize::try_from(raw.max_kernel_tasks)
+                .map_err(|_| "Task capacity value exceeds usize")?,
+            max_stack_bytes: usize::try_from(raw.max_stack_bytes)
+                .map_err(|_| "Task capacity value exceeds usize")?,
+        },
+        active_user_tasks: usize::try_from(raw.active_user_tasks)
+            .map_err(|_| "Task capacity value exceeds usize")?,
+        active_kernel_tasks: usize::try_from(raw.active_kernel_tasks)
+            .map_err(|_| "Task capacity value exceeds usize")?,
+        pending_user_tasks: usize::try_from(raw.pending_user_tasks)
+            .map_err(|_| "Task capacity value exceeds usize")?,
+        pending_kernel_tasks: usize::try_from(raw.pending_kernel_tasks)
+            .map_err(|_| "Task capacity value exceeds usize")?,
+        stack_slots: usize::try_from(raw.stack_slots)
+            .map_err(|_| "Task capacity value exceeds usize")?,
+        used_stack_slots: usize::try_from(raw.used_stack_slots)
+            .map_err(|_| "Task capacity value exceeds usize")?,
+    })
 }
 
 fn decode_memory_info(raw: &scarlet_abi::RawMemoryInfo) -> Result<MemoryInfo, &'static str> {
@@ -124,7 +233,62 @@ fn decode_field(bytes: &[u8]) -> Result<String, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawKernelInfo, decode_field, decode_kernel_info};
+    use super::{
+        RawKernelInfo, RawTaskCapacityLimitsV1, RawTaskCapacitySnapshotV1,
+        decode_field, decode_kernel_info, decode_task_capacity_snapshot,
+        encode_task_capacity_limits,
+    };
+
+    #[test]
+    fn task_capacity_v1_layouts_and_decoder_are_fixed_width() {
+        assert_eq!(core::mem::size_of::<RawTaskCapacityLimitsV1>(), 32);
+        assert_eq!(core::mem::align_of::<RawTaskCapacityLimitsV1>(), 8);
+        assert_eq!(core::mem::size_of::<RawTaskCapacitySnapshotV1>(), 80);
+        assert_eq!(core::mem::align_of::<RawTaskCapacitySnapshotV1>(), 8);
+
+        let raw = RawTaskCapacitySnapshotV1 {
+            size: 80,
+            version: 1,
+            max_user_tasks: 11,
+            max_kernel_tasks: 12,
+            max_stack_bytes: 13,
+            active_user_tasks: 21,
+            active_kernel_tasks: 22,
+            pending_user_tasks: 23,
+            pending_kernel_tasks: 24,
+            stack_slots: 25,
+            used_stack_slots: 26,
+        };
+        let snapshot = decode_task_capacity_snapshot(&raw).unwrap();
+        assert_eq!(snapshot.limits.max_user_tasks, 11);
+        assert_eq!(snapshot.active_kernel_tasks, 22);
+        assert_eq!(snapshot.used_stack_slots, 26);
+
+        assert!(decode_task_capacity_snapshot(&RawTaskCapacitySnapshotV1 {
+            version: 2,
+            ..raw
+        })
+        .is_err());
+        assert!(decode_task_capacity_snapshot(&RawTaskCapacitySnapshotV1 {
+            size: 72,
+            ..raw
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn task_capacity_limits_encode_uses_the_raw_v1_record() {
+        let raw = encode_task_capacity_limits(super::TaskCapacityLimits {
+            max_user_tasks: 895,
+            max_kernel_tasks: 128,
+            max_stack_bytes: 64 * 1024 * 1024,
+        });
+        assert_eq!(raw.size, 32);
+        assert_eq!(raw.version, 1);
+        assert_eq!(raw.max_user_tasks, 895);
+        assert_eq!(raw.max_kernel_tasks, 128);
+        assert_eq!(raw.max_stack_bytes, 64 * 1024 * 1024);
+    }
 
     #[test]
     fn memory_snapshot_reports_bytes_and_rejects_invalid_capacity() {

@@ -71,11 +71,6 @@ use crate::{
     },
 };
 
-/// Maximum number of concurrently active user tasks.
-pub const MAX_ACTIVE_USER_TASKS: usize = 895;
-/// Maximum number of concurrently active kernel tasks.
-pub const MAX_ACTIVE_KERNEL_TASKS: usize = 128;
-
 /// Global task pool storing all tasks
 /// Using Once with Box-ed tasks array to avoid large stack usage.
 static TASK_POOL: Once<TaskPool> = Once::new();
@@ -543,6 +538,7 @@ struct TaskEntry {
 
 struct TaskPoolState {
     tasks: BTreeMap<usize, TaskEntry>,
+    limits: super::task_capacity::TaskLimits,
     active_user_tasks: usize,
     active_kernel_tasks: usize,
     pending_user_tasks: usize,
@@ -595,6 +591,7 @@ impl TaskPool {
         TaskPool {
             tasks: IrqSpinLock::new(TaskPoolState {
                 tasks: BTreeMap::new(),
+                limits: super::task_capacity::default_limits(crate::mem::pmm::stats().0),
                 active_user_tasks: 0,
                 active_kernel_tasks: 0,
                 pending_user_tasks: 0,
@@ -613,7 +610,7 @@ impl TaskPool {
     ) -> Result<usize, &'static str> {
         match task_type {
             crate::task::TaskType::User => {
-                if state.active_user_tasks + state.pending_user_tasks >= MAX_ACTIVE_USER_TASKS {
+                if state.active_user_tasks + state.pending_user_tasks >= state.limits.max_user {
                     return Err("Maximum active user task count reached");
                 }
                 let id = state.next_user_id;
@@ -625,7 +622,7 @@ impl TaskPool {
                 Ok(id)
             }
             crate::task::TaskType::Kernel => {
-                if state.active_kernel_tasks + state.pending_kernel_tasks >= MAX_ACTIVE_KERNEL_TASKS
+                if state.active_kernel_tasks + state.pending_kernel_tasks >= state.limits.max_kernel
                 {
                     return Err("Maximum active kernel task count reached");
                 }
@@ -940,6 +937,7 @@ impl TaskPool {
             tasks.active_kernel_tasks = 0;
             tasks.pending_user_tasks = 0;
             tasks.pending_kernel_tasks = 0;
+            tasks.limits = super::task_capacity::default_limits(crate::mem::pmm::stats().0);
             tasks.next_user_id = 1;
             tasks.next_kernel_id = usize::MAX - 1;
         }
@@ -951,7 +949,38 @@ impl TaskPool {
             self.retired_tasks.lock().is_empty(),
             "cannot reset task pool while task handles remain"
         );
+        let limit = self.tasks.lock().limits.stack_bytes / crate::environment::TASK_KERNEL_STACK_SIZE;
+        crate::vm::configure_kstack_capacity(limit, || Ok(())).unwrap();
     }
+}
+
+pub fn task_capacity_snapshot() -> super::task_capacity::CapacitySnapshot {
+    crate::vm::with_kstack_capacity(|slots, used| {
+        let state = get_task_pool().tasks.lock();
+        super::task_capacity::CapacitySnapshot {
+            limits: state.limits,
+            active_user: state.active_user_tasks,
+            active_kernel: state.active_kernel_tasks,
+            pending_user: state.pending_user_tasks,
+            pending_kernel: state.pending_kernel_tasks,
+            stack_slots: slots,
+            used_stack_slots: used,
+        }
+    })
+}
+
+pub fn configure_task_capacity(limits: super::task_capacity::TaskLimits) -> Result<(), &'static str> {
+    let slots = super::task_capacity::validate(limits, crate::mem::pmm::stats().0)?;
+    crate::vm::configure_kstack_capacity(slots, || {
+        let mut state = get_task_pool().tasks.lock();
+        if limits.max_user < state.active_user_tasks + state.pending_user_tasks
+            || limits.max_kernel < state.active_kernel_tasks + state.pending_kernel_tasks
+        {
+            return Err("task capacity is below registered or reserved usage");
+        }
+        state.limits = limits;
+        Ok(())
+    })
 }
 
 const TASK_REAPER_RETRY_NS: u64 = SCHEDULER_ACCOUNTING_QUANTUM_NS;
@@ -8229,7 +8258,8 @@ mod tests {
         assert_eq!(kernel_id, usize::MAX - 1);
 
         let task_pool = get_task_pool();
-        for expected_id in 1..=(MAX_ACTIVE_USER_TASKS + 1) {
+        let capacity = task_pool.tasks.lock().limits.max_user;
+        for expected_id in 1..=(capacity + 1) {
             let task_id = register_task(Task::new(
                 "SequentialUserTask".to_string(),
                 1,
@@ -8282,7 +8312,8 @@ mod tests {
 
         let task_pool = get_task_pool();
         let mut ids = Vec::new();
-        for _ in 0..MAX_ACTIVE_USER_TASKS {
+        let capacity = task_pool.tasks.lock().limits.max_user;
+        for _ in 0..capacity {
             ids.push(register_task(Task::new(
                 "CapacityUserTask".to_string(),
                 1,
@@ -8319,8 +8350,34 @@ mod tests {
         }
         assert_eq!(
             task_pool.reap_retired_tasks_for_test(),
-            MAX_ACTIVE_USER_TASKS
+            capacity
         );
+    }
+
+    #[test_case]
+    fn task_capacity_updates_preserve_live_reservations_on_failure() {
+        reset();
+        let before = task_capacity_snapshot();
+        let limits = super::super::task_capacity::TaskLimits {
+            max_user: 2,
+            max_kernel: 2,
+            stack_bytes: (before.used_stack_slots + 5) * crate::environment::TASK_KERNEL_STACK_SIZE,
+        };
+        configure_task_capacity(limits).unwrap();
+        let first = register_task(Task::new("capacity-first".into(), 1, TaskType::User));
+        let second = register_task(Task::new("capacity-second".into(), 1, TaskType::User));
+        assert!(try_register_task(Task::new("capacity-overflow".into(), 1, TaskType::User)).is_err());
+        assert!(configure_task_capacity(super::super::task_capacity::TaskLimits { max_user: 1, ..limits }).is_err());
+        assert_eq!(task_capacity_snapshot().limits, limits);
+        for id in [first, second] {
+            let task = get_task_by_id(id).unwrap();
+            task.set_state(TaskState::Terminated);
+            drop(task);
+            assert!(get_task_pool().remove_task(id));
+        }
+        get_task_pool().reap_retired_tasks_for_test();
+        reset();
+        assert_eq!(task_capacity_snapshot().limits, before.limits);
     }
 }
 

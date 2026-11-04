@@ -33,5 +33,18 @@ pub const KERNEL_VM_STACK_START: usize = KERNEL_VM_STACK_END - KERNEL_VM_STACK_S
 pub const KERNEL_KSTACK_SLOT_SIZE: usize = TASK_KERNEL_STACK_SIZE + PAGE_SIZE;
 // Reserve the top-most page(s) for trampoline; place window region below KERNEL_VM_STACK
 pub const KERNEL_KSTACK_REGION_END: usize = KERNEL_VM_STACK_START - 1;
+// Reserve only virtual addresses here. Physical stack pages and allocator
+// metadata are committed on demand under the runtime task-capacity policy.
+#[cfg(target_pointer_width = "64")]
+const KERNEL_KSTACK_FLOOR: usize = KERNEL_MODULE_BASE + KERNEL_MODULE_SIZE;
+#[cfg(target_pointer_width = "32")]
+const KERNEL_KSTACK_FLOOR: usize = SCARLET_HHDM_BASE + KERNEL_DIRECT_MAP_SIZE;
+pub const KERNEL_KSTACK_SLOTS: usize =
+    (KERNEL_VM_STACK_START - KERNEL_KSTACK_FLOOR) / KERNEL_KSTACK_SLOT_SIZE;
 pub const KERNEL_KSTACK_REGION_START: usize =
     KERNEL_KSTACK_REGION_END + 1 - (KERNEL_KSTACK_SLOTS * KERNEL_KSTACK_SLOT_SIZE);
+const _: () = {
+    assert!(KERNEL_KSTACK_SLOTS > 1);
+    assert!(KERNEL_KSTACK_REGION_START >= KERNEL_KSTACK_FLOOR);
+    assert!(KERNEL_KSTACK_REGION_END < KERNEL_VM_STACK_START);
+};

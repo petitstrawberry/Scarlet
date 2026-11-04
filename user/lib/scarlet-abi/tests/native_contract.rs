@@ -89,6 +89,18 @@ fn native_memory_query_contract() {
 }
 
 #[test]
+fn native_task_capacity_v1_contract() {
+    assert_layout!(abi::RawTaskCapacityLimitsV1, 32, 8, {
+        size: 0, version: 4, max_user_tasks: 8, max_kernel_tasks: 16, max_stack_bytes: 24,
+    });
+    assert_layout!(abi::RawTaskCapacitySnapshotV1, 80, 8, {
+        size: 0, version: 4, max_user_tasks: 8, max_kernel_tasks: 16, max_stack_bytes: 24,
+        active_user_tasks: 32, active_kernel_tasks: 40, pending_user_tasks: 48,
+        pending_kernel_tasks: 56, stack_slots: 64, used_stack_slots: 72,
+    });
+}
+
+#[test]
 fn scheduler_v1_field_layouts() {
     assert_layout!(abi::RawTaskDeadlineParams, 24, 8, {
         runtime_ns: 0, deadline_ns: 8, period_ns: 16,
@@ -260,7 +272,7 @@ fn native_syscall_numbers() {
         SetTaskDeadline = 44, GetTaskDeadline = 45, SetSchedulerAttr = 46,
         GetSchedulerAttr = 47, GetSchedulerState = 48, FutexWait = 49,
         FutexWake = 50, GetKernelInfo = 51, SetSystemTime = 52, GetMemoryInfo = 53,
-        WakeDeadlineQuery = 54,
+        WakeDeadlineQuery = 54, TaskCapacityControl = 55,
         RegisterAbiZone = 90, UnregisterAbiZone = 91,
         CreateNamespace = 92, HandleQuery = 100, HandleSetRole = 101,
         HandleClose = 102, HandleDuplicate = 103,

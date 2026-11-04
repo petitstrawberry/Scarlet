@@ -326,6 +326,7 @@ syscall_table! {
     SetSystemTime = 52 => crate::task::syscall::sys_set_system_time,
     GetMemoryInfo = 53 => crate::system::sys_get_memory_info,
     WakeDeadlineQuery = 54 => crate::system_power::wake::sys_query,
+    TaskCapacityControl = 55 => crate::sched::task_capacity::sys_control,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,
