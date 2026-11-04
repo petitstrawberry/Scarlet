@@ -10,6 +10,24 @@ use core::mem;
 /// ext2 magic number
 pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
 
+/// The compatible feature bit indicating that external EA blocks are in use.
+pub const EXT2_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0004;
+
+/// ext2 extended-attribute block magic (`0xEA020000` on disk).
+pub const EXT2_XATTR_MAGIC: u32 = 0xEA02_0000;
+pub const EXT2_XATTR_REFCOUNT_MAX: u32 = 1024;
+pub const EXT2_XATTR_HEADER_SIZE: usize = 32;
+pub const EXT2_XATTR_ENTRY_SIZE: usize = 16;
+pub const EXT2_XATTR_PAD: usize = 4;
+
+/// Extended-attribute name indexes. Index zero stores the VFS name verbatim.
+pub const EXT2_XATTR_INDEX_USER: u8 = 1;
+pub const EXT2_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
+pub const EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
+pub const EXT2_XATTR_INDEX_TRUSTED: u8 = 4;
+pub const EXT2_XATTR_INDEX_SYSTEM: u8 = 5;
+pub const EXT2_XATTR_INDEX_SECURITY: u8 = 6;
+
 /// ext2 root inode number
 pub const EXT2_ROOT_INO: u32 = 2;
 
@@ -22,6 +40,72 @@ pub const EXT2_S_IFCHR: u16 = 0x2000; // Character device
 pub const EXT2_S_IFBLK: u16 = 0x6000; // Block device
 pub const EXT2_S_IFIFO: u16 = 0x1000; // FIFO (pipe)
 pub const EXT2_S_IFSOCK: u16 = 0xC000; // Socket
+
+/// Header of one external ext2 extended-attribute block.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct Ext2XattrHeader {
+    pub magic: u32,
+    pub refcount: u32,
+    pub blocks: u32,
+    pub hash: u32,
+    pub reserved: [u32; 4],
+}
+
+impl Ext2XattrHeader {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
+        if data.len() < EXT2_XATTR_HEADER_SIZE {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Insufficient data for ext2 xattr header",
+            ));
+        }
+        Ok(unsafe { *(data.as_ptr() as *const Self) })
+    }
+
+    pub fn refcount(&self) -> u32 {
+        u32::from_le(self.refcount)
+    }
+}
+
+/// Fixed header of an external ext2 extended-attribute entry.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct Ext2XattrEntry {
+    pub name_len: u8,
+    pub name_index: u8,
+    pub value_offs: u16,
+    pub value_block: u32,
+    pub value_size: u32,
+    pub hash: u32,
+}
+
+impl Ext2XattrEntry {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
+        if data.len() < EXT2_XATTR_ENTRY_SIZE {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Insufficient data for ext2 xattr entry",
+            ));
+        }
+        Ok(unsafe { *(data.as_ptr() as *const Self) })
+    }
+}
+
+/// Entry alignment is `align(EXT2_XATTR_ENTRY_SIZE + name_len, 4)`.
+pub fn ext2_xattr_entry_len(name_len: usize) -> Option<usize> {
+    EXT2_XATTR_ENTRY_SIZE
+        .checked_add(name_len)
+        .and_then(|len| len.checked_add(EXT2_XATTR_PAD - 1))
+        .map(|len| len & !(EXT2_XATTR_PAD - 1))
+}
+
+/// Value alignment is the on-disk `EXT2_XATTR_SIZE` macro.
+pub fn ext2_xattr_value_len(value_len: usize) -> Option<usize> {
+    value_len
+        .checked_add(EXT2_XATTR_PAD - 1)
+        .map(|len| len & !(EXT2_XATTR_PAD - 1))
+}
 
 /// ext2 Superblock structure
 ///
@@ -439,6 +523,15 @@ impl Ext2Inode {
     /// Get blocks count (512-byte blocks)
     pub fn get_blocks(&self) -> u32 {
         u32::from_le(self.blocks)
+    }
+
+    /// External extended-attribute block, or zero when none is attached.
+    pub fn get_file_acl(&self) -> u32 {
+        u32::from_le(self.file_acl)
+    }
+
+    pub fn set_file_acl(&mut self, block: u32) {
+        self.file_acl = block.to_le();
     }
 
     /// Get block pointer at index
