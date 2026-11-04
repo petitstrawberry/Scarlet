@@ -16,6 +16,7 @@ pub mod mm;
 mod mode;
 mod native_handle;
 pub mod pipe;
+mod pressure;
 pub mod proc;
 mod proc_fd;
 mod proc_text;

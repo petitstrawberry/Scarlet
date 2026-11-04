@@ -240,6 +240,18 @@ fn write_linux_epoll_event(
     copy_to_user_pagewise(ptr, &buf, &task.vm_manager) == EPOLL_EVENT_SIZE
 }
 
+fn acknowledge_linux_ready(task: &crate::task::Task, handle: u32, events: u32) {
+    if events & (EPOLLIN | EPOLLOUT | EPOLLPRI) == 0 { return; }
+    if let Some(object) = task.handle_table.get(handle)
+        && let Some(selectable) = object.as_selectable() {
+        selectable.acknowledge_ready(crate::object::capability::selectable::ReadySet {
+            read: events & EPOLLIN != 0,
+            write: events & EPOLLOUT != 0,
+            except: events & EPOLLPRI != 0,
+        });
+    }
+}
+
 fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: &EpollInterest) -> u32 {
     let Some(handle) = abi.get_handle(interest.fd as usize) else {
         return 0;
@@ -1348,6 +1360,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             return fd;
         }
         if let Some(fd) = super::proc_fd::open_task_directory(abi, &task, &absolute, flags) {
+            return fd;
+        }
+        if let Some(fd) = super::pressure::open(abi, &task, &absolute, flags) {
             return fd;
         }
         if let Some(fd) = super::quota::open_proc_quota_file(abi, &task, &absolute, flags) {
@@ -5137,6 +5152,7 @@ fn epoll_wait_for_task(
                 return errno::to_result(errno::EFAULT);
             }
             state.delivered(interest.events, ready, generations);
+            acknowledge_linux_ready(task, interest.watched_handle, ready);
             delivered.push(interest.delivery.clone());
             ready_count += 1;
         }
@@ -5533,6 +5549,15 @@ fn pselect6_for_task(
         }
     }
 
+    for fd in 0..max_fds {
+        let bit = 1u64 << fd;
+        let events = if out_read & bit != 0 { EPOLLIN } else { 0 }
+            | if out_write & bit != 0 { EPOLLOUT } else { 0 }
+            | if out_except & bit != 0 { EPOLLPRI } else { 0 };
+        if let Some(handle) = abi.get_handle(fd) {
+            acknowledge_linux_ready(task, handle, events);
+        }
+    }
     // Return count of ready fds
     let ready_count = out_read.count_ones() as usize
         + out_write.count_ones() as usize
@@ -5924,6 +5949,11 @@ fn ppoll_for_task(
         };
         if copy_to_user_pagewise(ptr, &pfd.revents.to_ne_bytes(), &task.vm_manager) != 2 {
             return errno::to_result(errno::EFAULT);
+        }
+    }
+    for pfd in &fds {
+        if pfd.fd >= 0 && let Some(handle) = abi.get_handle(pfd.fd as usize) {
+            acknowledge_linux_ready(task, handle, pfd.revents as u32);
         }
     }
     count

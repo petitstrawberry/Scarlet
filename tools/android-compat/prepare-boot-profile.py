@@ -275,17 +275,6 @@ def configure(output, stock, profile, contexts, metadata):
         supply.mkdir(parents=True, exist_ok=True)
         (supply / "type").write_text("Mains\n")
         (supply / "online").write_text("1\n")
-    if "lmkd" in profile.get("host_services", []):
-        # The pinned lmkd accepts the kernel-lowmemory-killer interface when it
-        # cannot observe PSI or vmpressure. Scarlet currently has neither monitor;
-        # expose the writable target file so the service remains available to AMS.
-        parameter = output / "sys/module/lowmemorykiller/parameters/minfree"
-        parameter.parent.mkdir(parents=True, exist_ok=True)
-        parameter.write_text("18432,23040,27648,32256,55296,80640\n")
-        parameter.chmod(0o666)
-        event = output / "proc/lowmemorykiller"
-        event.parent.mkdir(parents=True, exist_ok=True)
-        event.write_text("")
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)
         cpusets = []
