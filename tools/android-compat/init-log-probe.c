@@ -16,6 +16,7 @@
 #include <sys/uio.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <unistd.h>
 static int console=-1;
 static int zygote_diagnostic;
@@ -24,6 +25,29 @@ static long binder_trace_uid=-1;
 static struct stat null_identity;
 static int have_null;
 static void report(const char *format,...);
+static void diagnostic_log(const struct __android_log_message *message);
+typedef void (*log_callback)(const struct __android_log_message *);
+static _Atomic(log_callback) downstream_logger;
+static _Thread_local int logging;
+static void diagnostic_tee(const struct __android_log_message *message) {
+ if(logging)return;
+ logging=1;
+ int saved=errno;
+ diagnostic_log(message);
+ log_callback callback=atomic_load(&downstream_logger);
+ errno=saved;
+ if(callback)callback(message);
+ logging=0;
+}
+/* ART installs its own logger after the preload constructor. Preserve that
+ * callback and mirror its input without taking over Android's logd socket. */
+void __android_log_set_logger(log_callback callback) {
+ void (*real)(log_callback)=dlsym(RTLD_NEXT,"__android_log_set_logger");
+ if(!real)return;
+ if(!zygote_diagnostic){real(callback);return;}
+ atomic_store(&downstream_logger,callback);
+ real(diagnostic_tee);
+}
 static int utf16_contains(const unsigned char *data,size_t length,const char *text) {
  size_t needle_length=strlen(text);
  for(size_t start=0;start+needle_length*2<=length;start+=2) {
@@ -169,7 +193,7 @@ static void report(const char *format,...) {
  if(!zygote_diagnostic){if(console>=0)write(console,message,length);return;}
  // No diagnostic descriptor survives between messages or into a Zygote fork.
  int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return;
- struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/dev/socket/logdw");
+ struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/scarlet/boot/diagnostic.sock");
  if(!connect(fd,(struct sockaddr*)&address,sizeof(address))) {
   size_t offset=0;
   while(offset<length) {
@@ -203,7 +227,7 @@ __attribute__((constructor)) static void capture_console(void) {
    if(!strcmp(target,"/dev/tty0"))close((int)fd);
   }closedir(directory);}
  }else {console=fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,64);have_null=stat("/dev/null",&null_identity)==0;}
- void (*set_logger)(void (*)(const struct __android_log_message*))=dlsym(RTLD_DEFAULT,"__android_log_set_logger");
+ void (*set_logger)(void (*)(const struct __android_log_message*))=dlsym(RTLD_NEXT,"__android_log_set_logger");
  if(set_logger)set_logger(diagnostic_log);
  report("SCARLET_INIT_LOGGER_READY uid=%u euid=%u\n",getuid(),geteuid());
 }

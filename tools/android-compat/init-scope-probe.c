@@ -36,18 +36,32 @@ static void snapshot(void) {
 }
 static int log_socket(void) {
  int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return -1;
- struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/dev/socket/logdw");
- if(bind(fd,(struct sockaddr*)&address,sizeof(address))){close(fd);return -1;}return fd;
+ struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/scarlet/boot/diagnostic.sock");
+ struct stat previous;
+ if(!lstat(address.sun_path,&previous)) {
+  if(!S_ISSOCK(previous.st_mode) || unlink(address.sun_path)){close(fd);return -1;}
+ }else if(errno!=ENOENT){close(fd);return -1;}
+ if(bind(fd,(struct sockaddr*)&address,sizeof(address)) || chmod(address.sun_path,0666)){close(fd);return -1;}return fd;
 }
 static int important_log(const unsigned char *message,size_t length) {
- // The same socket carries Android logger packets and the preload's plain
- // text diagnostics. Quiet mode must retain crashes and command results.
+ // This private socket carries the preload's plain diagnostics. Quiet mode
+ // retains crashes and the stock user/home startup trace.
  const char *prefixes[]={"SCARLET_INIT_JAVA_FATAL ","SCARLET_INIT_ABORT_MESSAGE ",
                          "SCARLET_ANDROID_STDIO ","SCARLET_INIT_LOG priority=6 ",
                          "SCARLET_INIT_LOG priority=7 "};
  for(unsigned i=0;i<sizeof(prefixes)/sizeof(prefixes[0]);i++) {
   size_t n=strlen(prefixes[i]);
   if(length>=n && !memcmp(message,prefixes[i],n))return 1;
+ }
+ const char *progress[]={"SCARLET_INIT_LOG priority=4 tag=UserController ",
+                        "SCARLET_INIT_LOG priority=4 tag=StorageManagerService ",
+                        "SCARLET_INIT_LOG priority=4 tag=FallbackHome ",
+                        "SCARLET_INIT_LOG priority=4 tag=SystemServer ",
+                        "SCARLET_INIT_LOG priority=4 tag=ActivityTaskManager ",
+                        "SCARLET_INIT_LOG priority=4 tag=ActivityManager "};
+ for(unsigned i=0;i<sizeof(progress)/sizeof(progress[0]);i++) {
+  size_t n=strlen(progress[i]);
+  if(length>=n && !memcmp(message,progress[i],n))return 1;
  }
  // Packed logdw header: log ID (1), TID (2), seconds (4), nanoseconds (4).
  // Events/stats/security buffers contain binary records, not a priority byte.
@@ -99,7 +113,7 @@ int main(int argc,char **argv) {
   execv(args[0],args);perror("stock init exec");return 4;
  }
  long scope=syscall(0x53430000L+1320);if(scope<0)return 11;
- int logfd=log_socket();if(logfd<0)perror("diagnostic logdw bind");
+ int logfd=log_socket();if(logfd<0)perror("diagnostic socket bind");
  pid_t child=fork();if(child<0)return 1;
  if(child==0) {
   if(logfd>=0)close(logfd);
