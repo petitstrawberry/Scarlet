@@ -152,8 +152,21 @@ def prepare(archive, runtime, stock, profile_file, output):
     print(f"Prepared {len(payloads)} flattened factory APEXes; stock init boot has not been tested")
 
 
+def manager_init_imports(profile):
+    if "/system/etc/init/hw/init.rc" not in profile["init_imports"]:
+        raise ValueError("profile must retain the stock init root")
+    result = ["/system/etc/init/hw/init.rc",
+              "/scarlet/boot/init.d/system",
+              "/scarlet/boot/init.d/system_ext"]
+    result += [path for path in profile["init_imports"]
+               if path != "/system/etc/init/hw/init.rc" and
+               not path.startswith(("/system/etc/init/", "/system_ext/etc/init/",
+                                    "/scarlet/boot/services/"))]
+    return result
+
+
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,KEYMINT_MANAGED_RC,GATEKEEPER_MANAGED_RC,STORAGED_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,KEYMINT_MANAGED_RC,GATEKEEPER_MANAGED_RC,STORAGED_MANAGED_RC
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
             relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC,"keystore2":KEYSTORE_MANAGED_RC,"keymint":KEYMINT_MANAGED_RC,"gatekeeper":GATEKEEPER_MANAGED_RC,"storaged":STORAGED_MANAGED_RC}[name]
@@ -206,8 +219,14 @@ def configure(output, stock, profile, contexts, metadata):
     (output / "proc").mkdir(exist_ok=True)
     (output / "proc/bootconfig").write_text("".join(
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
+    # Stock init treats androidboot.init_rc as the complete root. Import the
+    # generated effective generic views once; their slots come from the
+    # verified package objects and manager RC proofs during assembly.
+    manager_imports = manager_init_imports(profile)
     manager_init = "# Explicit Scarlet device boot configuration\n" + "".join(
-        "import " + path + "\n" for path in profile["init_imports"] + imports(profile))
+        "import " + path + "\n" for path in manager_imports)
+    metadata["stock_init"] = {"kind": "scarlet-stock-init-assembly-v1",
+                              "result": "NOT_ASSEMBLED", "imports": manager_imports}
     if "/system/etc/init/bootanim.rc" in profile["init_imports"]:
         manager_init += (
             "\non property:init.svc.surfaceflinger=running\n"

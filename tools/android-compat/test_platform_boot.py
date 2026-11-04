@@ -8,6 +8,34 @@ spec.loader.exec_module(prepare)
 
 
 class PlatformBootTest(unittest.TestCase):
+    def test_manager_imports_the_complete_generic_init_view_once(self):
+        profile = {"init_imports": ["/system/etc/init/hw/init.rc",
+                                    "/system/etc/init/apexd.rc",
+                                    "/system/etc/init/servicemanager.rc",
+                                    "/system/etc/init/bootanim.rc",
+                                    "/scarlet/boot/services/system_suspend.rc",
+                                    "/scarlet/boot/services/hwservicemanager.rc",
+                                    "/scarlet/boot/services/graphics_cpu.rc",
+                                    "/scarlet/boot/services/installd.rc",
+                                    "/scarlet/boot/services/odsign.rc",
+                                    "/scarlet/boot/services/health.rc",
+                                    "/scarlet/boot/services/vold.rc",
+                                    "/scarlet/boot/services/lmkd.rc",
+                                    "/scarlet/boot/services/netd.rc",
+                                    "/scarlet/boot/services/audioserver.rc",
+                                    "/scarlet/boot/services/audio_hal.rc",
+                                    "/scarlet/boot/services/keymint.rc",
+                                    "/scarlet/boot/services/keystore2.rc",
+                                    "/scarlet/boot/services/gatekeeper.rc",
+                                    "/scarlet/boot/services/storaged.rc"]}
+        self.assertEqual(prepare.manager_init_imports(profile), [
+            "/system/etc/init/hw/init.rc",
+            "/scarlet/boot/init.d/system",
+            "/scarlet/boot/init.d/system_ext",
+        ])
+        with self.assertRaisesRegex(ValueError, "stock init root"):
+            prepare.manager_init_imports({"init_imports": []})
+
     def test_home_package_set_includes_the_module_metadata_provider(self):
         from desktop_inputs import CONFIGURATION, PACKAGES
         self.assertIn("app/ModuleMetadata",PACKAGES["product"])
