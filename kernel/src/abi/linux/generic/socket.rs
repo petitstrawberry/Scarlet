@@ -480,6 +480,13 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         };
     }
 
+    // The native INET stack currently exposes IPv4 only. Reject IPv6 up front
+    // so callers can fall back instead of receiving an IPv4-backed socket that
+    // later fails when bound or connected as AF_INET6.
+    if domain == AF_INET6 {
+        return errno::to_result(errno::EAFNOSUPPORT);
+    }
+
     // Map Linux socket domain to Scarlet domain
     let scarlet_domain = match domain {
         AF_UNIX => SocketDomain::Local,
@@ -2668,6 +2675,48 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::scheduler::get_task_by_id;
+
+    #[test_case]
+    fn ipv6_socket_creation_fails_before_allocating_ipv4_backed_state() {
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(
+            Task::new("ipv6-unsupported".into(), 1, TaskType::User),
+            cpu,
+        );
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, AF_INET6 as usize);
+        frame.set_arg(1, SOCK_STREAM as usize);
+        frame.set_arg(2, 0);
+        assert_eq!(
+            sys_socket(&mut abi, &mut frame),
+            errno::to_result(errno::EAFNOSUPPORT)
+        );
+        assert!(abi.get_handle(0).is_none());
+        assert!(task.handle_table.get(0).is_none());
+
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+
 
     #[cfg(target_arch = "aarch64")]
     #[test_case]
