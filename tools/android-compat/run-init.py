@@ -27,6 +27,7 @@ def main():
     verbose_logs="--verbose-logs" in arguments
     if verbose_logs:arguments.remove("--verbose-logs")
     compositor=None
+    android_runtime=None
     capture_frame="--capture-frame" in arguments
     if capture_frame:arguments.remove("--capture-frame")
     manage_apps="--manage-app-policy" in arguments
@@ -47,6 +48,12 @@ def main():
         arguments.extend(["--rootfs-extra-bytes",str(sum(node["size"] for node in packages["nodes"].values()))])
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+    if "--android-runtime" in arguments:
+        index=arguments.index("--android-runtime");android_runtime=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not android_runtime.is_file():raise ValueError("native Android runtime executable is missing")
+    if compositor and android_runtime is None:
+        raise ValueError("native display requires --android-runtime with the built Scarlet application")
+    if android_runtime and not compositor:raise ValueError("native Android runtime requires --sws-native")
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     launcher_app=None
     system_apk=None
@@ -161,6 +168,11 @@ def main():
                 if not any(seeded.iterdir()):raise ValueError("seed image is empty")
                 target=root/"data/dalvik-cache" if cache_source else root/"data"
                 shutil.copytree(seeded,target,dirs_exist_ok=True,symlinks=True)
+        if android_runtime:
+            destination=root.parent.parent/"bin/android-runtime"
+            shutil.copy2(android_runtime,destination)
+            if sha256(destination)!=sha256(android_runtime):raise ValueError("changed native Android runtime executable")
+            (output/"native-display.json").write_text(json.dumps({"path":str(android_runtime),"sha256":sha256(android_runtime)},indent=2)+"\n")
         if compositor:
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")

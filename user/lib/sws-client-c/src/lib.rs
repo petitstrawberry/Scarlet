@@ -11,7 +11,7 @@ use std::{
     ffi::{CStr, c_char},
     sync::{Mutex, OnceLock},
 };
-mod scene;
+pub mod scene;
 
 use sws_client::{
     Connection, Error, Event, EventReceiver, Handle, SgfxBufferIdentity, SgfxDamageRect,

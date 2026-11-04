@@ -6,7 +6,7 @@ use std::{
 
 pub fn environment(
     native: VfsView,
-) -> Result<(Environment, Option<std::shield::Policy>, Option<std::shield::Policy>), &'static str> {
+) -> Result<(Environment, Option<std::shield::Policy>, Option<std::shield::Policy>, Option<super::native_display::Setup>), &'static str> {
     let android = native
         .rooted_at("/systems/android-aarch64")
         .map_err(|_| "stock Android view")?;
@@ -61,13 +61,14 @@ pub fn environment(
     } else {
         None
     };
+    let display=if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP")==Some("1") {super::native_display::prepare(&android)?} else {None};
     let env = Environment::create().map_err(|_| "stock Environment")?;
     env.set_root("scarlet", &native)
         .map_err(|_| "native view")?;
     env.set_root("android-aarch64", &android)
         .map_err(|_| "Android view")?;
     env.seal().map_err(|_| "seal stock Environment")?;
-    Ok((env, policy,boot_policy))
+    Ok((env, policy,boot_policy,display))
 }
 
 fn run(

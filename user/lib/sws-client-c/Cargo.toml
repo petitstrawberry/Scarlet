@@ -5,7 +5,7 @@ edition = "2024"
 
 [lib]
 name = "sws_client_c"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 sws-client = { path = "../sws-client", default-features = false, features = ["std"] }

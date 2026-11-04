@@ -9,6 +9,7 @@ mod app_policy;
 mod framework_services;
 mod services;
 mod native_sws;
+mod native_display;
 mod shield;
 mod stock;
 mod kernel_log;
@@ -51,10 +52,10 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     let args = std::env::args_vec();
     let cmdline = args.get(1).map(|arg| arg.as_str()).unwrap_or("");
     let backing = bootstrap::backing(cmdline, true)?;
-    let (environment, policy,boot_policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
+    let (environment, policy,boot_policy,display) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
         stock::environment(backing)?
     } else {
-        (bootstrap::environment(backing)?.0, None,None)
+        (bootstrap::environment(backing)?.0, None,None,None)
     };
     let android = environment
         .root("android-aarch64")
@@ -74,6 +75,7 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         },
     ];
     let _compositor = native_sws::Compositor::start(&environment, &handles)?;
+    let _display=display.map(|display|display.start(&environment,&handles)).transpose()?;
     if let Some(policy) = policy {
         stock::prepare(&environment, &android, &handles)?;
         return if option_env!("SCARLET_ANDROID_FRAMEWORK_SERVICES") == Some("1") {
