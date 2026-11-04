@@ -110,7 +110,9 @@ def _read_extended_attributes(image, paths, temporary):
             output = temporary / f"ea-{len(reads)}"
             reads.append((path, name, size, output))
     commands = [
-        f"ea_get -f {quote_debugfs(output)} {quote_debugfs(path)} {quote_debugfs(name)}"
+        # Raw mode also preserves ACL bytes: debugfs otherwise converts their
+        # filesystem encoding and can change the length or reject the value.
+        f"ea_get -r -f {quote_debugfs(output)} {quote_debugfs(path)} {quote_debugfs(name)}"
         for path, name, _size, output in reads]
     if commands:
         _run_script(commands, image, temporary, "read-eas.debugfs")
@@ -223,7 +225,7 @@ def restore_inode_metadata(image, root, metadata):
                 value_file.write_bytes(value)
                 value_number += 1
                 lines.append(
-                    f"ea_set -f {quote_debugfs(value_file)} "
+                    f"ea_set -r -f {quote_debugfs(value_file)} "
                     f"{quote_debugfs(path)} {quote_debugfs(name)}")
         _run_script(lines, image, temporary, "restore-inodes.debugfs", writable=True)
 

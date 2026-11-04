@@ -130,11 +130,21 @@ class SeedImageTest(unittest.TestCase):
                 f'ea_set -f "{xattr_value}" /data/user_de/0/example/preferences '
                 'trusted.scarlet.shield.0123456789abcdef0123456789abcdef',
                 str(source)], check=True, capture_output=True)
+            # ext2's compact ACL layout differs from the Linux xattr layout.
+            # Metadata staging must retain the on-disk bytes without conversion.
+            acl_value = bytes.fromhex("01000000010007000400050020000100")
+            acl_file = base / "acl-value"
+            acl_file.write_bytes(acl_value)
+            subprocess.run([
+                "debugfs", "-w", "-R",
+                f'ea_set -r -f "{acl_file}" /data/user_de/0/example/preferences '
+                'system.posix_acl_access', str(source)], check=True, capture_output=True)
             identities = inode_metadata(source, "/data")
             self.assertNotIn("user_de/0/example/old-socket", identities)
             self.assertEqual(
                 identities["user_de/0/example/preferences"]["xattrs"],
-                {"trusted.scarlet.shield.0123456789abcdef0123456789abcdef": binary_value.hex()})
+                {"trusted.scarlet.shield.0123456789abcdef0123456789abcdef": binary_value.hex(),
+                 "system.posix_acl_access": acl_value.hex()})
             serialized = json.dumps(identities, sort_keys=True)
             identities = json.loads(serialized)
             self.assertEqual(json.dumps(identities, sort_keys=True), serialized)
