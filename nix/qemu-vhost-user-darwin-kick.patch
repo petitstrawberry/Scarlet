@@ -1,0 +1,30 @@
+diff --git a/hw/virtio/vhost-user.c b/hw/virtio/vhost-user.c
+--- a/hw/virtio/vhost-user.c
++++ b/hw/virtio/vhost-user.c
+@@ -1498,19 +1498,15 @@ static int vhost_user_set_vring_kick(struct vhost_dev *dev,
+     /*
+      * Inject a kick in case the back-end only starts vring processing upon
+      * receiving a kick. The spec suggests this to improve compatibility.
++     *
++     * Use the EventNotifier's write side. The kick fd passed to the backend is
++     * event_notifier_get_fd(), which is the read side when macOS uses pipes.
+      */
+     if (file->fd != -1) {
+-        uint64_t val = 1;
+-        ssize_t nwritten;
+-
+-        do {
+-            nwritten = write(file->fd, &val, sizeof(val));
+-        } while (nwritten < 0 && errno == EINTR);
+-
+-        if (nwritten < 0 && errno != EAGAIN /* back-end can already read */) {
+-            return -errno;
+-        }
++        ret = event_notifier_set(
++            virtio_queue_get_host_notifier(
++                virtio_get_queue(dev->vdev, file->index)));
+     }
+ 
+-    return 0;
++    return ret;
+ }

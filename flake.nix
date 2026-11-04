@@ -269,6 +269,9 @@
           qemu = pkgs.qemu.overrideAttrs (_finalAttrs: _prevAttrs: {
             version = "11.1.0-scarlet";
             src = qemu-scarlet;
+            patches = (_prevAttrs.patches or [ ]) ++ [
+              ./nix/qemu-vhost-user-darwin-kick.patch
+            ];
             configureFlags = (_prevAttrs.configureFlags or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               "--enable-cocoa"
               "--enable-hvf"
