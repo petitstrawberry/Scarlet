@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use scarlet_abi::shield::{RawLabel, RawRule};
 pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition, RawFileCreate as FileCreate, RawFileRelabel as FileRelabel};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
-use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
+pub use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
 pub use scarlet_abi::shield::{RawLabelSet as LabelSet, RawSetMember as SetMember,
     RawLabelSelector as LabelSelector, RawSetGrant as SetGrant, RawSetFileRule as SetFileRule};
 

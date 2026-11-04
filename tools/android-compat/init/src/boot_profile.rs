@@ -59,7 +59,7 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
         }
         // Keep in sync with the native Shield bounds; Android 13's stock
         // service inventory needs more exact labels than the original 512.
-        if labels.len() > 1024 || rules.len() > 16384 || transitions.len() > 16384 || exec_transitions.len() > 16384 || create_rules.len()>16384 || relabel_rules.len()>16384 || files.len() > 16384 { return Err("boot policy record bound"); }
+        if labels.len() > std::shield::MAX_LABELS || rules.len() > std::shield::MAX_RULES || transitions.len() > std::shield::MAX_RULES || exec_transitions.len() > std::shield::MAX_RULES || create_rules.len()>std::shield::MAX_RULES || relabel_rules.len()>std::shield::MAX_RULES || files.len() > std::shield::MAX_RULES { return Err("boot policy record bound"); }
     }
     if !labels.contains(&(1, "u:r:init:s0")) { return Err("boot init subject missing"); }
     let policy = Policy::create_with_exec_transitions(&labels, &rules, &transitions, &exec_transitions).map_err(|_| "boot Shield policy")?;

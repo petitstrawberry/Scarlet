@@ -183,8 +183,8 @@ impl Manager {
                 LabelSetUpdate {sets:&sets,members:&members,grants:&rules,files:&batch.rules},
             )
             .map_err(|error| {
-                std::println!("SCARLET_ANDROID_APP_POLICY_UPDATE_FAIL generation={} labels={} rules={} transitions={} sets={} members={} file_rules={} error={:?}",
-                    before, references.len(), rules.len(), transitions.len(), sets.len(), members.len(), batch.rules.len(), error);
+                std::println!("SCARLET_ANDROID_APP_POLICY_UPDATE_FAIL generation={} labels_added={} labels_total={} rules={} transitions={} sets={} members={} file_rules={} error={:?}",
+                    before, references.len(), self.labels.len(), rules.len(), transitions.len(), sets.len(), members.len(), batch.rules.len(), error);
                 "manager policy publication"
             })?;
         let after = self

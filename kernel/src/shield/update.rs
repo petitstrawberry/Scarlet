@@ -188,6 +188,27 @@ mod tests {
         assert_eq!(policy.extend(2, PolicyUpdate::default()), Ok(2));
     }
     #[test_case]
+    fn stock_boot_and_manager_labels_publish_above_the_original_bound() {
+        let boot = (1..=859)
+            .map(|id| (id, alloc::format!("boot-{id}")))
+            .collect();
+        let policy = Policy::new(boot, vec![]).unwrap();
+        let manager = (860..=1027)
+            .map(|id| (id, alloc::format!("manager-{id}")))
+            .collect();
+        assert_eq!(
+            policy.extend(
+                1,
+                PolicyUpdate {
+                    labels: manager,
+                    ..Default::default()
+                }
+            ),
+            Ok(2)
+        );
+        assert_eq!(policy.label(1027).unwrap().as_ref(), "manager-1027");
+    }
+    #[test_case]
     fn rejected_stale_ambiguous_and_over_quota_updates_publish_nothing() {
         let policy = Policy::with_exec_transitions(
             vec![(1, "manager".into()), (2, "file".into()), (3, "old".into())],

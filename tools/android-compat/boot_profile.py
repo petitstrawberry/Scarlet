@@ -256,7 +256,7 @@ def shield_policy(profile, contexts, generic_policy=None, generic_root=None):
     labels |= {target for _,target in profile.get("socket_labels",[])}
     labels -= set(runtime_subjects)
     # Mirrors the native Shield label bound (see kernel/src/shield/mod.rs).
-    if len(labels | set(profile.get("file_labels", {}).values())) + len(runtime_subjects) > 1024:
+    if len(labels | set(profile.get("file_labels", {}).values())) + len(runtime_subjects) > 2048:
         raise ValueError("profile exceeds native label bound")
     labels |= set(profile.get("file_labels", {}).values())
     identifiers = dict(runtime_subjects)
