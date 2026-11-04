@@ -98,8 +98,9 @@ use crate::ipc::syscall::{
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
 use crate::network::syscall::{
     sys_network_clear_ipv4, sys_network_configure_ipv4, sys_network_list_interfaces,
-    sys_network_list_interfaces_v2, sys_network_list_links_v1, sys_network_set_gateway,
-    sys_network_set_ipv4, sys_network_set_netmask, sys_network_traffic_configure_v1,
+    sys_network_list_interfaces_v2, sys_network_list_links_v1,
+    sys_network_read_link_statistics_v1, sys_network_set_gateway, sys_network_set_ipv4,
+    sys_network_set_netmask, sys_network_traffic_configure_v1,
     sys_network_update_ipv4_v1,
 };
 use crate::network::syscall::{
@@ -466,6 +467,7 @@ syscall_table! {
     NetworkListLinksV1 = 920 => sys_network_list_links_v1,
     NetworkUpdateIpv4V1 = 921 => sys_network_update_ipv4_v1,
     NetworkTrafficConfigureV1 = 922 => sys_network_traffic_configure_v1,
+    NetworkReadLinkStatisticsV1 = 923 => sys_network_read_link_statistics_v1,
 
     // === Task Event Operations ===
 

@@ -1391,6 +1391,73 @@ pub fn sys_network_list_links_v1(tf: &mut Trapframe) -> usize {
     records.len()
 }
 
+fn native_errno(errno: i32) -> usize {
+    (-(errno as isize)) as usize
+}
+
+fn link_statistics_error(error: crate::network::link::LinkStatisticsError) -> usize {
+    use crate::network::link::LinkStatisticsError;
+    native_errno(match error {
+        LinkStatisticsError::InvalidRequest => 22,
+        LinkStatisticsError::NotFound => 19,
+        LinkStatisticsError::Changed => 11,
+    })
+}
+
+/// Read one interface's existing counters, selected by the incarnation fields
+/// from `NetworkListLinksV1`. The request is also the output record.
+pub fn sys_network_read_link_statistics_v1(tf: &mut Trapframe) -> usize {
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
+    tf.increment_pc_next(&task);
+
+    let ptr = tf.get_arg(0);
+    if tf.get_arg(1) != scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize {
+        return native_errno(EINVAL);
+    }
+    if ptr == 0 {
+        return native_errno(EFAULT);
+    }
+
+    let mut request = scarlet_abi::network::NetworkReadLinkStatisticsV1::default();
+    // SAFETY: the destination is the exact, fully initialized 64-byte ABI record.
+    let request_bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut request as *mut scarlet_abi::network::NetworkReadLinkStatisticsV1).cast::<u8>(),
+            scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize,
+        )
+    };
+    if copy_from_user(&task, ptr, request_bytes).is_err() {
+        return native_errno(EFAULT);
+    }
+    if !request.is_query() {
+        return native_errno(EINVAL);
+    }
+
+    let response = match NetworkManager::get_manager().read_link_statistics(request) {
+        Ok(response) => response,
+        Err(error) => return link_statistics_error(error),
+    };
+
+    // Build the complete response before copying it. A failed copy_to_user may
+    // leave a partial destination; callers must ignore the record on EFAULT.
+    // SAFETY: response has the same explicit 64-byte layout as the request.
+    let response_bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&response as *const scarlet_abi::network::NetworkReadLinkStatisticsV1).cast::<u8>(),
+            scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize,
+        )
+    };
+    if copy_to_user(&task, ptr, response_bytes).is_err() {
+        return native_errno(EFAULT);
+    }
+    0
+}
+
 pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
     let Some(task) = mytask() else {
         return usize::MAX;
@@ -1488,5 +1555,27 @@ mod traffic_query_tests {
         request.subject = [0; 32];
         request.meter[0] = 1;
         assert_eq!(super::traffic_query(&request), None);
+    }
+}
+
+#[cfg(test)]
+mod link_statistics_tests {
+    use super::*;
+    use crate::network::link::LinkStatisticsError;
+
+    #[test_case]
+    fn link_statistics_errors_preserve_errno_contract() {
+        assert_eq!(
+            link_statistics_error(LinkStatisticsError::InvalidRequest),
+            (-22isize) as usize
+        );
+        assert_eq!(
+            link_statistics_error(LinkStatisticsError::NotFound),
+            (-19isize) as usize
+        );
+        assert_eq!(
+            link_statistics_error(LinkStatisticsError::Changed),
+            (-11isize) as usize
+        );
     }
 }

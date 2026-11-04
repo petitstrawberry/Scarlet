@@ -166,8 +166,23 @@ pub fn list_interface_configs() -> Result<Vec<NetworkInterfaceConfig>, HandleErr
 }
 
 pub use scarlet_abi::network::{
-    NetworkLinkInfoV1, NetworkTrafficConfigureV1, NetworkUpdateIpv4V1,
+    NetworkLinkInfoV1, NetworkReadLinkStatisticsV1, NetworkTrafficConfigureV1,
+    NetworkUpdateIpv4V1,
 };
+
+fn network_syscall_status(result: usize) -> Result<(), HandleError> {
+    if result == 0 {
+        return Ok(());
+    }
+    if result == usize::MAX {
+        return Err(HandleError::SystemError(-1));
+    }
+    if result > isize::MAX as usize {
+        let errno = -(result as isize) as i32;
+        return Err(HandleError::SystemError(errno));
+    }
+    Err(HandleError::SystemError(-1))
+}
 
 /// Query native packet-meter support without altering traffic policy.
 pub fn traffic_capabilities() -> Result<u64, HandleError> {
@@ -219,6 +234,26 @@ pub fn list_links() -> Result<Vec<NetworkLinkInfoV1>, HandleError> {
         records.resize(count, NetworkLinkInfoV1::default());
     }
     Err(HandleError::InvalidParameter)
+}
+
+/// Read exact link-layer RX/TX packet and byte counters for one 920 snapshot.
+/// Native `EINVAL`, `ENODEV`, `EAGAIN` and `EFAULT` are retained as
+/// [`HandleError::SystemError`] values so callers can retry only stale links.
+pub fn read_link_statistics(
+    link: &NetworkLinkInfoV1,
+) -> Result<NetworkReadLinkStatisticsV1, HandleError> {
+    let mut record = NetworkReadLinkStatisticsV1::query(link.id, link.generation);
+    // SAFETY: record has the fixed request/output layout and remains exclusive
+    // and initialized for the synchronous call.
+    let result = unsafe {
+        syscall2(
+            Syscall::NetworkReadLinkStatisticsV1,
+            &mut record as *mut NetworkReadLinkStatisticsV1 as usize,
+            scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize,
+        )
+    };
+    network_syscall_status(result)?;
+    Ok(record)
 }
 
 /// Apply or clear IPv4 configuration only if this link incarnation still exists.

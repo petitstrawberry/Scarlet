@@ -3,6 +3,13 @@ use super::{NetworkManager, ipv4::Ipv4Address};
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use scarlet_abi::network::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkStatisticsError {
+    InvalidRequest,
+    NotFound,
+    Changed,
+}
+
 pub(super) struct LinkRegistry {
     next_id: u64,
     epochs: BTreeMap<String, u64>,
@@ -194,6 +201,64 @@ impl NetworkManager {
         links.records.values().copied().collect()
     }
 
+    /// Read one interface's existing counters without holding the link lifecycle
+    /// lock while acquiring a driver or observation lock.
+    pub(crate) fn read_link_statistics(
+        &self,
+        request: NetworkReadLinkStatisticsV1,
+    ) -> Result<NetworkReadLinkStatisticsV1, LinkStatisticsError> {
+        if !request.is_query() {
+            return Err(LinkStatisticsError::InvalidRequest);
+        }
+
+        let (name, observed) = self
+            .link_incarnation(request.id)
+            .ok_or(LinkStatisticsError::NotFound)?;
+        if observed.generation != request.generation {
+            return Err(LinkStatisticsError::Changed);
+        }
+
+        let interface = self
+            .get_interface(&name)
+            .ok_or(LinkStatisticsError::Changed)?;
+        let stats = interface.stats();
+
+        // A same-name replacement must not attribute the new device's counters
+        // to an old 920 observation.
+        let (current_name, current) = self
+            .link_incarnation(request.id)
+            .ok_or(LinkStatisticsError::Changed)?;
+        if current_name != name || current.generation != request.generation {
+            return Err(LinkStatisticsError::Changed);
+        }
+
+        Ok(NetworkReadLinkStatisticsV1 {
+            version: LINK_STATISTICS_VERSION_V1,
+            size: LINK_STATISTICS_SIZE_V1,
+            id: request.id,
+            generation: request.generation,
+            rx_packets: stats.rx_packets,
+            rx_bytes: stats.rx_bytes,
+            tx_packets: stats.tx_packets,
+            tx_bytes: stats.tx_bytes,
+            layer: LINK_STATISTICS_LAYER_LINK,
+            reserved: 0,
+        })
+    }
+
+    fn link_incarnation(&self, id: u64) -> Option<(String, NetworkLinkInfoV1)> {
+        let mut links = self.link_lifecycle.lock();
+        links.refresh(self);
+        links
+            .records
+            .values()
+            .find(|link| link.id == id)
+            .and_then(|link| {
+                link.interface_name()
+                    .map(|name| (String::from(name), *link))
+            })
+    }
+
     /// Retire configuration while a controlled port is closed. Synchronizes
     /// against incarnation-checked DHCP installation; caller must not hold its
     /// carrier observation lock while acquiring the lifecycle lock.
@@ -249,5 +314,135 @@ impl NetworkManager {
             request.metric,
             request.flags & IPV4_MAKE_DEFAULT != 0,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::network::{DevicePacket, MacAddress};
+    use crate::network::{InterfaceStats, NetworkInterface};
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    struct StatsInterface {
+        name: &'static str,
+        state: AtomicU8,
+        stats: InterfaceStats,
+    }
+
+    impl NetworkInterface for StatsInterface {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn mac_address(&self) -> MacAddress {
+            MacAddress::new([2, 0, 0, 0, 0, 1])
+        }
+
+        fn link_state(&self) -> u8 {
+            self.state.load(Ordering::Acquire)
+        }
+
+        fn ip_address(&self) -> Option<Ipv4Address> {
+            None
+        }
+
+        fn set_ip_address(&self, _: Ipv4Address) {}
+
+        fn clear_ip_address(&self) {}
+
+        fn send(&self, _: DevicePacket) -> Result<(), &'static str> {
+            Err("statistics test interface")
+        }
+
+        fn poll(&self) -> Result<Vec<DevicePacket>, &'static str> {
+            Ok(Vec::new())
+        }
+
+        fn stats(&self) -> InterfaceStats {
+            self.stats.clone()
+        }
+    }
+
+    fn manager_with_stats() -> (NetworkManager, Arc<StatsInterface>, NetworkLinkInfoV1) {
+        let manager = NetworkManager::new();
+        let interface = Arc::new(StatsInterface {
+            name: "stats0",
+            state: AtomicU8::new(LINK_DOWN),
+            stats: InterfaceStats {
+                tx_packets: 17,
+                tx_bytes: 0x1234,
+                rx_packets: 23,
+                rx_bytes: 0x5678,
+                drops: 2,
+                errors: 3,
+            },
+        });
+        manager
+            .register_interface("stats0", interface.clone())
+            .unwrap();
+        let link = manager.link_snapshot()[0];
+        (manager, interface, link)
+    }
+
+    #[test_case]
+    fn statistics_round_trip_exact_link_counters_and_identity() {
+        let (manager, _interface, link) = manager_with_stats();
+        let result = manager
+            .read_link_statistics(NetworkReadLinkStatisticsV1::query(
+                link.id,
+                link.generation,
+            ))
+            .unwrap();
+        assert_eq!(result.version, LINK_STATISTICS_VERSION_V1);
+        assert_eq!(result.size, LINK_STATISTICS_SIZE_V1);
+        assert_eq!(result.id, link.id);
+        assert_eq!(result.generation, link.generation);
+        assert_eq!(result.rx_packets, 23);
+        assert_eq!(result.rx_bytes, 0x5678);
+        assert_eq!(result.tx_packets, 17);
+        assert_eq!(result.tx_bytes, 0x1234);
+        assert_eq!(result.layer, LINK_STATISTICS_LAYER_LINK);
+        assert_eq!(result.reserved, 0);
+    }
+
+    #[test_case]
+    fn statistics_requests_reject_output_fields_before_lookup() {
+        let (manager, _interface, link) = manager_with_stats();
+        let mut request = NetworkReadLinkStatisticsV1::query(link.id, link.generation);
+        request.rx_bytes = 1;
+        assert_eq!(
+            manager.read_link_statistics(request),
+            Err(LinkStatisticsError::InvalidRequest)
+        );
+
+        request.rx_bytes = 0;
+        request.layer = LINK_STATISTICS_LAYER_LINK;
+        assert_eq!(
+            manager.read_link_statistics(request),
+            Err(LinkStatisticsError::InvalidRequest)
+        );
+    }
+
+    #[test_case]
+    fn statistics_distinguish_unknown_and_stale_links() {
+        let (manager, interface, link) = manager_with_stats();
+        assert_eq!(
+            manager.read_link_statistics(NetworkReadLinkStatisticsV1::query(
+                link.id + 1,
+                link.generation,
+            )),
+            Err(LinkStatisticsError::NotFound)
+        );
+
+        interface.state.store(LINK_UP, Ordering::Release);
+        assert_eq!(
+            manager.read_link_statistics(NetworkReadLinkStatisticsV1::query(
+                link.id,
+                link.generation,
+            )),
+            Err(LinkStatisticsError::Changed)
+        );
     }
 }

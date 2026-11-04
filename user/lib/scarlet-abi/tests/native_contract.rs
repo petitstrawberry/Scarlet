@@ -284,6 +284,10 @@ fn network_management_v1_layouts() {
         id: 0, generation: 8, name: 16, mac_address: 48,
         kind: 54, state: 55, mtu: 56, reserved: 60,
     });
+    assert_layout!(abi::network::NetworkReadLinkStatisticsV1, 64, 8, {
+        version: 0, size: 4, id: 8, generation: 16, rx_packets: 24,
+        rx_bytes: 32, tx_packets: 40, tx_bytes: 48, layer: 56, reserved: 60,
+    });
     assert_layout!(abi::network::NetworkUpdateIpv4V1, 40, 8, {
         id: 0, generation: 8, address: 16, netmask: 20, gateway: 24,
         flags: 28, metric: 32, reserved: 36,
@@ -363,7 +367,8 @@ fn native_syscall_numbers() {
         NetworkListInterfaces = 914, NetworkConfigureIpv4 = 915,
         NetworkListInterfacesV2 = 916, NetworkClearIpv4 = 917,
         SocketGetLocalAddress = 918, SocketGetPeerAddress = 919,
-        NetworkListLinksV1 = 920, NetworkUpdateIpv4V1 = 921, NetworkTrafficConfigureV1 = 922,
+        NetworkListLinksV1 = 920, NetworkUpdateIpv4V1 = 921,
+        NetworkTrafficConfigureV1 = 922, NetworkReadLinkStatisticsV1 = 923,
         GetCpuDebugInfo = 997, GetTaskDebugInfo = 998, ProfilerDump = 999,
         Shutdown = 1000, ShvVmCreate = 1100, ShvVcpuCreate = 1101,
         ShvVcpuRun = 1102, LsmLoad = 1200, LsmUnload = 1201, LsmList = 1202,

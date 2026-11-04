@@ -8,6 +8,9 @@ pub const LINK_KIND_WIFI: u8 = 2;
 pub const IPV4_HAS_GATEWAY: u32 = 1;
 pub const IPV4_MAKE_DEFAULT: u32 = 2;
 pub const IPV4_CLEAR: u32 = 4;
+pub const LINK_STATISTICS_VERSION_V1: u32 = 1;
+pub const LINK_STATISTICS_SIZE_V1: u32 = 64;
+pub const LINK_STATISTICS_LAYER_LINK: u32 = 1;
 
 /// One registered link. IDs are nonzero and never reused during a boot.
 /// Generation changes for observed carrier, MAC, MTU, kind or driver epoch changes.
@@ -38,6 +41,54 @@ impl NetworkLinkInfoV1 {
     /// Identify the exact link incarnation for asynchronous work.
     pub fn same_incarnation(&self, other: &Self) -> bool {
         self.id == other.id && self.generation == other.generation
+    }
+}
+
+/// Read-only, incarnation-checked counter snapshot for one registered link.
+/// The caller seeds `id` and `generation` from [`NetworkLinkInfoV1`]; every
+/// other field except `version` and `size` must be zero. The kernel replaces
+/// the complete record on success without creating a second link namespace.
+/// Success returns zero; invalid requests, absent links, stale incarnations and
+/// user-copy failures return `-EINVAL`, `-ENODEV`, `-EAGAIN` and `-EFAULT`.
+/// The four counters are one interface's current link-level observations; the
+/// record does not claim an atomic snapshot across links or with the device.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkReadLinkStatisticsV1 {
+    pub version: u32,
+    pub size: u32,
+    pub id: u64,
+    pub generation: u64,
+    pub rx_packets: u64,
+    pub rx_bytes: u64,
+    pub tx_packets: u64,
+    pub tx_bytes: u64,
+    pub layer: u32,
+    pub reserved: u32,
+}
+
+impl NetworkReadLinkStatisticsV1 {
+    /// Construct the zero-payload request for one existing link incarnation.
+    pub fn query(id: u64, generation: u64) -> Self {
+        Self {
+            version: LINK_STATISTICS_VERSION_V1,
+            size: LINK_STATISTICS_SIZE_V1,
+            id,
+            generation,
+            ..Default::default()
+        }
+    }
+
+    /// A request may select a link but cannot supply output counters or a layer.
+    pub fn is_query(&self) -> bool {
+        self.version == LINK_STATISTICS_VERSION_V1
+            && self.size == LINK_STATISTICS_SIZE_V1
+            && self.rx_packets == 0
+            && self.rx_bytes == 0
+            && self.tx_packets == 0
+            && self.tx_bytes == 0
+            && self.layer == 0
+            && self.reserved == 0
     }
 }
 
@@ -100,6 +151,7 @@ impl NetworkTrafficConfigureV1 {
 const _: () = {
     assert!(core::mem::size_of::<NetworkLinkInfoV1>() == 64);
     assert!(core::mem::offset_of!(NetworkLinkInfoV1, mtu) == 56);
+    assert!(core::mem::size_of::<NetworkReadLinkStatisticsV1>() == 64);
     assert!(core::mem::size_of::<NetworkUpdateIpv4V1>() == 40);
     assert!(core::mem::size_of::<NetworkTrafficConfigureV1>() == 80);
 };
@@ -107,6 +159,37 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_statistics_request_cannot_prefill_output_fields() {
+        let mut request = NetworkReadLinkStatisticsV1::query(7, 3);
+        assert!(request.is_query());
+
+        request.rx_packets = 1;
+        assert!(!request.is_query());
+        request.rx_packets = 0;
+        request.rx_bytes = 1;
+        assert!(!request.is_query());
+        request.rx_bytes = 0;
+        request.tx_packets = 1;
+        assert!(!request.is_query());
+        request.tx_packets = 0;
+        request.tx_bytes = 1;
+        assert!(!request.is_query());
+        request.tx_bytes = 0;
+        request.layer = LINK_STATISTICS_LAYER_LINK;
+        assert!(!request.is_query());
+        request.layer = 0;
+        request.reserved = 1;
+        assert!(!request.is_query());
+        request.reserved = 0;
+        request.size = LINK_STATISTICS_SIZE_V1 - 1;
+        assert!(!request.is_query());
+        request.size = LINK_STATISTICS_SIZE_V1;
+        request.version = LINK_STATISTICS_VERSION_V1 + 1;
+        assert!(!request.is_query());
+    }
+
     #[test]
     fn incarnation_changes_even_when_name_is_reused() {
         let first = NetworkLinkInfoV1 {

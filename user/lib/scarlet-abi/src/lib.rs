@@ -1200,6 +1200,8 @@ pub enum Syscall {
     NetworkListLinksV1 = 920,
     NetworkUpdateIpv4V1 = 921,
     NetworkTrafficConfigureV1 = 922,
+    /// Read one link's counters using its `(id, generation)` from native 920.
+    NetworkReadLinkStatisticsV1 = 923,
     /// Write the socket's local IPv4 address to an eight-byte native address buffer.
     SocketGetLocalAddress = 918,
     /// Write the socket's peer IPv4 address to an eight-byte native address buffer.
