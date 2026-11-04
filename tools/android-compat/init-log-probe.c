@@ -68,10 +68,14 @@ void *android_dlopen_ext(const char *filename,int flags,const android_dlextinfo 
   report("SCARLET_INIT_DLOPEN path=%s flags=0x%x result=%p pid=%d tid=%d\n",filename,flags,result,getpid(),gettid());
  errno=saved;return result;
 }
-/* Java crash-buffer writes can bypass the logger installed during init. */
+/* ART may replace the installed logger; retain Java system/crash errors too. */
 int __android_log_buf_write(int buffer,int priority,const char *tag,const char *message) {
  int (*real)(int,int,const char*,const char*)=dlsym(RTLD_NEXT,"__android_log_buf_write");
- if(priority>=ANDROID_LOG_ERROR && tag && !strcmp(tag,"AndroidRuntime")) {
+ if(zygote_diagnostic && priority>=ANDROID_LOG_ERROR && priority>=minimum_log_priority) {
+  int saved=errno;
+  report("SCARLET_INIT_LOG priority=%d tag=%s %s\n",priority,tag?tag:"",message?message:"");
+  errno=saved;
+ }else if(priority>=ANDROID_LOG_ERROR && tag && !strcmp(tag,"AndroidRuntime")) {
   int saved=errno;
   report("SCARLET_INIT_JAVA_FATAL pid=%d tid=%d buffer=%d %s\n",getpid(),gettid(),buffer,message?message:"");
   errno=saved;
