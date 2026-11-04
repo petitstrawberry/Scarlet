@@ -1522,7 +1522,7 @@ impl SocketControl for LocalSocket {
 
         // Create server-side connection socket that will be added to backlog
         let server_conn = Arc::new(Self {
-            socket_type: SocketType::Stream,
+            socket_type: server_local.socket_type,
             datagrams:datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
@@ -2034,6 +2034,32 @@ mod tests {
             LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
         assert_eq!(sock1.state(), SocketState::Connected);
         assert_eq!(sock2.state(), SocketState::Connected);
+    }
+
+    #[test_case]
+    fn accepted_seqpacket_preserves_type_and_write_boundaries() {
+        let listener = local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
+        let name = format!("seqpacket-accept-{}", listener.as_ref() as *const dyn SocketObject as *const () as usize);
+        let address = SocketAddress::Local(LocalSocketAddress::from_path(name.clone()).unwrap());
+        NetworkManager::get_manager()
+            .register_named_socket(&name, Arc::clone(&listener))
+            .unwrap();
+        listener.bind(&address).unwrap();
+        listener.listen(1).unwrap();
+
+        let client = local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
+        client.connect(&address).unwrap();
+        let accepted = listener.accept().unwrap();
+        assert_eq!(accepted.socket_type(), SocketType::SeqPacket);
+
+        accepted.write(b"one").unwrap();
+        accepted.write(b"two").unwrap();
+        let mut packet = [0u8; 8];
+        assert_eq!(client.read(&mut packet).unwrap(), 3);
+        assert_eq!(&packet[..3], b"one");
+        assert_eq!(client.read(&mut packet).unwrap(), 3);
+        assert_eq!(&packet[..3], b"two");
+        NetworkManager::get_manager().unregister_named_socket(&name, listener.as_ref());
     }
 
     #[test_case]
