@@ -74,6 +74,7 @@ def validate_profile(profile):
         if "vintf" in profile: fields.add("vintf")
         if "host_services" in profile: fields.add("host_services")
         if "package_set" in profile: fields.add("package_set")
+        if "network_provider" in profile: fields.add("network_provider")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
