@@ -263,6 +263,10 @@ def configure(output, stock, profile, contexts, metadata):
     # user-0 data roots that stock vold would otherwise create after key setup.
     for name in ["storage", "apex", "linkerconfig", "data", "data_mirror", "data/user_de/0", "data/user/0", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "sys/fs/fuse/connections", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
+    # VINTF's runtime compatibility check reads the SELinux policy version.
+    # Scarlet enforces the translated policy through Shield rather than a
+    # selinuxfs policy blob, but the pinned Android policy level is still exact.
+    (output / "sys/fs/selinux/policyvers").write_text("33\n")
     if "health" in profile.get("host_services", []):
         # The hosted device is mains powered. Publish an AC supply so the
         # stock health HAL reports a plugged-in device instead of no battery,

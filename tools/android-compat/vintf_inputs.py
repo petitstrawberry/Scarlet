@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 
 FRAMEWORK = "system/etc/vintf/manifest.xml"
 DEVICE = "vendor/etc/vintf/manifest.xml"
+FRAMEWORK_MATRIX = "system/etc/vintf/compatibility_matrix.7.xml"
+DEVICE_MATRIX = "vendor/etc/vintf/compatibility_matrix.xml"
 SERVICE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+/[A-Za-z0-9_.-]+")
 GRAPHICS_DEVICE = {
     "android.hardware.graphics.allocator@2.0::IAllocator/default": "hwbinder",
@@ -117,6 +119,8 @@ def build_manifests(selection, sources, device_providers=None):
         for tag in ("name", "version", "fqname"):
             ET.SubElement(hal, tag).text = record["package" if tag == "name" else tag]
     device = ET.Element("manifest", {"version": "5.0", "type": "device"})
+    device_sepolicy = ET.SubElement(device, "sepolicy")
+    ET.SubElement(device_sepolicy, "version").text = "33.0"
     for contract in selection["device"]:
         if providers[contract].get("transport")!=DEVICE_PROVIDERS[contract]:raise ValueError("device provider transport mismatch")
         if contract in KEYMINT_DEVICE:
@@ -132,8 +136,34 @@ def build_manifests(selection, sources, device_providers=None):
         attributes={"arch":"64"} if DEVICE_PROVIDERS[contract]=="passthrough" else {}
         ET.SubElement(hal,"transport",attributes).text=DEVICE_PROVIDERS[contract]
         ET.SubElement(hal,"fqname").text="@"+fqname
+    framework_matrix = ET.Element(
+        "compatibility-matrix", {"version": "5.0", "type": "framework", "level": "7"}
+    )
+    sepolicy = ET.SubElement(framework_matrix, "sepolicy")
+    ET.SubElement(sepolicy, "kernel-sepolicy-version").text = "30"
+    for version in ("28.0", "29.0", "30.0", "31.0", "32.0", "33.0"):
+        ET.SubElement(sepolicy, "sepolicy-version").text = version
+    for contract in selection["device"]:
+        if contract in KEYMINT_DEVICE:
+            package, version, fqname = KEYMINT_DEVICE[contract]
+            hal = ET.SubElement(framework_matrix, "hal", {"format": "aidl", "optional": "false"})
+            ET.SubElement(hal, "name").text = package
+            ET.SubElement(hal, "version").text = version
+            interface, instance = fqname.split("/", 1)
+        else:
+            package, qualified = contract.split("@", 1)
+            version, qualified = qualified.split("::", 1)
+            interface, instance = qualified.split("/", 1)
+            hal = ET.SubElement(framework_matrix, "hal", {"format": "hidl", "optional": "false"})
+            ET.SubElement(hal, "name").text = package
+            ET.SubElement(hal, "version").text = version
+        declared = ET.SubElement(hal, "interface")
+        ET.SubElement(declared, "name").text = interface
+        ET.SubElement(declared, "instance").text = instance
+    device_matrix = ET.Element("compatibility-matrix", {"version": "5.0", "type": "device"})
     outputs = {}
-    for name, root in [(FRAMEWORK, framework), (DEVICE, device)]:
+    for name, root in [(FRAMEWORK, framework), (DEVICE, device),
+                       (FRAMEWORK_MATRIX, framework_matrix), (DEVICE_MATRIX, device_matrix)]:
         ET.indent(root)
         outputs[name] = ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
     proof = {"selection": selection, "contracts": candidates,
@@ -147,8 +177,12 @@ def validate_staged(metadata):
     if selection is None:
         return
     proof = metadata.get("vintf_inputs", {})
+    generated = set(proof.get("generated_sha256", {}))
+    expected = {FRAMEWORK, DEVICE}
+    if FRAMEWORK_MATRIX in generated or DEVICE_MATRIX in generated:
+        expected = {FRAMEWORK, DEVICE, FRAMEWORK_MATRIX, DEVICE_MATRIX}
     if (proof.get("selection") != selection or set(proof.get("contracts", {})) != set(selection["framework"]) or
-            set(proof.get("generated_sha256", {})) != {FRAMEWORK, DEVICE} or
+            generated != expected or
             any(metadata["files"].get(name) != digest for name, digest in proof["generated_sha256"].items())):
         raise ValueError("profile requires matching verified VINTF inputs; prepare with --platform-image")
     providers=proof.get("device_providers",{})

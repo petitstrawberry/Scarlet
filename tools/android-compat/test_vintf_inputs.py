@@ -3,7 +3,7 @@ import hashlib
 import unittest
 import xml.etree.ElementTree as ET
 
-from vintf_inputs import DEVICE, FRAMEWORK, GRAPHICS_DEVICE, KEYMINT_DEVICE, build_manifests, validate_selection, validate_staged
+from vintf_inputs import DEVICE, DEVICE_MATRIX, FRAMEWORK, FRAMEWORK_MATRIX, GRAPHICS_DEVICE, KEYMINT_DEVICE, build_manifests, validate_selection, validate_staged
 
 SOURCE = b'''<manifest version="1.0" type="framework">
 <hal><name>android.frameworks.stats</name><version>1.0</version><fqname>@1.0::IStats/default</fqname></hal>
@@ -21,10 +21,18 @@ class VintfInputsTest(unittest.TestCase):
         outputs,proof=build_manifests(selection,{},providers)
         hals=ET.fromstring(outputs[DEVICE]).findall("hal")
         self.assertEqual(len(hals),4)
+        self.assertEqual(ET.fromstring(outputs[DEVICE]).findtext("sepolicy/version"), "33.0")
         self.assertTrue(all(hal.get("format")=="aidl" for hal in hals))
         self.assertEqual([hal.findtext("version") for hal in hals],["2","2","1","1"])
         self.assertEqual([hal.findtext("fqname") for hal in hals],
                          [value[2] for value in KEYMINT_DEVICE.values()])
+        matrix = ET.fromstring(outputs[FRAMEWORK_MATRIX])
+        self.assertEqual(matrix.get("type"), "framework")
+        self.assertEqual(matrix.findtext("sepolicy/kernel-sepolicy-version"), "30")
+        self.assertEqual(matrix.findall("sepolicy/sepolicy-version")[-1].text, "33.0")
+        self.assertEqual(len(matrix.findall("hal")), 4)
+        self.assertTrue(all(hal.get("optional") == "false" for hal in matrix.findall("hal")))
+        self.assertEqual(ET.fromstring(outputs[DEVICE_MATRIX]).findall("hal"), [])
         providers[next(iter(providers))]["transport"]="hwbinder"
         with self.assertRaisesRegex(ValueError,"transport"):
             build_manifests(selection,{},providers)
