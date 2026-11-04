@@ -21,6 +21,9 @@ struct task_info {
 };
 _Static_assert(sizeof(struct task_info)==152,"native task info layout");
 static void snapshot(void) {
+ struct timespec now;
+ if(!clock_gettime(CLOCK_MONOTONIC,&now))
+  printf("SCARLET_INIT_TASK_SAMPLE time_ns=%llu\n",(unsigned long long)now.tv_sec*1000000000ULL+(unsigned long long)now.tv_nsec);
  struct task_info info[128];long count=syscall(0x53430000L+25,info,128);
  for(long i=0;i<count && i<128;i++)if(info[i].type==1)
   printf("SCARLET_INIT_TASK pid=%lu ppid=%lu tgid=%lu state=%u exit=%d cpu_ns=%llu name=%.64s\n",info[i].pid,info[i].ppid,info[i].tgid,info[i].state,info[i].exit_status,info[i].cpu_ns,info[i].name);
@@ -42,8 +45,19 @@ static int important_log(const unsigned char *message,size_t length) {
  }
  // Packed logdw header: log ID (1), TID (2), seconds (4), nanoseconds (4).
  // Events/stats/security buffers contain binary records, not a priority byte.
- return length>11 && (message[0]==0 || message[0]==1 || message[0]==3 || message[0]==4) &&
-        message[11]>=6 && message[11]<=7;
+ if(length<=12 || !(message[0]==0 || message[0]==1 || message[0]==3 || message[0]==4))return 0;
+ if(message[11]>=6 && message[11]<=7)return 1;
+ if(message[11]!=4)return 0;
+ // Keep boot/input/activity evidence without the full framework info stream.
+ const char *tag=(const char*)message+12;size_t tag_length=strnlen(tag,length-12);
+ if(tag_length==length-12)return 0;
+ const char *body=tag+tag_length+1;size_t body_length=length-13-tag_length;
+ if(tag_length==sizeof("InputReader")-1 && !memcmp(tag,"InputReader",sizeof("InputReader")-1))return 1;
+ if(tag_length==sizeof("ActivityTaskManager")-1 && !memcmp(tag,"ActivityTaskManager",sizeof("ActivityTaskManager")-1))
+  return memmem(body,body_length,"START u0",8)!=NULL || memmem(body,body_length,"Displayed ",10)!=NULL;
+ if(tag_length==sizeof("ActivityManager")-1 && !memcmp(tag,"ActivityManager",sizeof("ActivityManager")-1))
+  return memmem(body,body_length,"Start proc ",11)!=NULL || memmem(body,body_length,"BOOT_COMPLETED",14)!=NULL;
+ return 0;
 }
 static void drain_logs(int fd) {
  if(fd<0)return;
