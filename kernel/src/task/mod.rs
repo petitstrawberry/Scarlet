@@ -5049,6 +5049,10 @@ mod tests {
             image.reclaim_preference.read().protection_ceiling(),
             parent.reclaim_preference.read().protection_ceiling()
         );
+        drop(image);
+        drop(thread);
+        drop(fork);
+        drop(parent);
         reset();
     }
 

@@ -487,6 +487,11 @@ mod tests {
         assert_eq!(object.as_file().unwrap().write(b"-1000").unwrap(), 5);
         assert_eq!(caller.reclaim_preference.read().protection(), u16::MAX);
         clear_mock_current_task();
+        drop(object);
+        drop(privileged);
+        drop(other);
+        drop(caller);
+        drop(abi);
         reset();
     }
 
@@ -506,6 +511,8 @@ mod tests {
         assert!(file.write(b"1000").is_err());
         assert!(file.write_at(4096, b"1000").is_err());
         clear_mock_current_task();
+        drop(target);
+        drop(caller);
         reset();
     }
 
@@ -528,6 +535,8 @@ mod tests {
             path_target(&member, &path).unwrap().unwrap().get_id(),
             leader.get_id()
         );
+        drop(member);
+        drop(leader);
         reset();
     }
 
