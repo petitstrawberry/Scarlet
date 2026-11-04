@@ -15,6 +15,41 @@ pub struct Bridge {
     thread: Option<std::thread::JoinHandle>,
 }
 
+fn bridge_label(view: &VfsView) -> Result<u32, &'static str> {
+    let file = view
+        .open("/scarlet/boot/shield.policy", 0)
+        .map_err(|_| "input bridge policy")?;
+    let stream = file.as_stream().map_err(|_| "input bridge policy stream")?;
+    let mut bytes = std::vec![0; crate::boot_profile::MAX_POLICY_BYTES + 1];
+    let mut count = 0;
+    loop {
+        if count == bytes.len() {
+            return Err("input bridge policy bound");
+        }
+        let n = stream
+            .read(&mut bytes[count..])
+            .map_err(|_| "input bridge policy read")?;
+        if n == 0 {
+            break;
+        }
+        count += n;
+    }
+    let text = core::str::from_utf8(&bytes[..count]).map_err(|_| "input bridge policy encoding")?;
+    let mut label = None;
+    for line in text.lines() {
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        if let ["label", id, "u:r:scarlet_input_bridge:s0"] = fields.as_slice() {
+            if label
+                .replace(id.parse().map_err(|_| "input bridge label number")?)
+                .is_some()
+            {
+                return Err("input bridge label duplicate");
+            }
+        }
+    }
+    label.ok_or("input bridge label missing")
+}
+
 fn environment_values(view: &VfsView) -> Result<Vec<String>, &'static str> {
     let file = view
         .open("/init.environ.rc", 0)
@@ -100,6 +135,7 @@ impl Bridge {
             .open("/scarlet/lib/input-bridge.jar", 0)
             .map_err(|_| "input bridge bundle missing")?;
         let env = environment_values(&view)?;
+        let label = bridge_label(&view)?;
         let stdio: Vec<_> = stdio
             .iter()
             .map(|mapping| {
@@ -144,20 +180,40 @@ impl Bridge {
                         target: 3,
                     });
                     let env: Vec<_> = env.iter().map(|value| value.as_str()).collect();
-                    let pid = environment
-                        .spawn_with_abi(
-                            "android-aarch64",
-                            &executable,
-                            &[
-                                "/system/bin/app_process64",
-                                "/system/bin",
-                                "org.scarlet.android.input.InputBridge",
-                            ],
-                            &env,
-                            "/",
-                            &handles,
-                        )
-                        .map_err(|_| "input bridge spawn")?;
+                    // fork gives the client an exclusive process in which to
+                    // take its delegated label before exec. The manager and
+                    // its other children keep their original subjects.
+                    let pid = std::task::fork();
+                    if pid < 0 {
+                        return Err("input bridge fork");
+                    }
+                    if pid == 0 {
+                        let result = (|| -> Result<(), &'static str> {
+                            std::shield::Policy::current()
+                                .map_err(|_| "input bridge policy query")?
+                                .transition(label)
+                                .map_err(|_| "input bridge label transition")?;
+                            environment
+                                .exec_with_abi(
+                                    "android-aarch64",
+                                    &executable,
+                                    &[
+                                        "/system/bin/app_process64",
+                                        "/system/bin",
+                                        "org.scarlet.android.input.InputBridge",
+                                    ],
+                                    &env,
+                                    "/",
+                                    &handles,
+                                )
+                                .map_err(|_| "input bridge exec")?;
+                            Ok(())
+                        })();
+                        if let Err(error) = result {
+                            std::println!("SCARLET_ANDROID_INPUT_BRIDGE_FAIL {}", error);
+                        }
+                        std::task::exit(127);
+                    }
                     // The child inherits only stdio and the read endpoint, not the
                     // manager's policy capability or the window's injection writer.
                     std::println!("SCARLET_ANDROID_INPUT_BRIDGE_STARTED pid={}", pid);
