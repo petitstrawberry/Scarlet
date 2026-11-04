@@ -53,10 +53,12 @@ final class PlatformInputManager {
     static InputManager awaitService() throws IOException {
         for (;;) {
             try {
-                WAIT_FOR_SERVICE.invoke(null, "input");
-                Object manager = GET_INSTANCE.invoke(null);
-                if (manager != null) {
-                    return (InputManager) manager;
+                Object service = WAIT_FOR_SERVICE.invoke(null, "input");
+                if (service != null) {
+                    Object manager = GET_INSTANCE.invoke(null);
+                    if (manager != null) {
+                        return (InputManager) manager;
+                    }
                 }
             } catch (InvocationTargetException failure) {
                 Throwable cause = failure.getCause();
@@ -79,10 +81,16 @@ final class PlatformInputManager {
         if (failure == null) {
             return true;
         }
-        String name = failure.getClass().getName();
-        String message = failure.getMessage();
-        return name.endsWith("$ServiceNotFoundException")
-                || (message != null && message.toLowerCase().contains("service not found"));
+        // InputManager wraps ServiceNotFoundException in IllegalStateException.
+        // Only retry that actual cause; unrelated initialization errors remain
+        // visible instead of turning into an indefinite readiness wait.
+        for (int depth = 0; failure != null && depth < 16; depth++) {
+            if (failure.getClass().getName().endsWith("$ServiceNotFoundException")) {
+                return true;
+            }
+            failure = failure.getCause();
+        }
+        return false;
     }
 
     static IOException reflectionFailure(String operation, Throwable failure) {
