@@ -4384,6 +4384,11 @@ fn linux_access_path(
         return Err(errno::ENOENT);
     }
     if let Some(metadata) = super::proc_text::path_metadata(path) {
+        if let Some(caller) = crate::task::mytask() {
+            if let Some(access) = super::oom::access(&caller, path, mode) {
+                return access;
+            }
+        }
         return linux_access_metadata(&metadata, true, mode);
     }
     if let Some(metadata) = super::quota::path_metadata(path) {

@@ -302,6 +302,9 @@ fn layout_text(path:&str)->Option<String> {
     Some(format!("{}\n",if low {policy.low_bits}else {policy.native_bits}))
 }
 fn text_content(path: &str) -> Option<String> {
+    if let Some(content) = super::oom::text_content(path) {
+        return Some(content);
+    }
     if path == "/proc/version" {
         return Some(super::proc::linux_version_text());
     }
@@ -427,6 +430,9 @@ fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
 }
 
 pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
+    if let Some(metadata) = super::oom::path_metadata(path) {
+        return Some(metadata);
+    }
     if is_cpu_directory(path) {
         Some(metadata(path, 0, true))
     } else {
@@ -446,6 +452,9 @@ pub(super) fn open_proc_text_file(
     path: &str,
     flags: i32,
 ) -> Option<usize> {
+    if let Some(fd) = super::oom::open(abi, task, path, flags) {
+        return Some(fd);
+    }
     let directory = is_cpu_directory(path);
     let content = if directory {
         String::new()
