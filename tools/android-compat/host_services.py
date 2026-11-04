@@ -305,13 +305,13 @@ def build_vold(stock_rc,binary):
 def build_lmkd(stock_rc,binary):
     if not stock_rc.startswith(b"service lmkd /system/bin/lmkd\n") or b"    socket lmkd seqpacket+passcred 0660 system system\n" not in stock_rc:
         raise ValueError("changed stock lmkd service configuration")
-    omitted="    capabilities DAC_OVERRIDE KILL IPC_LOCK SYS_NICE SYS_RESOURCE\n".encode()
-    if stock_rc.count(omitted)!=1:raise ValueError("changed lmkd capability declaration")
-    managed=stock_rc.replace(omitted,b"")
+    capabilities="    capabilities DAC_OVERRIDE KILL IPC_LOCK SYS_NICE SYS_RESOURCE\n".encode()
+    if stock_rc.count(capabilities)!=1:raise ValueError("changed lmkd capability declaration")
+    managed=stock_rc.replace(capabilities,b"    capabilities SYS_RESOURCE\n")
     digest=lambda data:hashlib.sha256(data).hexdigest()
     return managed,{"source_rc":LMKD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
-                    "omitted_capabilities":["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE","SYS_RESOURCE"],
+                    "omitted_capabilities":["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE"],
                     "socket":{"name":"lmkd","type":"seqpacket","credentials":True,"mode":"0660"}}
 
 
@@ -493,7 +493,7 @@ def validate_staged(metadata):
         record=proof[LMKD]
         if (metadata["files"].get(LMKD_BINARY)!=record.get("binary_sha256") or
                 metadata["files"].get(LMKD_MANAGED_RC)!=record.get("managed_rc_sha256") or
-                record.get("omitted_capabilities") != ["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE","SYS_RESOURCE"]):
+                record.get("omitted_capabilities") != ["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE"]):
             raise ValueError("changed lmkd provider inputs")
         files=record.get("files",{})
         if (files.get(LMKD_BINARY)!=record.get("binary_sha256") or

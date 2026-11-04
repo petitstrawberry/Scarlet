@@ -121,7 +121,9 @@ class HostServicesTest(unittest.TestCase):
         from host_services import LMKD,LMKD_BINARY,LMKD_MANAGED_RC,LMKD_TEXT,build_lmkd
         managed,proof=build_lmkd(LMKD_TEXT.encode(),b"stock lmkd")
         self.assertIn(b"socket lmkd seqpacket+passcred 0660 system system",managed)
-        self.assertNotIn(b"capabilities",managed)
+        self.assertIn(b"capabilities SYS_RESOURCE\n",managed)
+        self.assertNotIn(b"DAC_OVERRIDE",managed)
+        self.assertNotIn(b"SYS_NICE",managed)
         proof.update(files={LMKD_BINARY:proof["binary_sha256"],"system/lib64/libpsi.so":"dependency"},
                      native_needed={LMKD_BINARY:["libpsi.so"],"system/lib64/libpsi.so":[]})
         metadata={"profile":{"host_services":[LMKD]},"host_service_inputs":{LMKD:proof},
