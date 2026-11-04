@@ -157,7 +157,11 @@ def validate_profile(profile):
 
 def file_rules(profile):
     config=profile["file_policy"]
-    if set(config)!={"default","create","relabel","property_areas"}: raise ValueError("invalid file policy fields")
+    if set(config)-{"persistence_domain"}!={"default","create","relabel","property_areas"}: raise ValueError("invalid file policy fields")
+    if "persistence_domain" in config:
+        domain=config["persistence_domain"]
+        if not isinstance(domain,str) or not re.fullmatch(r"[0-9a-f]{32}",domain) or int(domain,16)==0:
+            raise ValueError("invalid file persistence domain")
     labels={config["default"]};create=set();relabel=set()
     def contexts(values):
         if not isinstance(values,list) or not values or len(set(values))!=len(values) or any(not isinstance(value,str) or not valid_context(value) or not value.startswith("u:object_r:") for value in values): raise ValueError("invalid file labels")
@@ -277,6 +281,8 @@ def shield_policy(profile, contexts, generic_policy=None, generic_root=None):
     lines += [f"file-label {identifiers[label]} {path}" for path, label in sorted(profile.get("file_labels", {}).items())]
     if "file_policy" in profile:
         lines += [f"file-default {identifiers[profile['file_policy']['default']]}"]
+        if "persistence_domain" in profile["file_policy"]:
+            lines += ["file-persistence " + profile["file_policy"]["persistence_domain"]]
         lines += [f"file-create {identifiers[source]} {identifiers[parent]} {identifiers[target]} {kind} {default}" for source,parent,target,kind,default in sorted(create)]
         lines += [f"file-relabel {identifiers[source]} {identifiers[old]} {identifiers[target]} {kind}" for source,old,target,kind in sorted(relabel)]
     text = "\n".join(lines) + "\n"

@@ -29,6 +29,7 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
     let mut policy_version = None;
     let mut file_default=None;let mut create_rules=Vec::new();let mut relabel_rules=Vec::new();
     let mut label_sets=Vec::new();let mut set_members=Vec::new();let mut set_files=Vec::new();
+    let mut persistence_domain=None;
     for line in lines {
         let fields: Vec<_> = line.split_ascii_whitespace().collect();
         let number = |index: usize| -> Result<u32, &'static str> {
@@ -50,6 +51,12 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
             }),
             ["file-label", _, path] => files.push((number(1)?, *path)),
             ["file-default", _] => {if file_default.replace(number(1)?).is_some() {return Err("duplicate file default");}},
+            ["file-persistence", domain] => {
+                if domain.len()!=32 || !domain.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {return Err("boot file persistence domain");}
+                let mut bytes=[0u8;16];
+                for (index,byte) in bytes.iter_mut().enumerate() {*byte=u8::from_str_radix(&domain[index*2..index*2+2],16).map_err(|_|"boot file persistence domain")?;}
+                if bytes==[0;16] || persistence_domain.replace(bytes).is_some() {return Err("boot file persistence domain");}
+            },
             ["file-create",_,_,_,_,_] => create_rules.push(FileCreate {source:number(1)?,parent:number(2)?,target:number(3)?,kind:number(4)?,flags:number(5)?,reserved:0}),
             ["file-relabel",_,_,_,_] => relabel_rules.push(FileRelabel {source:number(1)?,old:number(2)?,target:number(3)?,kind:number(4)?}),
             ["label-set",_] => label_sets.push(LabelSet {id:number(1)?,reserved:0}),
@@ -69,6 +76,10 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
     if !labels.contains(&(1, "u:r:init:s0")) { return Err("boot init subject missing"); }
     let policy = Policy::create_with_exec_transitions(&labels, &rules, &transitions, &exec_transitions).map_err(|_| "boot Shield policy")?;
     let policy=if let Some(default)=file_default {policy.with_file_rules(default,&create_rules,&relabel_rules).map_err(|_| "boot file policy")?}else {policy};
+    let policy=if let Some(domain)=persistence_domain {
+        if file_default.is_none() {return Err("file persistence requires file policy");}
+        policy.with_file_persistence(&domain).map_err(|_|"boot file persistence")?
+    }else {policy};
     if !label_sets.is_empty() || !set_members.is_empty() || !set_files.is_empty() {
         let generation=policy.generation().map_err(|_|"boot policy generation")?;
         policy.extend_with_sets(generation,&[],&[],&[],&[],&[],&[],LabelSetUpdate {sets:&label_sets,members:&set_members,grants:&[],files:&set_files}).map_err(|_|"boot policy sets")?;

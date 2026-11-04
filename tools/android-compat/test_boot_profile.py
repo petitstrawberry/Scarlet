@@ -19,6 +19,20 @@ def profile():
 
 
 class BootProfileTest(unittest.TestCase):
+    def test_file_persistence_domain_is_explicit_and_stable(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        p["file_policy"]={"default":"u:object_r:unlabeled:s0","create":[],"relabel":[],"property_areas":[]}
+        self.assertNotIn("file-persistence ",shield_policy(p,["* u:object_r:gsid_prop:s0\n"]))
+        domain="0123456789abcdeffedcba9876543210"
+        p["file_policy"]["persistence_domain"]=domain
+        text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
+        self.assertIn("file-persistence "+domain+"\n",text)
+        self.assertEqual(text,shield_policy(p,["* u:object_r:gsid_prop:s0\n"]))
+        for invalid in ["0"*32,domain.upper(),"abc",None,7,domain+"\n"]:
+            p["file_policy"]["persistence_domain"]=invalid
+            with self.subTest(domain=invalid),self.assertRaisesRegex(ValueError,"persistence domain"):
+                validate_profile(p)
+
     def test_stock_webview_zygote_and_packages_list_rules_are_explicit(self):
         p=profile();p.update(version=2,file_labels={},exec_transitions=[])
         p["subjects"].update({"u:r:zygote:s0":3,"u:r:system_server:s0":4})
