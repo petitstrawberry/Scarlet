@@ -12,7 +12,9 @@ use crate::{
         get_all_task_ids, get_task_by_id, online_cpu_mask, schedule,
         update_task_nice,
     },
-    task::{CloneFlags, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask},
+    task::{
+        CloneFlags, ExitStatusPolicy, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask,
+    },
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -762,7 +764,13 @@ pub fn sys_getpid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_getppid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    let Some(parent_id) = task.get_parent_id() else {
+    // Linux reports the parent of the process (thread-group leader), not the
+    // task that happened to adopt this individual thread.
+    let parent_id = match get_task_by_id(task.get_thread_group_id()) {
+        Some(leader) => leader.get_parent_id(),
+        None => task.get_parent_id(),
+    };
+    let Some(parent_id) = parent_id else {
         return 0;
     };
     let parent_process_id = get_task_by_id(parent_id)
@@ -1359,6 +1367,15 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     &mut child_task,
                     crate::arch::get_cpu().get_cpuid(),
                 );
+            }
+
+            // Linux join is completed by CLONE_CHILD_CLEARTID and userspace
+            // futex wakeup. The native pool must therefore retire an exited
+            // thread directly instead of retaining an uncollectable zombie.
+            if is_process_child {
+                child_task.set_exit_status_policy(ExitStatusPolicy::Retain);
+            } else {
+                child_task.set_exit_status_policy(ExitStatusPolicy::Discard);
             }
 
             let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
@@ -2014,6 +2031,120 @@ mod tests {
             errno::EAGAIN
         );
         assert_eq!(clone_failure_errno("task pool is full"), errno::EAGAIN);
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    #[test_case]
+    fn linux_thread_exit_clears_tid_and_releases_pool_and_kernel_stack() {
+        use alloc::boxed::Box;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::sched::scheduler::{add_task, get_task_pool, register_online_cpu, reset};
+        use crate::task::{
+            CloneFlags, CloneFlagsDef, ExitStatusPolicy, TaskState, clear_mock_current_task,
+        };
+        #[cfg(target_arch = "aarch64")]
+        use crate::abi::linux::aarch64::LinuxAarch64Abi as LinuxArchAbi;
+        #[cfg(target_arch = "riscv64")]
+        use crate::abi::linux::riscv64::LinuxRiscv64Abi as LinuxArchAbi;
+
+        reset();
+        clear_mock_current_task();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+
+        let leader = Task::new("linux-thread-leader".into(), 0, TaskType::User);
+        leader.init();
+        let tid_address = USER_STACK_END - PAGE_SIZE;
+        let initial_tid = 0x1234_5678u32;
+        copy_to_user(&leader, tid_address, &initial_tid.to_ne_bytes()).unwrap();
+        let mut linux_abi = LinuxArchAbi::default();
+        linux_abi.0.thread_state.pending_clone_is_thread = true;
+        linux_abi.0.thread_state.clear_child_tid_ptr = Some(tid_address);
+        leader.install_exec_abi(Box::new(linux_abi));
+        leader.finish_exec_dispatch();
+        let leader_id = add_task(leader, cpu);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        thread_flags.set(CloneFlagsDef::Vm);
+        thread_flags.set(CloneFlagsDef::Files);
+        thread_flags.set(CloneFlagsDef::ClearChildTid);
+        let thread = leader.clone_task(thread_flags).unwrap();
+        thread.set_exit_status_policy(ExitStatusPolicy::Discard);
+        let kernel_stack_base = thread.get_kernel_stack_window_base().unwrap().1;
+        let thread_id = add_task(thread, cpu);
+        let thread = get_task_by_id(thread_id).unwrap();
+        assert!(leader.adopt_registered_child(&thread));
+        assert!(leader.get_children().contains(&thread_id));
+
+        thread.exit(7);
+        assert_eq!(thread.get_state(), TaskState::Terminated);
+        assert_eq!(thread.get_parent_id(), Some(leader_id));
+        assert_eq!(thread.get_exit_status(), None);
+        assert!(get_task_by_id(thread_id).is_none());
+        let mut tid_bytes = [0u8; 4];
+        copy_from_user(&leader, tid_address, &mut tid_bytes).unwrap();
+        assert_eq!(u32::from_ne_bytes(tid_bytes), 0);
+
+        drop(thread);
+        assert_eq!(get_task_pool().reclaim_retired_tasks_now(), 1);
+        assert!(!leader.get_children().contains(&thread_id));
+
+        // Reuse of the exact slot proves Task::drop returned it to the shared
+        // kernel-stack allocator rather than retaining a zombie's window.
+        let replacement = Task::new("linux-thread-kstack-reuse".into(), 0, TaskType::User);
+        replacement.init();
+        assert_eq!(
+            replacement.get_kernel_stack_window_base().unwrap().1,
+            kernel_stack_base
+        );
+
+        drop(replacement);
+        drop(leader);
+        reset();
+    }
+
+    #[test_case]
+    fn linux_getppid_uses_thread_group_leader_parent() {
+        use crate::sched::scheduler::{add_task, register_online_cpu, reset};
+        use crate::task::{
+            CloneFlags, CloneFlagsDef, clear_mock_current_task, set_mock_current_task,
+        };
+
+        reset();
+        clear_mock_current_task();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+
+        let parent = Task::new("getppid-parent".into(), 0, TaskType::User);
+        parent.init();
+        let parent_id = add_task(parent, cpu);
+        let parent = get_task_by_id(parent_id).unwrap();
+
+        let leader = parent.clone_task(CloneFlags::default()).unwrap();
+        let leader_id = add_task(leader, cpu);
+        let leader = get_task_by_id(leader_id).unwrap();
+        assert!(parent.adopt_registered_process_child(&leader));
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let thread = leader.clone_task(thread_flags).unwrap();
+        let thread_id = add_task(thread, cpu);
+        let thread = get_task_by_id(thread_id).unwrap();
+        assert!(leader.adopt_registered_child(&thread));
+
+        set_mock_current_task(thread.clone());
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        assert_eq!(sys_getppid(&mut abi, &mut frame), parent.get_namespace_id());
+        assert_ne!(sys_getppid(&mut abi, &mut frame), thread.get_namespace_id());
+        clear_mock_current_task();
+
+        drop(thread);
+        drop(leader);
+        drop(parent);
+        reset();
     }
 
     #[test_case]

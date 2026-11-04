@@ -341,7 +341,7 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> Arc<Waker> {
 /// Resolve the actual parent task which owns a child visible to this process.
 ///
 /// Process children are normally attached to the thread-group leader, while
-/// joinable threads remain attached to the thread which spawned them. A
+/// native joinable threads remain attached to the thread which spawned them. A
 /// specific `waitpid` from any sibling therefore has to resolve the real owner
 /// instead of assuming either the caller or leader owns every child.
 pub(crate) fn get_thread_group_wait_owner(caller: &Task, child_id: usize) -> Option<Arc<Task>> {
@@ -352,8 +352,10 @@ pub(crate) fn get_thread_group_wait_owner(caller: &Task, child_id: usize) -> Opt
 
 /// List process children waitable by any thread in the caller's process.
 ///
-/// Thread children are intentionally excluded from wait-any: their JoinHandle
-/// uses a specific PID and must not be consumed by an unrelated process reaper.
+/// Native thread children are intentionally excluded from wait-any: their
+/// JoinHandle uses a specific PID and must not be consumed by an unrelated
+/// process reaper. Linux threads join through clear-child-tid and do not remain
+/// native waitable children.
 pub(crate) fn get_waitable_process_children(caller: &Task) -> Vec<usize> {
     // A child can temporarily be absent from every scheduler queue while
     // another CPU dispatches or migrates it. Ownership is a property of the
@@ -514,6 +516,25 @@ impl AtomicTaskState {
 pub enum TaskType {
     Kernel,
     User,
+}
+
+/// How a task's exit status is exposed after the task stops executing.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum ExitStatusPolicy {
+    /// Keep the task waitable until its owner collects the status.
+    Retain = 0,
+    /// Terminate immediately; no owner can collect an exit status.
+    Discard = 1,
+}
+
+impl ExitStatusPolicy {
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Discard,
+            _ => Self::Retain,
+        }
+    }
 }
 
 /// Scheduler hint for heterogeneous CPU placement.
@@ -830,6 +851,8 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    /// Whether an exiting task remains waitable or is retired immediately.
+    exit_status_policy: AtomicU8,
     pub(crate) parent_exit_event: AtomicBool,
     pub(crate) exit_event_parent: AtomicUsize,
     /// Actual terminating signal, separate from a normal exit(128 + signal).
@@ -1138,6 +1161,7 @@ impl Task {
             data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            exit_status_policy: AtomicU8::new(ExitStatusPolicy::Retain as u8),
             parent_exit_event: AtomicBool::new(true),
             exit_event_parent: AtomicUsize::new(0),
             termination_signal: AtomicUsize::new(0),
@@ -2592,6 +2616,19 @@ impl Task {
         }
     }
 
+    /// Select whether exit retains a collectible status or terminates directly.
+    ///
+    /// The default is [`ExitStatusPolicy::Retain`]. ABI clone paths which create
+    /// non-waitable threads must select discard before publishing the child.
+    pub(crate) fn set_exit_status_policy(&self, policy: ExitStatusPolicy) {
+        self.exit_status_policy.store(policy as u8, Ordering::SeqCst);
+    }
+
+    /// Return the exit-status retention policy for this task.
+    pub(crate) fn exit_status_policy(&self) -> ExitStatusPolicy {
+        ExitStatusPolicy::from_u8(self.exit_status_policy.load(Ordering::SeqCst))
+    }
+
     /// Record the cause before publishing an exit or deferred exit request.
     /// Native wait keeps the historical shell-style status; Linux wait can
     /// distinguish exit(137) from SIGKILL without guessing from that value.
@@ -2834,6 +2871,10 @@ impl Task {
             self.task_type,
             self.namespace.read().clone(),
         );
+        // Clone policy is deliberately fresh: native processes and native
+        // joinable threads retain status. Linux clone paths override only
+        // CLONE_THREAD children before publishing them.
+        child.set_exit_status_policy(ExitStatusPolicy::Retain);
 
         // First, set up the virtual memory manager with the same ASID allocation
         match self.task_type {
@@ -3346,27 +3387,17 @@ impl Task {
         crate::breadcrumb::drop(crate::breadcrumb::EXIT_REPARENT_DONE, self.id as u64, 0);
         self.trace_fork_exit_phase("exit-reparent-done", 0);
 
+        let retain_status = self.exit_status_policy() == ExitStatusPolicy::Retain;
         match self.get_parent_id() {
-            Some(parent_id) => {
-                if get_task_by_id(parent_id).is_none() {
-                    // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
-                    self.set_state(TaskState::Terminated);
-                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
-                    self.trace_fork_exit_phase("exit-state", 6);
-                } else {
-                    /* Set the exit status */
-                    self.set_exit_status(status);
-                    self.set_state(TaskState::Zombie);
-                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 5);
-                    self.trace_fork_exit_phase("exit-state", 5);
-                }
-
-                // TODO: Notify parent via ABI-specific mechanism
-                // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
+            Some(parent_id) if retain_status && get_task_by_id(parent_id).is_some() => {
+                self.set_exit_status(status);
+                self.set_state(TaskState::Zombie);
+                crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 5);
+                self.trace_fork_exit_phase("exit-state", 5);
             }
-            None => {
-                /* If the task has no parent, it is terminated */
-                // crate::println!("Task {}: No parent, terminating", self.id);
+            _ => {
+                // No owner can collect this status. The task leaves the pool
+                // immediately through the normal cleanup and reaper path.
                 self.set_state(TaskState::Terminated);
                 crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
                 self.trace_fork_exit_phase("exit-state", 6);
@@ -3397,12 +3428,17 @@ impl Task {
         self.clear_process_control_stopped();
         self.clear_linux_child_tid_on_exit();
         self.reparent_children();
-        self.set_exit_status(status);
+        if self.exit_status_policy() == ExitStatusPolicy::Retain {
+            self.set_exit_status(status);
+        }
 
         let has_parent = self
             .get_parent_id()
             .is_some_and(|parent_id| get_task_by_id(parent_id).is_some());
-        let state = if waitable && has_parent {
+        let state = if waitable
+            && self.exit_status_policy() == ExitStatusPolicy::Retain
+            && has_parent
+        {
             TaskState::Zombie
         } else {
             TaskState::Terminated
@@ -4083,6 +4119,11 @@ impl Drop for Task {
     fn drop(&mut self) {
         self.cancel_software_timers();
         release_task_deadline(self);
+        if matches!(self.get_state(), TaskState::Zombie | TaskState::Terminated)
+            && let Some(parent) = self.get_parent_id().and_then(get_task_by_id)
+        {
+            parent.remove_child(self.id);
+        }
         crate::vm::teardown_trampoline_for_task_kstack_window(self);
     }
 }
@@ -4270,8 +4311,9 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        DeferredExitRequest, INIT_TASK_ID, Task, TaskType, clear_mock_current_task,
-        get_thread_group_wait_owner, get_waitable_process_children, mytask, set_mock_current_task,
+        DeferredExitRequest, ExitStatusPolicy, INIT_TASK_ID, Task, TaskType,
+        clear_mock_current_task, get_thread_group_wait_owner, get_waitable_process_children,
+        mytask, set_mock_current_task,
     };
     use crate::object::capability::memory_mapping::{
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
@@ -4945,8 +4987,10 @@ mod tests {
         let parent_id = add_task(parent, 0);
 
         let parent = get_task_by_id(parent_id).unwrap();
+        parent.set_exit_status_policy(ExitStatusPolicy::Discard);
         let child = parent.clone_task(CloneFlags::default()).unwrap();
         assert_eq!(child.thread_group_id, 0);
+        assert_eq!(child.exit_status_policy(), ExitStatusPolicy::Retain);
 
         let child_id = add_task(child, 0);
         let child = get_task_by_id(child_id).unwrap();
@@ -5228,10 +5272,14 @@ mod tests {
         let wait_owner = get_thread_group_wait_owner(&leader, thread_child_id).unwrap();
         assert_eq!(wait_owner.get_id(), worker_id);
         assert!(!get_waitable_process_children(&leader).contains(&thread_child_id));
+        assert_eq!(
+            thread_child.exit_status_policy(),
+            ExitStatusPolicy::Retain
+        );
 
-        thread_child.set_exit_status(17);
-        thread_child.set_state(TaskState::Zombie);
-        finalize_zombie(thread_child_id, Some(worker_id));
+        thread_child.exit(17);
+        assert_eq!(thread_child.get_state(), TaskState::Zombie);
+        assert_eq!(thread_child.get_exit_status(), Some(17));
         match wait_owner.wait(thread_child_id) {
             Ok(status) => assert_eq!(status, 17),
             Err(error) => panic!("thread join failed: {:?}", error),
