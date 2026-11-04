@@ -265,7 +265,9 @@ def main():
         return metadata
 
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
-    log_tags = "*:v" if verbose_logs else "*:e ActivityManager:i ActivityTaskManager:i InputReader:i libc:w"
+    # android-base InitLogging accepts only a global severity selector here.
+    # The log collector filters tags without passing unsupported syntax to init.
+    log_tags = "*:v" if verbose_logs else "*:i"
     arguments.extend(["--program-env", f"ANDROID_LOG_TAGS={log_tags}"])
     arguments.extend(["--program-env",f"SCARLET_ANDROID_LOG_MIN_PRIORITY={'0' if verbose_logs else '4'}"])
     if not verbose_logs:
