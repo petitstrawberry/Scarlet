@@ -88,7 +88,8 @@
     "u:r:gatekeeperd:s0": 35,
     "u:r:hal_gatekeeper_default:s0": 36,
     "u:r:storaged:s0": 37,
-    "u:r:scarlet_policy:s0": 38
+    "u:r:scarlet_policy:s0": 38,
+    "u:r:adbd:s0": 39
   },
   "transitions": [
     [
@@ -110,6 +111,11 @@
       "u:r:system_server_startup:s0",
       "u:r:system_server:s0",
       1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:adbd:s0",
+      0
     ]
   ],
   "property_grants": {
@@ -3241,6 +3247,10 @@
     [
       "u:r:init:s0",
       "u:r:statsd:s0"
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:adbd:s0"
     ]
   ],
   "vintf": {
