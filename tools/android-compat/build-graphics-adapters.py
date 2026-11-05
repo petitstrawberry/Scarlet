@@ -31,9 +31,7 @@ def generate_dynamic_framebuffer_adapter(output):
         "    void setRefreshCallback(HWC2_PFN_REFRESH callback, hwc2_callback_data_t data);\n    void updateDisplayInfo();\n",1)
     header=header.replace(
         "    Info mFbInfo{};\n",
-        "    struct Config { hwc2_config_t id; Info info; };\n"
         "    Info mFbInfo{};\n    hwc2_config_t mConfigId{0};\n    hwc2_config_t mNextConfigId{1};\n"
-        "    std::vector<Config> mConfigs;\n"
         "    mutable std::mutex mModesMutex;\n    HWC2_PFN_HOTPLUG mHotplugCallback{nullptr};\n"
         "    hwc2_callback_data_t mHotplugData{nullptr};\n"
         "    HWC2_PFN_REFRESH mRefreshCallback{nullptr};\n"
@@ -42,17 +40,10 @@ def generate_dynamic_framebuffer_adapter(output):
                           "    hwc2_config_t getConfigId();\n",1)
     header=header.replace(
         "    const Info& getInfo() const;\n",
-        "    Info getInfo() const;\n    size_t getConfigCount() const;\n"
-        "    hwc2_config_t getConfigIdAt(size_t index) const;\n"
-        "    Info getConfigInfo(hwc2_config_t config) const;\n"
+        "    Info getInfo() const;\n    Info getConfigInfo(hwc2_config_t config) const;\n"
         "    bool setConfig(hwc2_config_t config);\n",1)
-    header=header.replace("#include <unordered_set>\n","#include <unordered_set>\n#include <vector>\n",1)
     implementation=(source/"HWC2OnFbAdapter.cpp").read_text()
     implementation=implementation.replace("#include <algorithm>\n","#include <algorithm>\n#include <cstdio>\n",1)
-    implementation=implementation.replace(
-        "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n",
-        "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n"
-        "    mConfigs.push_back({mConfigId, mFbInfo});\n",1)
     implementation=implementation.replace(
         "        case HWC2_CALLBACK_HOTPLUG:\n            if (pointer) {\n"
         "                reinterpret_cast<HWC2_PFN_HOTPLUG>(pointer)(callbackData, adapter.getDisplayId(),\n"
@@ -68,6 +59,9 @@ def generate_dynamic_framebuffer_adapter(output):
         "        case HWC2_CALLBACK_REFRESH:\n            break;\n",
         "        case HWC2_CALLBACK_REFRESH:\n"
         "            adapter.setRefreshCallback(reinterpret_cast<HWC2_PFN_REFRESH>(pointer), callbackData);\n"
+        "            if (pointer) {\n"
+        "                reinterpret_cast<HWC2_PFN_REFRESH>(pointer)(callbackData, adapter.getDisplayId());\n"
+        "            }\n"
         "            break;\n",1)
     implementation=implementation.replace(
         "hwc2_config_t HWC2OnFbAdapter::getConfigId() {\n    return 0;\n}\n",
@@ -82,13 +76,13 @@ def generate_dynamic_framebuffer_adapter(output):
         *outNumConfigs = 1;
     }
 """
-    new_configs="""    const uint32_t count = adapter.getConfigCount();
-    if (outConfigs) {
-        const uint32_t written = std::min<uint32_t>(*outNumConfigs, count);
-        for (uint32_t i = 0; i < written; ++i) outConfigs[i] = adapter.getConfigIdAt(i);
-        *outNumConfigs = written;
+    new_configs="""    if (outConfigs) {
+        if (*outNumConfigs > 0) {
+            outConfigs[0] = adapter.getConfigId();
+            *outNumConfigs = 1;
+        }
     } else {
-        *outNumConfigs = count;
+        *outNumConfigs = 1;
     }
 """
     if implementation.count(old_configs)!=1:raise ValueError("changed HWC2 display config hook")
@@ -99,11 +93,10 @@ def generate_dynamic_framebuffer_adapter(output):
 
     const auto& info = adapter.getInfo();
 """
-    new_attribute="""    if (adapter.getConfigId() != config) {
+    new_attribute="""    const auto& info = adapter.getConfigInfo(config);
+    if (info.width == 0 || info.height == 0) {
         return HWC2_ERROR_BAD_CONFIG;
     }
-
-    const auto& info = adapter.getConfigInfo(config);
 """
     if implementation.count(old_attribute)!=1:raise ValueError("changed HWC2 attribute hook")
     implementation=implementation.replace(old_attribute,new_attribute,1)
@@ -123,17 +116,11 @@ def generate_dynamic_framebuffer_adapter(output):
     addition=""
     addition+="\nHWC2OnFbAdapter::Info HWC2OnFbAdapter::getInfo() const {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return mFbInfo;\n}\n"
-    addition+="size_t HWC2OnFbAdapter::getConfigCount() const {\n"
-    addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return mConfigs.size();\n}\n"
-    addition+="hwc2_config_t HWC2OnFbAdapter::getConfigIdAt(size_t index) const {\n"
-    addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return index < mConfigs.size() ? mConfigs[index].id : 0;\n}\n"
     addition+="HWC2OnFbAdapter::Info HWC2OnFbAdapter::getConfigInfo(hwc2_config_t config) const {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n"
-    addition+="    for (const auto& entry : mConfigs) if (entry.id == config) return entry.info;\n"
-    addition+="    return Info{};\n}\n"
+    addition+="    return config == mConfigId ? mFbInfo : Info{};\n}\n"
     addition+="bool HWC2OnFbAdapter::setConfig(hwc2_config_t config) {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n"
-    addition+="    for (const auto& entry : mConfigs) if (entry.id == config) { mConfigId = config; mFbInfo = entry.info; break; }\n"
     addition+="    if (config != mConfigId) return false;\n"
     addition+="    mState = State::MODIFIED;\n    return true;\n}\n"
     addition+="\nvoid HWC2OnFbAdapter::updateDisplayInfo() {\n"
@@ -141,23 +128,18 @@ def generate_dynamic_framebuffer_adapter(output):
     addition+="    const uint32_t height = mFbDevice->height;\n"
     addition+="    HWC2_PFN_HOTPLUG hotplug = nullptr;\n"
     addition+="    hwc2_callback_data_t hotplug_data = nullptr;\n"
-    addition+="    HWC2_PFN_REFRESH refresh = nullptr;\n"
-    addition+="    hwc2_callback_data_t refresh_data = nullptr;\n"
     addition+="    {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n"
     addition+="    if (width == mFbInfo.width && height == mFbInfo.height) return;\n"
     addition+="    mConfigId = mNextConfigId;\n    mNextConfigId = mNextConfigId == UINT32_MAX ? 1 : mNextConfigId + 1;\n"
     addition+="    mFbInfo.width = width;\n    mFbInfo.height = height;\n"
-    addition+="    if (mConfigs.size() == 16) mConfigs.erase(mConfigs.begin());\n"
-    addition+="    mConfigs.push_back({mConfigId, mFbInfo});\n"
     addition+="    mState = State::MODIFIED;\n"
     addition+="    hotplug = mHotplugCallback;\n    hotplug_data = mHotplugData;\n"
-    addition+="    refresh = mRefreshCallback;\n    refresh_data = mRefreshData;\n"
-    addition+="    std::fprintf(stderr, \"SCARLET_ANDROID_HWC_CONFIG config=%u hotplug=%p refresh=%p\\n\",\n"
-    addition+="                 mConfigId, reinterpret_cast<void*>(hotplug), reinterpret_cast<void*>(refresh));\n"
+    addition+="    std::fprintf(stderr, \"SCARLET_ANDROID_HWC_CONFIG config=%u hotplug=%p\\n\",\n"
+    addition+="                 mConfigId, reinterpret_cast<void*>(hotplug));\n"
     addition+="    }\n"
     addition+="    if (hotplug) hotplug(hotplug_data, getDisplayId(), HWC2_CONNECTION_CONNECTED);\n"
-    addition+="    if (refresh) refresh(refresh_data, getDisplayId());\n}\n"
+    addition+="}\n"
     addition+="\nvoid HWC2OnFbAdapter::setHotplugCallback(HWC2_PFN_HOTPLUG callback, hwc2_callback_data_t data) {\n"
     addition+="    mHotplugCallback = callback;\n    mHotplugData = data;\n}\n"
     addition+="\nvoid HWC2OnFbAdapter::setRefreshCallback(HWC2_PFN_REFRESH callback, hwc2_callback_data_t data) {\n"
