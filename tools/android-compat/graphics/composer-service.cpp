@@ -7,6 +7,7 @@
 #include <hidl/HidlTransportSupport.h>
 #include <chrono>
 #include <cstdio>
+#include <dlfcn.h>
 #include <thread>
 
 int main() {
@@ -18,19 +19,27 @@ int main() {
     framebuffer_device_t* framebuffer=nullptr;
     result=framebuffer_open(module,&framebuffer);
     if (result) {std::fprintf(stderr,"CPU composer framebuffer open failed: %d\n",result);return 1;}
+    using FramebufferModeFn=int (*)(framebuffer_device_t*,uint32_t*,uint32_t*,uint32_t*);
+    auto get_mode=reinterpret_cast<FramebufferModeFn>(
+            dlsym(module->dso,"scarlet_framebuffer_get_mode"));
+    if (!get_mode) {std::fprintf(stderr,"CPU composer framebuffer mode API unavailable\n");return 1;}
     auto hwc=std::make_unique<passthrough::HwcHal>();
     auto* framebuffer_adapter=new android::HWC2OnFbAdapter(framebuffer);
     // The stock framebuffer adapter explicitly reports unreliable present
     // fences. Keep that capability; no simulated fence or RT policy is added.
     if (!hwc->initWithDevice(framebuffer_adapter,false)) return 1;
-    std::thread([framebuffer,framebuffer_adapter]() {
-        uint32_t width=framebuffer->width,height=framebuffer->height;
+    std::thread([framebuffer,framebuffer_adapter,get_mode]() {
+        uint32_t width=framebuffer->width,height=framebuffer->height,dpi=160;
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (framebuffer->width!=width || framebuffer->height!=height) {
-                width=framebuffer->width;height=framebuffer->height;
-                std::fprintf(stderr,"SCARLET_ANDROID_COMPOSER_DISPLAY_SIZE width=%u height=%u\n",width,height);
-                framebuffer_adapter->updateDisplayInfo();
+            uint32_t next_width,next_height,next_dpi;
+            if (get_mode(framebuffer,&next_width,&next_height,&next_dpi)) continue;
+            if (next_width!=width || next_height!=height || next_dpi!=dpi) {
+                width=next_width;height=next_height;dpi=next_dpi;
+                std::fprintf(stderr,"SCARLET_ANDROID_COMPOSER_DISPLAY_SIZE width=%u height=%u dpi=%u\n",
+                             width,height,dpi);
+                framebuffer_adapter->updateDisplayInfo(
+                        width,height,int(dpi)*1000,int(dpi)*1000);
             }
         }
     }).detach();
