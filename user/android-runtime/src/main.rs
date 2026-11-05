@@ -4,7 +4,11 @@ mod input;
 mod bridge;
 mod mouse_wire;
 mod protocol;
-use scarlet_os::{Handle, handle::capability::StreamError, socket::Socket};
+use scarlet_os::{
+    Handle,
+    handle::capability::{StreamError, file::SeekFrom},
+    socket::Socket,
+};
 use scarlet_ui_core::{
     event::{MouseButton, MouseEvent, WindowEvent},
     window_chrome::{WindowChrome, chrome_insets},
@@ -21,7 +25,6 @@ const EV_REL: u16 = 2;
 const EV_ABS: u16 = 3;
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
-
 enum PendingMouseEvent {
     Button { code: u16, value: i32 },
     Wheel { code: u16, value: i32 },
@@ -47,9 +50,13 @@ struct Window {
     pending_x: Option<i32>,
     pending_y: Option<i32>,
     pending_mouse: Vec<PendingMouseEvent>,
+    frame_seen: bool,
+    expected_scanout: Option<(u32, u32)>,
+    pending_resize: Option<(u32, u32)>,
+    resize_settle_ticks: u8,
 }
 impl Window {
-    fn new(width: u32, height: u32) -> Result<Self> {
+    fn layout(width: u32, height: u32) -> Result<(SwsSceneGeometry, WindowChrome)> {
         let mut scale = 1000;
         check(unsafe { scene::sws_get_output_scale(&mut scale) })?;
         let inset = chrome_insets(scale, true);
@@ -78,20 +85,6 @@ impl Window {
             .ok_or("display frame width")?;
         let outer_height = fitted.height.checked_add(inset.top).and_then(|h| h.checked_add(inset.bottom))
             .ok_or("display frame height")?;
-        let mut id = 0;
-        check(unsafe {
-            scene::sws_scene_create(
-                c"Android".as_ptr(),
-                outer_width,
-                outer_height,
-                1,
-                &mut id,
-            )
-        })?;
-        if let Err(error) = check(sws::sws_window_set_touch_input(id, 1)) {
-            let _ = sws::sws_window_destroy(id);
-            return Err(error);
-        }
         let geometry = SwsSceneGeometry {
             width: outer_width,
             height: outer_height,
@@ -107,6 +100,24 @@ impl Window {
             true,
             true,
         )?;
+        Ok((geometry, frame))
+    }
+    fn new(width: u32, height: u32) -> Result<Self> {
+        let (geometry, frame) = Self::layout(width, height)?;
+        let mut id = 0;
+        check(unsafe {
+            scene::sws_scene_create(
+                c"Android".as_ptr(),
+                geometry.width,
+                geometry.height,
+                1,
+                &mut id,
+            )
+        })?;
+        if let Err(error) = check(sws::sws_window_set_touch_input(id, 1)) {
+            let _ = sws::sws_window_destroy(id);
+            return Err(error);
+        }
         Ok(Self {
             id,
             frame,
@@ -120,10 +131,50 @@ impl Window {
             pending_x: None,
             pending_y: None,
             pending_mouse: Vec::new(),
+            frame_seen: false,
+            expected_scanout: None,
+            pending_resize: None,
+            resize_settle_ticks: 0,
         })
     }
+    fn resize_scanout(&mut self, width: u32, height: u32, resize_outer: bool) -> Result<()> {
+        if width == self.width && height == self.height {
+            return Ok(());
+        }
+        if resize_outer {
+            let (geometry, frame) = Self::layout(width, height)?;
+            check(scene::sws_scene_resize(self.id, geometry.width, geometry.height))?;
+            self.geometry = geometry;
+            self.frame = frame;
+        }
+        self.width = width;
+        self.height = height;
+        self.pixels.resize((width * height * 4) as usize, 0);
+        Ok(())
+    }
+    fn requested_scanout_size(&self) -> (u32, u32) {
+        let content = self.frame.content();
+        let scale = u64::from(self.geometry.scale_milli.max(1));
+        let width = (u64::from(content.width) * 1000 / scale).clamp(2, 4096) as u32;
+        let height = (u64::from(content.height) * 1000 / scale).clamp(2, 4096) as u32;
+        (width, height)
+    }
+    fn take_pending_resize(&mut self) -> Option<(u32, u32)> {
+        if self.resize_settle_ticks != 0 {
+            self.resize_settle_ticks -= 1;
+            return None;
+        }
+        let requested = self.pending_resize.take()?;
+        if requested == (self.width, self.height) {
+            return None;
+        }
+        self.expected_scanout = Some(requested);
+        Some(requested)
+    }
     fn refresh(&mut self) -> Result<()> {
+        let previous_size = (self.geometry.width, self.geometry.height);
         check(unsafe { scene::sws_scene_geometry(self.id, &mut self.geometry) })?;
+        let geometry_changed = previous_size != (self.geometry.width, self.geometry.height);
         self.frame = WindowChrome::new(
             "Android",
             self.geometry.width,
@@ -132,6 +183,22 @@ impl Window {
             self.geometry.state & (4 | 16) == 0,
             true,
         )?;
+        if geometry_changed {
+            let content = self.frame.content();
+            if self.frame_seen {
+                self.pending_resize = Some(self.requested_scanout_size());
+                self.resize_settle_ticks = 15;
+            }
+            eprintln!(
+                "android-runtime: SWS window {}x{} -> {}x{}, content {}x{}",
+                previous_size.0,
+                previous_size.1,
+                self.geometry.width,
+                self.geometry.height,
+                content.width,
+                content.height
+            );
+        }
         self.chrome.clear();
         Ok(())
     }
@@ -431,22 +498,30 @@ fn run() -> Result<()> {
         .map(|v| v.parse::<u32>())
         .collect::<std::result::Result<_, _>>()
         .map_err(|_| "display arguments")?;
-    if args.len() != 6
-        || args[..4].iter().any(|v| *v > i32::MAX as u32)
+    if args.len() != 7
+        || args[..5].iter().any(|v| *v > i32::MAX as u32)
         || args[0] == args[1]
         || args[0] == args[2]
         || args[0] == args[3]
         || args[1] == args[2]
         || args[1] == args[3]
         || args[2] == args[3]
-        || !(2..=4096).contains(&args[4])
+        || args[..4].contains(&args[4])
         || !(2..=4096).contains(&args[5])
+        || !(2..=4096).contains(&args[6])
     {
         return Err(
-            "usage: android-runtime listener-handle keyboard-producer touch-producer mouse-pipe width height",
+            "usage: android-runtime listener-handle keyboard-producer touch-producer mouse-pipe display-control width height",
         );
     }
     let server = Socket::from_handle(owned(args[0])?).map_err(|_| "display listener")?;
+    let display_control = owned(args[4])?;
+    let display_control_file = display_control
+        .as_file()
+        .map_err(|_| "display control file")?;
+    let display_control = display_control
+        .as_stream()
+        .map_err(|_| "display control stream")?;
     server
         .set_nonblocking(true)
         .map_err(|_| "display listener mode")?;
@@ -454,8 +529,8 @@ fn run() -> Result<()> {
         owned(args[1])?,
         owned(args[2])?,
         owned(args[3])?,
-        args[4],
         args[5],
+        args[6],
     );
     let mut peer: Option<Socket> = None;
     let mut window: Option<Window> = None;
@@ -522,8 +597,8 @@ fn run() -> Result<()> {
                         match header.kind {
                             protocol::HELLO => {
                                 if window.is_some()
-                                    || header.width != args[4]
-                                    || header.height != args[5]
+                                    || header.width != args[5]
+                                    || header.height != args[6]
                                 {
                                     return Err("display dimensions");
                                 }
@@ -533,9 +608,14 @@ fn run() -> Result<()> {
                             }
                             protocol::FRAME => {
                                 let window = window.as_mut().ok_or("display handshake missing")?;
-                                if header.width != window.width || header.height != window.height {
-                                    return Err("display scanout changed");
-                                }
+                                let requested = window.expected_scanout.take();
+                                window.resize_scanout(
+                                    header.width,
+                                    header.height,
+                                    requested != Some((header.width, header.height)),
+                                )?;
+                                window.frame_seen = true;
+                                input.resize(header.width, header.height);
                                 window.pixels.clear();
                                 window.pixels.extend_from_slice(&bytes[protocol::HEADER..]);
                                 window.present()?;
@@ -573,6 +653,20 @@ fn run() -> Result<()> {
             }
         }
         input.flush_mouse();
+        if let Some((width, height)) = window
+            .as_mut()
+            .and_then(Window::take_pending_resize)
+        {
+            let mut request = [0u8; 8];
+            request[..4].copy_from_slice(&width.to_le_bytes());
+            request[4..].copy_from_slice(&height.to_le_bytes());
+            display_control_file
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| "display control seek")?;
+            display_control
+                .write_all(&request)
+                .map_err(|_| "display control write")?;
+        }
         std::thread::sleep(Duration::from_millis(8));
     }
 }

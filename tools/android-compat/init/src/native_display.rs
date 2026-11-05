@@ -7,12 +7,15 @@ use std::{
     string::String,
     vec::Vec,
 };
+const DISPLAY_WIDTH: u32 = 480;
+const DISPLAY_HEIGHT: u32 = 640;
 pub struct Setup {
     listener: Socket,
     keyboard: Handle,
     touch: Handle,
     mouse: Handle,
     mouse_reader: Handle,
+    display_control: Handle,
 }
 pub struct Display {
     pid: u32,
@@ -25,7 +28,8 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
     let (keyboard, key_events) =
         std::input::create_virtual_keyboard().map_err(|_| "keyboard channel")?;
     let (touch, touch_events) =
-        std::input::create_virtual_touchscreen(640, 480).map_err(|_| "touch channel")?;
+        std::input::create_virtual_touchscreen(DISPLAY_WIDTH, DISPLAY_HEIGHT)
+            .map_err(|_| "touch channel")?;
     let (mouse_reader, mouse) = std::task::pipe().map_err(|_| "absolute mouse channel")?;
     android
         .create_directory("/dev/input")
@@ -77,7 +81,12 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
     let config = storage
         .open("/endpoint", 0xc2)
         .map_err(|_| "display configuration file")?;
-    let text = std::format!("SAD1\n{name}\n640 480\n");
+    let control_storage =
+        VfsView::create("tmpfs", "size=4K").map_err(|_| "display control storage")?;
+    let display_control = control_storage
+        .open("/request", 0xc2)
+        .map_err(|_| "display control file")?;
+    let text = std::format!("SAD1\n{name}\n{DISPLAY_WIDTH} {DISPLAY_HEIGHT}\n");
     config
         .as_stream()
         .map_err(|_| "display configuration stream")?
@@ -90,11 +99,18 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
     android
         .publish_files(
             "/scarlet/runtime",
-            &[FilePublication {
-                name: "display-endpoint",
-                file: &config,
-                access: 1,
-            }],
+            &[
+                FilePublication {
+                    name: "display-endpoint",
+                    file: &config,
+                    access: 1,
+                },
+                FilePublication {
+                    name: "display-request",
+                    file: &display_control,
+                    access: 1,
+                },
+            ],
         )
         .map_err(|_| "display configuration publication")?;
     Ok(Some(Setup {
@@ -103,6 +119,7 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
         touch,
         mouse,
         mouse_reader,
+        display_control,
     }))
 }
 impl Setup {
@@ -141,12 +158,27 @@ impl Setup {
                 source: &self.mouse,
                 target: 6,
             },
+            HandleMapping {
+                source: &self.display_control,
+                target: 7,
+            },
         ]);
         let bridge = super::input_bridge::Bridge::start(environment, self.mouse_reader, stdio)?;
+        let width = std::format!("{DISPLAY_WIDTH}");
+        let height = std::format!("{DISPLAY_HEIGHT}");
         let pid = environment
             .spawn(
                 &executable,
-                &["/bin/android-runtime", "5", "3", "4", "6", "640", "480"],
+                &[
+                    "/bin/android-runtime",
+                    "5",
+                    "3",
+                    "4",
+                    "6",
+                    "7",
+                    width.as_str(),
+                    height.as_str(),
+                ],
                 &["PATH=/bin"],
                 "/",
                 &handles,

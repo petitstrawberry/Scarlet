@@ -155,13 +155,17 @@ static int lock_buffer(const gralloc_module_t *module, buffer_handle_t handle, i
     if (!address || usage & GRALLOC_USAGE_PROTECTED) return -EINVAL;
     *address=NULL; pthread_mutex_lock(&mappings_lock);
     Mapping *m=find_locked(handle); int result=-EINVAL;
+    if (m && width==0 && height==0) {
+        left=0;top=0;width=m->wire[WIDTH];height=m->wire[HEIGHT];
+    }
     if (m && left>=0 && top>=0 && width>0 && height>0 &&
         left<=m->wire[WIDTH]-width && top<=m->wire[HEIGHT]-height) {
         int write=!!(usage & (GRALLOC_USAGE_SW_WRITE_MASK|GRALLOC_USAGE_HW_RENDER));
-        if (m->writer || (write && m->readers)) result=-EBUSY;
+        if (write && (m->writer || m->readers)) result=-EBUSY;
         else if (!write && m->readers==INT_MAX) result=-EOVERFLOW;
         else { if (write) m->writer=1; else m->readers++; *address=m->address; result=0; }
-    }
+    } else if (m) fprintf(stderr,"SCARLET_ANDROID_GRALLOC_LOCK_REJECT bounds=%d,%d+%dx%d buffer=%dx%d readers=%d writer=%d usage=%x\n",left,top,width,height,m->wire[WIDTH],m->wire[HEIGHT],m->readers,m->writer,usage);
+    else fprintf(stderr,"SCARLET_ANDROID_GRALLOC_LOCK_REJECT unknown_handle usage=%x\n",usage);
     pthread_mutex_unlock(&mappings_lock); return result;
 }
 static int unlock_buffer(const gralloc_module_t *module, buffer_handle_t handle) {
@@ -215,12 +219,36 @@ typedef struct Framebuffer {
     uint64_t sequence;
     uint8_t *pixels;
     size_t capacity;
+    pthread_t control_thread;
+    int control_started;
+    volatile int control_stop;
 } Framebuffer;
 static void put16(uint8_t *p,uint16_t n) { p[0]=n;p[1]=n>>8; }
 static void put32(uint8_t *p,uint32_t n) { for (unsigned i=0;i<4;i++)p[i]=n>>(i*8); }
 static void put64(uint8_t *p,uint64_t n) { for (unsigned i=0;i<8;i++)p[i]=n>>(i*8); }
 static uint32_t get32(const uint8_t *p) { return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24; }
 static uint64_t get64(const uint8_t *p) { return get32(p)|(uint64_t)get32(p+4)<<32; }
+static int resize_framebuffer_locked(Framebuffer *fb,uint32_t width,uint32_t height) {
+    if (width<2 || height<2 || width>MAX_DIMENSION || height>MAX_DIMENSION ||
+        (uint64_t)width*height*4>MAX_BUFFER_BYTES)return -EINVAL;
+    if (width==fb->device.width && height==fb->device.height)return 0;
+    size_t capacity=(size_t)width*height*4;
+    uint8_t *resized=realloc(fb->pixels,capacity);
+    if (!resized)return -ENOMEM;
+    fb->pixels=resized;fb->capacity=capacity;
+    framebuffer_device_t updated={
+        .common=fb->device.common,.width=width,.height=height,.stride=(int)width,
+        .format=fb->device.format,.xdpi=fb->device.xdpi,.ydpi=fb->device.ydpi,
+        .fps=fb->device.fps,.minSwapInterval=fb->device.minSwapInterval,
+        .maxSwapInterval=fb->device.maxSwapInterval,.numFramebuffers=fb->device.numFramebuffers,
+        .setSwapInterval=fb->device.setSwapInterval,.post=fb->device.post,
+        .compositionComplete=fb->device.compositionComplete,.enableScreen=fb->device.enableScreen,
+        .reserved={0},
+    };
+    memcpy(&fb->device,&updated,sizeof(updated));
+    fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_RESIZED width=%u height=%u\n",width,height);
+    return 0;
+}
 static int send_bytes(int fd,const void *input,size_t size) {
     const uint8_t *p=input;
     while (size) { ssize_t n=send(fd,p,size,MSG_NOSIGNAL);if (n<0 && errno==EINTR)continue;
@@ -242,9 +270,45 @@ static int transmit(Framebuffer *fb,unsigned kind,uint32_t width,uint32_t height
     int error=send_bytes(fb->socket,header,sizeof(header));
     if (!error && bytes)error=send_bytes(fb->socket,pixels,bytes);
     if (!error)error=receive_bytes(fb->socket,ack,sizeof(ack));
-    if (!error && (memcmp(ack,"SADA",4) || get32(ack+4) || get64(ack+8)!=fb->sequence))error=-EPROTO;
-    if (error) { fb->error=error;close(fb->socket);fb->socket=-1; }
+    uint32_t status=error ? 0 : get32(ack+4);
+    if (!error && memcmp(ack,"SADA",4))error=-EPROTO;
+    if (!error && get64(ack+8)!=fb->sequence)error=-EPROTO;
+    if (!error && (status & 0x80000000u)) {
+        uint32_t requested_width=(status>>15)&0x7fffu,requested_height=status&0x7fffu;
+        fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_RESIZE_REQUEST width=%u height=%u current=%ux%u\n",
+                requested_width,requested_height,fb->device.width,fb->device.height);
+        error=resize_framebuffer_locked(fb,requested_width,requested_height);
+    } else if (!error && status) error=-EPROTO;
+    if (error) {
+        fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_TRANSMIT_FAIL kind=%u error=%d status=%u\n",kind,error,status);
+        fb->error=error;close(fb->socket);fb->socket=-1;
+    }
     return error;
+}
+static void *display_control_loop(void *context) {
+    Framebuffer *fb=context;
+    int fd=open("/scarlet/runtime/display-request",O_RDONLY|O_CLOEXEC);
+    uint32_t last_width=0,last_height=0;
+    while (!fb->control_stop) {
+        if (fd<0) {
+            fd=open("/scarlet/runtime/display-request",O_RDONLY|O_CLOEXEC);
+            if (fd<0) { usleep(100000); continue; }
+        }
+        uint8_t request[8];
+        if (lseek(fd,0,SEEK_SET)<0) { close(fd);fd=-1;usleep(100000);continue; }
+        ssize_t count=read(fd,request,sizeof(request));
+        if (count!=8) { usleep(100000); continue; }
+        uint32_t width=get32(request),height=get32(request+4);
+        if (width==last_width && height==last_height) { usleep(100000); continue; }
+        last_width=width;last_height=height;
+        pthread_mutex_lock(&fb->lock);
+        int error=resize_framebuffer_locked(fb,width,height);
+        pthread_mutex_unlock(&fb->lock);
+        if (error)fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_CONTROL_FAIL width=%u height=%u error=%d\n",width,height,error);
+        usleep(100000);
+    }
+    if (fd>=0)close(fd);
+    return NULL;
 }
 static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle) {
     Framebuffer *fb=(Framebuffer *)device;
@@ -272,6 +336,10 @@ done:
 }
 static int framebuffer_close_device(hw_device_t *device) {
     Framebuffer *fb=(Framebuffer *)device;
+    if (fb->control_started) {
+        fb->control_stop=1;
+        pthread_join(fb->control_thread,NULL);
+    }
     if (fb->socket>=0)close(fb->socket);
     free(fb->pixels);pthread_mutex_destroy(&fb->lock);free(fb);return 0;
 }
@@ -293,7 +361,11 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     if (!size || size==(ssize_t)sizeof(configuration)-1)return -EINVAL;
     configuration[size]=0;
     if (sscanf(configuration,"SAD1\n%107[^\n]\n%u %u\n%n",path,&width,&height,&end)!=3 || end!=size || path[0]!='/' ||
-        width<2 || height<2 || width>MAX_DIMENSION || height>MAX_DIMENSION || (uint64_t)width*height*4>MAX_BUFFER_BYTES)return -EINVAL;
+        width<2 || height<2 || width>MAX_DIMENSION || height>MAX_DIMENSION || (uint64_t)width*height*4>MAX_BUFFER_BYTES) {
+        fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_CONFIG_REJECT size=%zd end=%d path=%s width=%u height=%u\n",
+                size,end,path,width,height);
+        return -EINVAL;
+    }
     Framebuffer *fb=calloc(1,sizeof(*fb));if (!fb)return -ENOMEM;
     fb->socket=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
     if (fb->socket<0){saved=errno;free(fb);return -saved;}
@@ -311,6 +383,7 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     if(error){close(fb->socket);free(fb->pixels);free(fb);return -error;}
     fb->enabled=1;error=transmit(fb,1,width,height,NULL,0);
     if(error){framebuffer_close_device(&fb->device.common);return error;}
+    if (!pthread_create(&fb->control_thread,NULL,display_control_loop,fb))fb->control_started=1;
     *device=&fb->device.common;
     fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_READY width=%u height=%u host=native\n",width,height);return 0;
 }

@@ -86,6 +86,13 @@ impl Default for Core {
 }
 
 impl Core {
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.touch = TouchState::default();
+        self.mouse = MouseState::default();
+    }
+
     fn key(&mut self, code: u16, value: i32) -> Vec<WireEvent> {
         if !(1..=255).contains(&code) || !(0..=2).contains(&value) {
             return Vec::new();
@@ -443,6 +450,10 @@ impl Input {
         }
     }
 
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.core.resize(width, height);
+    }
+
     fn enqueue_mouse(&mut self, events: Vec<MouseWireEvent>) {
         if !self.mouse.is_enabled() {
             return;
@@ -565,6 +576,18 @@ mod tests {
             height: 480,
             ..Core::default()
         }
+    }
+
+    #[test]
+    fn resize_updates_mapping_and_clears_contact_state() {
+        let mut core = core();
+        core.mouse_motion(fitted(), 100, 100, true);
+        assert!(core.touch.active.is_none());
+        core.resize(480, 640);
+        assert_eq!((core.width, core.height), (480, 640));
+        assert_eq!(core.mouse.buttons, [false; 3]);
+        assert!(core.mouse.last.is_none());
+        assert!(core.touch.active.is_none());
     }
 
     fn down(id: u64) -> TouchChange {
