@@ -9,6 +9,10 @@ use std::{
 };
 const DISPLAY_WIDTH: u32 = 480;
 const DISPLAY_HEIGHT: u32 = 640;
+const OUTPUT_SCALE_MILLI: u32 = 2000;
+const SCANOUT_WIDTH: u32 = DISPLAY_WIDTH * OUTPUT_SCALE_MILLI / 1000;
+const SCANOUT_HEIGHT: u32 = DISPLAY_HEIGHT * OUTPUT_SCALE_MILLI / 1000;
+const SCANOUT_DPI: u32 = 160 * OUTPUT_SCALE_MILLI / 1000;
 pub struct Setup {
     listener: Socket,
     keyboard: Handle,
@@ -28,7 +32,7 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
     let (keyboard, key_events) =
         std::input::create_virtual_keyboard().map_err(|_| "keyboard channel")?;
     let (touch, touch_events) =
-        std::input::create_virtual_touchscreen(DISPLAY_WIDTH, DISPLAY_HEIGHT)
+        std::input::create_virtual_touchscreen(SCANOUT_WIDTH, SCANOUT_HEIGHT)
             .map_err(|_| "touch channel")?;
     let (mouse_reader, mouse) = std::task::pipe().map_err(|_| "absolute mouse channel")?;
     android
@@ -86,7 +90,9 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
     let display_control = control_storage
         .open("/request", 0xc2)
         .map_err(|_| "display control file")?;
-    let text = std::format!("SAD1\n{name}\n{DISPLAY_WIDTH} {DISPLAY_HEIGHT}\n");
+    let text = std::format!(
+        "SAD1\n{name}\n{SCANOUT_WIDTH} {SCANOUT_HEIGHT} {SCANOUT_DPI}\n"
+    );
     config
         .as_stream()
         .map_err(|_| "display configuration stream")?
@@ -164,8 +170,8 @@ impl Setup {
             },
         ]);
         let bridge = super::input_bridge::Bridge::start(environment, self.mouse_reader, stdio)?;
-        let width = std::format!("{DISPLAY_WIDTH}");
-        let height = std::format!("{DISPLAY_HEIGHT}");
+        let width = std::format!("{SCANOUT_WIDTH}");
+        let height = std::format!("{SCANOUT_HEIGHT}");
         let pid = environment
             .spawn(
                 &executable,

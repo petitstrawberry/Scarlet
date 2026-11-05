@@ -43,7 +43,7 @@
     "sys.use_memfd": "true",
     "ro.hardware.egl": "angle",
     "ro.hardware.vulkan": "pastel",
-    "ro.sf.lcd_density": "160",
+    "ro.sf.lcd_density": "320",
     "ro.hw_timeout_multiplier": "32",
     "debug.renderengine.backend": "gles"
   },

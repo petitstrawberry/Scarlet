@@ -61,12 +61,10 @@ impl Window {
         let mut scale = 1000;
         check(unsafe { scene::sws_get_output_scale(&mut scale) })?;
         let inset = chrome_insets(scale, true);
-        // Chrome and scanout content use the same physical output scale. The
-        // scanout and input endpoints retain their original Android dimensions.
-        let content_width = u32::try_from((u64::from(width) * u64::from(scale)).div_ceil(1000))
-            .map_err(|_| "display content width")?;
-        let content_height = u32::try_from((u64::from(height) * u64::from(scale)).div_ceil(1000))
-            .map_err(|_| "display content height")?;
+        // Scanout and SWS scene geometry are both physical output pixels.
+        // Apply the output scale to chrome and density, not again to content.
+        let content_width = width;
+        let content_height = height;
         let mut output = sws::SwsDisplay {
             width: 0, height: 0, compositor_epoch: 0, compositor_backend: 0, capabilities: 0,
         };
@@ -156,12 +154,11 @@ impl Window {
     }
     fn requested_scanout_size(&self) -> (u32, u32) {
         let content = self.frame.content();
-        let scale = u64::from(self.geometry.scale_milli.max(1));
-        let width = (u64::from(content.width) * 1000 / scale).clamp(2, 4096) as u32;
-        let height = (u64::from(content.height) * 1000 / scale).clamp(2, 4096) as u32;
+        let width = content.width.clamp(2, 4096);
+        let height = content.height.clamp(2, 4096);
         (width, height)
     }
-    fn take_pending_resize(&mut self) -> Option<(u32, u32)> {
+    fn take_pending_resize(&mut self) -> Option<(u32, u32, u32)> {
         if self.resize_settle_ticks != 0 {
             self.resize_settle_ticks -= 1;
             return None;
@@ -171,7 +168,8 @@ impl Window {
             return None;
         }
         self.expected_scanout = Some(requested);
-        Some(requested)
+        let dpi = (u64::from(self.geometry.scale_milli) * 160 / 1000).clamp(72, 640) as u32;
+        Some((requested.0, requested.1, dpi))
     }
     fn refresh(&mut self) -> Result<()> {
         let previous_size = (self.geometry.width, self.geometry.height);
@@ -660,13 +658,14 @@ fn run() -> Result<()> {
             }
         }
         input.flush_mouse();
-        if let Some((width, height)) = window
+        if let Some((width, height, dpi)) = window
             .as_mut()
             .and_then(Window::take_pending_resize)
         {
-            let mut request = [0u8; 8];
+            let mut request = [0u8; 12];
             request[..4].copy_from_slice(&width.to_le_bytes());
-            request[4..].copy_from_slice(&height.to_le_bytes());
+            request[4..8].copy_from_slice(&height.to_le_bytes());
+            request[8..].copy_from_slice(&dpi.to_le_bytes());
             display_control_file
                 .seek(SeekFrom::Start(0))
                 .map_err(|_| "display control seek")?;
