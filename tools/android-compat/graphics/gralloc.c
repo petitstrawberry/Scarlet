@@ -222,6 +222,7 @@ typedef struct Framebuffer {
     pthread_t control_thread;
     int control_started;
     volatile int control_stop;
+    volatile int awaiting_present;
 } Framebuffer;
 static void put16(uint8_t *p,uint16_t n) { p[0]=n;p[1]=n>>8; }
 static void put32(uint8_t *p,uint32_t n) { for (unsigned i=0;i<4;i++)p[i]=n>>(i*8); }
@@ -246,6 +247,7 @@ static int resize_framebuffer_locked(Framebuffer *fb,uint32_t width,uint32_t hei
         .reserved={0},
     };
     memcpy(&fb->device,&updated,sizeof(updated));
+    fb->awaiting_present=1;
     fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_RESIZED width=%u height=%u\n",width,height);
     return 0;
 }
@@ -300,6 +302,17 @@ static void *display_control_loop(void *context) {
         if (count!=8) { usleep(100000); continue; }
         uint32_t width=get32(request),height=get32(request+4);
         if (width==last_width && height==last_height) { usleep(100000); continue; }
+        for (unsigned waited=0; fb->awaiting_present && !fb->control_stop && waited<100; ++waited) usleep(10000);
+        if (fb->awaiting_present) {
+            fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_PRESENT_TIMEOUT\n");
+            fb->awaiting_present=0;
+        }
+        if (fb->control_stop) break;
+        if (lseek(fd,0,SEEK_SET)<0) { close(fd);fd=-1;continue; }
+        count=read(fd,request,sizeof(request));
+        if (count!=8) continue;
+        width=get32(request);height=get32(request+4);
+        if (width==last_width && height==last_height) { usleep(100000); continue; }
         last_width=width;last_height=height;
         pthread_mutex_lock(&fb->lock);
         int error=resize_framebuffer_locked(fb,width,height);
@@ -331,6 +344,7 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
     }else if(m && (m->readers||m->writer))result=-EBUSY;
     pthread_mutex_unlock(&mappings_lock);
     if (!result)result=transmit(fb,2,width,height,fb->pixels,fb->capacity);
+    if (!result)fb->awaiting_present=0;
 done:
     pthread_mutex_unlock(&fb->lock);return result;
 }
