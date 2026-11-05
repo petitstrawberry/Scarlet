@@ -20,6 +20,137 @@ LIBRARIES=["libc++","libutils","libhidlbase","libhardware","liblog","libcutils",
            "android.hardware.graphics.composer@2.1","libfmq"]
 
 
+def generate_dynamic_framebuffer_adapter(output):
+    source=output/"headers/composer-utils/hwc2onfbadapter"
+    target=output/"generated-hwc2onfbadapter"
+    target.mkdir()
+    header=(source/"include/hwc2onfbadapter/HWC2OnFbAdapter.h").read_text()
+    header=header.replace(
+        "    void enableVsync(bool enable);\n",
+        "    void enableVsync(bool enable);\n    void setHotplugCallback(HWC2_PFN_HOTPLUG callback, hwc2_callback_data_t data);\n"
+        "    void setRefreshCallback(HWC2_PFN_REFRESH callback, hwc2_callback_data_t data);\n    void updateDisplayInfo();\n",1)
+    header=header.replace(
+        "    Info mFbInfo{};\n",
+        "    Info mFbInfo{};\n    hwc2_config_t mConfigId{0};\n    std::vector<Info> mConfigs;\n    HWC2_PFN_HOTPLUG mHotplugCallback{nullptr};\n"
+        "    hwc2_callback_data_t mHotplugData{nullptr};\n"
+        "    HWC2_PFN_REFRESH mRefreshCallback{nullptr};\n"
+        "    hwc2_callback_data_t mRefreshData{nullptr};\n",1)
+    header=header.replace("    static hwc2_config_t getConfigId();\n",
+                          "    hwc2_config_t getConfigId();\n",1)
+    header=header.replace(
+        "    const Info& getInfo() const;\n",
+        "    const Info& getInfo() const;\n    size_t getConfigCount() const;\n"
+        "    const Info& getConfigInfo(hwc2_config_t config) const;\n"
+        "    bool setConfig(hwc2_config_t config);\n",1)
+    header=header.replace("#include <unordered_set>\n","#include <unordered_set>\n#include <vector>\n",1)
+    implementation=(source/"HWC2OnFbAdapter.cpp").read_text()
+    implementation=implementation.replace("#include <algorithm>\n","#include <algorithm>\n#include <cstdio>\n",1)
+    implementation=implementation.replace(
+        "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n",
+        "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n    mConfigs.push_back(mFbInfo);\n",1)
+    implementation=implementation.replace(
+        "        case HWC2_CALLBACK_HOTPLUG:\n            if (pointer) {\n"
+        "                reinterpret_cast<HWC2_PFN_HOTPLUG>(pointer)(callbackData, adapter.getDisplayId(),\n"
+        "                                                            HWC2_CONNECTION_CONNECTED);\n"
+        "            }\n",
+        "        case HWC2_CALLBACK_HOTPLUG:\n"
+        "            adapter.setHotplugCallback(reinterpret_cast<HWC2_PFN_HOTPLUG>(pointer), callbackData);\n"
+        "            if (pointer) {\n"
+        "                reinterpret_cast<HWC2_PFN_HOTPLUG>(pointer)(callbackData, adapter.getDisplayId(),\n"
+        "                                         HWC2_CONNECTION_CONNECTED);\n"
+        "            }\n",1)
+    implementation=implementation.replace(
+        "        case HWC2_CALLBACK_REFRESH:\n            break;\n",
+        "        case HWC2_CALLBACK_REFRESH:\n"
+        "            adapter.setRefreshCallback(reinterpret_cast<HWC2_PFN_REFRESH>(pointer), callbackData);\n"
+        "            break;\n",1)
+    implementation=implementation.replace(
+        "hwc2_config_t HWC2OnFbAdapter::getConfigId() {\n    return 0;\n}\n",
+        "hwc2_config_t HWC2OnFbAdapter::getConfigId() {\n    return mConfigId;\n}\n",1)
+    old_configs="""    if (outConfigs) {
+        if (*outNumConfigs > 0) {
+            outConfigs[0] = adapter.getConfigId();
+            *outNumConfigs = 1;
+        }
+    } else {
+        *outNumConfigs = 1;
+    }
+"""
+    new_configs="""    const uint32_t count = adapter.getConfigCount();
+    if (outConfigs) {
+        const uint32_t written = std::min<uint32_t>(*outNumConfigs, count);
+        for (uint32_t i = 0; i < written; ++i) outConfigs[i] = i;
+        *outNumConfigs = written;
+    } else {
+        *outNumConfigs = count;
+    }
+"""
+    if implementation.count(old_configs)!=1:raise ValueError("changed HWC2 display config hook")
+    implementation=implementation.replace(old_configs,new_configs,1)
+    old_attribute="""    if (adapter.getConfigId() != config) {
+        return HWC2_ERROR_BAD_CONFIG;
+    }
+
+    const auto& info = adapter.getInfo();
+"""
+    new_attribute="""    if (config >= adapter.getConfigCount()) {
+        return HWC2_ERROR_BAD_CONFIG;
+    }
+
+    const auto& info = adapter.getConfigInfo(config);
+"""
+    if implementation.count(old_attribute)!=1:raise ValueError("changed HWC2 attribute hook")
+    implementation=implementation.replace(old_attribute,new_attribute,1)
+    old_set="""    if (adapter.getConfigId() != config) {
+        return HWC2_ERROR_BAD_CONFIG;
+    }
+
+    return HWC2_ERROR_NONE;
+}
+"""
+    new_set="""    return adapter.setConfig(config) ? HWC2_ERROR_NONE : HWC2_ERROR_BAD_CONFIG;
+}
+"""
+    if implementation.count(old_set)!=1:raise ValueError("changed HWC2 set config hook")
+    implementation=implementation.replace(old_set,new_set,1)
+    marker="const HWC2OnFbAdapter::Info& HWC2OnFbAdapter::getInfo() const {\n    return mFbInfo;\n}\n"
+    addition=marker
+    addition+="\nsize_t HWC2OnFbAdapter::getConfigCount() const { return mConfigs.size(); }\n"
+    addition+="const HWC2OnFbAdapter::Info& HWC2OnFbAdapter::getConfigInfo(hwc2_config_t config) const { return mConfigs[config]; }\n"
+    addition+="bool HWC2OnFbAdapter::setConfig(hwc2_config_t config) {\n"
+    addition+="    if (config >= mConfigs.size()) return false;\n"
+    addition+="    mConfigId = config;\n    mFbInfo = mConfigs[config];\n    mState = State::MODIFIED;\n    return true;\n}\n"
+    addition+="\nvoid HWC2OnFbAdapter::updateDisplayInfo() {\n"
+    addition+="    const uint32_t width = mFbDevice->width;\n"
+    addition+="    const uint32_t height = mFbDevice->height;\n"
+    addition+="    if (width == mFbInfo.width && height == mFbInfo.height) return;\n"
+    addition+="    hwc2_config_t config = mConfigs.size();\n"
+    addition+="    for (hwc2_config_t i = 0; i < mConfigs.size(); ++i) {\n"
+    addition+="        if (mConfigs[i].width == width && mConfigs[i].height == height) { config = i; break; }\n"
+    addition+="    }\n"
+    addition+="    if (config == mConfigs.size()) {\n"
+    addition+="        if (mConfigs.size() >= 16) config = mConfigId;\n"
+    addition+="        else { Info info = mFbInfo; info.width = width; info.height = height; mConfigs.push_back(info); config = mConfigs.size() - 1; }\n"
+    addition+="        mConfigs[config].width = width; mConfigs[config].height = height;\n"
+    addition+="    }\n"
+    addition+="    mConfigId = config;\n    mFbInfo = mConfigs[config];\n"
+    addition+="    mState = State::MODIFIED;\n"
+    addition+="    std::fprintf(stderr, \"SCARLET_ANDROID_HWC_CONFIG config=%u hotplug=%p refresh=%p\\n\",\n"
+    addition+="                 mConfigId, reinterpret_cast<void*>(mHotplugCallback), reinterpret_cast<void*>(mRefreshCallback));\n"
+    addition+="    if (mHotplugCallback) mHotplugCallback(mHotplugData, getDisplayId(), HWC2_CONNECTION_CONNECTED);\n"
+    addition+="    if (mRefreshCallback) mRefreshCallback(mRefreshData, getDisplayId());\n}\n"
+    addition+="\nvoid HWC2OnFbAdapter::setHotplugCallback(HWC2_PFN_HOTPLUG callback, hwc2_callback_data_t data) {\n"
+    addition+="    mHotplugCallback = callback;\n    mHotplugData = data;\n}\n"
+    addition+="\nvoid HWC2OnFbAdapter::setRefreshCallback(HWC2_PFN_REFRESH callback, hwc2_callback_data_t data) {\n"
+    addition+="    mRefreshCallback = callback;\n    mRefreshData = data;\n}\n"
+    if implementation.count(marker)!=1:raise ValueError("changed HWC2 framebuffer adapter info hook")
+    implementation=implementation.replace(marker,addition,1)
+    (target/"HWC2OnFbAdapter.cpp").write_text(implementation)
+    include=target/"include/hwc2onfbadapter";include.mkdir(parents=True)
+    (include/"HWC2OnFbAdapter.h").write_text(header)
+    return target
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ["ndk","runtime-root","stock-inputs","boot-profile","output"]:
@@ -61,8 +192,10 @@ def main():
     for path in sorted((output/"headers/composer21-headers").rglob("gen")):flags += ["-isystem",str(path)]
     for name in ["mapper-utils","allocator-utils"]:
         for kind in ["hal","passthrough"]:flags += ["-isystem",str(output/"headers"/name/kind/"include")]
-    for kind in ["hal","passthrough","resources","command-buffer","hwc2onfbadapter"]:
+    for kind in ["hal","passthrough","resources","command-buffer"]:
         flags += ["-isystem",str(output/"headers/composer-utils"/kind/"include")]
+    dynamic_adapter=generate_dynamic_framebuffer_adapter(output)
+    flags += ["-isystem",str(dynamic_adapter/"include")]
     libraries=[]
     for name in LIBRARIES:
         candidates=[args.boot_profile.resolve()/partition/"lib64"/(name+".so") for partition in ["system","vendor"]]
@@ -76,7 +209,7 @@ def main():
     for name,(source,extra) in products.items():
         command=flags+extra+[str(SOURCE/"graphics"/source),*link,"-o",str(output/name)]
         if source=="composer-service.cpp":
-            command[1:1]=[str(output/"headers/composer-utils"/p) for p in ["hwc2onfbadapter/HWC2OnFbAdapter.cpp","resources/ComposerResources.cpp"]]
+            command[1:1]=[str(dynamic_adapter/"HWC2OnFbAdapter.cpp"),str(output/"headers/composer-utils/resources/ComposerResources.cpp")]
         subprocess.run(command,check=True);commands.append(command)
     record={"kind":"android-stock-graphics-adapters-v1","headers":pins,"commands":commands,
             "sources":{str(p.relative_to(SOURCE)):sha256(p) for p in [SOURCE/"build-graphics-adapters.py",SOURCE/"graphics/adapter-headers.json",*[SOURCE/"graphics"/entry[0] for entry in products.values()]]},
