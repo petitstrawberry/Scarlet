@@ -54,6 +54,7 @@ struct Window {
     expected_scanout: Option<(u32, u32)>,
     pending_resize: Option<(u32, u32)>,
     resize_settle_ticks: u8,
+    maximized: bool,
 }
 impl Window {
     fn layout(width: u32, height: u32) -> Result<(SwsSceneGeometry, WindowChrome)> {
@@ -135,11 +136,12 @@ impl Window {
             expected_scanout: None,
             pending_resize: None,
             resize_settle_ticks: 0,
+            maximized: false,
         })
     }
-    fn resize_scanout(&mut self, width: u32, height: u32, resize_outer: bool) -> Result<()> {
+    fn resize_scanout(&mut self, width: u32, height: u32, resize_outer: bool) -> Result<bool> {
         if width == self.width && height == self.height {
-            return Ok(());
+            return Ok(false);
         }
         if resize_outer {
             let (geometry, frame) = Self::layout(width, height)?;
@@ -150,7 +152,7 @@ impl Window {
         self.width = width;
         self.height = height;
         self.pixels.resize((width * height * 4) as usize, 0);
-        Ok(())
+        Ok(true)
     }
     fn requested_scanout_size(&self) -> (u32, u32) {
         let content = self.frame.content();
@@ -183,6 +185,7 @@ impl Window {
             self.geometry.state & (4 | 16) == 0,
             true,
         )?;
+        self.maximized = self.geometry.state & 2 != 0;
         if geometry_changed {
             let content = self.frame.content();
             if self.frame_seen {
@@ -252,8 +255,11 @@ impl Window {
                 WindowEvent::CloseRequested => close = true,
                 WindowEvent::MoveRequested => check(sws::sws_window_action(self.id, 6))?,
                 WindowEvent::MinimizeRequested => check(sws::sws_window_action(self.id, 2))?,
-                WindowEvent::MaximizeRequested => check(sws::sws_window_action(self.id, 4))?,
-                WindowEvent::RestoreRequested => check(sws::sws_window_action(self.id, 5))?,
+                WindowEvent::MaximizeRequested | WindowEvent::RestoreRequested => {
+                    let action = if self.maximized { 5 } else { 4 };
+                    check(sws::sws_window_action(self.id, action))?;
+                    self.maximized = !self.maximized;
+                }
             }
         }
         Ok(close)
@@ -609,13 +615,14 @@ fn run() -> Result<()> {
                             protocol::FRAME => {
                                 let window = window.as_mut().ok_or("display handshake missing")?;
                                 let requested = window.expected_scanout.take();
-                                window.resize_scanout(
+                                if window.resize_scanout(
                                     header.width,
                                     header.height,
                                     requested != Some((header.width, header.height)),
-                                )?;
+                                )? {
+                                    input.resize(header.width, header.height)?;
+                                }
                                 window.frame_seen = true;
-                                input.resize(header.width, header.height);
                                 window.pixels.clear();
                                 window.pixels.extend_from_slice(&bytes[protocol::HEADER..]);
                                 window.present()?;

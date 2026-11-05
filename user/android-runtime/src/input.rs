@@ -86,11 +86,20 @@ impl Default for Core {
 }
 
 impl Core {
-    fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32) -> Routed {
+        let routed = Routed {
+            keyboard: Vec::new(),
+            touch: self.release_touch(),
+            mouse_cancel: self.mouse_cancel().and_then(|event| match event {
+                MouseWireEvent::Cancel { x, y } => Some((x, y)),
+                _ => None,
+            }),
+        };
         self.width = width;
         self.height = height;
         self.touch = TouchState::default();
         self.mouse = MouseState::default();
+        routed
     }
 
     fn key(&mut self, code: u16, value: i32) -> Vec<WireEvent> {
@@ -450,8 +459,13 @@ impl Input {
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
-        self.core.resize(width, height);
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), &'static str> {
+        let routed = self.core.resize(width, height);
+        if let Some((x, y)) = routed.mouse_cancel {
+            self.enqueue_mouse(vec![MouseWireEvent::Cancel { x, y }]);
+        }
+        self.flush_mouse();
+        send(&self.touch, &routed.touch)
     }
 
     fn enqueue_mouse(&mut self, events: Vec<MouseWireEvent>) {
@@ -587,6 +601,29 @@ mod tests {
         assert_eq!((core.width, core.height), (480, 640));
         assert_eq!(core.mouse.buttons, [false; 3]);
         assert!(core.mouse.last.is_none());
+        assert!(core.touch.active.is_none());
+    }
+
+    #[test]
+    fn resize_cancels_active_mouse_and_touch_before_remapping() {
+        let r = fitted();
+        let mut core = core();
+        core.mouse_motion(r, 196, 100, true);
+        core.mouse_button(r, 196, 100, MOUSE_LEFT, 1, true);
+        core.touch(r, down(17));
+
+        let routed = core.resize(480, 640);
+        assert_eq!(routed.mouse_cancel, Some((114, 58)));
+        assert_eq!(
+            routed.touch,
+            vec![
+                (EV_ABS, ABS_X, 18),
+                (EV_ABS, ABS_Y, 58),
+                (EV_KEY, BTN_TOUCH, 0),
+            ]
+        );
+        assert_eq!((core.width, core.height), (480, 640));
+        assert_eq!(core.mouse.buttons, [false; 3]);
         assert!(core.touch.active.is_none());
     }
 
