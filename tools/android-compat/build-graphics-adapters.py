@@ -31,7 +31,9 @@ def generate_dynamic_framebuffer_adapter(output):
         "    void setRefreshCallback(HWC2_PFN_REFRESH callback, hwc2_callback_data_t data);\n    void updateDisplayInfo();\n",1)
     header=header.replace(
         "    Info mFbInfo{};\n",
-        "    Info mFbInfo{};\n    hwc2_config_t mConfigId{0};\n    std::vector<Info> mConfigs;\n"
+        "    struct Config { hwc2_config_t id; Info info; };\n"
+        "    Info mFbInfo{};\n    hwc2_config_t mConfigId{0};\n    hwc2_config_t mNextConfigId{1};\n"
+        "    std::vector<Config> mConfigs;\n"
         "    mutable std::mutex mModesMutex;\n    HWC2_PFN_HOTPLUG mHotplugCallback{nullptr};\n"
         "    hwc2_callback_data_t mHotplugData{nullptr};\n"
         "    HWC2_PFN_REFRESH mRefreshCallback{nullptr};\n"
@@ -41,6 +43,7 @@ def generate_dynamic_framebuffer_adapter(output):
     header=header.replace(
         "    const Info& getInfo() const;\n",
         "    Info getInfo() const;\n    size_t getConfigCount() const;\n"
+        "    hwc2_config_t getConfigIdAt(size_t index) const;\n"
         "    Info getConfigInfo(hwc2_config_t config) const;\n"
         "    bool setConfig(hwc2_config_t config);\n",1)
     header=header.replace("#include <unordered_set>\n","#include <unordered_set>\n#include <vector>\n",1)
@@ -48,7 +51,8 @@ def generate_dynamic_framebuffer_adapter(output):
     implementation=implementation.replace("#include <algorithm>\n","#include <algorithm>\n#include <cstdio>\n",1)
     implementation=implementation.replace(
         "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n",
-        "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n    mConfigs.push_back(mFbInfo);\n",1)
+        "    mFbInfo.ydpi_scaled = int(mFbDevice->ydpi * 1000.0f);\n"
+        "    mConfigs.push_back({mConfigId, mFbInfo});\n",1)
     implementation=implementation.replace(
         "        case HWC2_CALLBACK_HOTPLUG:\n            if (pointer) {\n"
         "                reinterpret_cast<HWC2_PFN_HOTPLUG>(pointer)(callbackData, adapter.getDisplayId(),\n"
@@ -81,7 +85,7 @@ def generate_dynamic_framebuffer_adapter(output):
     new_configs="""    const uint32_t count = adapter.getConfigCount();
     if (outConfigs) {
         const uint32_t written = std::min<uint32_t>(*outNumConfigs, count);
-        for (uint32_t i = 0; i < written; ++i) outConfigs[i] = i;
+        for (uint32_t i = 0; i < written; ++i) outConfigs[i] = adapter.getConfigIdAt(i);
         *outNumConfigs = written;
     } else {
         *outNumConfigs = count;
@@ -95,7 +99,7 @@ def generate_dynamic_framebuffer_adapter(output):
 
     const auto& info = adapter.getInfo();
 """
-    new_attribute="""    if (config >= adapter.getConfigCount()) {
+    new_attribute="""    if (adapter.getConfigId() != config) {
         return HWC2_ERROR_BAD_CONFIG;
     }
 
@@ -121,12 +125,17 @@ def generate_dynamic_framebuffer_adapter(output):
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return mFbInfo;\n}\n"
     addition+="size_t HWC2OnFbAdapter::getConfigCount() const {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return mConfigs.size();\n}\n"
+    addition+="hwc2_config_t HWC2OnFbAdapter::getConfigIdAt(size_t index) const {\n"
+    addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return index < mConfigs.size() ? mConfigs[index].id : 0;\n}\n"
     addition+="HWC2OnFbAdapter::Info HWC2OnFbAdapter::getConfigInfo(hwc2_config_t config) const {\n"
-    addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n    return config < mConfigs.size() ? mConfigs[config] : Info{};\n}\n"
+    addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n"
+    addition+="    for (const auto& entry : mConfigs) if (entry.id == config) return entry.info;\n"
+    addition+="    return Info{};\n}\n"
     addition+="bool HWC2OnFbAdapter::setConfig(hwc2_config_t config) {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n"
-    addition+="    if (config >= mConfigs.size()) return false;\n"
-    addition+="    mConfigId = config;\n    mFbInfo = mConfigs[config];\n    mState = State::MODIFIED;\n    return true;\n}\n"
+    addition+="    for (const auto& entry : mConfigs) if (entry.id == config) { mConfigId = config; mFbInfo = entry.info; break; }\n"
+    addition+="    if (config != mConfigId) return false;\n"
+    addition+="    mState = State::MODIFIED;\n    return true;\n}\n"
     addition+="\nvoid HWC2OnFbAdapter::updateDisplayInfo() {\n"
     addition+="    const uint32_t width = mFbDevice->width;\n"
     addition+="    const uint32_t height = mFbDevice->height;\n"
@@ -137,16 +146,10 @@ def generate_dynamic_framebuffer_adapter(output):
     addition+="    {\n"
     addition+="    std::lock_guard<std::mutex> lock(mModesMutex);\n"
     addition+="    if (width == mFbInfo.width && height == mFbInfo.height) return;\n"
-    addition+="    hwc2_config_t config = mConfigs.size();\n"
-    addition+="    for (hwc2_config_t i = 0; i < mConfigs.size(); ++i) {\n"
-    addition+="        if (mConfigs[i].width == width && mConfigs[i].height == height) { config = i; break; }\n"
-    addition+="    }\n"
-    addition+="    if (config == mConfigs.size()) {\n"
-    addition+="        if (mConfigs.size() >= 16) config = mConfigId;\n"
-    addition+="        else { Info info = mFbInfo; info.width = width; info.height = height; mConfigs.push_back(info); config = mConfigs.size() - 1; }\n"
-    addition+="        mConfigs[config].width = width; mConfigs[config].height = height;\n"
-    addition+="    }\n"
-    addition+="    mConfigId = config;\n    mFbInfo = mConfigs[config];\n"
+    addition+="    mConfigId = mNextConfigId;\n    mNextConfigId = mNextConfigId == UINT32_MAX ? 1 : mNextConfigId + 1;\n"
+    addition+="    mFbInfo.width = width;\n    mFbInfo.height = height;\n"
+    addition+="    if (mConfigs.size() == 16) mConfigs.erase(mConfigs.begin());\n"
+    addition+="    mConfigs.push_back({mConfigId, mFbInfo});\n"
     addition+="    mState = State::MODIFIED;\n"
     addition+="    hotplug = mHotplugCallback;\n    hotplug_data = mHotplugData;\n"
     addition+="    refresh = mRefreshCallback;\n    refresh_data = mRefreshData;\n"
