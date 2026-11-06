@@ -305,8 +305,77 @@ impl VirtualMemoryManager {
         }
     }
 
-    fn track_private_page_allocation(&self, alloc: ContiguousPages) {
-        self.page_allocations.write().push(alloc);
+    /// Pin a fork snapshot while the current mappings and their allocation
+    /// registry are protected together. A later unmap may remove the parent
+    /// VMA, but cannot release backing retained by this snapshot.
+    pub(crate) fn fork_snapshot(&self) -> Result<Vec<VirtualMemoryMap>, &'static str> {
+        use crate::object::capability::memory_mapping::anon_owner::ForkCowPageOwner;
+        // Match fault/relocation publication: page tables precede metadata.
+        // Keep this guard until writable parent PTEs have been revoked, so a
+        // second fork cannot publish a child before the first revocation.
+        let asid = self.get_asid();
+        let mut page_table = if asid != 0 && is_asid_used(asid) {
+            Some(get_root_pagetable(asid).ok_or("Missing fork page table")?)
+        } else { None };
+        let mut inner = self.inner.write();
+        if inner.asid != asid { return Err("Address space changed during fork"); }
+        let mut allocations = self.page_allocations.write();
+        let bounds: BTreeMap<_, _> = allocations.iter().map(|allocation| {
+            (allocation.as_paddr(), allocation.as_paddr() + (allocation.len() * PAGE_SIZE) as u64 - 1)
+        }).collect();
+        let allocation_base = |map: &VirtualMemoryMap| {
+            bounds.range(..=map.pmarea.start).next_back()
+                .filter(|(_, end)| map.pmarea.end <= **end)
+                .map(|(&base, _)| base)
+        };
+        // Untracked private ranges retain the previous eager-copy behavior.
+        // Copy while the VMA is still protected, before moving any ownership.
+        let mut copied = BTreeMap::new();
+        for map in inner.memmap.values().filter(|map| {
+            !map.is_shared && map.owner.is_none() && map.pmarea.start != 0
+        }) {
+            if allocation_base(map).is_some() { continue; }
+            let pages = ContiguousPages::new(map.vmarea.size() / PAGE_SIZE)
+                .ok_or("Failed to retain private fork mapping")?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    phys_to_virt(map.pmarea.start) as *const u8,
+                    pages.as_ptr() as *mut u8,
+                    map.vmarea.size(),
+                );
+            }
+            let mut snapshot = map.clone();
+            snapshot.pmarea = PhysicalMemoryArea::new(0, 0);
+            snapshot.owner = Some(Arc::new(ForkCowPageOwner::new(
+                (map.vmarea.start - map.vm_start) / PAGE_SIZE, pages,
+            )));
+            copied.insert(map.vmarea.start, snapshot);
+        }
+        let mut unclaimed: BTreeMap<_, _> = allocations.drain(..)
+            .map(|allocation| (allocation.as_paddr(), allocation)).collect();
+        let mut retained: BTreeMap<u64, Arc<ContiguousPages>> = BTreeMap::new();
+        let mut revoke = Vec::new();
+        for map in inner.memmap.values_mut().filter(|map| map.owner.is_none() && map.pmarea.start != 0) {
+            let Some(base) = allocation_base(map) else { continue; };
+            let pages = retained.entry(base).or_insert_with(|| Arc::new(unclaimed.remove(&base).unwrap()));
+            map.owner = Some(Arc::new(ForkCowPageOwner::from_shared(
+                (map.vmarea.start - map.vm_start) / PAGE_SIZE,
+                ((map.pmarea.start - base) / PAGE_SIZE as u64) as usize,
+                pages.clone(),
+                map.is_shared,
+            )));
+            map.pmarea = PhysicalMemoryArea::new(0, 0);
+            if !map.is_shared { revoke.push(map.vmarea); }
+        }
+        allocations.extend(unclaimed.into_values());
+        let snapshot = inner.memmap.values().map(|map| {
+            copied.remove(&map.vmarea.start).unwrap_or_else(|| map.clone())
+        }).collect();
+        inner.last_search_cache = None;
+        if let Some(root) = page_table.as_mut() {
+            for area in revoke { root.unmap_range(area.start, area.end); }
+        }
+        Ok(snapshot)
     }
 
     fn sync_executable_page_for_mapping(permissions: usize, paddr: u64) {
@@ -460,6 +529,18 @@ impl VirtualMemoryManager {
         Self::insert_memory_map(&mut g.memmap, map)?;
 
         g.last_search_cache = None;
+        Ok(())
+    }
+
+    pub(crate) fn add_owned_memory_map(&self, map: VirtualMemoryMap, pages: ContiguousPages) -> Result<(), &'static str> {
+        Self::validate_memory_map(&map)?;
+        if map.pmarea.start != pages.as_paddr() || map.vmarea.size() != pages.len() * PAGE_SIZE {
+            return Err("Mapping does not match physical allocation");
+        }
+        let mut inner = self.inner.write();
+        Self::insert_memory_map(&mut inner.memmap, map)?;
+        self.page_allocations.write().push(pages);
+        inner.last_search_cache = None;
         Ok(())
     }
 
@@ -1447,10 +1528,20 @@ impl VirtualMemoryManager {
         map.pmarea.start.checked_add(offset as u64)
     }
 
+    #[cfg(test)]
     fn commit_private_cow_page(
         &self,
         expected: &VirtualMemoryMap,
         replacement: VirtualMemoryMap,
+    ) -> Result<bool, &'static str> {
+        self.commit_private_cow_page_owned(expected, replacement, None)
+    }
+
+    fn commit_private_cow_page_owned(
+        &self,
+        expected: &VirtualMemoryMap,
+        replacement: VirtualMemoryMap,
+        allocation: Option<ContiguousPages>,
     ) -> Result<bool, &'static str> {
         let page_vaddr = replacement.vmarea.start;
         let page_end = page_vaddr
@@ -1543,6 +1634,9 @@ impl VirtualMemoryManager {
                 owner: current.owner.clone(),
             };
             inner.memmap.insert(right.vmarea.start, right);
+        }
+        if let Some(allocation) = allocation {
+            self.page_allocations.write().push(allocation);
         }
         inner.memmap.insert(page_vaddr, replacement);
         inner.last_search_cache = None;
@@ -1691,11 +1785,9 @@ impl VirtualMemoryManager {
                             memory_attribute: memory_map.memory_attribute,
                             owner: None,
                         };
-                        if !self.commit_private_cow_page(&memory_map, cow_map.clone())? {
-                            drop(new_alloc);
+                        if !self.commit_private_cow_page_owned(&memory_map, cow_map.clone(), Some(new_alloc))? {
                             return self.lazy_map_page_with(access);
                         }
-                        self.track_private_page_allocation(new_alloc);
                         crate::breadcrumb::drop(
                             crate::breadcrumb::LAZY_COWDONE,
                             page_vaddr as u64,
@@ -1986,7 +2078,10 @@ impl VirtualMemoryManager {
             .ok()?;
         for attempt in 0..2 {
             {
+                let asid = self.get_asid();
+                let mut root = get_root_pagetable(asid)?;
                 let inner = self.inner.read();
+                if inner.asid != asid { return None; }
                 let (_, map) = inner.memmap.range(..=vaddr).next_back()?;
                 if vaddr.checked_add(width - 1)? > map.vmarea.end
                     || !VirtualMemoryPermission::Read.contained_in(map.permissions)
@@ -1995,7 +2090,6 @@ impl VirtualMemoryManager {
                 {
                     return None;
                 }
-                let mut root = get_root_pagetable(inner.asid)?;
                 if let Some(paddr) = root.translate(vaddr) {
                     let pointer = phys_to_virt(paddr);
                     // SAFETY: the aligned scalar fits in one page and the

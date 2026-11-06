@@ -43,9 +43,7 @@ use crate::{
     ipc::{EventContent, event::ProcessControlType},
     mem::page::ContiguousPages,
     object::{
-        capability::memory_mapping::{
-            anon_owner::ForkCowPageOwner, syscall::reclaim_private_removed_mappings,
-        },
+        capability::memory_mapping::syscall::reclaim_private_removed_mappings,
         handle::HandleTable,
     },
     sched::scheduler::{
@@ -71,9 +69,6 @@ const LOG_EXIT_GROUP_SIBLINGS: bool = false;
 // physically contiguous PMM allocation. Large image and video buffers can
 // otherwise fail after physical memory becomes fragmented.
 const BRK_PHYSICAL_CHUNK_PAGES: usize = 256;
-// Copy private page allocations eagerly to isolate fork COW ownership and
-// parent page-table invalidation from the Apple SMP hang.
-const DIAGNOSTIC_DISABLE_FORK_COW: bool = false;
 /// Scheduler utilization scale used for task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = 1024;
 const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
@@ -2206,9 +2201,7 @@ impl Task {
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
-        self.vm_manager.add_memory_map(mmap.clone())?;
-
-        self.page_allocations.write().push(page_alloc);
+        self.vm_manager.add_owned_memory_map(mmap.clone(), page_alloc)?;
 
         Ok(mmap)
     }
@@ -2382,14 +2375,6 @@ impl Task {
             owner: None,
         };
         Ok(mmap)
-    }
-
-    fn take_exact_page_allocation(&self, paddr: u64, page_count: usize) -> Option<ContiguousPages> {
-        let mut allocations = self.page_allocations.write();
-        let index = allocations
-            .iter()
-            .position(|alloc| alloc.as_paddr() == paddr && alloc.len() == page_count)?;
-        Some(allocations.swap_remove(index))
     }
 
     // Set the entry point
@@ -2859,6 +2844,14 @@ impl Task {
     /// If the task cannot be cloned, an error is returned.
     ///
     pub fn clone_task(&self, flags: CloneFlags) -> Result<Task, &'static str> {
+        self.clone_task_with_vm_snapshot_hook(flags, || {})
+    }
+
+    fn clone_task_with_vm_snapshot_hook(
+        &self,
+        flags: CloneFlags,
+        after_snapshot: impl FnOnce(),
+    ) -> Result<Task, &'static str> {
         crate::breadcrumb::drop(
             crate::breadcrumb::CLONE_ENTER,
             self.registered_id().unwrap_or(0) as u64,
@@ -2903,9 +2896,8 @@ impl Task {
 
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child without cloning lists
-            let memmaps = self
-                .vm_manager
-                .with_memmaps(|maps| maps.values().cloned().collect::<Vec<_>>());
+            let memmaps = self.vm_manager.fork_snapshot()?;
+            after_snapshot();
             for mmap in memmaps {
                 if mmap.owner.as_ref().is_some_and(|owner| !owner.inherit_on_fork()) {
                     continue;
@@ -3029,37 +3021,6 @@ impl Task {
                         }
                     }
                 } else if mmap.pmarea.start != 0 {
-                    if !DIAGNOSTIC_DISABLE_FORK_COW
-                        && let Some(page_alloc) =
-                            self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
-                    {
-                        let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
-                        let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
-                        let cow_map = VirtualMemoryMap {
-                            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
-                            vmarea: mmap.vmarea,
-                            vm_start: mmap.vm_start,
-                            mapping_origin: mmap.mapping_origin,
-                            maximum_permissions: mmap.maximum_permissions,
-                            permissions: mmap.permissions,
-                            is_shared: false,
-                            memory_attribute: mmap.memory_attribute,
-                            owner: Some(cow_owner),
-                        };
-                        self.vm_manager.with_memmaps_mut(|maps| {
-                            if let Some(parent_map) = maps.get_mut(&mmap.vmarea.start) {
-                                *parent_map = cow_map.clone();
-                            }
-                        });
-                        self.vm_manager
-                            .unmap_range_from_mmu(mmap.vmarea.start, mmap.vmarea.end);
-                        child
-                            .vm_manager
-                            .add_memory_map(cow_map)
-                            .map_err(|_| "Failed to add COW memory map to child task")?;
-                        continue;
-                    }
-
                     // Private memory regions: allocate new pages and copy contents
                     let permissions = mmap.permissions;
                     let page_alloc = ContiguousPages::new(num_pages)
@@ -4548,6 +4509,114 @@ mod tests {
                 .iter()
                 .any(|allocation| allocation.as_paddr() == paddr && allocation.len() == 2)
         );
+    }
+
+    #[test_case]
+    fn fork_snapshot_retains_parent_tail_after_concurrent_prefix_unmap() {
+        fork_snapshot_partial_unmap(0);
+    }
+
+    #[test_case]
+    fn fork_snapshot_preserves_offsets_of_previously_split_allocation() {
+        use crate::environment::PAGE_SIZE;
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let parent = super::new_user_task("ForkSplit".into(), 0);
+        parent.init();
+        let base = 0x7400_0000;
+        parent.allocate_data_pages(base, 3).unwrap();
+        for page in 0..3 {
+            copy_to_user(&parent, base + page * PAGE_SIZE, &[0xa0 + page as u8]).unwrap();
+        }
+        parent.free_pages(base + PAGE_SIZE, 1);
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert!(child.vm_manager.search_memory_map(base + PAGE_SIZE).is_none());
+        let mut value = [0];
+        for page in [0, 2] {
+            copy_from_user(&child, base + page * PAGE_SIZE, &mut value).unwrap();
+            assert_eq!(value, [0xa0 + page as u8]);
+        }
+        copy_to_user(&child, base + 2 * PAGE_SIZE, &[0xb2]).unwrap();
+        copy_from_user(&parent, base + 2 * PAGE_SIZE, &mut value).unwrap();
+        assert_eq!(value, [0xa2]);
+        drop(child);
+        copy_from_user(&parent, base, &mut value).unwrap();
+        assert_eq!(value, [0xa0]);
+        copy_to_user(&parent, base + 2 * PAGE_SIZE, &[0xc2]).unwrap();
+        copy_from_user(&parent, base + 2 * PAGE_SIZE, &mut value).unwrap();
+        assert_eq!(value, [0xc2]);
+    }
+
+    #[test_case]
+    fn fork_snapshot_retains_shared_backing_and_permission_changes() {
+        use crate::environment::PAGE_SIZE;
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let parent = super::new_user_task("ForkShared".into(), 0);
+        parent.init();
+        let base = 0x7400_0000;
+        parent.allocate_data_pages(base, 1).unwrap();
+        parent.vm_manager.with_memmaps_mut(|maps| {
+            let map = maps.get_mut(&base).unwrap();
+            map.is_shared = true;
+            map.permissions &= !0x2;
+        });
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        child.vm_manager.protect_memory_map_range(
+            super::MemoryArea::new(base, base + PAGE_SIZE - 1), 3,
+        ).unwrap();
+        copy_to_user(&child, base, &[0xa5]).unwrap();
+        let mut value = [0];
+        copy_from_user(&parent, base, &mut value).unwrap();
+        assert_eq!(value, [0xa5]);
+        drop(parent);
+        copy_from_user(&child, base, &mut value).unwrap();
+        assert_eq!(value, [0xa5]);
+    }
+
+    #[test_case]
+    fn fork_snapshot_does_not_restore_concurrently_unmapped_middle_page() {
+        fork_snapshot_partial_unmap(1);
+    }
+
+    fn fork_snapshot_partial_unmap(removed_page: usize) {
+        use crate::environment::PAGE_SIZE;
+        let parent = super::new_user_task("ForkUnmap".into(), 0);
+        parent.init();
+        let base = 0x7400_0000;
+        let mapping = parent.allocate_data_pages(base, 3).unwrap();
+        for page in 0..3 {
+            unsafe {
+                core::ptr::write_bytes(
+                    phys_to_virt(mapping.pmarea.start + (page * PAGE_SIZE) as u64) as *mut u8,
+                    0xa0 + page as u8,
+                    PAGE_SIZE,
+                );
+            }
+        }
+        // This seam models a CLONE_VM sibling unmapping after the fork has
+        // sampled its VMAs, without relying on scheduler timing.
+        let child = parent.clone_task_with_vm_snapshot_hook(CloneFlags::default(), || {
+            parent.free_pages(base + removed_page * PAGE_SIZE, 1);
+        }).unwrap();
+        assert!(parent.vm_manager.search_memory_map(base + removed_page * PAGE_SIZE).is_none());
+        let tail = parent.vm_manager.search_memory_map(base + 2 * PAGE_SIZE).unwrap();
+        assert!(tail.owner.is_some() || parent.page_allocations.read().iter().any(|allocation| {
+            allocation.as_paddr() <= tail.pmarea.start
+                && tail.pmarea.end < allocation.as_paddr() + (allocation.len() * PAGE_SIZE) as u64
+        }), "surviving parent mapping lost its physical owner");
+        parent.vm_manager.with_memmaps(|maps| {
+            let mut end = None;
+            for map in maps.values() {
+                assert!(end.is_none_or(|previous| previous < map.vmarea.start));
+                end = Some(map.vmarea.end);
+            }
+        });
+        for page in 0..3 {
+            let address = child.vm_manager.translate_to_kva(base + page * PAGE_SIZE).unwrap();
+            assert_eq!(unsafe { *(address as *const u8) }, 0xa0 + page as u8);
+        }
+        drop(child);
+        let address = parent.vm_manager.translate_to_kva(base + 2 * PAGE_SIZE).unwrap();
+        assert_eq!(unsafe { *(address as *const u8) }, 0xa2);
     }
 
     #[test_case]
