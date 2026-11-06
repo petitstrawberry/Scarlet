@@ -198,12 +198,28 @@ impl Thread {
     fn can_receive(&self, endpoint: &RpcEndpoint) -> bool {
         if self.pending_receive.is_some() {true}
         else if let Some(call) = self.outgoing() {call.reentrant_ready(endpoint)}
-        else {self.looper && self.stack.is_empty() && endpoint.ready()}
+        else {self.accepts_process_work() && endpoint.ready()}
     }
     fn receive(&mut self, endpoint: &RpcEndpoint) -> Result<Option<RpcRequest>,crate::ipc::rpc::RpcError> {
         if let Some(request)=self.pending_receive.take() {return Ok(Some(request));}
         if let Some(call) = self.outgoing() {call.receive_reentrant(endpoint)}
         else {endpoint.receive()}
+    }
+
+    /// Process-wide Binder work is eligible only when this thread has no
+    /// transaction state or thread-local work still owed to userspace.
+    ///
+    /// Linux `binder_thread_read()` gives `thread->todo` priority over
+    /// `proc->todo`. In particular, a one-way `BR_TRANSACTION_COMPLETE` is
+    /// thread work and must be consumed before a process-level death notice;
+    /// death callbacks can issue nested Binder calls, so returning one first
+    /// can make an inner call consume the outer call's uncorrelated completion.
+    fn accepts_process_work(&self) -> bool {
+        self.looper
+            && self.stack.is_empty()
+            && self.completed.is_empty()
+            && self.pending_receive.is_none()
+            && self.pending_delivery.is_none()
     }
 }
 struct Completed {
@@ -659,11 +675,11 @@ impl BinderFile {
             return true;
         }
         let objects = self.objects.lock();
-        let process_work = thread.looper && thread.stack.is_empty();
+        let process_work = thread.accepts_process_work();
         if objects.deaths.ready(tid, process_work) {
             return true;
         }
-        if objects.ready(tid) {
+        if objects.ready_for(tid, process_work) {
             return true;
         }
         if objects.pending_acquisition(tid) {
@@ -776,7 +792,7 @@ impl BinderFile {
             if closed { return Err(errno::EPIPE); }
             return Ok(4);
         }
-        let process_work = thread.looper && thread.stack.is_empty();
+        let process_work = thread.accepts_process_work();
         let death = {
             let objects = self.objects.lock();
             if objects.deaths.ready(tid, process_work) {
@@ -792,7 +808,7 @@ impl BinderFile {
             drop(state);
             return record.write(task, output);
         }
-        if self.objects.lock().ready(tid) {
+        if self.objects.lock().ready_for(tid, process_work) {
             if capacity < 20 {
                 return Err(errno::ENOSPC);
             }
@@ -802,7 +818,7 @@ impl BinderFile {
                 // transport admission has committed. A failed send must drop
                 // the corresponding lease before another thread observes it.
                 let _sending = self.send_gate.lock();
-                self.objects.lock().reference_record(tid)
+                self.objects.lock().reference_record_for(tid, process_work)
             };
             return record.map_or(Ok(0), |record| record.write(task, output));
         }
@@ -1027,9 +1043,7 @@ impl BinderFile {
                 {
                     let mut state = self.state.lock();
                     let thread = state.thread_mut(task.get_id())?;
-                    thread.waiting_for_process = thread.looper && thread.stack.is_empty()
-                        && thread.completed.is_empty()
-                        && thread.pending_receive.is_none() && thread.pending_delivery.is_none();
+                    thread.waiting_for_process = thread.accepts_process_work();
                 }
                 let waited = waker.wait_result_until_owned(task.get_id(), tf, || self.ready(task.get_id()));
                 {
@@ -1788,6 +1802,60 @@ mod tests {
             .command(&task, &abi, BC_DECREFS, &0u32.to_le_bytes())
             .unwrap();
         assert!(!client.ready(1));
+    }
+
+    #[test_case]
+    fn binder_oneway_completion_precedes_process_death_with_fault_retry() {
+        let environment = Environment::new();
+        let sender = task(&environment, 1);
+        let receiver = task(&environment, 2);
+        let client = file(&sender, &environment, 0);
+        let server = file(&receiver, &environment, 0);
+        let abi = LinuxAbi::default();
+        assert_eq!(
+            server.ioctl(&receiver, &abi, &mut Trapframe::new(), SET_CONTEXT, 0, false),
+            0
+        );
+        client.ensure_thread(sender.get_id()).unwrap();
+        client
+            .command(&sender, &abi, BC_ENTER_LOOPER, &[])
+            .unwrap();
+        client
+            .command(&sender, &abi, BC_INCREFS, &0u32.to_le_bytes())
+            .unwrap();
+        let mut death = [0; 12];
+        put64(&mut death, 4, 0x1234_5678_8765_4321);
+        client
+            .command(&sender, &abi, BC_REQUEST_DEATH_NOTIFICATION, &death)
+            .unwrap();
+
+        // Queue one-way thread completion first, then make process-level
+        // death work ready. Linux still gives the thread completion priority.
+        let mut transaction = [0; 64];
+        transaction[20..24].copy_from_slice(&1u32.to_le_bytes());
+        client
+            .command(&sender, &abi, BC_TRANSACTION, &transaction)
+            .unwrap();
+        drop(server);
+
+        assert!(client.ready(sender.get_id()));
+        // A failed completion usercopy consumes neither the completion nor the
+        // queued death and must not select the latter out of order.
+        assert_eq!(
+            client.read_record(&sender, 0, 4),
+            Err(errno::EFAULT)
+        );
+        assert!(client.ready(sender.get_id()));
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        sender.allocate_stack_pages(output, 1).unwrap();
+        assert_eq!(client.read_record(&sender, output, 4), Ok(4));
+        assert_eq!(u32_at(&read::<4>(&sender, output).unwrap(), 0), BR_COMPLETE);
+        assert!(client.ready(sender.get_id()));
+        assert_eq!(client.read_record(&sender, output, 12), Ok(12));
+        assert_eq!(
+            u32_at(&read::<12>(&sender, output).unwrap(), 0),
+            death::BR_DEAD_BINDER
+        );
     }
     #[test_case]
     fn binder_shield_domain_and_relabel_cannot_reuse_foreign_authority() {

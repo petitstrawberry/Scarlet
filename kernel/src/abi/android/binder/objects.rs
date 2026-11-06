@@ -36,14 +36,19 @@ struct References {
     abandoned: bool,
 }
 impl References {
-    fn next(&self, tid: usize) -> Option<u32> {
+    fn next(&self, tid: usize, process_work: bool) -> Option<u32> {
         if self.delivering {
             return None;
         }
         if self.abandoned {
-            return if self.strong == 0 && self.has_strong {
+            return if process_work && self.strong == 0 && self.has_strong {
                 Some(BR_RELEASE)
-            } else if self.strong == 0 && self.weak == 0 && !self.has_strong && self.has_weak {
+            } else if process_work
+                && self.strong == 0
+                && self.weak == 0
+                && !self.has_strong
+                && self.has_weak
+            {
                 Some(BR_DECREFS)
             } else {
                 None
@@ -55,9 +60,9 @@ impl References {
             (self.acquisition_thread == Some(tid)).then_some(BR_INCREFS)
         } else if strong && !self.has_strong {
             (self.acquisition_thread == Some(tid)).then_some(BR_ACQUIRE)
-        } else if !strong && self.has_strong {
+        } else if process_work && !strong && self.has_strong {
             Some(BR_RELEASE)
-        } else if !weak && self.has_weak {
+        } else if process_work && !weak && self.has_weak {
             Some(BR_DECREFS)
         } else {
             None
@@ -131,8 +136,16 @@ impl Node {
         }
     }
     fn reserve_record(self: &Arc<Self>, tid: usize) -> Option<ReferenceRecord> {
+        self.reserve_record_for(tid, true)
+    }
+
+    fn reserve_record_for(
+        self: &Arc<Self>,
+        tid: usize,
+        process_work: bool,
+    ) -> Option<ReferenceRecord> {
         let mut refs = self.references.lock();
-        let command = refs.next(tid)?;
+        let command = refs.next(tid, process_work)?;
         refs.delivering = true;
         match command {
             BR_INCREFS => {
@@ -473,13 +486,19 @@ impl Objects {
         })
     }
     pub fn ready(&self, tid: usize) -> bool {
+        self.ready_for(tid, true)
+    }
+
+    /// Scope process-wide release work while retaining acquisition work
+    /// targeted to the thread that is waiting for an outgoing completion.
+    pub fn ready_for(&self, tid: usize, process_work: bool) -> bool {
         if self.closed {
             return false;
         }
         self.nodes
             .values()
             .chain(self.retired.iter())
-            .any(|node| node.references.lock().next(tid).is_some())
+            .any(|node| node.references.lock().next(tid, process_work).is_some())
     }
     pub fn pending_local_acquisitions(&self) -> bool {
         if self.closed {
@@ -488,13 +507,18 @@ impl Objects {
         self.nodes.values().any(|node| !node.acquired())
     }
     pub fn reference_record(&self, tid: usize) -> Option<ReferenceRecord> {
+        self.reference_record_for(tid, true)
+    }
+
+    /// Reserve the next reference command with the caller's process-work scope.
+    pub fn reference_record_for(&self, tid: usize, process_work: bool) -> Option<ReferenceRecord> {
         if self.closed {
             return None;
         }
         self.nodes
             .values()
             .chain(self.retired.iter())
-            .find_map(|node| node.reserve_record(tid))
+            .find_map(|node| node.reserve_record_for(tid, process_work))
     }
     pub fn abandon_thread(&mut self, tid: usize) -> Vec<Arc<RpcObject>> {
         if self.closed {
@@ -1014,6 +1038,76 @@ mod tests {
         assert!(owner.ready(3));
         drop((call, strong, weak));
     }
+
+    #[test_case]
+    fn pending_completion_allows_required_reference_work_before_process_death() {
+        let environment = Environment::new();
+        let owner = file(domain(environment.clone(), 0));
+        owner.ensure_thread(1).unwrap();
+        owner.state.lock().threads.get_mut(&1).unwrap().looper = true;
+        let lease = owner
+            .objects
+            .lock()
+            .local(&owner, 0x1000, 0x2000, 0, true, 1)
+            .unwrap();
+        let node = lease.node.clone();
+        assert!(!node.acquired());
+        owner
+            .objects
+            .lock()
+            .deaths
+            .request(0x77, 0x55aa, &node.object, &owner.endpoint.waker())
+            .unwrap();
+        owner.endpoint.close();
+        assert!(owner.objects.lock().deaths.ready(1, true));
+        owner
+            .state
+            .lock()
+            .threads
+            .get_mut(&1)
+            .unwrap()
+            .completed
+            .push_back(Completed {
+                command: BR_COMPLETE,
+                acquisitions: vec![node.clone()],
+            });
+
+        let mut task = Task::new("binder-thread-work".into(), 0, TaskType::User);
+        task.set_id(1);
+        task.set_namespace_id(1);
+        *task.execution_environment.write() = Some(environment);
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(output, 1).unwrap();
+
+        // The completion is incomplete until the thread acknowledges its
+        // referenced object. Those required BR_INCREFS/BR_ACQUIRE records must
+        // remain deliverable, but process death must still stay behind them.
+        assert!(owner.ready(1));
+        assert_eq!(owner.read_record(&task, output, 20), Ok(20));
+        assert_eq!(u32_at(&read::<20>(&task, output).unwrap(), 0), BR_INCREFS);
+        ack(&owner, BC_INCREFS_DONE).unwrap();
+
+        assert!(owner.ready(1));
+        assert_eq!(owner.read_record(&task, output, 20), Ok(20));
+        assert_eq!(u32_at(&read::<20>(&task, output).unwrap(), 0), BR_ACQUIRE);
+        ack(&owner, BC_ACQUIRE_DONE).unwrap();
+
+        // Untargeted release work is process work and must not jump ahead of
+        // the thread's completion. The reference remains eligible after the
+        // thread has no outstanding work.
+        drop(lease);
+        assert!(!owner.objects.lock().ready_for(1, false));
+        assert!(owner.objects.lock().ready_for(1, true));
+        assert!(owner.objects.lock().reference_record_for(1, false).is_none());
+        assert!(owner.ready(1));
+        assert_eq!(owner.read_record(&task, output, 4), Ok(4));
+        assert_eq!(u32_at(&read::<4>(&task, output).unwrap(), 0), BR_COMPLETE);
+        assert!(owner.ready(1));
+        assert_eq!(owner.read_record(&task, output, 12), Ok(12));
+        assert_eq!(u32_at(&read::<12>(&task, output).unwrap(), 0), death::BR_DEAD_BINDER);
+        assert_eq!(owner.read_record(&task, output, 20), Ok(20));
+        assert_eq!(u32_at(&read::<20>(&task, output).unwrap(), 0), BR_RELEASE);
+    }
     #[test_case]
     fn binder_abandoned_acquisition_revokes_only_its_node_and_releases_known_holds() {
         for acquire_delivered in [false, true] {
@@ -1200,7 +1294,7 @@ mod tests {
             node.reserve_record(1).unwrap().write(&task, 0),
             Err(errno::EFAULT)
         );
-        assert_eq!(node.references.lock().next(1), Some(BR_INCREFS));
+        assert_eq!(node.references.lock().next(1, true), Some(BR_INCREFS));
         assert_eq!(delivered(&node), BR_INCREFS);
         assert!(node.reserve_record(1).is_none());
         ack(&owner, BC_INCREFS_DONE).unwrap();

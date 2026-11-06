@@ -7,7 +7,7 @@ use crate::ipc::rpc::{RpcDeathWatch, RpcObject};
 pub(super) const BC_REQUEST_DEATH_NOTIFICATION: u32 = 0x400c630e;
 pub(super) const BC_CLEAR_DEATH_NOTIFICATION: u32 = 0x400c630f;
 pub(super) const BC_DEAD_BINDER_DONE: u32 = 0x40086310;
-const BR_DEAD_BINDER: u32 = 0x8008720f;
+pub(super) const BR_DEAD_BINDER: u32 = 0x8008720f;
 const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = 0x80087210;
 const MAX_DEATHS: usize = 1024;
 
