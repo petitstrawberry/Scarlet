@@ -4,6 +4,7 @@ mod input;
 mod bridge;
 mod mouse_wire;
 mod protocol;
+mod resize;
 use scarlet_os::{
     Handle,
     handle::capability::{StreamError, file::SeekFrom},
@@ -50,10 +51,7 @@ struct Window {
     pending_x: Option<i32>,
     pending_y: Option<i32>,
     pending_mouse: Vec<PendingMouseEvent>,
-    frame_seen: bool,
-    expected_scanout: Option<(u32, u32)>,
-    pending_resize: Option<(u32, u32)>,
-    resize_settle_ticks: u8,
+    resize: resize::Resize,
     maximized: bool,
 }
 impl Window {
@@ -130,23 +128,16 @@ impl Window {
             pending_x: None,
             pending_y: None,
             pending_mouse: Vec::new(),
-            frame_seen: false,
-            expected_scanout: None,
-            pending_resize: None,
-            resize_settle_ticks: 0,
+            resize: resize::Resize::default(),
             maximized: false,
         })
     }
-    fn resize_scanout(&mut self, width: u32, height: u32, resize_outer: bool) -> Result<bool> {
+    fn resize_scanout(&mut self, width: u32, height: u32) -> Result<bool> {
         if width == self.width && height == self.height {
             return Ok(false);
         }
-        if resize_outer {
-            let (geometry, frame) = Self::layout(width, height)?;
-            check(scene::sws_scene_resize(self.id, geometry.width, geometry.height))?;
-            self.geometry = geometry;
-            self.frame = frame;
-        }
+        // SWS owns the outer geometry. A delayed frame updates the scanout
+        // buffer only, even if the configure event has not been consumed yet.
         self.width = width;
         self.height = height;
         self.pixels.resize((width * height * 4) as usize, 0);
@@ -159,20 +150,13 @@ impl Window {
         (width, height)
     }
     fn take_pending_resize(&mut self) -> Option<(u32, u32, u32)> {
-        if self.resize_settle_ticks != 0 {
-            self.resize_settle_ticks -= 1;
-            return None;
-        }
-        let requested = self.pending_resize.take()?;
-        if requested == (self.width, self.height) {
-            return None;
-        }
-        self.expected_scanout = Some(requested);
+        let requested = self.resize.next((self.width, self.height))?;
         let dpi = (u64::from(self.geometry.scale_milli) * 160 / 1000).clamp(72, 640) as u32;
         Some((requested.0, requested.1, dpi))
     }
     fn refresh(&mut self) -> Result<()> {
         let previous_size = (self.geometry.width, self.geometry.height);
+        let previous_content = self.requested_scanout_size();
         check(unsafe { scene::sws_scene_geometry(self.id, &mut self.geometry) })?;
         let geometry_changed = previous_size != (self.geometry.width, self.geometry.height);
         self.frame = WindowChrome::new(
@@ -184,12 +168,11 @@ impl Window {
             true,
         )?;
         self.maximized = self.geometry.state & 2 != 0;
+        if previous_content != self.requested_scanout_size() {
+            self.resize.queue(self.requested_scanout_size());
+        }
         if geometry_changed {
             let content = self.frame.content();
-            if self.frame_seen {
-                self.pending_resize = Some(self.requested_scanout_size());
-                self.resize_settle_ticks = 15;
-            }
             eprintln!(
                 "android-runtime: SWS window {}x{} -> {}x{}, content {}x{}",
                 previous_size.0,
@@ -612,18 +595,16 @@ fn run() -> Result<()> {
                             }
                             protocol::FRAME => {
                                 let window = window.as_mut().ok_or("display handshake missing")?;
-                                let requested = window.expected_scanout.take();
                                 if window.resize_scanout(
                                     header.width,
                                     header.height,
-                                    requested != Some((header.width, header.height)),
                                 )? {
                                     input.resize(header.width, header.height)?;
                                 }
-                                window.frame_seen = true;
                                 window.pixels.clear();
                                 window.pixels.extend_from_slice(&bytes[protocol::HEADER..]);
                                 window.present()?;
+                                window.resize.presented((header.width, header.height));
                             }
                             protocol::VISIBLE => {
                                 let window = window.as_ref().ok_or("display handshake missing")?;
