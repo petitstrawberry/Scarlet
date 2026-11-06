@@ -937,6 +937,8 @@ mod tests {
             auto_fds: IrqSpinLock::new(BTreeMap::new()),
             state: IrqSpinLock::new(State {
                 closed: false,
+                max_threads: 0,
+                spawn: None,
                 threads: BTreeMap::new(),
                 arena: None,
                 node: (0, 0),

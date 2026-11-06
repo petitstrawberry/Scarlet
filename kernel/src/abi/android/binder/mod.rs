@@ -63,6 +63,7 @@ const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_COMPLETE: u32 = 0x7206;
 const BR_FAILED_REPLY: u32 = 0x7209;
 const BR_NOOP: u32 = 0x720c;
+const BR_SPAWN_LOOPER: u32 = 0x720d;
 // Framework BinderProxy uses this userspace flag to request AppOps collection.
 // Transport it unchanged; collection itself belongs to the Java recipient.
 const FLAG_COLLECT_NOTED_APP_OPS: u32 = 0x2;
@@ -152,6 +153,8 @@ fn domain(environment: Arc<Environment>, device: u8) -> Arc<Domain> {
 #[derive(Default)]
 struct Thread {
     looper: bool,
+    registered: bool,
+    waiting_for_process: bool,
     flush_generation: u64,
     returned_flush: u64,
     completed: VecDeque<Completed>,
@@ -212,14 +215,32 @@ impl Completed {
         self.acquisitions.iter().all(|node| node.acquired())
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpawnRequest {
+    Writing(usize),
+    Requested,
+}
 struct State {
     closed: bool,
+    max_threads: usize,
+    spawn: Option<SpawnRequest>,
     threads: BTreeMap<usize, Thread>,
     arena: Option<Arc<Arena>>,
     node: (usize, usize),
     node_flags: u32,
 }
 impl State {
+    fn can_spawn(&self, tid: usize) -> bool {
+        !self.closed
+            && self.spawn.is_none()
+            && self.threads.get(&tid).is_some_and(|thread| thread.looper)
+            && self.threads.values().filter(|thread| thread.registered).count() < self.max_threads
+            && self.threads.len() < MAX_THREADS
+            && !self.threads.iter().any(|(&other, thread)| {
+                other != tid && thread.waiting_for_process
+            })
+    }
+
     fn thread(&self, tid: usize) -> Option<&Thread> {
         if self.closed { None } else { self.threads.get(&tid) }
     }
@@ -252,6 +273,8 @@ pub(super) fn new_file(task: &Task, device: u8) -> Result<Arc<BinderFile>, usize
         objects: IrqSpinLock::new(Objects::default()),
         state: IrqSpinLock::new(State {
             closed: false,
+            max_threads: 0,
+            spawn: None,
             threads: BTreeMap::new(),
             arena: None,
             node: (0, 0),
@@ -321,6 +344,11 @@ impl BinderFile {
                     if n as usize > MAX_THREADS {
                         Err(errno::EINVAL)
                     } else {
+                        let mut state = self.state.lock();
+                        if state.closed { return Err(errno::EPIPE); }
+                        state.max_threads = n as usize;
+                        drop(state);
+                        self.endpoint.waker().wake_all();
                         Ok(())
                     }
                 }
@@ -400,7 +428,28 @@ impl BinderFile {
                 }
             }
             BC_ENTER_LOOPER | BC_REGISTER_LOOPER | BC_EXIT_LOOPER => {
-                self.state.lock().thread_mut(tid)?.looper = command != BC_EXIT_LOOPER;
+                let mut state = self.state.lock();
+                if command == BC_REGISTER_LOOPER {
+                    if state.thread_mut(tid)?.looper
+                        || state.spawn != Some(SpawnRequest::Requested)
+                    {
+                        return Err(errno::EINVAL);
+                    }
+                    state.spawn = None;
+                    let thread = state.thread_mut(tid)?;
+                    thread.looper = true;
+                    thread.registered = true;
+                } else {
+                    let thread = state.thread_mut(tid)?;
+                    if command == BC_ENTER_LOOPER && thread.looper {
+                        return Err(errno::EINVAL);
+                    }
+                    thread.looper = command == BC_ENTER_LOOPER;
+                    thread.registered = false;
+                    thread.waiting_for_process = false;
+                }
+                drop(state);
+                self.endpoint.waker().wake_all();
             }
             BC_FREE_BUFFER => {
                 let state = self.state.lock();
@@ -599,6 +648,12 @@ impl BinderFile {
         if thread.flush_generation != thread.returned_flush {
             return true;
         }
+        // A looper can be blocked in an outgoing call while unrelated work is
+        // queued for its process. Wake it to grow the pool; that work must not
+        // be delivered as if it were a callback in the outstanding call chain.
+        if state.can_spawn(tid) && self.endpoint.ready() {
+            return true;
+        }
         if thread.pending_delivery.as_ref().and_then(|delivery| delivery.incoming.as_ref())
             .is_some_and(RpcRequest::cancelled) {
             return true;
@@ -633,7 +688,13 @@ impl BinderFile {
         self.endpoint.waker()
     }
     fn thread_exit(&self, tid: usize) {
-        let removed = self.state.lock().threads.remove(&tid);
+        let removed = {
+            let mut state = self.state.lock();
+            if state.spawn == Some(SpawnRequest::Writing(tid)) {
+                state.spawn = None;
+            }
+            state.threads.remove(&tid)
+        };
         let revoked = {
             let mut objects = self.objects.lock();
             objects.deaths.thread_exit(tid);
@@ -695,6 +756,24 @@ impl BinderFile {
             // Usercopy may fault or race another close. A failed copy does not
             // consume the notification, and a newer generation stays pending.
             self.state.lock().thread_mut(tid)?.returned_flush = generation;
+            return Ok(4);
+        }
+        if state.can_spawn(tid) && self.endpoint.ready() {
+            if capacity < 4 { return Err(errno::ENOSPC); }
+            // Reserve one request before dropping the lock for faultable
+            // usercopy. A failed copy must not permanently consume pool space.
+            state.spawn = Some(SpawnRequest::Writing(tid));
+            drop(state);
+            let copied = write(task, output, &BR_SPAWN_LOOPER.to_le_bytes());
+            let mut state = self.state.lock();
+            if state.spawn == Some(SpawnRequest::Writing(tid)) {
+                state.spawn = copied.as_ref().ok().map(|_| SpawnRequest::Requested);
+            }
+            let closed = state.closed;
+            drop(state);
+            self.endpoint.waker().wake_all();
+            copied?;
+            if closed { return Err(errno::EPIPE); }
             return Ok(4);
         }
         let process_work = thread.looper && thread.stack.is_empty();
@@ -945,9 +1024,19 @@ impl BinderFile {
                     return Err(errno::EAGAIN);
                 }
                 let waker = self.waiter(task.get_id());
-                if waker.wait_result_until_owned(task.get_id(), tf, || self.ready(task.get_id()))
-                    == WaitResult::Interrupted
                 {
+                    let mut state = self.state.lock();
+                    let thread = state.thread_mut(task.get_id())?;
+                    thread.waiting_for_process = thread.looper && thread.stack.is_empty()
+                        && thread.completed.is_empty()
+                        && thread.pending_receive.is_none() && thread.pending_delivery.is_none();
+                }
+                let waited = waker.wait_result_until_owned(task.get_id(), tf, || self.ready(task.get_id()));
+                {
+                    let mut state = self.state.lock();
+                    state.thread_mut(task.get_id())?.waiting_for_process = false;
+                }
+                if waited == WaitResult::Interrupted {
                     return Err(errno::EINTR);
                 }
             }
@@ -1021,6 +1110,7 @@ impl BinderFile {
                 return;
             }
             state.closed = true;
+            state.spawn = None;
             let mut threads = Vec::new();
             // Keep empty thread tombstones for ioctl callers already inside the
             // adapter; `closed` rejects those callers after their lock release.
@@ -1180,6 +1270,8 @@ mod tests {
             objects: IrqSpinLock::new(Objects::default()),
             state: IrqSpinLock::new(State {
                 closed: false,
+                max_threads: 0,
+                spawn: None,
                 threads: BTreeMap::new(),
                 arena: None,
                 node: (0, 0),
@@ -1239,6 +1331,105 @@ mod tests {
         // An untrusted serialized euid cannot replace the native snapshot.
         message.bytes[8..12].copy_from_slice(&0u32.to_le_bytes());message
     }
+    fn pool_limit(file: &BinderFile, task: &Task, output: usize, limit: u32) {
+        write(task, output, &limit.to_le_bytes()).unwrap();
+        assert_eq!(file.ioctl(task, &LinuxAbi::default(), &mut Trapframe::new(),
+            SET_MAX_THREADS, output, false), 0);
+    }
+
+    #[test_case]
+    fn binder_pool_spawn_is_bounded_retries_failed_copy_and_replaces_exited_workers() {
+        let (server, client, file, _, output) = context_fixture();
+        let abi = LinuxAbi::default();
+        let peer = RpcEndpoint::new();
+        let _call = file.endpoint.send_scoped_from(&client, context_message(), &peer, None).unwrap();
+        assert!(!file.state.lock().can_spawn(server.get_id()));
+        pool_limit(&file, &server, output, 1);
+        assert_eq!(file.read_record(&server, output, 3), Err(errno::ENOSPC));
+        assert_eq!(file.read_record(&server, 0, 4), Err(errno::EFAULT));
+        assert!(file.state.lock().can_spawn(server.get_id()));
+        assert_eq!(file.read_record(&server, output, 4), Ok(4));
+        assert_eq!(u32_at(&read::<4>(&server, output).unwrap(), 0), BR_SPAWN_LOOPER);
+        assert!(!file.state.lock().can_spawn(server.get_id()));
+
+        let worker = task(&file.domain.environment, 303);
+        file.ensure_thread(worker.get_id()).unwrap();
+        file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]).unwrap();
+        assert_eq!(file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]), Err(errno::EINVAL));
+        assert!(!file.state.lock().can_spawn(server.get_id()));
+        pool_limit(&file, &server, output, 2);
+        file.state.lock().thread_mut(worker.get_id()).unwrap().waiting_for_process = true;
+        assert!(!file.state.lock().can_spawn(server.get_id()));
+        // An already waiting receiver can dispatch queued work without growth.
+        assert!(file.ready(worker.get_id()));
+        file.state.lock().thread_mut(worker.get_id()).unwrap().waiting_for_process = false;
+        pool_limit(&file, &server, output, 1);
+        file.command(&worker, &abi, BC_EXIT_LOOPER, &[]).unwrap();
+        assert!(file.state.lock().can_spawn(server.get_id()));
+        assert_eq!(file.read_record(&server, output, 4), Ok(4));
+        file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]).unwrap();
+        file.thread_exit(worker.get_id());
+        assert!(file.state.lock().can_spawn(server.get_id()));
+        pool_limit(&file, &server, output, 0);
+        assert!(!file.state.lock().can_spawn(server.get_id()));
+        assert_eq!(file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]), Err(errno::EPIPE));
+    }
+
+    #[test_case]
+    fn binder_pool_growth_breaks_unrelated_synchronous_call_cycle() {
+        let environment = Environment::new();
+        let mut first = task(&environment, 401);
+        let mut second = task(&environment, 402);
+        let a = file(&first, &environment, 0);
+        let b = file(&second, &environment, 0);
+        let abi = LinuxAbi::default();
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        for (file, task) in [(&a, &first), (&b, &second)] {
+            file.ensure_thread(task.get_id()).unwrap();
+            file.command(task, &abi, BC_ENTER_LOOPER, &[]).unwrap();
+            task.allocate_stack_pages(output, 1).unwrap();
+            assert!(file.mmap(task, 0, 256 * 1024, 1, 2, 0) < usize::MAX - 4096);
+        }
+        // These calls have different roots: neither may be delivered through
+        // the other's synchronous callback stack. This is the SF/permission
+        // service cycle when each process has only its original pool looper.
+        let a_call = b.endpoint.send_scoped(context_message(), &a.endpoint, None).unwrap();
+        let b_call = a.endpoint.send_scoped(context_message(), &b.endpoint, None).unwrap();
+        a.state.lock().thread_mut(401).unwrap().stack.push(Transaction::Outgoing(a_call));
+        b.state.lock().thread_mut(402).unwrap().stack.push(Transaction::Outgoing(b_call));
+        for (file, task) in [(&a, &first), (&b, &second)] {
+            assert!(!file.state.lock().threads[&task.get_id()].can_receive(&file.endpoint));
+            assert!(!file.ready(task.get_id()));
+            assert_eq!(file.read_record(task, output, 68), Ok(0));
+            pool_limit(file, task, output, 1);
+            assert!(file.ready(task.get_id()));
+            assert_eq!(file.read_record(task, output, 68), Ok(4));
+            assert_eq!(u32_at(&read::<4>(task, output).unwrap(), 0), BR_SPAWN_LOOPER);
+        }
+        first.set_id(403);
+        second.set_id(404);
+        for (file, task) in [(&a, &first), (&b, &second)] {
+            file.ensure_thread(task.get_id()).unwrap();
+            file.command(task, &abi, BC_REGISTER_LOOPER, &[]).unwrap();
+            assert_eq!(file.read_record(task, output, 68), Ok(68));
+            let record = read::<68>(task, output).unwrap();
+            assert_eq!(u32_at(&record, 0), BR_TRANSACTION);
+            let arena = file.state.lock().arena.clone().unwrap();
+            file.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+            file.command(task, &abi, BC_REPLY, &[0; 64]).unwrap();
+        }
+        first.set_id(401);
+        second.set_id(402);
+        for (file, task) in [(&a, &first), (&b, &second)] {
+            assert_eq!(file.read_record(task, output, 68), Ok(68));
+            let record = read::<68>(task, output).unwrap();
+            assert_eq!(u32_at(&record, 0), BR_REPLY);
+            assert!(file.state.lock().threads[&task.get_id()].stack.is_empty());
+            let arena = file.state.lock().arena.clone().unwrap();
+            file.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+        }
+    }
+
     #[test_case]
     fn binder_receive_backpressure_retains_native_request_until_space_is_freed() {
         let (server, client, endpoint, _, output) = context_fixture();
