@@ -34,6 +34,29 @@ static int imported_copy(gralloc_module_t *module,buffer_handle_t buffer) {
     copy->data[7]--;CHECK(module->registerBuffer(module,copy)==-EINVAL);
     close(copy->data[0]);free(copy);return 0;
 }
+static int edge_quad_case(gralloc_module_t *module,alloc_device_t *allocator,
+                          int width,int height,int format,int pixel_bytes) {
+    buffer_handle_t buffer=NULL;int stride;
+    CHECK(allocator->alloc(allocator,width,height,format,
+          GRALLOC_USAGE_HW_RENDER|GRALLOC_USAGE_SW_READ_OFTEN,&buffer,&stride)==0);
+    CHECK(module->validateBufferSize(module,buffer,width,height,format,0,stride)==0);
+    CHECK(module->validateBufferSize(module,buffer,width,height+1,format,0,stride)==-EINVAL);
+    /* The renderer reads both rows of an edge quad before masking its result.
+     * This read passed the old mmap's page boundary at 845x493 and 992x631. */
+    off_t lower_row=(off_t)stride*height*pixel_bytes;
+    off_t last_pair=lower_row+((width-1)&~1)*pixel_bytes;
+    unsigned char pair[8]={0xff};
+    CHECK(pread(buffer->data[0],pair,2*pixel_bytes,last_pair)==2*pixel_bytes);
+    for(int i=0;i<2*pixel_bytes;i++)CHECK(pair[i]==0);
+    void *mapped=NULL;
+    CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_READ_OFTEN,0,0,width,height,&mapped)==0);
+    volatile unsigned char *edge=(volatile unsigned char *)mapped+last_pair;
+    CHECK(edge[0]==0 && edge[2*pixel_bytes-1]==0);
+    CHECK(module->unlock(module,buffer)==0);
+    CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_READ_OFTEN,0,height,1,1,&mapped)==-EINVAL);
+    CHECK(allocator->free(allocator,buffer)==0);
+    return 0;
+}
 static int framebuffer_case(void) {
     gralloc_module_t *module=&HAL_MODULE_INFO_SYM;framebuffer_device_t *fb=NULL;
     for (int i=0;i<100 && !fb;i++) {
@@ -64,6 +87,9 @@ int main(int argc,char **argv) {
     gralloc_module_t *module=&HAL_MODULE_INFO_SYM;
     alloc_device_t *allocator=NULL;
     CHECK(gralloc_open(&module->common,&allocator)==0 && allocator);
+    CHECK(edge_quad_case(module,allocator,845,493,HAL_PIXEL_FORMAT_RGBA_8888,4)==0);
+    CHECK(edge_quad_case(module,allocator,992,631,HAL_PIXEL_FORMAT_BGRA_8888,4)==0);
+    CHECK(edge_quad_case(module,allocator,845,493,HAL_PIXEL_FORMAT_RGB_565,2)==0);
     buffer_handle_t buffer=NULL;int stride;
     CHECK(allocator->alloc(allocator,17,9,HAL_PIXEL_FORMAT_RGBA_8888,
           GRALLOC_USAGE_SW_READ_OFTEN|GRALLOC_USAGE_SW_WRITE_OFTEN,&buffer,&stride)==0);
@@ -78,7 +104,10 @@ int main(int argc,char **argv) {
     CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_WRITE_OFTEN,0,0,17,9,&mapped)==0);
     CHECK(((uint32_t *)mapped)[0]==0);((uint32_t *)mapped)[0]=0x12345678;
     CHECK(allocator->free(allocator,buffer)==-EBUSY);
-    CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_READ_OFTEN,0,0,17,9,&mapped)==-EBUSY);
+    CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_WRITE_OFTEN,0,0,17,9,&mapped)==-EBUSY);
+    CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_READ_OFTEN,0,0,17,9,&mapped)==0);
+    CHECK(module->unlock(module,buffer)==0);
+    CHECK(allocator->free(allocator,buffer)==-EBUSY);
     CHECK(module->unlock(module,buffer)==0);
     pid_t pid=fork();CHECK(pid>=0);
     if (!pid) _exit(imported_copy(module,buffer));

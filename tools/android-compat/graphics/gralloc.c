@@ -54,7 +54,9 @@ static int layout(int width, int height, int format, int *stride, size_t *length
     int bpp = pixel_bytes(format);
     if (!bpp || width < 1 || height < 1 || width > MAX_DIMENSION || height > MAX_DIMENSION) return -EINVAL;
     *stride = (width + 63 / bpp) & ~(63 / bpp);
-    *length = (size_t)*stride * height * bpp;
+    /* SwiftShader's 2x2 color paths load the masked lower row, so odd heights need one physical row. */
+    size_t physical_height = (size_t)height + height % 2;
+    *length = (size_t)*stride * physical_height * bpp;
     return *length <= MAX_BUFFER_BYTES ? 0 : -ENOMEM;
 }
 static int describe(buffer_handle_t handle, struct stat *statbuf, size_t *length) {
