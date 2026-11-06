@@ -213,10 +213,23 @@ impl Completed {
     }
 }
 struct State {
+    closed: bool,
     threads: BTreeMap<usize, Thread>,
     arena: Option<Arc<Arena>>,
     node: (usize, usize),
     node_flags: u32,
+}
+impl State {
+    fn thread(&self, tid: usize) -> Option<&Thread> {
+        if self.closed { None } else { self.threads.get(&tid) }
+    }
+
+    fn thread_mut(&mut self, tid: usize) -> Result<&mut Thread, usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
+        self.threads.get_mut(&tid).ok_or(errno::EPIPE)
+    }
 }
 pub(crate) struct BinderFile {
     owner: usize,
@@ -237,7 +250,13 @@ pub(super) fn new_file(task: &Task, device: u8) -> Result<Arc<BinderFile>, usize
         domain: domain(environment, device), endpoint: RpcEndpoint::new(),
         send_gate: IrqSpinLock::new(()), auto_fds: IrqSpinLock::new(BTreeMap::new()),
         objects: IrqSpinLock::new(Objects::default()),
-        state: IrqSpinLock::new(State { threads: BTreeMap::new(), arena: None, node: (0, 0), node_flags: 0 }),
+        state: IrqSpinLock::new(State {
+            closed: false,
+            threads: BTreeMap::new(),
+            arena: None,
+            node: (0, 0),
+            node_flags: 0,
+        }),
     }))
 }
 
@@ -259,13 +278,20 @@ impl BinderFile {
                 .as_ref()
                 .is_some_and(|environment| Arc::ptr_eq(environment, &self.domain.environment))
         {
-            Ok(())
+            if self.state.lock().closed {
+                Err(errno::EPIPE)
+            } else {
+                Ok(())
+            }
         } else {
             Err(errno::EINVAL)
         }
     }
     fn ensure_thread(&self, tid: usize) -> Result<(), usize> {
         let mut state = self.state.lock();
+        if state.closed {
+            return Err(errno::EPIPE);
+        }
         if !state.threads.contains_key(&tid) {
             if state.threads.len() >= MAX_THREADS {
                 return Err(errno::ENOMEM);
@@ -285,6 +311,9 @@ impl BinderFile {
     ) -> usize {
         let result = (|| {
             self.check_owner(task)?;
+            if self.state.lock().closed {
+                return Err(errno::EPIPE);
+            }
             match request {
                 VERSION => write(task, arg, &8i32.to_le_bytes()),
                 SET_MAX_THREADS => {
@@ -317,7 +346,11 @@ impl BinderFile {
                     {
                         return Err(errno::EBUSY);
                     }
-                    {let mut state=self.state.lock();state.node=node.0;state.node_flags=node.1;}
+                    {
+                        let mut state=self.state.lock();
+                        if state.closed { return Err(errno::EPIPE); }
+                        state.node=node.0;state.node_flags=node.1;
+                    }
                     *context = Some(Context {
                         endpoint: Arc::downgrade(&self.endpoint),
                         object: self.endpoint.create_object().map_err(|_| errno::ENOMEM)?,
@@ -338,6 +371,9 @@ impl BinderFile {
     fn command(&self, task: &Task, abi: &LinuxAbi, command: u32, data: &[u8]) -> Result<(), usize> {
         let command=match command {BC_TRANSACTION_SG=>BC_TRANSACTION,BC_REPLY_SG=>BC_REPLY,other=>other};
         let tid = task.get_id();
+        if self.state.lock().closed {
+            return Err(errno::EPIPE);
+        }
         match command {
             BC_REQUEST_DEATH_NOTIFICATION => {
                 self.objects
@@ -348,12 +384,13 @@ impl BinderFile {
                 let target = self
                     .state
                     .lock()
-                    .threads
-                    .get(&tid)
-                    .unwrap()
-                    .looper
+                    .thread(tid)
+                    .map_or(false, |thread| thread.looper)
                     .then_some(tid);
                 let mut objects = self.objects.lock();
+                if objects.is_closed() {
+                    return Err(errno::EPIPE);
+                }
                 if command == BC_CLEAR_DEATH_NOTIFICATION {
                     objects
                         .deaths
@@ -363,10 +400,15 @@ impl BinderFile {
                 }
             }
             BC_ENTER_LOOPER | BC_REGISTER_LOOPER | BC_EXIT_LOOPER => {
-                self.state.lock().threads.get_mut(&tid).unwrap().looper = command != BC_EXIT_LOOPER;
+                self.state.lock().thread_mut(tid)?.looper = command != BC_EXIT_LOOPER;
             }
             BC_FREE_BUFFER => {
-                let arena = self.state.lock().arena.clone().ok_or(errno::EINVAL)?;
+                let state = self.state.lock();
+                if state.closed {
+                    return Err(errno::EPIPE);
+                }
+                let arena = state.arena.clone().ok_or(errno::EINVAL)?;
+                drop(state);
                 self.release_buffer(&arena, u64_at(data, 0))?;
                 // A process can have more outstanding synchronous Binder calls
                 // than receive slots. Releasing one buffer must wake loopers
@@ -401,6 +443,9 @@ impl BinderFile {
                 // All fallible usercopy precedes this IRQ lock. A failed send
                 // releases its leases before another exporter can adopt them.
                 let _sending = self.send_gate.lock();
+                if self.state.lock().closed {
+                    return Err(errno::EPIPE);
+                }
                 let target = if command == BC_TRANSACTION && number != 0 {
                     Some(self.objects.lock().target(number as u32)?)
                 } else {
@@ -412,7 +457,7 @@ impl BinderFile {
                     let accepts=if command==BC_TRANSACTION {
                         target.as_ref().is_some_and(|target|target.node.accepts_fds())
                     } else {
-                        self.state.lock().threads.get(&tid).is_some_and(|thread|thread.incoming().is_some_and(|incoming| incoming.accepts_fds))
+                        self.state.lock().thread(tid).is_some_and(|thread|thread.incoming().is_some_and(|incoming| incoming.accepts_fds))
                     };
                     if !accepts {return Err(errno::EPERM);}
                 }
@@ -435,7 +480,7 @@ impl BinderFile {
                         None
                     };
                     let mut state = self.state.lock();
-                    let thread = state.threads.get_mut(&tid).unwrap();
+                    let thread = state.thread_mut(tid)?;
                     if !oneway {
                         if thread.outgoing().is_some() {return Err(errno::EINVAL);}
                         if thread.stack.len() >= crate::ipc::rpc::MAX_CALL_DEPTH {return Err(errno::E2BIG);}
@@ -506,7 +551,7 @@ impl BinderFile {
                 } else {
                     let request = {
                         let mut state = self.state.lock();
-                        let thread = state.threads.get_mut(&tid).unwrap();
+                        let thread = state.thread_mut(tid)?;
                         if thread.completed.len() >= crate::ipc::rpc::MAX_IN_FLIGHT {
                             return Err(errno::EAGAIN);
                         }
@@ -517,13 +562,8 @@ impl BinderFile {
                         }
                     };
                     let _ = request.reply(message);
-                    self.state
-                        .lock()
-                        .threads
-                        .get_mut(&tid)
-                        .unwrap()
-                        .completed
-                        .push_back(Completed {
+                    let mut state = self.state.lock();
+                    state.thread_mut(tid)?.completed.push_back(Completed {
                             command: BR_COMPLETE,
                             acquisitions,
                         });
@@ -539,6 +579,9 @@ impl BinderFile {
         // app_process closes the driver while a Binder pool thread is waiting.
         {
             let mut state = self.state.lock();
+            if state.closed {
+                return;
+            }
             for thread in state.threads.values_mut() {
                 thread.flush_generation = thread.flush_generation.wrapping_add(1);
             }
@@ -547,6 +590,9 @@ impl BinderFile {
     }
     fn ready(&self, tid: usize) -> bool {
         let state = self.state.lock();
+        if state.closed {
+            return true;
+        }
         let Some(thread) = state.threads.get(&tid) else {
             return false;
         };
@@ -618,21 +664,27 @@ impl BinderFile {
         self.read_record_for_abi(task,None,output,capacity)
     }
     fn read_record_for_abi(&self,task:&Task,abi:Option<&LinuxAbi>,output:usize,capacity:usize)->Result<usize,usize> {
-        if self.domain.device==1 && task.deadline_enabled() {return Err(errno::EOPNOTSUPP);}
         let mut state = self.state.lock();
+        if state.closed {
+            return Err(errno::EPIPE);
+        }
+        if self.domain.device==1 && task.deadline_enabled() {return Err(errno::EOPNOTSUPP);}
         let tid = task.get_id();
-        if state.threads.get(&tid).unwrap().pending_receive.as_ref().is_some_and(RpcRequest::cancelled) {
-            let cancelled=state.threads.get_mut(&tid).unwrap().pending_receive.take();
+        let thread = state.thread(tid).ok_or(errno::EPIPE)?;
+        let cancel_receive = thread.pending_receive.as_ref().is_some_and(RpcRequest::cancelled);
+        let cancel_delivery = thread.pending_delivery.as_ref()
+            .and_then(|delivery| delivery.incoming.as_ref()).is_some_and(RpcRequest::cancelled);
+        if cancel_receive {
+            let cancelled=state.thread_mut(tid)?.pending_receive.take();
             drop(state);drop(cancelled);
             return self.read_record_for_abi(task,abi,output,capacity);
         }
-        if state.threads.get(&tid).unwrap().pending_delivery.as_ref()
-            .and_then(|delivery| delivery.incoming.as_ref()).is_some_and(RpcRequest::cancelled) {
-            let cancelled = state.threads.get_mut(&tid).unwrap().pending_delivery.take();
+        if cancel_delivery {
+            let cancelled = state.thread_mut(tid)?.pending_delivery.take();
             drop(state); drop(cancelled);
             return self.read_record_for_abi(task, abi, output, capacity);
         }
-        let thread = state.threads.get(&tid).unwrap();
+        let thread = state.thread(tid).ok_or(errno::EPIPE)?;
         if thread.flush_generation != thread.returned_flush {
             if capacity < 4 {
                 return Err(errno::ENOSPC);
@@ -642,12 +694,7 @@ impl BinderFile {
             write(task, output, &BR_NOOP.to_le_bytes())?;
             // Usercopy may fault or race another close. A failed copy does not
             // consume the notification, and a newer generation stays pending.
-            self.state
-                .lock()
-                .threads
-                .get_mut(&tid)
-                .unwrap()
-                .returned_flush = generation;
+            self.state.lock().thread_mut(tid)?.returned_flush = generation;
             return Ok(4);
         }
         let process_work = thread.looper && thread.stack.is_empty();
@@ -685,7 +732,7 @@ impl BinderFile {
         if self.objects.lock().pending_acquisition(tid) {
             return Ok(0);
         }
-        if let Some(completed) = state.threads.get(&tid).unwrap().completed.front() {
+        if let Some(completed) = state.thread(tid).and_then(|thread| thread.completed.front()) {
             // Another thread may have begun this node's weak acquisition
             // before this sender exported it strongly. Both exporters retain
             // their userspace references until all needed holds are confirmed.
@@ -700,13 +747,7 @@ impl BinderFile {
             // across that operation. Only this task consumes its thread queue.
             drop(state);
             write(task, output, &command.to_le_bytes())?;
-            self.state
-                .lock()
-                .threads
-                .get_mut(&tid)
-                .unwrap()
-                .completed
-                .pop_front();
+            self.state.lock().thread_mut(tid)?.completed.pop_front();
             return Ok(4);
         }
         // A target or a returned local object embeds userspace pointers. Hold
@@ -715,7 +756,7 @@ impl BinderFile {
         if self.objects.lock().pending_local_acquisitions() {
             return Ok(0);
         }
-        let thread = state.threads.get(&tid).unwrap();
+        let thread = state.thread(tid).ok_or(errno::EPIPE)?;
         let replying = thread.pending_receive.is_none() && thread.outgoing().is_some_and(RpcCall::ready);
         let receiving = thread.can_receive(&self.endpoint);
         if thread.pending_delivery.is_none() && !replying && !receiving {
@@ -725,16 +766,16 @@ impl BinderFile {
             return Err(errno::ENOSPC);
         }
         let arena = state.arena.clone().ok_or(errno::EINVAL)?;
-        let delivery = if let Some(delivery) = state.threads.get_mut(&tid).unwrap().pending_delivery.take() {
+        let delivery = if let Some(delivery) = state.thread_mut(tid)?.pending_delivery.take() {
             delivery
         } else if replying {
-            let message = match state.threads.get_mut(&tid).unwrap().stack.pop().unwrap() {
+            let message = match state.thread_mut(tid)?.stack.pop().ok_or(errno::EPIPE)? {
                 Transaction::Outgoing(call) => call.take_reply().unwrap(),
                 _ => unreachable!(),
             };
             Delivery { message, incoming: None, replying: true }
         } else {
-            match state.threads.get_mut(&tid).unwrap().receive(&self.endpoint) {
+            match state.thread_mut(tid)?.receive(&self.endpoint) {
                 Ok(Some(mut request)) => {
                     let message = core::mem::replace(&mut request.message, objects::message_empty());
                     Delivery { message: Ok(message), incoming: Some(request), replying: false }
@@ -745,7 +786,7 @@ impl BinderFile {
         let address = match arena.reserve(delivery.allocation_size()) {
             Ok(address) => address,
             Err(errno::ENOSPC) => {
-                state.threads.get_mut(&tid).unwrap().pending_delivery = Some(delivery);
+                state.thread_mut(tid)?.pending_delivery = Some(delivery);
                 return Ok(0);
             }
             Err(error) => return Err(error),
@@ -775,7 +816,7 @@ impl BinderFile {
                 // Keep the delivered native request, route and its immutable
                 // sender snapshot intact until the caller supplies room.
                 let mut request=incoming.take().unwrap();request.message=message;
-                self.state.lock().threads.get_mut(&tid).unwrap().pending_receive=Some(request);
+                self.state.lock().thread_mut(tid)?.pending_receive=Some(request);
                 return Err(errno::ENOSPC);
             }
             let sender=incoming.as_ref().and_then(RpcRequest::sender);
@@ -815,15 +856,18 @@ impl BinderFile {
             if let Some(installed)=installed {
                 let automatic=installed.commit();
                 if !automatic.is_empty() {
-                    let previous=self.auto_fds.lock().insert(address,automatic);
-                    drop(previous);
+                    self.retain_auto_fds(address,automatic)?;
                 }
             }
             if let Some(request) = incoming.take() {
                 if request.is_oneway() {
-                    self.objects.lock().oneway.insert(address, request);
+                    let queued = self.objects.lock().queue_oneway(address, request);
+                    if let Err((error, request)) = queued {
+                        drop(request);
+                        return Err(error);
+                    }
                 } else {
-                    let mut state=self.state.lock();let thread=state.threads.get_mut(&tid).unwrap();
+                    let mut state=self.state.lock();let thread=state.thread_mut(tid)?;
                     thread.stack.push(Transaction::Incoming(Incoming {
                         accepts_fds:u32_at(&message.bytes,0)&0x10!=0, request,
                     }));
@@ -914,6 +958,27 @@ impl BinderFile {
     }
 }
 
+/// Tear down Binder files owned by a process before its shared descriptor table
+/// is cleared. A retained `ioctl` Arc may still reference the file, so endpoint
+/// and lease destruction must be explicit rather than waiting for final drop.
+pub(super) fn process_exit(task: &Task) {
+    let owner = task.get_thread_group_id();
+    let files: Vec<_> = task
+        .handle_table
+        .active_handles()
+        .into_iter()
+        .filter_map(|handle| task.handle_table.get(handle))
+        .filter(|object| {
+            from_object(object).is_some_and(|file| file.owner == owner)
+        })
+        .collect();
+    for object in files {
+        if let Some(file) = from_object(&object) {
+            file.close_owned_process();
+        }
+    }
+}
+
 pub(super) fn task_exit(task: &Task) {
     for handle in task.handle_table.active_handles() {
         if let Some(object) = task.handle_table.get(handle) {
@@ -923,6 +988,65 @@ pub(super) fn task_exit(task: &Task) {
                 }
             }
         }
+    }
+}
+
+impl BinderFile {
+    fn retain_auto_fds(
+        &self,
+        address: usize,
+        descriptors: Vec<crate::abi::linux::generic::DescriptorReceipt>,
+    ) -> Result<(), usize> {
+        let state = self.state.lock();
+        if state.closed {
+            drop(state);
+            drop(descriptors);
+            return Err(errno::EPIPE);
+        }
+        let previous = {
+            let mut fds = self.auto_fds.lock();
+            fds.insert(address, descriptors)
+        };
+        drop(state);
+        // Receipt teardown may close descriptors or wake waiters.
+        drop(previous);
+        Ok(())
+    }
+
+    fn close_owned_process(&self) {
+        let send_gate = self.send_gate.lock();
+        let (threads, arena) = {
+            let mut state = self.state.lock();
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            let mut threads = Vec::new();
+            // Keep empty thread tombstones for ioctl callers already inside the
+            // adapter; `closed` rejects those callers after their lock release.
+            for thread in state.threads.values_mut() {
+                threads.push(core::mem::take(thread));
+            }
+            (threads, state.arena.take())
+        };
+        drop(send_gate);
+        let retained = {
+            let mut objects = self.objects.lock();
+            objects.close()
+        };
+        let auto_fds = {
+            let mut fds = self.auto_fds.lock();
+            core::mem::take(&mut *fds)
+        };
+
+        // Request cancellation, remote reference release and fd teardown can
+        // all wake another endpoint. Keep them outside Binder locks.
+        self.endpoint.close();
+        drop(retained);
+        drop(threads);
+        drop(auto_fds);
+        drop(arena);
+        self.endpoint.waker().wake_all();
     }
 }
 
@@ -1055,6 +1179,7 @@ mod tests {
             auto_fds: IrqSpinLock::new(BTreeMap::new()),
             objects: IrqSpinLock::new(Objects::default()),
             state: IrqSpinLock::new(State {
+                closed: false,
                 threads: BTreeMap::new(),
                 arena: None,
                 node: (0, 0),
@@ -1283,6 +1408,7 @@ mod tests {
         assert!(!file.ready(1) && !file.ready(2));
         let abi = LinuxAbi::with_extensions(&crate::abi::android::AndroidExtensions);
         abi.close_descriptor_object(&first, &object);
+        assert!(!file.state.lock().closed);
         assert!(file.ready(1) && file.ready(2));
         assert_eq!(file.read_record(&first, 0, 4), Err(errno::EFAULT));
         assert!(file.ready(1));

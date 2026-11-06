@@ -234,6 +234,7 @@ pub(super) struct BufferReference {
     lease: Lease,
 }
 pub(super) struct Objects {
+    closed: bool,
     pub deaths: death::Deaths,
     pub oneway: BTreeMap<usize, RpcRequest>,
     nodes: BTreeMap<usize, Arc<Node>>,
@@ -247,6 +248,7 @@ pub(super) struct Objects {
 impl Default for Objects {
     fn default() -> Self {
         Self {
+            closed: false,
             deaths: death::Deaths::default(),
             oneway: BTreeMap::new(),
             nodes: BTreeMap::new(),
@@ -259,7 +261,35 @@ impl Default for Objects {
         }
     }
 }
+pub(super) struct ClosedObjects {
+    // Dropped after the endpoint lock is released so lease and reply teardown
+    // can wake the remote Binder owners without lock inversion.
+    handles: BTreeMap<u32, Handle>,
+    buffers: BTreeMap<usize, Vec<BufferReference>>,
+    oneway: BTreeMap<usize, RpcRequest>,
+    nodes: BTreeMap<usize, Arc<Node>>,
+    retired: Vec<Arc<Node>>,
+    deaths: death::Deaths,
+}
 impl Objects {
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    pub(super) fn close(&mut self) -> ClosedObjects {
+        self.closed = true;
+        self.context_strong = 0;
+        self.context_weak = 0;
+        ClosedObjects {
+            handles: core::mem::take(&mut self.handles),
+            buffers: core::mem::take(&mut self.buffers),
+            oneway: core::mem::take(&mut self.oneway),
+            nodes: core::mem::take(&mut self.nodes),
+            retired: core::mem::take(&mut self.retired),
+            deaths: core::mem::take(&mut self.deaths),
+        }
+    }
+
     fn local(
         &mut self,
         file: &BinderFile,
@@ -269,6 +299,9 @@ impl Objects {
         strong: bool,
         tid: usize,
     ) -> Result<Lease, usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         self.nodes.retain(|_, node| !node.references.lock().idle());
         self.retired.retain(|node| !node.references.lock().idle());
         if let Some(node) = self.nodes.get(&pointer) {
@@ -301,6 +334,9 @@ impl Objects {
         Ok(node.retain_from_thread(strong, Some(tid)))
     }
     pub fn target(&self, handle: u32) -> Result<Lease, usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         let handle = self.handles.get(&handle).ok_or(errno::EINVAL)?;
         if !handle.can_call() {
             return Err(errno::EOPNOTSUPP);
@@ -313,6 +349,9 @@ impl Objects {
         cookie: usize,
         file: &BinderFile,
     ) -> Result<(), usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         let object = if number == 0 {
             if self.context_strong == 0 && self.context_weak == 0 {
                 return Err(errno::EINVAL);
@@ -335,6 +374,9 @@ impl Objects {
             .request(number, cookie, &object, &file.endpoint.waker())
     }
     fn exported(&self, number: u32, strong: bool) -> Result<Lease, usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         let handle = self.handles.get(&number).ok_or(errno::EINVAL)?;
         if strong && !handle.can_call() {
             return Err(errno::EOPNOTSUPP);
@@ -342,6 +384,9 @@ impl Objects {
         Ok(handle.node.retain(strong))
     }
     pub fn reference_command(&mut self, command: u32, data: &[u8]) -> Result<(), usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         if matches!(command, BC_INCREFS_DONE | BC_ACQUIRE_DONE) {
             let node = self.nodes.get(&u64_at(data, 0)).ok_or(errno::EINVAL)?;
             if node.cookie != u64_at(data, 8) {
@@ -419,27 +464,42 @@ impl Objects {
         Ok(())
     }
     pub fn pending_acquisition(&self, tid: usize) -> bool {
+        if self.closed {
+            return false;
+        }
         self.nodes.values().any(|node| {
             let refs = node.references.lock();
             refs.acquisition_thread == Some(tid) && refs.acquisition_needed()
         })
     }
     pub fn ready(&self, tid: usize) -> bool {
+        if self.closed {
+            return false;
+        }
         self.nodes
             .values()
             .chain(self.retired.iter())
             .any(|node| node.references.lock().next(tid).is_some())
     }
     pub fn pending_local_acquisitions(&self) -> bool {
+        if self.closed {
+            return false;
+        }
         self.nodes.values().any(|node| !node.acquired())
     }
     pub fn reference_record(&self, tid: usize) -> Option<ReferenceRecord> {
+        if self.closed {
+            return None;
+        }
         self.nodes
             .values()
             .chain(self.retired.iter())
             .find_map(|node| node.reserve_record(tid))
     }
     pub fn abandon_thread(&mut self, tid: usize) -> Vec<Arc<RpcObject>> {
+        if self.closed {
+            return Vec::new();
+        }
         let mut revoked = Vec::new();
         let retired = &mut self.retired;
         self.nodes.retain(|_, node| {
@@ -468,11 +528,25 @@ impl Objects {
         revoked
     }
     pub fn dispatch(&self, key: u64) -> Result<Lease, usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         self.nodes
             .values()
             .find(|node| node.object.key() == key)
             .map(|node| node.retain(true))
             .ok_or(errno::EINVAL)
+    }
+    pub(super) fn queue_oneway(
+        &mut self,
+        address: usize,
+        request: RpcRequest,
+    ) -> Result<(), (usize, RpcRequest)> {
+        if self.closed {
+            return Err((errno::EPIPE, request));
+        }
+        self.oneway.insert(address, request);
+        Ok(())
     }
     fn imported(
         &mut self,
@@ -480,6 +554,9 @@ impl Objects {
         node: Arc<Node>,
         strong: bool,
     ) -> Result<BufferReference, usize> {
+        if self.closed {
+            return Err(errno::EPIPE);
+        }
         if node.object.belongs_to(&file.endpoint) {
             return Ok(BufferReference {
                 handle: None,
@@ -525,17 +602,26 @@ impl Objects {
         })
     }
     fn release(&mut self, references: Vec<BufferReference>) {
+        let closed = self.closed;
         for reference in references {
             if let Some(number) = reference.handle {
-                let handle = self.handles.get_mut(&number).unwrap();
-                if reference.lease.strong {
-                    handle.temporary_strong -= 1;
+                let handle = if closed {
+                    self.handles.get_mut(&number)
                 } else {
-                    handle.temporary_weak -= 1;
-                }
-                if !handle.live() {
-                    self.handles.remove(&number);
-                    self.deaths.forget(number);
+                    Some(self.handles.get_mut(&number).unwrap())
+                };
+                if let Some(handle) = handle {
+                    if reference.lease.strong {
+                        if !closed || handle.temporary_strong != 0 {
+                            handle.temporary_strong -= 1;
+                        }
+                    } else if !closed || handle.temporary_weak != 0 {
+                        handle.temporary_weak -= 1;
+                    }
+                    if !handle.live() {
+                        self.handles.remove(&number);
+                        self.deaths.forget(number);
+                    }
                 }
             }
             drop(reference);
@@ -813,6 +899,11 @@ impl BinderFile {
             arena.store(address, &payload)?;
             Ok((len, offsets_len,context_address))
         })();
+        if result.is_ok() && table.closed {
+            drop(table);
+            drop(references);
+            return Err(errno::EPIPE);
+        }
         if result.is_ok() {
             table.buffers.insert(address, references);
         } else {
@@ -825,6 +916,17 @@ impl BinderFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::TaskType;
+
+    fn process_task(environment: &Arc<Environment>, id: usize) -> Task {
+        let mut task = Task::new("binder-process".into(), 0, TaskType::User);
+        task.set_id(id);
+        task.set_namespace_id(id);
+        task.set_thread_group_id(id);
+        *task.execution_environment.write() = Some(environment.clone());
+        task
+    }
+
     fn file(domain: Arc<Domain>) -> BinderFile {
         BinderFile {
             subject: None,
@@ -834,6 +936,7 @@ mod tests {
             send_gate: IrqSpinLock::new(()),
             auto_fds: IrqSpinLock::new(BTreeMap::new()),
             state: IrqSpinLock::new(State {
+                closed: false,
                 threads: BTreeMap::new(),
                 arena: None,
                 node: (0, 0),
@@ -1230,5 +1333,116 @@ mod tests {
         assert_eq!(request.object_key(), Some(local.node.object.key()));
         drop(request);
         peer.objects.lock().release(vec![buffer]);
+    }
+
+    #[test_case]
+    fn binder_process_exit_releases_remote_refs_and_pending_calls_with_retained_arc() {
+        let environment = Environment::new();
+        let domain = domain(environment.clone(), 1);
+        let mut server = file(domain.clone());
+        server.owner = 1;
+        let mut client = file(domain);
+        client.owner = 2;
+
+        let transit = server
+            .objects
+            .lock()
+            .local(&server, 0x1000, 0x2000, 0, true, 1)
+            .unwrap();
+        let node = transit.node.clone();
+        let reference = client
+            .objects
+            .lock()
+            .imported(&client, node.clone(), true)
+            .unwrap();
+        let handle = reference.handle.unwrap();
+        client.objects.lock().buffers.insert(0x3000, vec![reference]);
+        client
+            .objects
+            .lock()
+            .reference_command(BC_ACQUIRE, &handle.to_le_bytes())
+            .unwrap();
+        client.objects.lock().free_buffer(0x3000);
+
+        assert_eq!(delivered(&node), BR_INCREFS);
+        ack(&server, BC_INCREFS_DONE).unwrap();
+        assert_eq!(delivered(&node), BR_ACQUIRE);
+        ack(&server, BC_ACQUIRE_DONE).unwrap();
+        drop(transit);
+
+        client.ensure_thread(2).unwrap();
+        let remote = RpcEndpoint::new();
+        let call = remote
+            .send_scoped(message_empty(), &client.endpoint, None)
+            .unwrap();
+        let request = remote.receive().unwrap().unwrap();
+        client
+            .state
+            .lock()
+            .threads
+            .get_mut(&2)
+            .unwrap()
+            .stack
+            .push(Transaction::Outgoing(call));
+
+        let task = process_task(&environment, 2);
+        let client = Arc::new(client);
+        task.handle_table
+            .insert(KernelObject::File(client.clone()))
+            .unwrap();
+        process_exit(&task);
+        process_exit(&task);
+
+        assert!(request.cancelled());
+        assert!(matches!(
+            client.endpoint.send(message_empty()),
+            Err(crate::ipc::rpc::RpcError::PeerClosed)
+        ));
+        assert!(client.ready(2));
+        assert_eq!(client.read_record(&task, 0, 4), Err(errno::EPIPE));
+        let mut release = server.objects.lock().reference_record(1).unwrap();
+        assert_eq!(release.command, BR_RELEASE);
+        release.committed = true;
+        drop(release);
+        let mut decrefs = server.objects.lock().reference_record(1).unwrap();
+        assert_eq!(decrefs.command, BR_DECREFS);
+        decrefs.committed = true;
+        drop(decrefs);
+        assert!(node.references.lock().idle());
+    }
+
+    #[test_case]
+    fn binder_process_exit_skips_inherited_parent_file_and_is_idempotent() {
+        let environment = Environment::new();
+        let domain = domain(environment.clone(), 0);
+        let mut parent = file(domain.clone());
+        parent.owner = 1;
+        let mut child = file(domain);
+        child.owner = 2;
+        let parent = Arc::new(parent);
+        let child = Arc::new(child);
+        let task = process_task(&environment, 2);
+        task.handle_table
+            .insert(KernelObject::File(parent.clone()))
+            .unwrap();
+        task.handle_table
+            .insert(KernelObject::File(child.clone()))
+            .unwrap();
+        task.handle_table
+            .insert(KernelObject::File(child.clone()))
+            .unwrap();
+
+        process_exit(&task);
+        process_exit(&task);
+
+        assert!(!parent.state.lock().closed);
+        assert!(child.state.lock().closed);
+        parent.ensure_thread(2).unwrap();
+        assert_eq!(child.ensure_thread(2), Err(errno::EPIPE));
+        assert_eq!(child.read_record(&task, 0, 4), Err(errno::EPIPE));
+        assert_eq!(
+            child.mmap(&task, 0, 4096, 1, 1, 0),
+            errno::to_result(errno::EPIPE)
+        );
     }
 }

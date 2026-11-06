@@ -82,6 +82,7 @@ impl AbiModule for AndroidAarch64Abi {
         self.linux.on_task_exit(task);
     }
     fn on_process_exit(&mut self, task: &Task) {
+        super::binder::process_exit(task);
         self.linux.on_process_exit(task);
     }
     fn on_exec_commit(&mut self, task: &Task) {
