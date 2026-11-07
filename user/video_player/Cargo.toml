@@ -25,7 +25,7 @@ vp9-stateless-hw = ["scarlet-video-client/vp9-stateless-hw"]
 [dependencies]
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scarlet-video-client = { path = "../lib/scarlet-video-client", default-features = false, features = ["legacy-scarlet-std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1bc568cdc7e41006d78a8276a7cca65706cca01c", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "7d266bd8c66605c41185f637934ca6b451261a50", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client", default-features = false, features = ["legacy-scarlet-std"] }

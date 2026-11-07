@@ -3,7 +3,7 @@
 # the SDK shares one source checkout per Git URL during image assembly.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "f25a6db371998cb5460db637415084558e3be4fa" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "6bfecaabfa39505f936edf2bff844f87b5101990" }
 subdir = "platforms/scarlet"
 
 [[layers]]
