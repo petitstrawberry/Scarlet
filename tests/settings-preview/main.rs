@@ -6,7 +6,7 @@ compile_error!(
 );
 
 use scarlet_desktop_config::{BackgroundStyle, ClockFormat, StatusItemId, StatusPreferences};
-use scarlet_ui::{HeaderBar, NavigationLink, State, hstack, navigation, prelude::*, vstack};
+use scarlet_ui::{NavigationLink, State, hstack, navigation, prelude::*, vstack};
 use scarlet_ui_macros::View;
 #[path = "../../user/bin/src/settings_views.rs"]
 mod settings_views;
@@ -121,7 +121,6 @@ struct SettingsApp {
     display_brightness_percent: State<f32>,
     display_brightness_last_good: State<f32>,
     display_brightness_status: State<String>,
-    navigation_title: State<String>,
     cursor_themes: State<Vec<CursorThemeInfo>>,
     cursor_theme_index: State<usize>,
     cursor_theme_status: State<String>,
@@ -147,7 +146,6 @@ impl SettingsApp {
         app.timezone_regions.set(vec!["Asia".into(), "Etc".into()]);
         app.timezone_cities.set(enumerate_cities("Asia"));
         app.audio_volume_percent.set(65.0);
-        app.navigation_title.set("Appearance".into());
         app.cpu_visible.set(true);
         app.audio_visible.set(true);
         app.cursor_theme_status.set("Fixture cursor theme".into());

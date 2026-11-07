@@ -33,9 +33,7 @@ use scarlet_desktop_config::{
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SET_BACKGROUND_METHOD,
     DESKTOP_SETTINGS_SET_STATUS_PREFERENCES_METHOD, StatusItemId, StatusPreferences,
 };
-use scarlet_ui::{
-    HeaderBar, NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack,
-};
+use scarlet_ui::{NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack};
 use scarlet_ui_macros::View;
 use std::format;
 use std::fs;
@@ -1045,7 +1043,6 @@ struct SettingsApp {
     display_brightness_percent: State<f32>,
     display_brightness_last_good: State<f32>,
     display_brightness_status: State<String>,
-    navigation_title: State<String>,
     cursor_themes: State<Vec<CursorThemeInfo>>,
     cursor_theme_index: State<usize>,
     cursor_theme_status: State<String>,
@@ -1183,7 +1180,6 @@ impl SettingsApp {
             display_brightness_percent: State::new(StateId::new(18), display_brightness),
             display_brightness_last_good: State::new(StateId::new(19), display_brightness),
             display_brightness_status: State::new(StateId::new(20), display_brightness_status),
-            navigation_title: State::new(StateId::new(21), String::from("Appearance")),
             cursor_themes: State::new(StateId::new(22), cursor_themes),
             cursor_theme_index: State::new(StateId::new(23), cursor_theme_index),
             cursor_theme_status: State::new(StateId::new(24), cursor_theme_status),

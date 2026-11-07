@@ -288,67 +288,25 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
     let audio_app = original.clone();
     let input_app = original.clone();
     let status_app = original.clone();
-    let navigation_title = original.navigation_title.clone();
     let navigation = navigation! {
-        NavigationLink::new("Appearance", move || {
-            appearance_page(app.clone())
-        })
-        .on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Appearance"))
-        }),
-        NavigationLink::new("Display", move || display_page(display_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Display"))
-        }),
-        NavigationLink::new("Audio", move || audio_page(audio_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Audio"))
-        }),
-        NavigationLink::new("Network", move || network_page(network_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Network"))
-        }),
-        NavigationLink::new("Input", move || input_page(input_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Input"))
-        }),
-        NavigationLink::new("Shell & Status", move || {
-            status_page(status_app.clone())
-        }).on_select({
-            let title = navigation_title.clone();
-            let app = original.clone();
-            move || {
-                app.refresh_status_preferences();
-                title.set(String::from("Shell & Status"));
-            }
-        }),
-        NavigationLink::new("About", about_page).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("About This System"))
-        }),
+        NavigationLink::new("Appearance", move || appearance_page(app.clone())),
+        NavigationLink::new("Display", move || display_page(display_app.clone())),
+        NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
+        NavigationLink::new("Network", move || network_page(network_app.clone())),
+        NavigationLink::new("Input", move || input_page(input_app.clone())),
+        NavigationLink::new("Shell & Status", move || status_page(status_app.clone()))
+            .on_select(move || original.refresh_status_preferences()),
+        NavigationLink::new("About", about_page)
+            .custom_header(scarlet_ui::NavigationHeader::title("About This System")),
     };
     if std::env::args().any(|arg| arg == "--network")
         && !NETWORK_ENTRY_SELECTED.swap(true, AtomicOrdering::AcqRel)
     {
         navigation.selected_index_state().set(3);
-        navigation_title.set(String::from("Network"));
     }
     navigation
-        .header(move || {
-            HeaderBar::new(
-                hstack! {
-                    Text::from_state(navigation_title.clone()).font_size(20.0),
-                    Spacer::new(),
-                }
-                .alignment(Alignment::Center)
-                .padding_insets(scarlet_ui::geometry::EdgeInsets::new(
-                    24.0, 10.0, 24.0, 10.0,
-                )),
-            )
-            .height(48.0)
-        })
-        .sidebar_width(160.0)
+        .navigation_header()
+        .sidebar_width(144.0)
         .frame(f32::INFINITY, f32::INFINITY)
 }
 

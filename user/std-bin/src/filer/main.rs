@@ -37,9 +37,9 @@ use scarlet_desktop_config::{
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, Image,
-    ImageFit, KeyCode, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
-    navigation, open_window, vstack,
+    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, Icon, Image, ImageFit,
+    KeyCode, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized, navigation,
+    open_window, vstack,
 };
 use scarlet_ui_macros::View;
 use zune_jpeg::JpegDecoder;
@@ -1715,9 +1715,13 @@ impl FilerApp {
         .on_key(move |event| key_app.handle_key(event, picker))
         .alignment(Alignment::Leading)
         .padding(10.0)
+        .safe_area_padding(scarlet_ui::geometry::SafeAreaEdges::ALL)
         .frame(f32::INFINITY, f32::INFINITY)
         .on_geometry_change(
-            |geometry| geometry.size().width,
+            |geometry| {
+                let insets = geometry.safe_area_insets();
+                (geometry.size().width - insets.left - insets.right).max(0.0)
+            },
             move |width| width_state.set(width),
         )
     }
@@ -1806,13 +1810,17 @@ impl FilerApp {
     }
 
     fn picker_page(&self) -> impl View + Clone + use<> {
-        vstack! {
-            self.header_for(true),
-            self.browser_page(true),
+        let content = self.clone();
+        let toolbar = self.clone();
+        navigation! {
+            NavigationLink::new("Open File", move || content.browser_page(true)),
         }
+        .presentation(scarlet_ui::NavigationPresentation::Sidebar)
+        .sidebar_width(0.0)
+        .toolbar(move || toolbar.navigation_controls(true))
     }
 
-    fn header_for(&self, picker: bool) -> impl View + Clone + use<> {
+    fn navigation_controls(&self, picker: bool) -> impl View + Clone + use<> {
         let back_app = self.clone();
         let forward_app = self.clone();
         let up_app = self.clone();
@@ -1847,38 +1855,34 @@ impl FilerApp {
                 focus_generation,
             ))
             .frame(f32::INFINITY, 32.0);
-        HeaderBar::new(
-            hstack! {
-                Button::icon_only(Icon::ChevronLeft)
-                    .header_style()
-                    .on_click(move || back_app.navigate_history(false, picker)),
-                Button::icon_only(Icon::ChevronRight)
-                    .header_style()
-                    .on_click(move || forward_app.navigate_history(true, picker)),
-                Button::icon_only(Icon::ArrowUp)
-                    .header_style()
-                    .on_click(move || {
-                        if picker {
-                            up_app.navigate_picker_up();
-                        } else {
-                            up_app.navigate_up();
-                        }
-                    }),
-                current_path,
-                Button::icon_only(Icon::Refresh)
-                    .header_style()
-                    .on_click(move || {
-                        if picker {
-                            refresh_app.refresh_picker();
-                        } else {
-                            refresh_app.refresh();
-                        }
-                    }),
-            }
-            .alignment(Alignment::Center)
-            .padding(8.0),
-        )
-        .height(48.0)
+        hstack! {
+            Button::icon_only(Icon::ChevronLeft)
+                .header_style()
+                .on_click(move || back_app.navigate_history(false, picker)),
+            Button::icon_only(Icon::ChevronRight)
+                .header_style()
+                .on_click(move || forward_app.navigate_history(true, picker)),
+            Button::icon_only(Icon::ArrowUp)
+                .header_style()
+                .on_click(move || {
+                    if picker {
+                        up_app.navigate_picker_up();
+                    } else {
+                        up_app.navigate_up();
+                    }
+                }),
+            current_path,
+            Button::icon_only(Icon::Refresh)
+                .header_style()
+                .on_click(move || {
+                    if picker {
+                        refresh_app.refresh_picker();
+                    } else {
+                        refresh_app.refresh();
+                    }
+                }),
+        }
+        .alignment(Alignment::Center)
     }
 }
 
@@ -1952,9 +1956,9 @@ impl Application for FilerApp {
                         move || app.navigate_to(downloads_path.clone())
                     }),
             }
-            .header(move || header.header_for(false))
+            .toolbar(move || header.navigation_controls(false))
             .shows_icons(true)
-            .sidebar_width(170.0),
+            .sidebar_width(154.0),
         )
         .app_id(APP_ID)
         .menu_bar(self.browser_menu_bar())
@@ -2250,7 +2254,7 @@ mod layout_tests {
         let root = Window::new(
             "Files",
             NavigationView::new((NavigationLink::new("Files", move || page_app.files_page()),))
-                .sidebar_width(170.0),
+                .sidebar_width(154.0),
         )
         .size(Size::new(960.0, 640.0));
 
@@ -2295,7 +2299,7 @@ mod layout_tests {
                 NavigationLink::new("First", || Text::new("First")),
                 NavigationLink::new("Files", move || page_app.files_page()),
             ))
-            .sidebar_width(170.0),
+            .sidebar_width(154.0),
         )
         .size(Size::new(960.0, 640.0));
 
@@ -2308,8 +2312,8 @@ mod layout_tests {
         assert!(
             pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
-                x: 10,
-                y: 85,
+                x: 28,
+                y: 106,
                 click_count: 1,
             }))
         );
