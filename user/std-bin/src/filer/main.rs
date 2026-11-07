@@ -6,6 +6,7 @@
 //! calling application.
 
 mod archive;
+mod browser_pane;
 mod details;
 mod icons;
 mod listing;
@@ -1621,7 +1622,8 @@ impl FilerApp {
                     .font_size(12.0).color(ColorPalette::default().text_secondary()),
                 Button::new("Clear Filter").on_click(move || clear_filter.search.set(String::new())),
                 Spacer::new(),
-            }.spacing(12.0).frame(f32::INFINITY, f32::INFINITY))
+            }.spacing(12.0).frame(f32::INFINITY, f32::INFINITY)
+                .safe_area_padding(scarlet_ui::geometry::SafeAreaEdges::ALL))
         } else {
             Either::B(grid)
         };
@@ -1729,15 +1731,18 @@ impl FilerApp {
         };
         let key_app = self.clone();
 
-        vstack! {
-            filter_hint,
-            prompt,
-            grid,
-            footer,
-        }
+        Surface::new(
+            browser_pane::BrowserPane {
+                grid,
+                top: Surface::new(
+                    vstack! { filter_hint, prompt }.alignment(Alignment::Leading),
+                    SurfaceRole::Canvas,
+                ),
+                footer,
+            },
+            SurfaceRole::Canvas,
+        )
         .on_key(move |event| key_app.handle_key(event, picker))
-        .alignment(Alignment::Leading)
-        .safe_area_padding(scarlet_ui::geometry::SafeAreaEdges::ALL)
         .frame(f32::INFINITY, f32::INFINITY)
         .on_geometry_change(
             |geometry| {
@@ -2414,6 +2419,35 @@ mod layout_tests {
                 "folder column {column} should be painted in app scene"
             );
         }
+
+        fn render_bounds(
+            element: &dyn scarlet_ui::Element,
+            parent: scarlet_ui::Point,
+            matches: fn(&dyn scarlet_ui::ElementRenderObject) -> bool,
+        ) -> Option<scarlet_ui::Rect> {
+            let position = element.position();
+            let origin = scarlet_ui::Point::new(parent.x + position.x, parent.y + position.y);
+            if element.render_object().is_some_and(matches) {
+                return Some(scarlet_ui::Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| render_bounds(child.as_ref(), origin, matches))
+        }
+        let root = pipeline.element_tree().root().unwrap();
+        let header = render_bounds(root, scarlet_ui::Point::ZERO, |r| {
+            r.as_any().is::<scarlet_ui::views::HeaderBarRenderObject>()
+        }).unwrap();
+        let viewport = render_bounds(root, scarlet_ui::Point::ZERO, |r| {
+            r.accepts_touch_scroll()
+        }).unwrap();
+        assert!(
+            viewport.top() < header.top(),
+            "the grid must paint behind the navigation header"
+        );
+        assert_eq!(viewport.left(), header.left());
+        assert_eq!(viewport.size.width, header.size.width);
     }
 
     #[test]
