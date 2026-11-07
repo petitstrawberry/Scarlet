@@ -110,7 +110,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1bc568cdc7e41006d78a8276a7cca65706cca01c" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -328,7 +328,7 @@ to = "/bin/remote-desktop"
 # Cadence owns its app recipe and preserves the PIC build and final ELF audit.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/cadence", rev = "877f521a1f814914abd7cf36976eae30aa288d33" }
+source = { git = "https://github.com/petitstrawberry/cadence", rev = "a0c29be6f8abd5d389fd7701a1937857c20ef401" }
 subdir = "platforms/scarlet"
 
 [[layers]]

@@ -11,7 +11,7 @@ to = "/lib/libsws_client_c.so"
 # Standard Window chrome for native hosts with externally rendered content.
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "da5ab44c9a41599f925dc84bb4fb55709bf83d84" }
 package = "scarlet-ui-window-c"
 lib = "scarlet_ui_window"
 architectures = ["aarch64"]
@@ -24,7 +24,8 @@ subdir = "native"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "fe99dc6f3f66bb1780d76ab2b559f16bbb8d2e44" }
+# Keep this SGFX revision aligned with bundles/sgfx-native/bundle.toml.
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "f25a6db371998cb5460db637415084558e3be4fa" }
 package = "vulkan-sgfx"
 lib = "vulkan_sgfx"
 default-features = false
