@@ -1661,6 +1661,24 @@ impl GpuCompositor {
         releases
     }
 
+    /// Keep the latest offscreen shell image without filling the client's pool.
+    /// Event processing runs after composition has completed (or admission has
+    /// retired its work). The hidden surface is not sampled by a new display
+    /// frame, so replacing its retained image needs no display presentation.
+    pub(super) fn take_prepared_shell_releases(&mut self, window: &Window) -> Vec<SgfxCommitToken> {
+        if !window.prepares_while_workspace_hidden() || window.retains_native_transition_frame() {
+            return Vec::new();
+        }
+        self.shared_windows
+            .iter_mut()
+            .find(|state| state.window_id == window.id)
+            .map(promote_pending_shared_frame)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect()
+    }
+
     fn schedule_retired_texture_rebuild(&mut self) {
         let mut count = 0usize;
         let mut bytes = 0u64;
@@ -2089,7 +2107,7 @@ impl GpuCompositor {
     }
 }
 
-/// Promote the frame used for the completed display present.
+/// Promote a completed display frame or an offscreen shell preparation frame.
 ///
 /// The previously presented commit remains retained until this transition.
 /// This is also the generation boundary used during a window resize: SWS may
