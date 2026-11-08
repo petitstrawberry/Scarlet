@@ -15,6 +15,7 @@ mod home_style;
 mod home_trace;
 mod network_status;
 mod options;
+mod popup_menu;
 mod power;
 #[path = "../power_request.rs"]
 mod power_request;
@@ -50,12 +51,10 @@ use scarlet_os::time;
 use scarlet_os::{network, process, scheduler};
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::{Color, ColorPalette};
-use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
 use scarlet_ui::geometry::Size;
 use scarlet_ui::graphics;
 use scarlet_ui::platform::WindowPlacement;
 use scarlet_ui::prelude::*;
-use scarlet_ui::views::menu::MenuRenderObject;
 use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
 use scarlet_ui::{GridView, IconView, StateId, hstack, vstack};
 use scarlet_ui::{
@@ -83,6 +82,7 @@ use control_center::{
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
 use network_status::{ConnectionState, NetworkKind, NetworkStatus};
 use options::{Options, ShellMode};
+use popup_menu::PopupMenuRenderer;
 use power::{PowerIcon, PowerStatus};
 use status::{StatusPresentation, StatusProvider, StatusProviderSnapshot};
 
@@ -540,6 +540,7 @@ struct PhysicalWorkarea {
 impl ShellLayout {
     const LAPTOP_STATUS_BAR_HEIGHT: u32 = 32;
     const TABLET_STATUS_BAR_HEIGHT: u32 = 40;
+    const MENU_POPUP_GAP: u32 = 4;
 
     /// Build a layout from the compositor state, treating an unknown state as
     /// the laptop/desktop default.
@@ -568,9 +569,9 @@ impl ShellLayout {
         self.status_bar_height() as i32
     }
 
-    /// Return the physical popup anchor directly below the StatusBar.
+    /// Leave the same logical gap below the StatusBar as the Web menu host.
     fn physical_popup_y(self, scale_milli: u32) -> i32 {
-        scale_u32(self.popup_y() as u32, scale_milli) as i32
+        scale_u32(self.popup_y() as u32 + Self::MENU_POPUP_GAP, scale_milli) as i32
     }
 
     /// Return a physical workarea after reserving the scaled StatusBar height.
@@ -2082,16 +2083,13 @@ fn build_menu_items(
                     let next_state = submenu_path.clone();
                     let mut next_path = current_path.clone();
                     next_path.push(index);
-                    // MenuRenderObject does not draw Submenu's chevron itself.
-                    // Keep any supplied shortcut and use its trailing column.
-                    let indicator = match &item.shortcut {
-                        Some(shortcut) => format!("{}  ›", shortcut),
-                        None => String::from("›"),
-                    };
+                    // Shared menu paint owns the submenu chevron and its gutter.
+                    if let Some(ref shortcut) = item.shortcut {
+                        content = content.shortcut(shortcut.clone());
+                    }
                     items.push(
                         content
                             .action(MenuAction::Submenu)
-                            .shortcut(indicator)
                             .callback(move || next_state.set(next_path.clone())),
                     );
                     continue;
@@ -2250,61 +2248,6 @@ fn build_overview_items(
     items
 }
 
-struct PopupMenuRenderer {
-    render_object: MenuRenderObject,
-    size: Size,
-    scale_milli: u32,
-}
-
-impl PopupMenuRenderer {
-    fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32, scale_milli: u32) -> Self {
-        graphics::set_current_scale_milli(scale_milli);
-        let mut render_object = MenuRenderObject::new(items, item_height, width);
-        let constraints = LayoutConstraints {
-            min_width: width,
-            max_width: width,
-            min_height: 0.0,
-            max_height: f32::INFINITY,
-        };
-        let size = render_object.layout(constraints);
-        render_object.render();
-        Self {
-            render_object,
-            size,
-            scale_milli,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.size
-    }
-
-    fn handle_move(&mut self, x: f32, y: f32) -> bool {
-        let hovered = self.render_object.hit_test(x, y);
-        if hovered != self.render_object.hovered() {
-            self.render_object.set_hovered(hovered);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn handle_click(&self, x: f32, y: f32) {
-        if let Some(index) = self.render_object.hit_test(x, y) {
-            self.render_object.invoke_item(index);
-        }
-    }
-
-    fn render(&mut self) {
-        graphics::set_current_scale_milli(self.scale_milli);
-        self.render_object.render();
-    }
-
-    fn buffer(&self) -> Option<&Buffer> {
-        self.render_object.get_buffer()
-    }
-}
-
 enum ShellPopupRenderer {
     Menu(PopupMenuRenderer),
 }
@@ -2313,6 +2256,12 @@ impl ShellPopupRenderer {
     fn size(&self) -> Size {
         match self {
             Self::Menu(renderer) => renderer.size(),
+        }
+    }
+
+    fn menu(&self) -> &PopupMenuRenderer {
+        match self {
+            Self::Menu(renderer) => renderer,
         }
     }
 
@@ -4333,10 +4282,9 @@ impl ShellApp {
                             };
                             let size = renderer.size();
                             let width = size.width as u32;
-                            let height = size.height as u32;
-                            let physical_width = scale_u32(width, scale_milli);
-                            let physical_height = scale_u32(height, scale_milli);
-                            popup_renderer = Some(renderer);
+                            let (physical_width, physical_height) = renderer.menu().physical_size();
+                            let geometry = renderer.menu().window_geometry();
+                            let regions = renderer.menu().surface_regions();
                             needs_render = true;
 
                             let screen_width = screen_width_popup.get().max(1.0);
@@ -4365,6 +4313,12 @@ impl ShellApp {
                                         layout.physical_popup_y(scale_milli),
                                     ) {
                                         Ok(id) => {
+                                            // Transparent shadow padding surrounds the visible
+                                            // rounded menu. Only its body accepts input and
+                                            // requests compositor backdrop diffusion.
+                                            let _ = conn.set_window_has_alpha_content(id, true);
+                                            let _ = conn.set_window_geometry(id, geometry);
+                                            let _ = conn.set_surface_regions(id, true, &regions);
                                             popup_surface_id = Some(id);
                                             popup_focus_observed = false;
                                             popup_surface_id_popup.set(Some(id));
@@ -4394,6 +4348,7 @@ impl ShellApp {
                                     }
                                 }
                             };
+                            popup_renderer = Some(renderer);
                         }
                     } else {
                         if let Some(surface_id) = popup_surface_id.take() {
