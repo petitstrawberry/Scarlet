@@ -983,7 +983,7 @@ dependencies = [
 [[package]]
 name = "scarlet-scroll-motion"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=775e42f502f4e150bb614bbe2c1ed76d46530484#775e42f502f4e150bb614bbe2c1ed76d46530484"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a2d97928b43b6a3dbebe28b109a545e649834a8#3a2d97928b43b6a3dbebe28b109a545e649834a8"
 dependencies = [
  "libm",
 ]
@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=775e42f502f4e150bb614bbe2c1ed76d46530484#775e42f502f4e150bb614bbe2c1ed76d46530484"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a2d97928b43b6a3dbebe28b109a545e649834a8#3a2d97928b43b6a3dbebe28b109a545e649834a8"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.2",
@@ -1011,13 +1011,15 @@ dependencies = [
  "scarlet-ui-macros",
  "unicode-script",
  "unicode-segmentation",
+ "wasm-bindgen-futures",
+ "web-time",
  "zune-jpeg",
 ]
 
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=775e42f502f4e150bb614bbe2c1ed76d46530484#775e42f502f4e150bb614bbe2c1ed76d46530484"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a2d97928b43b6a3dbebe28b109a545e649834a8#3a2d97928b43b6a3dbebe28b109a545e649834a8"
 dependencies = [
  "svgtypes",
 ]
@@ -1025,7 +1027,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=775e42f502f4e150bb614bbe2c1ed76d46530484#775e42f502f4e150bb614bbe2c1ed76d46530484"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a2d97928b43b6a3dbebe28b109a545e649834a8#3a2d97928b43b6a3dbebe28b109a545e649834a8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1035,11 +1037,12 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=775e42f502f4e150bb614bbe2c1ed76d46530484#775e42f502f4e150bb614bbe2c1ed76d46530484"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a2d97928b43b6a3dbebe28b109a545e649834a8#3a2d97928b43b6a3dbebe28b109a545e649834a8"
 dependencies = [
  "libm",
  "scarlet-ui-core",
  "sgfx-core",
+ "web-time",
 ]
 
 [[package]]
@@ -1405,6 +1408,16 @@ name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use scarlet_ui::prelude::*;
 use scarlet_ui::views::Either;
-use scarlet_ui::{KeyCode, hstack, vstack};
+use scarlet_ui::{Icon, IconSize, KeyCode, hstack, vstack};
 use scarlet_ui_macros::View;
 
 mod model;
@@ -106,27 +106,31 @@ impl CalendarApp {
                 let is_today = self.today.get() == Some(date);
                 let state = self.selected.clone();
                 Either::A(
-                    Button::new(date.day.to_string())
+                    Text::new(date.day.to_string())
                         .font_size(16.0)
-                        .background_color(if selected {
-                            palette.primary()
-                        } else if is_today {
-                            palette.surface_variant()
-                        } else {
-                            palette.background()
-                        })
-                        .text_color(if selected {
+                        .color(if selected {
                             palette.text_inverse()
                         } else {
                             palette.text()
                         })
-                        .border_color(if is_today {
+                        .alignment(Alignment::Center)
+                        .frame(f32::INFINITY, f32::INFINITY)
+                        .background(if selected {
                             palette.primary()
                         } else {
                             Color::CLEAR
                         })
-                        .on_click(move || state.set(date))
-                        .frame(f32::INFINITY, f32::INFINITY),
+                        .clip_radius(6.0)
+                        .border_rounded(
+                            if is_today {
+                                palette.primary()
+                            } else {
+                                Color::CLEAR
+                            },
+                            1.0,
+                            6.0,
+                        )
+                        .on_click(move || state.set(date)),
                 )
             }
             None => Either::B(Spacer::new().frame(f32::INFINITY, f32::INFINITY)),
@@ -157,8 +161,10 @@ impl CalendarApp {
                 Spacer::new(),
                 Button::new("Today").font_size(12.0).enabled(self.today.get().is_some())
                     .on_click(move || current.go_today()).frame(58.0, 34.0),
-                Button::new("‹").font_size(22.0).on_click(move || previous.move_month(-1)).frame(32.0, 34.0),
-                Button::new("›").font_size(22.0).on_click(move || next.move_month(1)).frame(32.0, 34.0),
+                Button::icon_only(Icon::ChevronLeft).icon_size(IconSize::Small)
+                    .on_click(move || previous.move_month(-1)).frame(32.0, 34.0),
+                Button::icon_only(Icon::ChevronRight).icon_size(IconSize::Small)
+                    .on_click(move || next.move_month(1)).frame(32.0, 34.0),
             }.spacing(6.0).frame_width(f32::INFINITY),
             Divider::new(),
             hstack! {
