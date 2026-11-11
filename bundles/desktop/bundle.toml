@@ -387,8 +387,8 @@ source = "../../user/std-bin"
 bin = "applications"
 to = "/bin/applications"
 
-# Kureha Code owns its native app recipe and resources.
+# Kureha Code distributes prebuilt app archives with a checksum-pinned bundle.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "ccba3380066c96474db240ac17417707ccbc1704" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "94b6bc2909ca1e6e25074d7d326a55c8de685a28" }
 bundle = "platforms/scarlet/bundle.toml"

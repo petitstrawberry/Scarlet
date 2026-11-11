@@ -5,7 +5,7 @@ hash = "sha256:4023ac0c1caa537b5bbf7742c4d41b44ec716d426c9e862a7715c2185b3a3a42"
 layers = []
 
 [sections.disk]
-hash = "sha256:9cc2f3298d9c19fe994e5665b0b13c3c7b91e4f406d229075b26fb263a133316"
+hash = "sha256:ee83e252539b4d74b76ce440d81140986460787bbef96ea6054b51c6dde72787"
 layers = []
 
 [sections.initramfs]
@@ -489,7 +489,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:1918589b36d8022b9b78c6c20e79ff2b2898f7707614d797524e5eadd5b2066a"
+hash = "sha256:26ff2fcc78d619ad6fcc406667a6b5a8afa93d75e9a31f7dc4d7ffbc4d86a66f"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1589,10 +1589,16 @@ type = "path"
 path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
-kind = "app"
-source = ".scarlet/cache/git/be620600662a4ab7/app.toml"
-to = "/applications/kureha-code.app"
-hash = "sha256:607c1e47ddfabf4f05a3bdbc3d16206be7e0e5cd2cef14f51444b83ff635b30f"
+kind = "archive"
+to = "/"
+format = "tar-gz"
+strip_components = 0
+hash = "sha256:29588e564dd8f9cf15f9604322a55caa196ad98c9106a67e9dd2ca0406279cce"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/kureha-code/releases/download/scarlet-v0.1.0-4.1/kureha-code-aarch64-scarlet-v0.1.0-4.1.tar.gz"
+sha256 = "sha256:29588e564dd8f9cf15f9604322a55caa196ad98c9106a67e9dd2ca0406279cce"
 
 [[sections.rootfs.layers]]
 kind = "archive"
@@ -1783,7 +1789,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:9fcff8ada87206e440d2671b0651f073ea0b2f1eba037bdf1012a98bc9e60d99"
+hash = "sha256:b4b2e61d6f6a47bb7805d3a58868bebb5dc2113ab370ed5627c8374a3f9f5240"
 
 [sections.rootfs.layers.source]
 type = "path"
