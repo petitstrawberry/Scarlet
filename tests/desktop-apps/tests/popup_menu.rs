@@ -23,6 +23,7 @@ fn glass_menu_has_translucent_rounded_body_and_shadow_at_each_scale() {
             ],
             28.0,
             220.0,
+            220.0,
             scale,
         );
         let geometry = renderer.window_geometry();
@@ -94,7 +95,7 @@ fn shadow_padding_does_not_shift_rows_or_invoke_actions() {
     let row = reference.item_rect(0).unwrap();
     let separator = reference.item_rect(1).unwrap();
     let disabled = reference.item_rect(2).unwrap();
-    let mut renderer = PopupMenuRenderer::new(items, 48.0, 320.0, 1500);
+    let mut renderer = PopupMenuRenderer::new(items, 48.0, 320.0, 320.0, 1500);
     let origin = renderer.origin();
     assert_eq!(renderer.size(), size);
     renderer.handle_click(0.0, 0.0);
@@ -114,4 +115,19 @@ fn shadow_padding_does_not_shift_rows_or_invoke_actions() {
     assert!(renderer.handle_move(origin.x + 10.0, origin.y + 20.0));
     assert!(!renderer.handle_move(origin.x + 10.0, origin.y + 30.0));
     assert!(renderer.handle_move(0.0, 0.0));
+}
+
+#[test]
+fn popup_menu_grows_to_fit_label_and_shortcut() {
+    let items = vec![
+        MenuItemContent::new("Open Markdown Preview to Side").shortcut("Ctrl+K V"),
+        MenuItemContent::new("Command Palette...").shortcut("Ctrl+Shift+P"),
+    ];
+    let preferred = MenuRenderObject::new(items.clone(), 28.0, 220.0).preferred_width();
+    assert!(preferred > 220.0);
+    let renderer = PopupMenuRenderer::new(items.clone(), 28.0, 220.0, 2000.0, 1000);
+    assert!(renderer.size().width >= preferred);
+    // Never wider than the usable screen width.
+    let capped = PopupMenuRenderer::new(items, 28.0, 220.0, 240.0, 1000);
+    assert_eq!(capped.size().width, 240.0);
 }

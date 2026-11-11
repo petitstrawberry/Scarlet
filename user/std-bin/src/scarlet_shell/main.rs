@@ -2259,12 +2259,10 @@ impl ShellPopupRenderer {
         }
     }
 
-    fn handle_move(&mut self, x: i32, y: i32, pressed: bool) -> Option<ControlCenterAction> {
+    /// Returns whether the hover state changed and a repaint is needed.
+    fn handle_move(&mut self, x: i32, y: i32, pressed: bool) -> bool {
         match self {
-            Self::Menu(renderer) => {
-                let _ = renderer.handle_move(x as f32, y as f32);
-                None
-            }
+            Self::Menu(renderer) => renderer.handle_move(x as f32, y as f32),
         }
     }
 
@@ -2289,11 +2287,9 @@ impl ShellPopupRenderer {
         }
     }
 
-    fn handle_exit(&mut self) {
+    fn handle_exit(&mut self) -> bool {
         match self {
-            Self::Menu(renderer) => {
-                let _ = renderer.handle_move(-1.0, -1.0);
-            }
+            Self::Menu(renderer) => renderer.handle_move(-1.0, -1.0),
         }
     }
 
@@ -4279,8 +4275,9 @@ impl ShellApp {
                                         submenu_path.clone(),
                                     )
                                 };
+                                let max_menu_width = (screen_width_popup.get() - 16.0).max(160.0);
                                 let menu_width = if overview_open {
-                                    (screen_width_popup.get() - 16.0).clamp(220.0, 420.0)
+                                    max_menu_width.clamp(220.0, 420.0)
                                 } else {
                                     220.0
                                 };
@@ -4288,6 +4285,7 @@ impl ShellApp {
                                     items,
                                     geometry.row_height,
                                     menu_width,
+                                    max_menu_width,
                                     scale_milli,
                                 ))
                             };
@@ -4455,16 +4453,18 @@ impl ShellApp {
                                 (sws::event::event_type::EV_SYN, _) => {
                                     if pending_move {
                                         if let Some(renderer) = popup_renderer.as_mut() {
-                                            if pointer_x < 0 || pointer_y < 0 {
-                                                renderer.handle_exit();
+                                            // Repaint only when the hovered row
+                                            // changes; a full CPU repaint per
+                                            // pointer sample made menus lag.
+                                            needs_render |= if pointer_x < 0 || pointer_y < 0 {
+                                                renderer.handle_exit()
                                             } else {
-                                                let _ = renderer.handle_move(
+                                                renderer.handle_move(
                                                     pointer_x,
                                                     pointer_y,
                                                     pointer_pressed,
-                                                );
-                                            }
-                                            needs_render = true;
+                                                )
+                                            };
                                         }
                                         pending_move = false;
                                     }
@@ -4492,8 +4492,7 @@ impl ShellApp {
                                         if popup_touch_id == Some(change.id) =>
                                     {
                                         if let Some(renderer) = popup_renderer.as_mut() {
-                                            let _ = renderer.handle_move(x, y, true);
-                                            needs_render = true;
+                                            needs_render |= renderer.handle_move(x, y, true);
                                         }
                                     }
                                     sws_protocol::touch::Phase::Up

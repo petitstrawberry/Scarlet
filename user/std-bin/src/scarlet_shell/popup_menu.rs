@@ -20,13 +20,22 @@ pub struct PopupMenuRenderer {
 }
 
 impl PopupMenuRenderer {
+    /// Build a menu at least `min_width` wide that grows to fit its widest
+    /// label/shortcut row, capped at `max_width` (the usable screen width).
     pub fn new(
         items: Vec<MenuItemContent>,
         item_height: f32,
-        width: f32,
+        min_width: f32,
+        max_width: f32,
         scale_milli: u32,
     ) -> Self {
         graphics::set_current_scale_milli(scale_milli);
+        // Measure with the same metrics the menu paints with so labels and
+        // right-aligned shortcuts never overlap or get clipped.
+        let preferred = MenuRenderObject::new(items.clone(), item_height, min_width)
+            .preferred_width()
+            .ceil();
+        let width = preferred.max(min_width).min(max_width.max(min_width));
         let mut menu = MenuRenderObject::new(items, item_height, width);
         let size = menu.layout(LayoutConstraints {
             min_width: width,
