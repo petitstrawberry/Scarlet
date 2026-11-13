@@ -110,10 +110,16 @@ fn load() -> Result<Vec<Grant>, &'static str> {
         }
         let mut views = Vec::new();
         for view in &rule.view {
+            // A grant for the whole native View includes its existing mounts.
+            // rooted_at deliberately drops nested mounts and would leave only
+            // the backing root filesystem's empty /dev and /tmp directories.
             views.push(
-                native
-                    .rooted_at(&view.root)
-                    .map_err(|_| "cannot construct delegated View")?,
+                if view.root == "/" {
+                    native.clone_mounts()
+                } else {
+                    native.rooted_at(&view.root)
+                }
+                .map_err(|_| "cannot construct delegated View")?,
             );
         }
         grants.push(Grant {

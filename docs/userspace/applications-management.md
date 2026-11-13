@@ -118,6 +118,10 @@ startup; standard input and captured logs occupy handles 0–2. Handles 3–255 
 be explicitly assigned, and ordinary applications keep their existing launch
 path. A transferred View is management authority, not a path string; the child
 must deliberately pass it on if another executable needs it.
+`root = "/"` copies the native View's existing mount topology, including `/dev`
+and `/tmp`, at startup. Other roots use a directory-rooted View without child
+mounts. Both forms have independent mount topology and share their underlying
+filesystem data.
 Native `#!/bin/sh` app scripts use the system shell, as with normal app launch;
 the grant still matches the script's original command and arguments exactly.
 
