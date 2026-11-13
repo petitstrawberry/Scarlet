@@ -45,7 +45,10 @@
     "ro.hardware.vulkan": "pastel",
     "ro.sf.lcd_density": "320",
     "ro.hw_timeout_multiplier": "32",
-    "debug.renderengine.backend": "gles"
+    "debug.renderengine.backend": "gles",
+    "persist.traced.enable": "0",
+    "persist.traced_perf.enable": "0",
+    "persist.device_config.global_settings.sys_traced": "0"
   },
   "network_provider": {
     "provider": "netd-iptables-trafficstats-v2",
