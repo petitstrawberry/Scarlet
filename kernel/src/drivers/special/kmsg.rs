@@ -26,6 +26,9 @@ impl Selectable for KmsgDevice {
         if interest.read {
             set.read = disclosure_denied() || !crate::log::is_empty();
         }
+        if interest.write {
+            set.write = true;
+        }
         set
     }
 
@@ -97,12 +100,20 @@ impl CharDevice for KmsgDevice {
         }
     }
 
-    fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
-        Err("kmsg is read-only")
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        crate::log::submit_userspace(&[byte]).map(|_| ()).map_err(|error| match error {
+            crate::log::UserspaceLogError::InvalidArgument => "invalid kmsg message",
+            crate::log::UserspaceLogError::TooLarge => "kmsg message too large",
+            crate::log::UserspaceLogError::NoCurrentTask => "kmsg write outside a task",
+        })
     }
 
-    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
-        Err("kmsg is read-only")
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        crate::log::submit_userspace(buffer).map_err(|error| match error {
+            crate::log::UserspaceLogError::InvalidArgument => "invalid kmsg message",
+            crate::log::UserspaceLogError::TooLarge => "kmsg message too large",
+            crate::log::UserspaceLogError::NoCurrentTask => "kmsg write outside a task",
+        })
     }
 
     fn can_read(&self) -> bool {
@@ -110,7 +121,7 @@ impl CharDevice for KmsgDevice {
     }
 
     fn can_write(&self) -> bool {
-        false
+        true
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
