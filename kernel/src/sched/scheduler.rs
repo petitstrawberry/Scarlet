@@ -6055,7 +6055,11 @@ pub fn current_task(cpu_id: usize) -> Option<CurrentTaskRef> {
     // prevents pool retirement. The IRQ guard prevents a local switch or
     // migration between loading the pointer and constructing the borrowed guard.
     let task = unsafe { &*task_ptr };
-    if task.get_id() != task_id {
+    // The publication must be validated without asserting on an unregistered
+    // task. A context can become stale while a task is retiring; returning
+    // `None` lets the syscall boundary reject the stale owner instead of
+    // entering the panic path with interrupts masked.
+    if task.registered_id() != Some(task_id) {
         return None;
     }
     CurrentTaskRef::from_running_task(task, cpu_id)
@@ -7479,6 +7483,21 @@ mod tests {
         assert_eq!(Arc::strong_count(&task), strong_count);
         set_current_task_id(cpu_id, None);
         task.running_cpu.store(NO_CPU, Ordering::SeqCst);
+    }
+
+    #[test_case]
+    fn unregistered_current_pointer_is_rejected_without_panicking() {
+        reset();
+        let cpu_id = get_cpu().get_cpuid();
+        let task = Task::new("UnregisteredCurrent".to_string(), 1, TaskType::Kernel);
+        CURRENT_TASK_PTRS[cpu_id].store(
+            core::ptr::from_ref(&task) as *mut Task,
+            Ordering::SeqCst,
+        );
+        CURRENT_TASK_IDS[cpu_id].store(encode_task_id(Some(1)), Ordering::SeqCst);
+        assert!(current_task(cpu_id).is_none());
+        set_current_task_id(cpu_id, None);
+        reset();
     }
 
     #[test_case]
