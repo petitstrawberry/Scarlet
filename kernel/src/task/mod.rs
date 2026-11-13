@@ -2722,14 +2722,9 @@ impl Task {
         let Some(ptr) = self.take_linux_clear_child_tid() else {
             return;
         };
-        let Some(paddr) = self.vm_manager.translate_to_kva(ptr) else {
+        let cleared = 0i32.to_ne_bytes();
+        if crate::library::std::usercopy::copy_to_user(self, ptr, &cleared).is_err() {
             return;
-        };
-
-        // SAFETY: `translate_to_kva` validated this user address in this task's
-        // address space; exit owns the one-time clear-child-tid transition.
-        unsafe {
-            core::ptr::write_volatile(paddr as *mut i32, 0);
         }
         let _ = crate::abi::linux::generic::futex::wake_task_address(self, ptr, 1);
     }
@@ -4463,6 +4458,29 @@ mod tests {
         task.set_linux_clear_child_tid(Some(0x4000));
         assert_eq!(task.take_linux_clear_child_tid(), Some(0x4000));
         assert_eq!(task.take_linux_clear_child_tid(), None);
+    }
+
+    #[test_case]
+    fn clear_child_tid_cows_before_a_forked_child_shares_the_page() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+
+        let parent = super::new_user_task("ClearChildTidCow".to_string(), 1);
+        parent.init();
+        let address = 0xa700_0000;
+        parent.allocate_data_pages(address, 1).unwrap();
+        copy_to_user(&parent, address, b"class!").unwrap();
+        parent.set_linux_clear_child_tid(Some(address));
+
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        parent.clear_linux_child_tid_on_exit();
+
+        let mut parent_bytes = [0xff; 6];
+        let mut child_bytes = [0xff; 6];
+        copy_from_user(&parent, address, &mut parent_bytes).unwrap();
+        copy_from_user(&child, address, &mut child_bytes).unwrap();
+        assert_eq!(&parent_bytes[..4], &[0; 4]);
+        assert_eq!(&parent_bytes[4..], b"s!");
+        assert_eq!(child_bytes, *b"class!");
     }
 
     #[test_case]
