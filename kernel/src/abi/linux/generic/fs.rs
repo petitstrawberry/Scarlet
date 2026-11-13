@@ -1535,6 +1535,10 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::ENXIO);
     }
 
+    let kernel_obj = match super::log::wrap_device(kernel_obj, flags) {
+        Ok(object) => object,
+        Err(error) => return errno::to_result(error),
+    };
     let kernel_obj = crate::abi::linux::device::evdev::wrap(kernel_obj);
 
     // Post-open flag handling (O_DIRECTORY, O_TRUNC, O_APPEND)
@@ -1817,7 +1821,7 @@ fn current_file_status_flags(abi: &LinuxAbi, task: &crate::task::Task, fd: usize
         if crate::abi::linux::device::tty::is_tty_ioctl_target(
             crate::abi::linux::device::tty::TIOCGWINSZ,
             &object,
-        ) {
+        ) || super::log::is_log_file(&object) {
             if let Some(selectable) = object.as_selectable() {
                 flags &= !(O_NONBLOCK as u32);
                 if selectable.is_nonblocking() {
@@ -1861,6 +1865,9 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let Some(object) = task.handle_table.get(handle) else {
         return errno::to_result(errno::EBADF);
     };
+    if let Some(result) = super::log::read_to_user(&object, &task, trapframe, user_buf, count) {
+        return result;
+    }
     if object
         .as_file()
         .and_then(|file| file.metadata().ok())
@@ -1931,6 +1938,9 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => return usize::MAX,
     };
+    if let Some(result) = super::log::write_from_user(&kernel_obj, &task, user_buf, count) {
+        return result;
+    }
 
     #[cfg(feature="network")]
     if let Some(local)=kernel_obj.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).filter(|socket|socket.is_datagram()) {
@@ -4072,6 +4082,13 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
         }
         vectors.push((base, length));
         total = next;
+    }
+    if reading {
+        if let Some(result) = super::log::readv_to_user(&object, &task, trapframe, &vectors, total) {
+            return result;
+        }
+    } else if let Some(result) = super::log::writev_from_user(&object, &task, &vectors, total) {
+        return result;
     }
     #[cfg(feature="network")]
     if !reading && object.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).is_some_and(|socket|socket.is_datagram()) && total>crate::network::local::MAX_DATAGRAM_BYTES {return errno::to_result(errno::EMSGSIZE);}

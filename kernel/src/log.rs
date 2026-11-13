@@ -4,7 +4,7 @@
 //! retrieved later by user-space programs (e.g. `/dev/kmsg`).
 //!
 //! Writes append to the buffer; old data is overwritten when full.
-//! Readers block via `READER_WAKER` until new data arrives (Linux /dev/kmsg semantics).
+//! Readers wait on `READER_WAKER` until new data arrives.
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -393,6 +393,57 @@ pub(crate) fn read_record_at(cursor: usize, buf: &mut [u8]) -> (usize, usize) {
     (count, start + count)
 }
 
+/// A copied line fragment and its native metadata from the same ring snapshot.
+pub(crate) struct RecordSlice {
+    pub start: usize,
+    pub next: usize,
+    pub length: usize,
+    pub origin: Origin,
+    pub severity: Option<u8>,
+}
+
+/// Copy up to a newline, buffer boundary, or change in origin/severity. Holding
+/// the byte lock for both data and metadata avoids separately sampling bytes
+/// which may have been overwritten. PID lookup occurs once per fragment.
+pub(crate) fn read_record_with_metadata(cursor: usize, buf: &mut [u8]) -> Option<RecordSlice> {
+    let _lock = BYTE_LOCK.lock();
+    let start = cursor.max(TAIL.load(Ordering::Acquire));
+    let head = HEAD.load(Ordering::Acquire);
+    if start >= head || buf.is_empty() {
+        return None;
+    }
+    let tag = USER_BYTES[start % LOG_BUF_SIZE].load(Ordering::Relaxed);
+    let origin = if tag == 0 {
+        Origin::Kernel
+    } else {
+        USER_RECORDS
+            .lock()
+            .origin(start)
+            .unwrap_or(Origin::Userspace { pid: None })
+    };
+    let limit = buf.len().min(head - start);
+    let mut length = 0;
+    while length < limit {
+        let index = (start + length) % LOG_BUF_SIZE;
+        if USER_BYTES[index].load(Ordering::Relaxed) != tag {
+            break;
+        }
+        let byte = BUF[index].load(Ordering::Relaxed);
+        buf[length] = byte;
+        length += 1;
+        if byte == b'\n' {
+            break;
+        }
+    }
+    Some(RecordSlice {
+        start,
+        next: start + length,
+        length,
+        origin,
+        severity: tag.checked_sub(1),
+    })
+}
+
 pub(crate) fn has_data(cursor: usize) -> bool {
     let tail = TAIL.load(Ordering::Acquire);
     let head = HEAD.load(Ordering::Acquire);
@@ -511,6 +562,34 @@ mod tests {
     fn log_reader_ahead_of_the_writer_has_no_bytes() {
         let mut output = [0u8; 8];
         assert_eq!(read_at(head() + 1, &mut output), 0);
+    }
+
+    #[test_case]
+    fn metadata_snapshot_stops_before_a_different_origin_and_keeps_copied_metadata() {
+        let start = head();
+        write_bytes(b"partial kernel");
+        submit_userspace_as(31, 3, b"first\nsecond").unwrap();
+        let mut output = [0u8; 128];
+        let kernel = read_record_with_metadata(start, &mut output).unwrap();
+        assert_eq!(&output[..kernel.length], b"partial kernel");
+        assert_eq!(kernel.origin, Origin::Kernel);
+        assert_eq!(kernel.severity, None);
+        assert_eq!(kernel.next, start + kernel.length);
+        let user = read_record_with_metadata(kernel.next, &mut output).unwrap();
+        assert_eq!(&output[..user.length], b"userspace[pid=31] first\n");
+        assert_eq!(user.origin, Origin::Userspace { pid: Some(31) });
+        assert_eq!(user.severity, Some(3));
+        let continuation = read_record_with_metadata(user.next, &mut output).unwrap();
+        assert_eq!(&output[..continuation.length], b"second\n");
+        assert_eq!(continuation.origin, user.origin);
+        assert_eq!(continuation.severity, user.severity);
+        for sequence in 0..=MAX_USER_RECORDS {
+            submit_userspace_as(sequence, 6, b"metadata-retention").unwrap();
+        }
+        assert_eq!(user.origin, Origin::Userspace { pid: Some(31) });
+        let retained = read_record_with_metadata(kernel.next, &mut output).unwrap();
+        assert_eq!(retained.origin, Origin::Userspace { pid: None });
+        assert_eq!(retained.severity, Some(3));
     }
 
     #[test_case]

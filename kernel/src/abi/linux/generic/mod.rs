@@ -11,6 +11,7 @@ pub mod fs;
 pub mod futex;
 mod memfd;
 mod fd_transfer;
+mod log;
 pub(crate) use fd_transfer::DescriptorReceipt;
 pub mod mm;
 mod mode;
@@ -678,6 +679,7 @@ syscall_table! {
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
     ClockNanosleep = 115 => time::sys_clock_nanosleep,
+    Syslog = 116 => log::sys_syslog,
     SchedSetparam = 118 => proc::sys_sched_setparam,
     SchedSetscheduler = 119 => proc::sys_sched_setscheduler,
     SchedGetscheduler = 120 => proc::sys_sched_getscheduler,

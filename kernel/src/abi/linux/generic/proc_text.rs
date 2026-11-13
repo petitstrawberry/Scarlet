@@ -581,6 +581,9 @@ fn snapshot_content(path: &str) -> Option<alloc::vec::Vec<u8>> {
 }
 
 pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
+    if let Some(metadata) = super::log::path_metadata(path) {
+        return Some(metadata);
+    }
     if let Some(metadata) = super::oom::path_metadata(path) {
         return Some(metadata);
     }
@@ -609,6 +612,9 @@ pub(super) fn open_proc_text_file(
     path: &str,
     flags: i32,
 ) -> Option<usize> {
+    if let Some(fd) = super::log::open(abi, task, path, flags) {
+        return Some(fd);
+    }
     if let Some(fd) = super::oom::open(abi, task, path, flags) {
         return Some(fd);
     }
