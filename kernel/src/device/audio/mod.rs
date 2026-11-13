@@ -893,11 +893,11 @@ impl AudioCharDevice {
     }
 
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
-        self.with_ring_mut(|ring| {
-            let info = ring.buffer_info();
-            write_user_value(arg, &info)?;
-            Ok(0)
-        })
+        let info = self.with_ring_mut(|ring| Ok(ring.buffer_info()))?;
+        // Usercopy can resolve COW pages and wait on the address space. Keep
+        // only a value snapshot after releasing the ring's IRQ/spin guards.
+        write_user_value(arg, &info)?;
+        Ok(0)
     }
 
     fn handle_commit_frames(&self, arg: usize) -> Result<i32, &'static str> {
@@ -959,12 +959,12 @@ impl AudioCharDevice {
     }
 
     fn handle_get_status(&self, arg: usize) -> Result<i32, &'static str> {
-        self.with_ring_mut(|ring| {
+        let status = self.with_ring_mut(|ring| {
             self.pump_locked(ring);
-            let status = ring.status();
-            write_user_value(arg, &status)?;
-            Ok(0)
-        })
+            Ok(ring.status())
+        })?;
+        write_user_value(arg, &status)?;
+        Ok(0)
     }
 
     fn handle_release(&self) -> Result<i32, &'static str> {
