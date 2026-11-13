@@ -3,6 +3,7 @@ use super::capability_config::{self, ApplicationGrant};
 use scarlet_os::{
     Handle,
     environment::{Environment, HandleMapping, VfsView},
+    shield::PolicyFactory,
 };
 use std::{fs, io::Read, os::fd::IntoRawFd, sync::OnceLock};
 
@@ -14,6 +15,7 @@ pub struct Grant {
     executable: Handle,
     execution_argv: Vec<String>,
     views: Vec<VfsView>,
+    policy_factory: Option<PolicyFactory>,
 }
 
 // Configuration and capabilities are immutable after startup. IPC callers can
@@ -122,11 +124,17 @@ fn load() -> Result<Vec<Grant>, &'static str> {
                 .map_err(|_| "cannot construct delegated View")?,
             );
         }
+        let policy_factory = if rule.shield_policy_factory.is_some() {
+            Some(PolicyFactory::acquire().map_err(|_| "cannot acquire policy-factory grant")?)
+        } else {
+            None
+        };
         grants.push(Grant {
             rule,
             executable,
             execution_argv,
             views,
+            policy_factory,
         });
     }
     Ok(grants)
@@ -196,6 +204,15 @@ pub fn spawn(grant: &Grant, environment: &[String]) -> Result<Spawned, &'static 
                 target: rule.target,
             }),
     );
+    if let (Some(factory), Some(target)) = (
+        grant.policy_factory.as_ref(),
+        grant.rule.shield_policy_factory,
+    ) {
+        handles.push(HandleMapping {
+            source: factory.as_handle(),
+            target,
+        });
+    }
     let argv: Vec<_> = grant.execution_argv.iter().map(String::as_str).collect();
     let environment: Vec<_> = environment.iter().map(String::as_str).collect();
     let pid = Environment::current()

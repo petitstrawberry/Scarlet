@@ -1,4 +1,4 @@
-//! Administrator-configured View-capability grants for stemd applications.
+//! Administrator-configured capability grants for stemd applications.
 //!
 //! A grant fixes both the application identity and its complete argument vector.
 //! Runtime callers can therefore only select an existing grant; they cannot add
@@ -17,6 +17,7 @@ pub struct ApplicationGrant {
     pub id: String,
     pub argv: Vec<String>,
     pub view: Vec<ViewGrant>,
+    pub shield_policy_factory: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +38,9 @@ struct CapabilityConfig {
 struct ApplicationEntry {
     id: String,
     argv: Vec<String>,
+    #[serde(default)]
     view: Vec<ViewEntry>,
+    shield_policy_factory: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -49,9 +52,10 @@ struct ViewEntry {
 
 /// Parse administrator-owned capability configuration.
 ///
-/// The TOML document has a `[[application]]` entry for every trusted app and a
-/// `[[application.view]]` entry for every native View to transfer. Unknown
-/// fields, ambiguous grants, and unsafe paths are rejected.
+/// The TOML document has a `[[application]]` entry for every trusted app. Each
+/// entry must have at least one `[[application.view]]` child or a
+/// `shield_policy_factory` target. Unknown fields, ambiguous grants, and unsafe
+/// paths are rejected.
 pub fn parse(text: &str) -> Result<Vec<ApplicationGrant>, &'static str> {
     if text.len() > MAX_CONFIG_BYTES {
         return Err("capability configuration exceeds 64 KiB");
@@ -89,9 +93,6 @@ pub fn parse(text: &str) -> Result<Vec<ApplicationGrant>, &'static str> {
             }
         }
 
-        if application.view.is_empty() {
-            return Err("application has no View grants");
-        }
         if application.view.len() > MAX_VIEWS_PER_APPLICATION {
             return Err("application has too many View grants");
         }
@@ -113,11 +114,25 @@ pub fn parse(text: &str) -> Result<Vec<ApplicationGrant>, &'static str> {
             });
         }
 
+        if let Some(target) = application.shield_policy_factory {
+            if !(3..=255).contains(&target) {
+                return Err("policy-factory target must be between 3 and 255");
+            }
+            if targets.contains(&target) {
+                return Err("duplicate target for application");
+            }
+        }
+
+        if views.is_empty() && application.shield_policy_factory.is_none() {
+            return Err("application has no capability grants");
+        }
+
         application_ids.push(application.id.clone());
         grants.push(ApplicationGrant {
             id: application.id,
             argv: application.argv,
             view: views,
+            shield_policy_factory: application.shield_policy_factory,
         });
     }
 
@@ -222,6 +237,25 @@ mod tests {
                 target: 3
             }]
         );
+        assert_eq!(grant.shield_policy_factory, None);
+    }
+
+    #[test]
+    fn policy_factory_only_grant_can_omit_views() {
+        let config = r#"
+            [[application]]
+            id = "org.scarlet.PolicyTool"
+            argv = ["/bin/policy-tool"]
+            shield_policy_factory = 4
+        "#;
+        let grants = parse(config).unwrap();
+        let argv = strings(&["/bin/policy-tool"]);
+        let grant = find_grant(&grants, "org.scarlet.PolicyTool", &argv)
+            .unwrap()
+            .unwrap();
+
+        assert!(grant.view.is_empty());
+        assert_eq!(grant.shield_policy_factory, Some(4));
     }
 
     #[test]
@@ -292,6 +326,53 @@ mod tests {
             "root = \"/\"\n        target = 3\n\n        [[application.view]]\n        root = \"/tmp\"\n        target = 3",
         );
         assert!(parse(&duplicate_target).is_err());
+
+        let factory_duplicate = TRUSTED.replace(
+            "target = 3",
+            "target = 3\n        shield_policy_factory = 3",
+        );
+        assert!(parse(&factory_duplicate).is_err());
+
+        let factory_duplicate = r#"
+            [[application]]
+            id = "org.scarlet.PolicyTool"
+            argv = ["/bin/policy-tool"]
+            shield_policy_factory = 4
+
+            [[application.view]]
+            root = "/"
+            target = 4
+        "#;
+        assert!(parse(factory_duplicate).is_err());
+    }
+
+    #[test]
+    fn empty_grants_and_invalid_policy_factory_targets_are_rejected() {
+        let empty = r#"
+            [[application]]
+            id = "org.scarlet.Empty"
+            argv = ["/bin/empty"]
+        "#;
+        assert!(parse(empty).is_err());
+
+        let empty_view = r#"
+            [[application]]
+            id = "org.scarlet.Empty"
+            argv = ["/bin/empty"]
+            view = []
+        "#;
+        assert!(parse(empty_view).is_err());
+
+        let low = r#"
+            [[application]]
+            id = "org.scarlet.PolicyTool"
+            argv = ["/bin/policy-tool"]
+            shield_policy_factory = 2
+        "#;
+        assert!(parse(low).is_err());
+
+        let high = low.replace("shield_policy_factory = 2", "shield_policy_factory = 256");
+        assert!(parse(&high).is_err());
     }
 
     #[test]
