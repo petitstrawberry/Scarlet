@@ -11,6 +11,12 @@ mod tests;
 /// Handle type for referencing kernel objects
 pub type Handle = u32;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum DuplicateToError {
+    InvalidHandle,
+    ReservedTarget,
+}
+
 /// Internal structure containing the actual handle table data.
 /// This is wrapped in Arc<IrqRwSpinLock<...>> to enable sharing between tasks.
 struct HandleTableInner {
@@ -364,6 +370,47 @@ impl HandleTable {
         let object = inner.handles[handle as usize].as_ref()?;
         let metadata = inner.metadata[handle as usize].as_ref()?;
         Some((object.clone(), metadata.clone()))
+    }
+
+    /// Replace `target` atomically with a duplicate of `source`, sharing its
+    /// open-file description and access rights, with close-on-exec cleared.
+    /// A reserved slot belongs to an in-progress open; reject it without
+    /// disrupting either operation. Dispose of the old object outside the
+    /// table lock, since its final close may wake tasks or acquire other locks.
+    pub fn duplicate_to(&self, source: Handle, target: Handle) -> Result<Handle, DuplicateToError> {
+        if source as usize >= Self::MAX_HANDLES || target as usize >= Self::MAX_HANDLES {
+            return Err(DuplicateToError::InvalidHandle);
+        }
+        let replaced = {
+            let mut inner = self.inner.write();
+            if inner.handles[source as usize].is_none() || inner.metadata[source as usize].is_none()
+            {
+                return Err(DuplicateToError::InvalidHandle);
+            }
+            if source == target {
+                return Ok(target);
+            }
+            let free_index = inner
+                .free_handles
+                .iter()
+                .position(|&handle| handle == target);
+            if inner.handles[target as usize].is_none() && free_index.is_none() {
+                return Err(DuplicateToError::ReservedTarget);
+            }
+            let mut object = inner.handles[source as usize].as_ref().unwrap().clone();
+            object.ensure_handle_ownership();
+            let mut metadata = inner.metadata[source as usize].as_ref().unwrap().clone();
+            if metadata.special_semantics == Some(SpecialSemantics::CloseOnExec) {
+                metadata.special_semantics = None;
+            }
+            if let Some(index) = free_index {
+                inner.free_handles.swap_remove(index);
+            }
+            inner.metadata[target as usize] = Some(metadata);
+            inner.handles[target as usize].replace(object)
+        };
+        drop(replaced);
+        Ok(target)
     }
 
     /// O(1) removal

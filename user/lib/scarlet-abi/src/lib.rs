@@ -949,6 +949,10 @@ pub enum Syscall {
     /// Set descriptor close-on-exec bit (0 or 1), returning zero or -errno.
     HandleSetDescriptorFlags = 109,
     HandleControl = 110,
+    /// Atomically duplicate a descriptor onto a specified slot. Returns the
+    /// target or -errno; an in-progress open reservation returns -EBUSY.
+    /// source == target validates the handle without changing descriptor flags.
+    HandleDuplicateToWithStatus = 111,
 
     // Core capabilities
     StreamRead = 200,

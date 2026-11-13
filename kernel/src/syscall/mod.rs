@@ -304,6 +304,7 @@ syscall_table! {
     HandleGetDescriptorFlags = 108 => crate::fs::vfs_v2::descriptor::sys_handle_get_descriptor_flags,
     HandleSetDescriptorFlags = 109 => crate::fs::vfs_v2::descriptor::sys_handle_set_descriptor_flags,
     HandleControl = 110 => sys_handle_control,  // Control operations on handles (ioctl-equivalent)
+    HandleDuplicateToWithStatus = 111 => crate::fs::vfs_v2::descriptor::sys_handle_duplicate_to_with_status,
 
     // === StreamOps Capability ===
     // Stream operations for any KernelObject with StreamOps capability

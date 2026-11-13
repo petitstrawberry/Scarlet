@@ -15,7 +15,7 @@ use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::object::KernelObject;
 use crate::object::capability::StreamError;
 use crate::object::handle::{
-    AccessMode, HandleMetadata, HandleTable, HandleType, SpecialSemantics,
+    AccessMode, DuplicateToError, HandleMetadata, HandleTable, HandleType, SpecialSemantics,
 };
 use crate::task::{Task, mytask};
 
@@ -221,6 +221,20 @@ pub fn sys_handle_duplicate_with_status(tf: &mut Trapframe) -> usize {
     let handle = tf.get_arg(0);
     tf.increment_pc_next(&task);
     duplicate(&task.handle_table, handle).unwrap_or_else(|error| error)
+}
+
+pub fn sys_handle_duplicate_to_with_status(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let (source, target) = (tf.get_arg(0), tf.get_arg(1));
+    tf.increment_pc_next(&task);
+    let (Ok(source), Ok(target)) = (u32::try_from(source), u32::try_from(target)) else {
+        return negative(ERRNO_EBADF);
+    };
+    match task.handle_table.duplicate_to(source, target) {
+        Ok(handle) => handle as usize,
+        Err(DuplicateToError::InvalidHandle) => negative(ERRNO_EBADF),
+        Err(DuplicateToError::ReservedTarget) => negative(ERRNO_EBUSY),
+    }
 }
 
 pub fn sys_handle_get_descriptor_flags(tf: &mut Trapframe) -> usize {

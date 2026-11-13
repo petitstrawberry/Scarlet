@@ -1,11 +1,135 @@
 //! HandleTable tests
 
 use super::super::{AccessMode, Handle, HandleMetadata, HandleTable, HandleType, KernelObject};
+use super::super::{DuplicateToError, SpecialSemantics};
 use super::mock::{MockFileObject, MockPipeObject};
 use crate::device::gpu::GpuObject;
 use crate::ipc::pipe::PipeObject;
 use alloc::{format, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[test_case]
+fn duplicate_to_replaces_atomically_and_shares_file_offset() {
+    let table = HandleTable::new();
+    let source = table
+        .insert_with_metadata(
+            KernelObject::File(Arc::new(MockFileObject::new(b"abc".to_vec()))),
+            HandleMetadata {
+                handle_type: HandleType::Regular,
+                access_mode: AccessMode::ReadOnly,
+                special_semantics: Some(SpecialSemantics::CloseOnExec),
+            },
+        )
+        .unwrap();
+    let target = table
+        .insert(KernelObject::File(Arc::new(MockFileObject::new(
+            b"xyz".to_vec(),
+        ))))
+        .unwrap();
+    assert_eq!(table.duplicate_to(source, target), Ok(target));
+    assert_eq!(table.open_count(), 2);
+    assert_eq!(
+        table.get_metadata(target).unwrap().access_mode,
+        AccessMode::ReadOnly
+    );
+    assert_eq!(table.get_metadata(target).unwrap().special_semantics, None);
+    assert_eq!(
+        table.get_metadata(source).unwrap().special_semantics,
+        Some(SpecialSemantics::CloseOnExec)
+    );
+    let mut byte = [0];
+    table
+        .get_arc_clone(source)
+        .unwrap()
+        .as_stream()
+        .unwrap()
+        .read(&mut byte)
+        .unwrap();
+    assert_eq!(byte, [b'a']);
+    table
+        .get_arc_clone(target)
+        .unwrap()
+        .as_stream()
+        .unwrap()
+        .read(&mut byte)
+        .unwrap();
+    assert_eq!(byte, [b'b']);
+    assert_eq!(table.duplicate_to(source, source), Ok(source));
+    assert_eq!(
+        table.get_metadata(source).unwrap().special_semantics,
+        Some(SpecialSemantics::CloseOnExec)
+    );
+}
+
+#[test_case]
+fn duplicate_to_failures_preserve_target_and_reservations() {
+    let table = HandleTable::new();
+    let source = table
+        .insert(KernelObject::File(Arc::new(MockFileObject::new(
+            b"source".to_vec(),
+        ))))
+        .unwrap();
+    let target = table
+        .insert(KernelObject::File(Arc::new(MockFileObject::new(
+            b"target".to_vec(),
+        ))))
+        .unwrap();
+    assert_eq!(
+        table.duplicate_to(100, target),
+        Err(DuplicateToError::InvalidHandle)
+    );
+    assert_eq!(
+        table.duplicate_to(source, HandleTable::MAX_HANDLES as Handle),
+        Err(DuplicateToError::InvalidHandle)
+    );
+    assert_eq!(
+        table.duplicate_to(100, 100),
+        Err(DuplicateToError::InvalidHandle)
+    );
+    let mut bytes = [0; 6];
+    table
+        .get_arc_clone(target)
+        .unwrap()
+        .as_stream()
+        .unwrap()
+        .read(&mut bytes)
+        .unwrap();
+    assert_eq!(&bytes, b"target");
+    let reservation = table.reserve_lowest().unwrap();
+    assert_eq!(
+        table.clone().duplicate_to(source, 2),
+        Err(DuplicateToError::ReservedTarget)
+    );
+    assert_eq!(table.open_count(), 3);
+    drop(reservation);
+    assert_eq!(table.duplicate_to(source, 2), Ok(2));
+    assert_eq!(table.open_count(), 3);
+    assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES - 3);
+    table.remove(2).unwrap();
+    assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES - 2);
+}
+
+#[test_case]
+fn duplicate_to_releases_replaced_object_without_table_lock() {
+    let table = HandleTable::new();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let count = Arc::new(AtomicUsize::new(0));
+    let source = table
+        .insert(KernelObject::File(Arc::new(MockFileObject::new(
+            b"source".to_vec(),
+        ))))
+        .unwrap();
+    let target = table
+        .insert(KernelObject::Gpu(Arc::new(ReentrantDropGpuObject {
+            table: table.clone(),
+            dropped: dropped.clone(),
+            observed_open_count: count.clone(),
+        })))
+        .unwrap();
+    assert_eq!(table.duplicate_to(source, target), Ok(target));
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
 
 struct ReentrantDropGpuObject {
     table: HandleTable,
