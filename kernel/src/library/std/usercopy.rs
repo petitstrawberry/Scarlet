@@ -99,28 +99,30 @@ pub fn copy_to_user(
     }
     check_range(user_addr, src.len())?;
 
-    let mut copied = 0usize;
-    while copied < src.len() {
-        let current_vaddr = user_addr + copied;
-        let page_off = current_vaddr & (PAGE_SIZE - 1);
-        let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
-        let kaddr = task
-            .vm_manager
-            .translate_to_kva_for_write(current_vaddr)
-            .ok_or(UserCopyError::TranslationError)?;
+    task.vm_manager.with_mapping_write(|| {
+        let mut copied = 0usize;
+        while copied < src.len() {
+            let current_vaddr = user_addr + copied;
+            let page_off = current_vaddr & (PAGE_SIZE - 1);
+            let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
+            let kaddr = task
+                .vm_manager
+                .translate_to_kva_for_write(current_vaddr)
+                .ok_or(UserCopyError::TranslationError)?;
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                src[copied..copied + chunk_len].as_ptr(),
-                kaddr as *mut u8,
-                chunk_len,
-            );
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src[copied..copied + chunk_len].as_ptr(),
+                    kaddr as *mut u8,
+                    chunk_len,
+                );
+            }
+
+            copied += chunk_len;
         }
 
-        copied += chunk_len;
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 // Reject arithmetic wrap before any page is translated or copied. This checks

@@ -602,36 +602,39 @@ fn madvise_for_task(task: &crate::task::Task, addr: usize, length: usize, advice
     const MADV_DONTNEED: usize = 4;
     const MADV_FREE: usize = 8;
     if advice == MADV_DONTNEED || advice == MADV_FREE {
-        for page in (addr..end).step_by(PAGE_SIZE) {
-            let Some(map) = task.vm_manager.search_memory_map(page) else {
-                return to_result(errno::ENOMEM);
-            };
-            if map.is_shared || map.permissions & 0x2 == 0 {
-                continue;
-            }
-            if let Some(owner) = &map.owner {
-                let name = owner.mmap_owner_name();
-                if !matches!(name.as_str(), "anonymous" | "fork-cow") {
+        return task.vm_manager.with_mapping_write(|| {
+            for page in (addr..end).step_by(PAGE_SIZE) {
+                let Some(map) = task.vm_manager.search_memory_map(page) else {
+                    return to_result(errno::ENOMEM);
+                };
+                if map.is_shared || map.permissions & 0x2 == 0 {
                     continue;
                 }
-                // A never-allocated anonymous page already reads as zero.
-                // In particular, glibc discards the unused part of every
-                // exiting thread's stack before waking pthread_join. Faulting
-                // that entire range in here turns cleanup into allocation/COW
-                // and page-table updates for thousands of untouched pages.
-                let page_idx = (page - map.vm_start) / PAGE_SIZE;
-                if name == "anonymous"
-                    && map.pmarea.start == 0
-                    && owner.is_page_resident(page_idx) == Some(false)
-                {
-                    continue;
+                if let Some(owner) = &map.owner {
+                    let name = owner.mmap_owner_name();
+                    if !matches!(name.as_str(), "anonymous" | "fork-cow") {
+                        continue;
+                    }
+                    // A never-allocated anonymous page already reads as zero.
+                    // In particular, glibc discards the unused part of every
+                    // exiting thread's stack before waking pthread_join. Faulting
+                    // that entire range in here turns cleanup into allocation/COW
+                    // and page-table updates for thousands of untouched pages.
+                    let page_idx = (page - map.vm_start) / PAGE_SIZE;
+                    if name == "anonymous"
+                        && map.pmarea.start == 0
+                        && owner.is_page_resident(page_idx) == Some(false)
+                    {
+                        continue;
+                    }
                 }
+                let Some(kva) = task.vm_manager.translate_to_kva_for_write(page) else {
+                    return to_result(errno::EFAULT);
+                };
+                unsafe { core::ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE) };
             }
-            let Some(kva) = task.vm_manager.translate_to_kva_for_write(page) else {
-                return to_result(errno::EFAULT);
-            };
-            unsafe { core::ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE) };
-        }
+            0
+        });
     }
     0
 }

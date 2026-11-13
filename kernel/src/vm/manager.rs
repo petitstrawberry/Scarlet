@@ -113,6 +113,12 @@ pub struct VirtualMemoryManager {
     brk: Arc<AtomicUsize>,
     data_size: Arc<AtomicUsize>,
     brk_transaction: Arc<Mutex<()>>,
+    // Serialize user writes that use direct-map aliases with fork publication.
+    // fork_snapshot changes ownerless resident pages into shared COW sources;
+    // a write resolved before that transition must not land in the source now
+    // visible to the child. This lock belongs to one address space and is
+    // shared by CLONE_VM siblings through this Arc.
+    mapping_transaction: Arc<Mutex<()>>,
 }
 
 impl core::fmt::Debug for VirtualMemoryManager {
@@ -229,6 +235,7 @@ impl VirtualMemoryManager {
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
             data_size: Arc::new(AtomicUsize::new(0)),
             brk_transaction: Arc::new(Mutex::new(())),
+            mapping_transaction: Arc::new(Mutex::new(())),
         }
     }
 
@@ -274,6 +281,17 @@ impl VirtualMemoryManager {
         Arc::clone(&self.brk_transaction)
     }
 
+    /// Run a user-memory write against a stable mapping snapshot.
+    ///
+    /// `fork_snapshot` takes the same address-space-local transaction lock
+    /// before it changes private resident pages into shared COW sources. The
+    /// caller may therefore translate and write each page under this guard
+    /// without observing a mapping transition between those operations.
+    pub(crate) fn with_mapping_write<R>(&self, write: impl FnOnce() -> R) -> R {
+        let _transaction = self.mapping_transaction.lock();
+        write()
+    }
+
     /// Check whether this manager is the only owner of its address space.
     ///
     /// # Returns
@@ -310,6 +328,7 @@ impl VirtualMemoryManager {
     /// VMA, but cannot release backing retained by this snapshot.
     pub(crate) fn fork_snapshot(&self) -> Result<Vec<VirtualMemoryMap>, &'static str> {
         use crate::object::capability::memory_mapping::anon_owner::ForkCowPageOwner;
+        let _transaction = self.mapping_transaction.lock();
         // Match fault/relocation publication: page tables precede metadata.
         // Keep this guard until writable parent PTEs have been revoked, so a
         // second fork cannot publish a child before the first revocation.
