@@ -7,6 +7,7 @@ use super::SeekFrom;
 use crate::arch::Trapframe;
 use crate::fs::AbiFileMetadata;
 use crate::library::std::usercopy::copy_to_user;
+use crate::object::KernelObject;
 use crate::task::mytask;
 
 fn stream_errno(error: crate::object::capability::StreamError) -> usize {
@@ -142,40 +143,41 @@ pub fn sys_file_truncate(trapframe: &mut Trapframe) -> usize {
 ///
 /// # Arguments
 ///
-/// - `handle`: Handle to the KernelObject (must support FileObject)
+/// - `handle`: Handle to a file or anonymous pipe KernelObject
 /// - `metadata_ptr`: Pointer to an `AbiFileMetadata` structure to fill
 ///
 /// # Returns
 ///
 /// - On success: `0`
-/// - On error: `usize::MAX`
+/// - On error: `usize::MAX`, including invalid handles and invalid output memory.
+///
+/// This is a legacy sentinel-result syscall. Do not return encoded errno values
+/// here: existing FileError::from_syscall_result callers would treat -EBADF (and
+/// other values besides -1) as success and consume an uninitialized record.
 pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return usize::MAX,
     };
 
-    let handle = trapframe.get_arg(0) as u32;
+    let handle = trapframe.get_arg(0);
     let metadata_ptr = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop if metadata fails
     trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
-    let kernel_obj = match task.handle_table.get(handle) {
+    let kernel_obj = match u32::try_from(handle)
+        .ok()
+        .and_then(|handle| task.handle_table.get(handle))
+    {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid handle
     };
 
-    // Check if object supports FileObject operations
-    let file = match kernel_obj.as_file() {
-        Some(file) => file,
-        None => return usize::MAX, // Object doesn't support file operations
-    };
-
-    let metadata = match file.metadata() {
-        Ok(metadata) => AbiFileMetadata::from_metadata(&metadata),
-        Err(_) => return usize::MAX,
+    let metadata = match object_metadata(&kernel_obj) {
+        Some(metadata) => metadata,
+        None => return usize::MAX,
     };
 
     // SAFETY: `metadata` is a plain `repr(C)` byte record and is only read for
@@ -191,4 +193,37 @@ pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
+}
+
+/// Query object state without granting pipes seek/truncate capabilities or
+/// manufacturing a regular-file record for an unsupported object.
+fn object_metadata(object: &KernelObject) -> Option<AbiFileMetadata> {
+    if let Some(file) = object.as_file() {
+        return file
+            .metadata()
+            .ok()
+            .map(|metadata| AbiFileMetadata::from_metadata(&metadata));
+    }
+    let pipe = object.as_pipe()?;
+    // Real pipe endpoints share this identity across both ends and duplicates.
+    // An implementation without an identity cannot provide this record.
+    let file_id = pipe.pipe_id()?;
+    let mut permissions = 0;
+    if pipe.is_readable() {
+        permissions |= crate::fs::ABI_FILE_PERMISSION_READ;
+    }
+    if pipe.is_writable() {
+        permissions |= crate::fs::ABI_FILE_PERMISSION_WRITE;
+    }
+    Some(AbiFileMetadata {
+        file_type: crate::fs::ABI_FILE_TYPE_PIPE,
+        file_id,
+        permissions,
+        // This is a snapshot of queued bytes, not the pipe capacity or a
+        // seekable file length. Observing it does not consume data.
+        size: pipe.available_bytes() as u64,
+        // Anonymous pipes have no directory links or tracked timestamps.
+        // Keep those unavailable fields and the reserved word zero.
+        ..AbiFileMetadata::default()
+    })
 }
