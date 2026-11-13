@@ -59,6 +59,7 @@ regex = "1"
 svgtypes = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8.23"
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
 pulldown-cmark = "0.12"
 png = "0.18.1"

@@ -94,3 +94,34 @@ Host keyboard inspection, invalid-package feedback and window scrolling are
 checked with an explicit scratch package. Native compilation uses the current
 Scarlet toolchain. These checks do not demonstrate installation/removal in a
 running Scarlet desktop or power-loss recovery.
+
+## Explicit application View grants
+
+stemd reads administrator-owned `/etc/stemd.d/capabilities/*.toml` once at startup.
+A grant fixes the application ID, complete argument vector and native View roots
+that the application receives as administrative capabilities. For example:
+
+```toml
+[[application]]
+id = "org.scarlet.example-manager"
+argv = ["/applications/example-manager.app/bin/manager", "--view-handle", "3"]
+
+[[application.view]]
+root = "/systems/example"
+target = 3
+```
+
+The command must exactly match the resolved desktop entry, including arguments.
+An IPC command override, added file argument or replacement desktop command is
+rejected for a configured ID. The executable and rooted Views are opened during
+startup; standard input and captured logs occupy handles 0–2. Handles 3–255 can
+be explicitly assigned, and ordinary applications keep their existing launch
+path. A transferred View is management authority, not a path string; the child
+must deliberately pass it on if another executable needs it.
+Native `#!/bin/sh` app scripts use the system shell, as with normal app launch;
+the grant still matches the script's original command and arguments exactly.
+
+These files have the same installation trust boundary as stemd's service
+configuration. They are not loaded from an application's writable resources or
+reloaded by `ReloadApplications`. Invalid or duplicate grants disable application
+launch with an error while normal service startup continues.

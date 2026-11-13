@@ -35,6 +35,8 @@ use sws_client::Connection;
 
 // Import protocol and desktop modules
 use scarlet_apps as desktop;
+mod capability_config;
+mod capability_launch;
 mod power;
 mod protocol;
 
@@ -132,6 +134,36 @@ fn spawn_command(
         }
     }
     Ok(pid)
+}
+
+fn spawn_application(
+    app_id: &str,
+    argv: &[String],
+    activation_token: Option<&str>,
+) -> Result<i32, &'static str> {
+    let Some(grant) = capability_launch::find(app_id, argv)? else {
+        return spawn_command(argv, activation_token, None, Some(app_id));
+    };
+    let environment = application_environment(activation_token);
+    let transition = POWER_TRANSITION.lock().expect("stemd mutex poisoned");
+    if *transition {
+        return Err("system power transition in progress");
+    }
+    let child = capability_launch::spawn(grant, &environment)?;
+    drop(transition);
+    start_log_forwarder(
+        child.stdout,
+        app_id.to_string(),
+        child.pid,
+        LogStream::Stdout,
+    );
+    start_log_forwarder(
+        child.stderr,
+        app_id.to_string(),
+        child.pid,
+        LogStream::Stderr,
+    );
+    Ok(child.pid)
 }
 
 fn start_log_forwarder<R>(mut reader: R, unit: String, pid: i32, stream: LogStream)
@@ -821,7 +853,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
 
     let argv = expand_exec(&exec_path, &[])?;
-    let pid = spawn_command(&argv, None, None, Some(app_id)).map_err(|error| {
+    let pid = spawn_application(app_id, &argv, None).map_err(|error| {
         println!("stemd: Failed to launch app '{}': {}", app_id, error);
         error
     })?;
@@ -967,11 +999,10 @@ fn launch_desktop_entry(
     let app_id = entry.app_id.clone();
     let exec_path = entry.exec.clone();
 
-    let pid =
-        spawn_command(&argv_strings, activation_token, None, Some(&app_id)).map_err(|error| {
-            println!("stemd: Failed to launch app '{}': {}", app_id, error);
-            error
-        })?;
+    let pid = spawn_application(&app_id, &argv_strings, activation_token).map_err(|error| {
+        println!("stemd: Failed to launch app '{}': {}", app_id, error);
+        error
+    })?;
 
     add_running_app(app_id.clone(), pid, exec_path);
     println!("stemd: App '{}' launched with PID: {}", app_id, pid);
@@ -1919,6 +1950,12 @@ fn handle_sbus_message(
 fn main() {
     println!("stemd: Stem Daemon starting...");
     println!("stemd: PID={}", std::process::id());
+    if let Err(error) = capability_launch::initialize() {
+        println!(
+            "stemd: Application capability configuration failed: {}",
+            error
+        );
+    }
 
     // Read configuration.
     // Directory structure:
