@@ -49,6 +49,7 @@ pub enum KernelObjectType {
     ProcessScope = 15,
     MountNamespace = 16,
     ResourceGroup = 17,
+    ShieldPolicyFactory = 18,
     /// Unknown or unsupported type
     Unknown = 0,
 }

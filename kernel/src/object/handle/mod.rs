@@ -242,6 +242,7 @@ impl HandleTable {
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
+            | KernelObject::ShieldPolicyFactory(_)
             | KernelObject::Gpu(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => HandleType::Regular,
@@ -614,6 +615,11 @@ impl HandleTable {
             KernelObject::ShieldPolicy(cap) => {
                 let mut info = introspection::KernelObjectInfo::for_environment(false, cap.administer);
                 info.object_type = introspection::KernelObjectType::ShieldPolicy;
+                Some(info)
+            }
+            KernelObject::ShieldPolicyFactory(_) => {
+                let mut info = introspection::KernelObjectInfo::for_environment(false, true);
+                info.object_type = introspection::KernelObjectType::ShieldPolicyFactory;
                 Some(info)
             }
             KernelObject::Environment(cap) => Some(

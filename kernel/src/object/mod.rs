@@ -34,6 +34,7 @@ pub enum KernelObject {
     ResourceGroup(Arc<crate::task::resource_group::ResourceGroup>),
     MountNamespace(Arc<crate::fs::vfs_v2::namespace::MountNamespace>),
     ShieldPolicy(crate::shield::PolicyHandle),
+    ShieldPolicyFactory(Arc<crate::shield::PolicyFactory>),
     Environment(crate::executor::environment::EnvironmentHandle),
     VfsView(crate::executor::environment::ViewHandle),
     File(Arc<dyn FileObject>),
@@ -302,6 +303,7 @@ impl<'a> KernelObjectRef<'a> {
             KernelObject::ResourceGroup(_) => "ResourceGroup",
             KernelObject::MountNamespace(_) => "MountNamespace",
             KernelObject::ShieldPolicy(_) => "ShieldPolicy",
+            KernelObject::ShieldPolicyFactory(_) => "ShieldPolicyFactory",
             KernelObject::Environment(_) => "Environment",
             KernelObject::VfsView(_) => "VfsView",
             #[cfg(feature = "network")]
@@ -501,6 +503,7 @@ impl KernelObject {
             KernelObject::ResourceGroup(_) => "ResourceGroup",
             KernelObject::MountNamespace(_) => "MountNamespace",
             KernelObject::ShieldPolicy(_) => "ShieldPolicy",
+            KernelObject::ShieldPolicyFactory(_) => "ShieldPolicyFactory",
             KernelObject::Environment(_) => "Environment",
             KernelObject::VfsView(_) => "VfsView",
             #[cfg(feature = "network")]
@@ -652,6 +655,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -701,6 +705,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -749,6 +754,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -796,6 +802,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -881,6 +888,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -929,6 +937,7 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(gpu) => gpu.as_control_ops(),
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -984,6 +993,7 @@ impl KernelObject {
                 Some(memory_mapping_ops)
             }
             KernelObject::Gpu(gpu) => gpu.as_memory_mappable(),
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -1035,6 +1045,7 @@ impl KernelObject {
                 Some(weak_shmem)
             }
             KernelObject::Gpu(_) => None,
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -1064,6 +1075,7 @@ impl KernelObject {
             KernelObject::SharedMemory(shared_memory) => {
                 Some(Arc::clone(shared_memory) as Arc<dyn MemoryMappingOps>)
             }
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -1150,6 +1162,7 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => None,
             KernelObject::SharedMemory(_) => None,
             KernelObject::Gpu(gpu) => gpu.as_selectable(),
+            KernelObject::ShieldPolicyFactory(_) => None,
             KernelObject::ResourceGroup(_)
             | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
@@ -1194,6 +1207,9 @@ impl KernelObject {
             KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
             KernelObject::MountNamespace(namespace) => KernelObject::MountNamespace(namespace.clone()),
             KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
+            KernelObject::ShieldPolicyFactory(factory) => {
+                KernelObject::ShieldPolicyFactory(Arc::clone(factory))
+            }
             KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
             KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),
             #[cfg(feature = "hypervisor")]
@@ -1232,6 +1248,9 @@ impl Clone for KernelObject {
             KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
             KernelObject::MountNamespace(namespace) => KernelObject::MountNamespace(namespace.clone()),
                 KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
+                KernelObject::ShieldPolicyFactory(factory) => {
+                    KernelObject::ShieldPolicyFactory(Arc::clone(factory))
+                }
                 KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
                 KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),
                 #[cfg(feature = "hypervisor")]

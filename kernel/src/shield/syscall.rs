@@ -216,7 +216,10 @@ pub fn sys_shield_policy_generation(tf: &mut Trapframe) -> usize {
 }
 
 fn insert(task: &Task, cap: PolicyHandle) -> Result<usize, &'static str> {
-    let handle = task.handle_table.insert(KernelObject::ShieldPolicy(cap))?;
+    insert_object(task, KernelObject::ShieldPolicy(cap))
+}
+fn insert_object(task: &Task, object: KernelObject) -> Result<usize, &'static str> {
+    let handle = task.handle_table.insert(object)?;
     let mut metadata = task
         .handle_table
         .get_metadata(handle)
@@ -236,8 +239,27 @@ pub fn policy_handle(task: &Task, handle: usize, admin: bool) -> Result<Arc<Poli
 }
 fn can_create(task: &Task) -> bool {
     task.bootstrap_environment.load(Ordering::Acquire) || task.handle_table.active_handles().iter().any(|&h| {
-        matches!(task.handle_table.get(h), Some(KernelObject::ShieldPolicy(cap)) if cap.administer)
+        match task.handle_table.get(h) {
+            Some(KernelObject::ShieldPolicyFactory(_)) => true,
+            Some(KernelObject::ShieldPolicy(cap)) => cap.administer,
+            _ => false,
+        }
     })
+}
+
+fn acquire_factory(task: &Task) -> Result<usize, &'static str> {
+    if !can_create(task) {
+        return Err("policy construction authority required");
+    }
+    insert_object(task, KernelObject::ShieldPolicyFactory(Arc::new(PolicyFactory { _private: () })))
+}
+
+/// Materialize transferable, close-on-exec construction authority. Possession
+/// does not satisfy policy_handle() and cannot administer an existing policy.
+pub fn sys_shield_policy_factory(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    acquire_factory(&task).unwrap_or(usize::MAX)
 }
 fn read<const N: usize>(task: &Task, ptr: usize) -> Result<[u8; N], &'static str> {
     let mut bytes = [0; N];
@@ -451,6 +473,53 @@ pub fn sys_shield_apply(tf: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn policy_factory_delegates_creation_without_existing_policy_management() {
+        use crate::library::std::usercopy::copy_to_user;
+        let issuer = Task::new("factory-issuer".into(), 0, crate::task::TaskType::User);
+        assert!(acquire_factory(&issuer).is_err());
+        issuer.bootstrap_environment.store(true, Ordering::Release);
+        let issued = acquire_factory(&issuer).unwrap() as u32;
+        let (object, metadata) = issuer.handle_table.clone_for_dup(issued).unwrap();
+        assert_eq!(metadata.special_semantics, Some(SpecialSemantics::CloseOnExec));
+
+        let mut task = Task::new("factory-recipient".into(), 0, crate::task::TaskType::User);
+        task.set_id(60034);
+        let factory = task.handle_table.insert(object).unwrap();
+        task.handle_table.update_metadata(factory, metadata).unwrap();
+        issuer.handle_table.remove(issued).unwrap();
+        assert!(can_create(&task));
+        assert!(policy_handle(&task, factory as usize, false).is_err());
+        assert!(apply(&task, factory as usize, 1).is_err());
+        let host_policy = Policy::new(alloc::vec![(1, "host".into())], Vec::new()).unwrap();
+        let query = insert(&task, PolicyHandle { policy: host_policy.clone(), administer: false }).unwrap();
+        assert!(policy_handle(&task, query, true).is_err());
+
+        let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        let name = base + 16;
+        let mut label = [0u8; 16];
+        label[..4].copy_from_slice(&1u32.to_ne_bytes());
+        label[4..8].copy_from_slice(&3u32.to_ne_bytes());
+        label[8..].copy_from_slice(&(name as u64).to_ne_bytes());
+        copy_to_user(&task, base, &label).unwrap();
+        copy_to_user(&task, name, b"new").unwrap();
+        let created = create(&task, base, 1, 0, 0, 0, 0, Vec::new()).unwrap();
+        let new_policy = policy_handle(&task, created, true).unwrap();
+        assert!(!Arc::ptr_eq(&new_policy, &host_policy));
+        assert_eq!(host_policy.subject(1).unwrap().name(), "host");
+        assert_eq!(new_policy.subject(1).unwrap().name(), "new");
+        assert!(task.security_subject.read().is_none());
+
+        let exec_handles = task.handle_table.deep_clone();
+        exec_handles.remove_close_on_exec();
+        assert!(exec_handles.get(factory).is_none());
+        task.handle_table.remove(created as u32).unwrap();
+        task.handle_table.remove(factory).unwrap();
+        assert!(!can_create(&task));
+        assert!(acquire_factory(&task).is_err());
+    }
+
     #[test_case]
     fn security_query_capability_cannot_assign_labels_or_construct_policy() {
         let task = crate::task::new_user_task("security-test".into(), 1);

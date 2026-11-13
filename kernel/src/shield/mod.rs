@@ -309,6 +309,13 @@ pub struct PolicyHandle {
     pub administer: bool,
 }
 
+/// Authority to construct new policies, independent of any existing policy.
+/// Only the native constructor syscall can issue this object to an authorized
+/// task. Handle duplication delegates the same construction authority.
+pub struct PolicyFactory {
+    _private: (),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

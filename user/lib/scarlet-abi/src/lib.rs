@@ -946,6 +946,10 @@ pub enum Syscall {
     /// Derive a fresh policy handle using a stable 16-byte file-label domain.
     /// Arguments: management policy handle, pointer to `[u8; 16]`.
     ShieldFilePersistence = 1346,
+    /// Return a close-on-exec capability to construct new Shield policies.
+    /// Requires bootstrap, existing policy administration, or factory authority.
+    /// The returned handle grants no access to any existing policy. No arguments.
+    ShieldPolicyFactory = 1347,
     VmLayoutConfigure = 1350,
     VmLayoutQuery = 1351,
     ShieldPolicyCreate = 1310,

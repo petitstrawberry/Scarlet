@@ -16,12 +16,18 @@ identify the same subject, and cross-policy authorization denies.
 
 `ShieldPolicyCreate` (1310) copies fixed-width label and rule records and
 publishes a fully validated, immutable policy. It requires bootstrap authority
-or an existing policy management capability. The returned handle is
+or an existing policy management capability. A delegated `PolicyFactory` also
+allows construction. The returned handle is
 close-on-exec. `ShieldPolicyCurrent` (1311) returns query authority only; handle
 metadata changes cannot upgrade it. `ShieldApply` (1312) requires management
 authority and an exclusive, single-threaded process. It assigns one of that
 policy's labels to the current process. The `scarlet_os::shield::Policy` wrapper
 owns these capabilities.
+
+`ShieldPolicyFactory` (1347) retains existing construction authority as a separate
+close-on-exec handle. It references no policy and cannot query, apply or modify
+an existing policy. The ordinary init explicitly passes it into PID 1's initial
+program; stemd delegates it only through administrator-owned application grants.
 
 `ShieldPolicyCreateWithTransitions` (1313) additionally accepts at most 4,096
 unique `(source label, target label, principal)` transitions. A transition requires

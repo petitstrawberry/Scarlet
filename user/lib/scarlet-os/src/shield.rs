@@ -25,6 +25,34 @@ pub struct LabelSetUpdate<'a> {
     pub files:&'a [SetFileRule],
 }
 
+/// Transferable authority to construct new policies without carrying an
+/// existing policy's management handle. Acquired handles are close-on-exec.
+pub struct PolicyFactory(Handle);
+impl PolicyFactory {
+    /// Retain the caller's existing construction authority. This cannot grant
+    /// authority to an ordinary process that does not already possess it.
+    pub fn acquire() -> HandleResult<Self> {
+        // SAFETY: no pointer arguments; the kernel checks construction authority.
+        let result = unsafe { syscall0(Syscall::ShieldPolicyFactory) };
+        if result == usize::MAX {
+            return Err(HandleError::InvalidParameter);
+        }
+        // SAFETY: a successful syscall transfers ownership of a new handle.
+        Self::from_handle(unsafe { Handle::from_raw(result as i32) }?)
+    }
+
+    pub fn from_handle(handle: Handle) -> HandleResult<Self> {
+        if handle.object_info().object_type != KernelObjectType::ShieldPolicyFactory {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(Self(handle))
+    }
+
+    pub fn as_handle(&self) -> &Handle {
+        &self.0
+    }
+}
+
 pub struct Policy(Handle);
 impl Policy {
     pub fn generation(&self) -> HandleResult<u64> {
@@ -164,7 +192,8 @@ impl Policy {
         }
     }
 
-    /// Requires bootstrap authority or an existing policy management handle.
+    /// Requires a policy factory, bootstrap authority, or an existing policy
+    /// management handle. The newly created policy has independent identity.
     pub fn create(labels: &[(u32, &str)], rules: &[RawRule]) -> HandleResult<Self> {
         let raw: Vec<_> = labels
             .iter()
