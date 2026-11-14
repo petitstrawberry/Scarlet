@@ -1736,6 +1736,35 @@ type = "path"
 path = "../../user/websocket-demo"
 
 [[sections.rootfs.layers]]
+kind = "archive"
+to = "/systems/android-aarch64"
+format = "tar-gz"
+strip_components = 1
+hash = "sha256:7cc6e7681d9553845c95d7be0007cf25a81a006bb9fa49d9eb3504b145f9cd92"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-android/releases/download/v0.1.14/android-aarch64-v0.1.14.tar.gz"
+sha256 = "sha256:7cc6e7681d9553845c95d7be0007cf25a81a006bb9fa49d9eb3504b145f9cd92"
+
+[[sections.rootfs.layers]]
+kind = "app"
+source = ".scarlet/cache/git/c302d033ba6d8d1e/manager/app.toml"
+to = "/applications/android.app"
+hash = ""
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "android-runtime"
+bin = "android-runtime"
+to = "/bin/android-runtime"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/c302d033ba6d8d1e/runtime"
+
+[[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/blitz"
 git_ref = "c26e20dfff971941486ca9f50c8dcd332ec404da"
