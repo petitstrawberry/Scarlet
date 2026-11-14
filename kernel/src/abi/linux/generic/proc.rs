@@ -2,19 +2,13 @@ use alloc::{string::String, sync::Arc, vec, vec::Vec};
 
 use crate::task::INIT_TASK_ID;
 use crate::{
-    abi::linux::generic::{
-        LinuxAbi, errno,
-        signal::LinuxSignal,
-    },
+    abi::linux::generic::{LinuxAbi, errno, signal::LinuxSignal},
     arch::Trapframe,
     library::std::usercopy::{copy_from_user, copy_to_user},
     sched::scheduler::{
-        get_all_task_ids, get_task_by_id, online_cpu_mask, schedule,
-        update_task_nice,
+        get_all_task_ids, get_task_by_id, online_cpu_mask, schedule, update_task_nice,
     },
-    task::{
-        CloneFlags, ExitStatusPolicy, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask,
-    },
+    task::{CloneFlags, ExitStatusPolicy, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask},
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -133,12 +127,20 @@ pub(crate) fn unshare_filesystem(task: &Task, flags: usize) -> Result<(), usize>
         return Err(errno::EOPNOTSUPP);
     }
     if flags & CLONE_NEWNS != 0 {
-        if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
+        if !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_MOUNTS)
+        {
+            return Err(errno::EPERM);
+        }
         let (namespace, fs) = task.prepare_mount_namespace().map_err(|_| errno::ENOMEM)?;
         task.install_mount_namespace(namespace, fs);
     } else if flags & CLONE_FS != 0 {
         let fs = task.get_vfs().ok_or(errno::EIO)?;
-        task.set_vfs(crate::fs::VfsManager::clone_with_shared_mount_namespace(&fs));
+        task.set_vfs(crate::fs::VfsManager::clone_with_shared_mount_namespace(
+            &fs,
+        ));
     }
     Ok(())
 }
@@ -249,8 +251,13 @@ pub fn sys_sched_setaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     if mask == 0 {
         return errno::to_result(errno::EINVAL);
     }
-    if caller.credentials.read().identity().principal != target.credentials.read().identity().principal
-        && !caller.credentials.read().permits(crate::shield::identity::MANAGE_RESOURCES) {
+    if caller.credentials.read().identity().principal
+        != target.credentials.read().identity().principal
+        && !caller
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_RESOURCES)
+    {
         return errno::to_result(errno::EPERM);
     }
     if crate::task::resource_group::set_task_affinity(&target, mask).is_err() {
@@ -837,17 +844,25 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         // succeeded makes Bionic pass tags into that unsupported syscall ABI.
         PR_SET_TAGGED_ADDR_CTRL | PR_GET_TAGGED_ADDR_CTRL => errno::to_result(errno::EINVAL),
         47 => {
-            if trapframe.get_arg(3)!=0 || trapframe.get_arg(4)!=0 {return errno::to_result(errno::EINVAL);}
-            super::credentials::ambient(&task,arg2,trapframe.get_arg(2))
+            if trapframe.get_arg(3) != 0 || trapframe.get_arg(4) != 0 {
+                return errno::to_result(errno::EINVAL);
+            }
+            super::credentials::ambient(&task, arg2, trapframe.get_arg(2))
         }
         7 => usize::from(abi.keep_caps), // PR_GET_KEEPCAPS
-        8 => { // PR_SET_KEEPCAPS: preserved across fork, reset on exec.
-            if abi.keep_caps_locked {errno::to_result(errno::EPERM)}
-            else if trapframe.get_arg(1) > 1 { errno::to_result(errno::EINVAL) }
-            else { abi.keep_caps = trapframe.get_arg(1) == 1; 0 }
+        8 => {
+            // PR_SET_KEEPCAPS: preserved across fork, reset on exec.
+            if abi.keep_caps_locked {
+                errno::to_result(errno::EPERM)
+            } else if trapframe.get_arg(1) > 1 {
+                errno::to_result(errno::EINVAL)
+            } else {
+                abi.keep_caps = trapframe.get_arg(1) == 1;
+                0
+            }
         }
-        27|28 => super::credentials::securebits(abi,&task,option,arg2),
-        23|24 => super::credentials::bounding(&task,option,arg2),
+        27 | 28 => super::credentials::securebits(abi, &task, option, arg2),
+        23 | 24 => super::credentials::bounding(&task, option, arg2),
         // Scarlet has no core-dump or ambient ptrace backend. Report the actual
         // disabled state; only the idempotent disable is supported.
         3 => 0, // PR_GET_DUMPABLE
@@ -858,14 +873,21 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         },
         21 => super::seccomp::mode(&task), // PR_GET_SECCOMP
         22 => super::seccomp::set_mode(&task, arg2, trapframe.get_arg(2)),
-        38 => { // PR_SET_NO_NEW_PRIVS: irreversible, inherited by all exec paths.
+        38 => {
+            // PR_SET_NO_NEW_PRIVS: irreversible, inherited by all exec paths.
             if arg2 != 1 || (2..5).any(|i| trapframe.get_arg(i) != 0) {
                 errno::to_result(errno::EINVAL)
-            } else { task.execution_restrictions.write().seal_authority(); 0 }
+            } else {
+                task.execution_restrictions.write().seal_authority();
+                0
+            }
         }
         39 => {
-            if (1..5).any(|i| trapframe.get_arg(i) != 0) { errno::to_result(errno::EINVAL) }
-            else { usize::from(task.execution_restrictions.read().no_new_authority()) }
+            if (1..5).any(|i| trapframe.get_arg(i) != 0) {
+                errno::to_result(errno::EINVAL)
+            } else {
+                usize::from(task.execution_restrictions.read().no_new_authority())
+            }
         }
         PR_SET_NAME => {
             let mut name = [0u8; TASK_COMM_LEN];
@@ -1159,9 +1181,7 @@ pub(super) const LINUX_ABI_RELEASE: &str = "6.1.0-scarlet_linux_abi_module";
 pub(super) const LINUX_ABI_VERSION: &str = "#1 SMP Scarlet";
 
 pub(super) fn linux_version_text() -> alloc::string::String {
-    alloc::format!(
-        "Linux version {LINUX_ABI_RELEASE} ({LINUX_ABI_VERSION}) (scarlet@build) #1\n"
-    )
+    alloc::format!("Linux version {LINUX_ABI_RELEASE} ({LINUX_ABI_VERSION}) (scarlet@build) #1\n")
 }
 
 impl UtsName {
@@ -1265,7 +1285,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let flags = trapframe.get_arg(0);
-    if !matches!(flags & 0xff,0|17) {
+    if !matches!(flags & 0xff, 0 | 17) {
         trapframe.increment_pc_next(&parent_task);
         return errno::to_result(errno::EOPNOTSUPP);
     }
@@ -1346,7 +1366,9 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
-            child_task.parent_exit_event.store(flags & 0xff == 17,core::sync::atomic::Ordering::Release);
+            child_task
+                .parent_exit_event
+                .store(flags & 0xff == 17, core::sync::atomic::Ordering::Release);
             child_task.vcpu.lock().set_return_value(0);
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
@@ -1454,8 +1476,12 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             child_linux_tid
         }
         Err(error) => {
-            crate::println!("[linux clone] creation failed: parent={} flags={:#x} reason={}",
-                parent_task.get_id(), flags, error);
+            crate::println!(
+                "[linux clone] creation failed: parent={} flags={:#x} reason={}",
+                parent_task.get_id(),
+                flags,
+                error
+            );
             errno::to_result(clone_failure_errno(error))
         }
     };
@@ -2024,8 +2050,14 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 mod tests {
     #[test_case]
     fn clone_failures_report_stable_resource_errors() {
-        assert_eq!(clone_failure_errno("Failed to allocate pages"), errno::ENOMEM);
-        assert_eq!(clone_failure_errno("kernel stack mmap failed"), errno::ENOMEM);
+        assert_eq!(
+            clone_failure_errno("Failed to allocate pages"),
+            errno::ENOMEM
+        );
+        assert_eq!(
+            clone_failure_errno("kernel stack mmap failed"),
+            errno::ENOMEM
+        );
         assert_eq!(
             clone_failure_errno("No free kernel stack window slots"),
             errno::EAGAIN
@@ -2036,16 +2068,16 @@ mod tests {
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     #[test_case]
     fn linux_thread_exit_clears_tid_and_releases_pool_and_kernel_stack() {
-        use alloc::boxed::Box;
+        #[cfg(target_arch = "aarch64")]
+        use crate::abi::linux::aarch64::LinuxAarch64Abi as LinuxArchAbi;
+        #[cfg(target_arch = "riscv64")]
+        use crate::abi::linux::riscv64::LinuxRiscv64Abi as LinuxArchAbi;
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
         use crate::sched::scheduler::{add_task, get_task_pool, register_online_cpu, reset};
         use crate::task::{
             CloneFlags, CloneFlagsDef, ExitStatusPolicy, TaskState, clear_mock_current_task,
         };
-        #[cfg(target_arch = "aarch64")]
-        use crate::abi::linux::aarch64::LinuxAarch64Abi as LinuxArchAbi;
-        #[cfg(target_arch = "riscv64")]
-        use crate::abi::linux::riscv64::LinuxRiscv64Abi as LinuxArchAbi;
+        use alloc::boxed::Box;
 
         reset();
         clear_mock_current_task();
@@ -2259,7 +2291,7 @@ mod tests {
             (PR_SET_TAGGED_ADDR_CTRL, 0),
             (PR_GET_TAGGED_ADDR_CTRL, 0),
             (23, 64), // PR_CAPBSET_READ must terminate unsupported queries.
-            (38, 0), // PR_SET_NO_NEW_PRIVS cannot be cleared.
+            (38, 0),  // PR_SET_NO_NEW_PRIVS cannot be cleared.
             (22, 99), // Unsupported seccomp mode.
             (i32::MAX, 0),
         ] {
@@ -2271,7 +2303,8 @@ mod tests {
             );
         }
         for (operation, value, expected) in [
-            (3, 0, 0), (4, 0, 0),
+            (3, 0, 0),
+            (4, 0, 0),
             (4, 1, errno::to_result(errno::EOPNOTSUPP)),
             (4, 2, errno::to_result(errno::EINVAL)),
         ] {
@@ -2455,7 +2488,10 @@ mod tests {
             let mut frame = Trapframe::new();
             frame.set_pc(address as u64);
             frame.set_arg(0, 0);
-            assert_eq!(sys_sched_getscheduler(&mut abi, &mut frame), usize::from(base != 0));
+            assert_eq!(
+                sys_sched_getscheduler(&mut abi, &mut frame),
+                usize::from(base != 0)
+            );
             frame.set_pc(address as u64);
             frame.set_arg(1, address + 16);
             assert_eq!(sys_sched_getparam(&mut abi, &mut frame), 0);

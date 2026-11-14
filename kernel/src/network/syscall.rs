@@ -577,7 +577,10 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
 
     let socket = match domain {
         SocketDomain::Local => {
-            let socket = match LocalSocket::try_new(socket_type,protocol) {Ok(socket)=>Arc::new(socket),Err(error)=>return socket_error_result(error)};
+            let socket = match LocalSocket::try_new(socket_type, protocol) {
+                Ok(socket) => Arc::new(socket),
+                Err(error) => return socket_error_result(error),
+            };
             LocalSocket::init_self_weak(&socket);
             socket as Arc<dyn SocketObject>
         }
@@ -1043,7 +1046,10 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
         SocketType::Stream,
         String::from("socketpair:0"),
         String::from("socketpair:1"),
-    ) {Ok(pair)=>pair,Err(error)=>return socket_error_result(error)};
+    ) {
+        Ok(pair) => pair,
+        Err(error) => return socket_error_result(error),
+    };
 
     // Add both sockets to handle table
     let kernel_obj1 = KernelObject::from_socket_object(socket1);
@@ -1481,9 +1487,15 @@ pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
 }
 
 pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else { return usize::MAX; };
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
     tf.increment_pc_next(&task);
-    if !task.credentials.read().permits(crate::shield::identity::MANAGE_TRAFFIC) {
+    if !task
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_TRAFFIC)
+    {
         return usize::MAX;
     }
     let mut request = scarlet_abi::network::NetworkTrafficConfigureV1::default();
@@ -1517,7 +1529,9 @@ pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
             .subject_name()
             .zip(request.meter_name())
             .ok_or("Invalid link meter")
-            .and_then(|(interface, meter)| manager.set_interface_traffic_meter(interface, Some(meter))),
+            .and_then(|(interface, meter)| {
+                manager.set_interface_traffic_meter(interface, Some(meter))
+            }),
         scarlet_abi::network::TRAFFIC_CONFIGURE_LINK_CLEAR => request
             .subject_name()
             .ok_or("Invalid link name")
@@ -1526,7 +1540,9 @@ pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
             .meter_name()
             .ok_or("Invalid global meter")
             .and_then(|meter| manager.set_global_traffic_meter(Some(meter))),
-        scarlet_abi::network::TRAFFIC_CONFIGURE_GLOBAL_CLEAR => manager.set_global_traffic_meter(None),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_GLOBAL_CLEAR => {
+            manager.set_global_traffic_meter(None)
+        }
         scarlet_abi::network::TRAFFIC_CONFIGURE_LINKS_CLEAR_METER => request
             .meter_name()
             .ok_or("Invalid traffic meter")

@@ -32,8 +32,8 @@ fn claim(
 
 #[cfg(test)]
 mod tests {
-    use crate::abi::linux::generic::fs::FD_CLOEXEC;
     use super::*;
+    use crate::abi::linux::generic::fs::FD_CLOEXEC;
     fn message(task: &Task, abi: &mut LinuxAbi) -> (RpcMessage, usize) {
         let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
         task.allocate_stack_pages(base, 1).unwrap();

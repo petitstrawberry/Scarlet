@@ -45,7 +45,7 @@ const RAW_SCHEDULER_ATTR_V1_SIZE: usize = 128;
 const RAW_SCHEDULER_STATE_V1_SIZE: usize = 160;
 const SCHED_POLICY_FAIR: u32 = 0;
 const SCHED_POLICY_DEADLINE: u32 = 1;
-const SCHED_POLICY_FIFO:u32=2;
+const SCHED_POLICY_FIFO: u32 = 2;
 const SCHED_AFFINITY_ANY: u32 = 0;
 const SCHED_AFFINITY_SINGLE: u32 = 1;
 const SCHED_AFFINITY_MASK: u32 = 2;
@@ -91,7 +91,7 @@ fn validate_scheduler_attr_header(bytes: &[u8]) -> Result<(), SchedulerControlRe
     if decode_native_u32(bytes, 12) != 0 {
         return Err(SchedulerControlResult::InvalidFlags);
     }
-    if (decode_native_u32(bytes,8)!=SCHED_POLICY_FIFO && decode_native_u32(bytes, 76) != 0)
+    if (decode_native_u32(bytes, 8) != SCHED_POLICY_FIFO && decode_native_u32(bytes, 76) != 0)
         || (0..6).any(|index| decode_native_u64(bytes, 80 + index * 8) != 0)
     {
         return Err(SchedulerControlResult::InvalidArgument);
@@ -173,11 +173,18 @@ fn decode_scheduler_attr(
             SchedulerPolicy::Fair
         }
         SCHED_POLICY_FIFO => {
-            if decode_native_u64(bytes,48)!=0 || decode_native_u64(bytes,56)!=0 || decode_native_u64(bytes,64)!=0 || decode_native_u32(bytes,72)!=SCHED_CPU_ID_NONE {
+            if decode_native_u64(bytes, 48) != 0
+                || decode_native_u64(bytes, 56) != 0
+                || decode_native_u64(bytes, 64) != 0
+                || decode_native_u32(bytes, 72) != SCHED_CPU_ID_NONE
+            {
                 return Err(SchedulerControlResult::InvalidArgument);
             }
-            let priority=u8::try_from(decode_native_u32(bytes,76)).ok().filter(|priority|*priority!=0).ok_or(SchedulerControlResult::InvalidArgument)?;
-            SchedulerPolicy::Fifo {priority}
+            let priority = u8::try_from(decode_native_u32(bytes, 76))
+                .ok()
+                .filter(|priority| *priority != 0)
+                .ok_or(SchedulerControlResult::InvalidArgument)?;
+            SchedulerPolicy::Fifo { priority }
         }
         SCHED_POLICY_DEADLINE => SchedulerPolicy::Deadline {
             params: TaskDeadlineParams {
@@ -229,7 +236,7 @@ fn write_scheduler_attr(
 ) {
     let (policy, runtime_ns, deadline_ns, period_ns, deadline_cpu_id) = match attributes.policy {
         SchedulerPolicy::Fair => (SCHED_POLICY_FAIR, 0, 0, 0, SCHED_CPU_ID_NONE),
-        SchedulerPolicy::Fifo {..} => (SCHED_POLICY_FIFO,0,0,0,SCHED_CPU_ID_NONE),
+        SchedulerPolicy::Fifo { .. } => (SCHED_POLICY_FIFO, 0, 0, 0, SCHED_CPU_ID_NONE),
         SchedulerPolicy::Deadline { params, cpu_id } => (
             SCHED_POLICY_DEADLINE,
             params.runtime_ns,
@@ -251,7 +258,15 @@ fn write_scheduler_attr(
     encode_native_u64(bytes, 56, deadline_ns);
     encode_native_u64(bytes, 64, period_ns);
     encode_native_u32(bytes, 72, deadline_cpu_id);
-    encode_native_u32(bytes,76,if let SchedulerPolicy::Fifo {priority}=attributes.policy {priority as u32} else {0});
+    encode_native_u32(
+        bytes,
+        76,
+        if let SchedulerPolicy::Fifo { priority } = attributes.policy {
+            priority as u32
+        } else {
+            0
+        },
+    );
 }
 
 fn write_scheduler_mask_metadata(
@@ -1593,7 +1608,7 @@ pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
     let mut output = [0u8; RAW_SCHEDULER_STATE_V1_SIZE];
     let policy = match state.attributes.policy {
         SchedulerPolicy::Fair => SCHED_POLICY_FAIR,
-        SchedulerPolicy::Fifo {..} => SCHED_POLICY_FIFO,
+        SchedulerPolicy::Fifo { .. } => SCHED_POLICY_FIFO,
         SchedulerPolicy::Deadline { .. } => SCHED_POLICY_DEADLINE,
     };
     let (affinity_kind, configured_cpu_id, _) = raw_affinity(state.active_affinity);
@@ -1601,7 +1616,15 @@ pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
     encode_native_u32(&mut output, 4, SCHEDULER_CONTROL_VERSION_V1);
     encode_native_u32(&mut output, 8, state.status);
     encode_native_u32(&mut output, 12, policy);
-    encode_native_u32(&mut output,44,if let SchedulerPolicy::Fifo {priority}=state.attributes.policy {priority as u32} else {0});
+    encode_native_u32(
+        &mut output,
+        44,
+        if let SchedulerPolicy::Fifo { priority } = state.attributes.policy {
+            priority as u32
+        } else {
+            0
+        },
+    );
     encode_native_u32(&mut output, 16, 0);
     encode_native_u32(&mut output, 20, affinity_kind);
     encode_native_u32(&mut output, 24, configured_cpu_id);
@@ -2340,7 +2363,11 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
                 syscall_pc: execution.syscall_pc,
                 cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
             };
-            if caller.execution_restrictions.read().kernel_addresses_hidden() {
+            if caller
+                .execution_restrictions
+                .read()
+                .kernel_addresses_hidden()
+            {
                 crate::shield::information::redact_task(&mut info);
             }
             let Some(offset) = written.checked_mul(entry_size) else {
@@ -2455,7 +2482,11 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             breadcrumb_aux2: breadcrumb.aux2,
             timer_deadline_ns,
         };
-        if caller.execution_restrictions.read().kernel_addresses_hidden() {
+        if caller
+            .execution_restrictions
+            .read()
+            .kernel_addresses_hidden()
+        {
             crate::shield::information::redact_cpu(&mut info);
         }
         let bytes = unsafe {
@@ -2518,15 +2549,24 @@ mod tests {
 
     #[test_case]
     fn task_info_snapshot_keeps_blocked_tasks_outside_run_queues() {
-        use crate::sched::scheduler::{get_task_by_id, register_task, remove_task_from_queues, reset};
+        use crate::sched::scheduler::{
+            get_task_by_id, register_task, remove_task_from_queues, reset,
+        };
         use crate::task::{BlockedType, Task, TaskState, TaskType};
         use alloc::string::ToString;
         use core::sync::atomic::Ordering;
 
         reset();
-        let id = register_task(Task::new("BlockedTaskInfo".to_string(), 1, TaskType::Kernel));
+        let id = register_task(Task::new(
+            "BlockedTaskInfo".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
         let target = get_task_by_id(id).unwrap();
-        target.state.store(TaskState::Blocked(BlockedType::Interruptible), Ordering::SeqCst);
+        target.state.store(
+            TaskState::Blocked(BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
         remove_task_from_queues(id);
         assert!(task_info_ids().contains(&id));
         drop(target);

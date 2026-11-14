@@ -583,7 +583,9 @@ pub fn analyze_and_load_elf_with_strategy(
     task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<LoadElfResult, ElfLoaderError> {
-    if !file_obj.allows_execution() { return Err(elf_error("execution disabled on mount")); }
+    if !file_obj.allows_execution() {
+        return Err(elf_error("execution disabled on mount"));
+    }
     let header = read_elf_header(file_obj)?;
     let interpreter = match find_interpreter_path(&header, file_obj)? {
         Some(path) => Some(
@@ -749,7 +751,9 @@ fn load_interpreter(interpreter_path: &str, task: &Task) -> Result<(u64, u64), E
     };
 
     let file_object: &dyn crate::fs::FileObject = file_arc.as_ref();
-    if !file_object.allows_execution() { return Err(elf_error("interpreter execution disabled on mount")); }
+    if !file_object.allows_execution() {
+        return Err(elf_error("interpreter execution disabled on mount"));
+    }
 
     // Step 2: Read ELF header data from file
     file_object

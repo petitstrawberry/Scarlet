@@ -109,8 +109,7 @@ impl FilePolicy {
 /// fallback. Persistent backends enforce the same bound through the policy
 /// configuration and their xattr storage.
 pub const MAX_LABEL_DOMAINS: usize = 16;
-pub const MAX_LABEL_METADATA_BYTES: usize =
-    scarlet_abi::shield::FILE_LABEL_METADATA_MAX_BYTES;
+pub const MAX_LABEL_METADATA_BYTES: usize = scarlet_abi::shield::FILE_LABEL_METADATA_MAX_BYTES;
 const MAX_POLICY_BINDINGS: usize = 16;
 
 #[derive(Default)]
@@ -155,7 +154,9 @@ impl Labels {
     }
     fn assign(&self, policy: &Arc<Policy>, label: u32, replace: bool) -> Result<(), &'static str> {
         let mut state = self.state.write();
-        state.policies.retain(|_, (policy, _)| policy.strong_count() != 0);
+        state
+            .policies
+            .retain(|_, (policy, _)| policy.strong_count() != 0);
         let key = Arc::as_ptr(policy) as usize;
         if let Some((_, old)) = state.policies.get(&key) {
             if !replace && *old != label {
@@ -253,7 +254,12 @@ impl CreateContext {
         let target = if let Some(selected) = selected {
             if !Arc::ptr_eq(&selected.policy, &policy)
                 || selected.source != subject.label()
-                || !policy.snapshot().creation_allowed(subject.label(), parent, kind, selected.target)
+                || !policy.snapshot().creation_allowed(
+                    subject.label(),
+                    parent,
+                    kind,
+                    selected.target,
+                )
             {
                 return Err("file create override denied");
             }
@@ -269,7 +275,8 @@ impl CreateContext {
         Ok(Some(Self { policy, target }))
     }
     pub fn initialize(&self, node: &dyn VfsNode) -> Result<(), &'static str> {
-        let labels = node.shield_labels()
+        let labels = node
+            .shield_labels()
             .ok_or("filesystem cannot retain file labels")?;
         if let Some(domain) = self.policy.file_persistence_domain() {
             let name = self.policy.label(self.target).ok_or("unknown file label")?;
@@ -297,10 +304,7 @@ impl Policy {
     /// Derive a fresh policy identity that stores file labels as symbolic names
     /// in the shared stable domain. The management capability is checked by the
     /// native syscall; derivation itself does not grant authority.
-    pub fn with_file_persistence(
-        &self,
-        domain: [u8; 16],
-    ) -> Result<Arc<Self>, &'static str> {
+    pub fn with_file_persistence(&self, domain: [u8; 16]) -> Result<Arc<Self>, &'static str> {
         if domain == [0; 16] {
             return Err("file persistence domain must be nonzero");
         }
@@ -361,14 +365,8 @@ impl Policy {
                 }
                 let persisted = self.persisted_label_name(node, &domain)?;
                 let old = match persisted.as_ref() {
-                    Some(name) => self
-                        .label_id(name)
-                        .ok_or("unknown persistent file label")?,
-                    None => self
-                        .snapshot()
-                        .files
-                        .default
-                        .ok_or("file label missing")?,
+                    Some(name) => self.label_id(name).ok_or("unknown persistent file label")?,
+                    None => self.snapshot().files.default.ok_or("file label missing")?,
                 };
                 if old != target
                     && !self
@@ -400,7 +398,9 @@ impl Policy {
         if old == target {
             return Ok(());
         }
-        if !self.snapshot().relabel_allowed(subject.label(), old, kind, target)
+        if !self
+            .snapshot()
+            .relabel_allowed(subject.label(), old, kind, target)
         {
             return Err("file relabel denied");
         }
@@ -419,7 +419,9 @@ pub fn select_creation_label(task: &Task, target: Option<u32>) -> Result<(), &'s
             .clone()
             .ok_or("subject missing")?;
         let policy = subject.policy();
-        if !policy.snapshot().creation_delegated(subject.label(), target)
+        if !policy
+            .snapshot()
+            .creation_delegated(subject.label(), target)
         {
             return Err("file creation label not delegated");
         }
@@ -435,17 +437,28 @@ pub fn select_creation_label(task: &Task, target: Option<u32>) -> Result<(), &'s
 }
 
 impl super::PolicyData {
-    fn creation_allowed(&self, source:u32, parent:u32, kind:u32, target:u32)->bool {
-        self.files.create.contains(&(source,parent,kind,target))
-            || self.sets.file_allowed(source,parent,target,kind,super::sets::FileAction::Create)
+    fn creation_allowed(&self, source: u32, parent: u32, kind: u32, target: u32) -> bool {
+        self.files.create.contains(&(source, parent, kind, target))
+            || self.sets.file_allowed(
+                source,
+                parent,
+                target,
+                kind,
+                super::sets::FileAction::Create,
+            )
     }
-    fn relabel_allowed(&self, source:u32, old:u32, kind:u32, target:u32)->bool {
-        self.files.relabel.contains(&(source,old,kind,target))
-            || self.sets.file_allowed(source,old,target,kind,super::sets::FileAction::Relabel)
+    fn relabel_allowed(&self, source: u32, old: u32, kind: u32, target: u32) -> bool {
+        self.files.relabel.contains(&(source, old, kind, target))
+            || self
+                .sets
+                .file_allowed(source, old, target, kind, super::sets::FileAction::Relabel)
     }
-    fn creation_delegated(&self, source:u32, target:u32)->bool {
-        self.files.create.iter().any(|&(s,_,_,t)|s==source && t==target)
-            || self.sets.creation_delegated(source,target)
+    fn creation_delegated(&self, source: u32, target: u32) -> bool {
+        self.files
+            .create
+            .iter()
+            .any(|&(s, _, _, t)| s == source && t == target)
+            || self.sets.creation_delegated(source, target)
     }
 }
 
@@ -566,25 +579,65 @@ mod tests {
     }
     #[test_case]
     fn shared_file_rules_reach_vfs_creation_and_relabel_checks_without_changing_defaults() {
-        use super::super::{sets::{Update,Selector,FileRule,FileAction},update::PolicyUpdate};
-        let policy=policy();let subject=policy.subject(1).unwrap();
-        let task=Arc::new(Task::new("set-file-label".into(),1,TaskType::User));
-        *task.security_subject.write()=Some(subject.clone());
-        assert!(select_creation_label(&task,Some(5)).is_err());
-        policy.extend(1,PolicyUpdate {sets:Update {sets:vec![9],members:vec![(9,5)],files:vec![
-            FileRule {source:Selector::Label(1),origin:Selector::Label(2),target:Selector::Set(9),kind:1,action:FileAction::Create,different:false},
-            FileRule {source:Selector::Label(1),origin:Selector::Set(9),target:Selector::Label(4),kind:1,action:FileAction::Relabel,different:true},
-        ],..Default::default()},..Default::default()}).unwrap();
-        let fs=VfsManager::new();set_mock_current_task(task.clone());
-        select_creation_label(&task,Some(5)).unwrap();fs.create_file("/selected",FileType::RegularFile).unwrap();
-        let node=fs.resolve_path("/selected").unwrap().0.node();assert_eq!(policy.resource_label(node.as_ref()),Some(5));
-        policy.relabel_file(&subject,node.as_ref(),4).unwrap();assert_eq!(policy.resource_label(node.as_ref()),Some(4));
-        assert!(policy.relabel_file(&subject,node.as_ref(),5).is_err());
-        select_creation_label(&task,None).unwrap();fs.create_file("/default",FileType::RegularFile).unwrap();
-        assert_eq!(policy.resource_label(fs.resolve_path("/default").unwrap().0.node().as_ref()),Some(3));
-        let derived=policy.with_file_rules(Some(2),vec![],vec![]).unwrap();
-        *task.security_subject.write()=Some(derived.subject(1).unwrap());
-        assert!(select_creation_label(&task,Some(5)).is_err());clear_mock_current_task();
+        use super::super::{
+            sets::{FileAction, FileRule, Selector, Update},
+            update::PolicyUpdate,
+        };
+        let policy = policy();
+        let subject = policy.subject(1).unwrap();
+        let task = Arc::new(Task::new("set-file-label".into(), 1, TaskType::User));
+        *task.security_subject.write() = Some(subject.clone());
+        assert!(select_creation_label(&task, Some(5)).is_err());
+        policy
+            .extend(
+                1,
+                PolicyUpdate {
+                    sets: Update {
+                        sets: vec![9],
+                        members: vec![(9, 5)],
+                        files: vec![
+                            FileRule {
+                                source: Selector::Label(1),
+                                origin: Selector::Label(2),
+                                target: Selector::Set(9),
+                                kind: 1,
+                                action: FileAction::Create,
+                                different: false,
+                            },
+                            FileRule {
+                                source: Selector::Label(1),
+                                origin: Selector::Set(9),
+                                target: Selector::Label(4),
+                                kind: 1,
+                                action: FileAction::Relabel,
+                                different: true,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let fs = VfsManager::new();
+        set_mock_current_task(task.clone());
+        select_creation_label(&task, Some(5)).unwrap();
+        fs.create_file("/selected", FileType::RegularFile).unwrap();
+        let node = fs.resolve_path("/selected").unwrap().0.node();
+        assert_eq!(policy.resource_label(node.as_ref()), Some(5));
+        policy.relabel_file(&subject, node.as_ref(), 4).unwrap();
+        assert_eq!(policy.resource_label(node.as_ref()), Some(4));
+        assert!(policy.relabel_file(&subject, node.as_ref(), 5).is_err());
+        select_creation_label(&task, None).unwrap();
+        fs.create_file("/default", FileType::RegularFile).unwrap();
+        assert_eq!(
+            policy.resource_label(fs.resolve_path("/default").unwrap().0.node().as_ref()),
+            Some(3)
+        );
+        let derived = policy.with_file_rules(Some(2), vec![], vec![]).unwrap();
+        *task.security_subject.write() = Some(derived.subject(1).unwrap());
+        assert!(select_creation_label(&task, Some(5)).is_err());
+        clear_mock_current_task();
     }
     #[test_case]
     fn relabel_rechecks_current_inode_label_and_preserves_administrator_bindings() {
@@ -643,7 +696,11 @@ mod tests {
         let domain = [0x42; 16];
         let other_domain = [0x24; 16];
         let original = Policy::new(
-            vec![(1, "actor".into()), (2, "base".into()), (3, "private".into())],
+            vec![
+                (1, "actor".into()),
+                (2, "base".into()),
+                (3, "private".into()),
+            ],
             vec![],
         )
         .unwrap()
@@ -652,7 +709,8 @@ mod tests {
         .with_file_persistence(domain)
         .unwrap();
         let fs = VfsManager::new();
-        fs.create_file("/persistent", FileType::RegularFile).unwrap();
+        fs.create_file("/persistent", FileType::RegularFile)
+            .unwrap();
         let node = fs.resolve_path("/persistent").unwrap().0.node();
         CreateContext {
             policy: original.clone(),
@@ -668,7 +726,11 @@ mod tests {
         assert_eq!(original.resource_label(node.as_ref()), Some(3));
 
         let recreated = Policy::new(
-            vec![(1, "actor".into()), (2, "base".into()), (9, "private".into())],
+            vec![
+                (1, "actor".into()),
+                (2, "base".into()),
+                (9, "private".into()),
+            ],
             vec![],
         )
         .unwrap()
@@ -677,7 +739,10 @@ mod tests {
         .with_file_persistence(domain)
         .unwrap();
         assert_eq!(recreated.resource_label(node.as_ref()), Some(9));
-        assert_eq!(recreated.resource_label_name(node.as_ref()).as_deref(), Some("private"));
+        assert_eq!(
+            recreated.resource_label_name(node.as_ref()).as_deref(),
+            Some("private")
+        );
         let isolated = recreated.with_file_persistence(other_domain).unwrap();
         assert_eq!(isolated.resource_label(node.as_ref()), Some(2));
         assert_eq!(recreated.resource_label(node.as_ref()), Some(9));
@@ -720,7 +785,11 @@ mod tests {
         use crate::fs::vfs_v2::xattr::{self, SetMode};
         let domain = [0x73; 16];
         let policy = Policy::new(
-            vec![(1, "actor".into()), (2, "base".into()), (3, "private".into())],
+            vec![
+                (1, "actor".into()),
+                (2, "base".into()),
+                (3, "private".into()),
+            ],
             vec![],
         )
         .unwrap()
@@ -738,7 +807,8 @@ mod tests {
         );
         assert_eq!(node.list_xattrs().unwrap(), Vec::<Vec<u8>>::new());
 
-        node.write_label_metadata(&domain, b"SLB1unregistered").unwrap();
+        node.write_label_metadata(&domain, b"SLB1unregistered")
+            .unwrap();
         assert_eq!(policy.resource_label(node.as_ref()), None);
         assert_eq!(
             policy.resource_label_name(node.as_ref()).as_deref(),
@@ -777,9 +847,7 @@ mod tests {
         for domain in 0..MAX_LABEL_DOMAINS as u8 {
             let mut key = [0u8; 16];
             key[0] = domain + 1;
-            labels
-                .write_label_metadata(&key, b"SLB1label")
-                .unwrap();
+            labels.write_label_metadata(&key, b"SLB1label").unwrap();
         }
         let mut existing = [0u8; 16];
         existing[0] = 1;
@@ -792,7 +860,10 @@ mod tests {
         );
         let extra = [0xff; 16];
         assert_eq!(
-            labels.write_label_metadata(&extra, b"SLB1extra").unwrap_err().kind,
+            labels
+                .write_label_metadata(&extra, b"SLB1extra")
+                .unwrap_err()
+                .kind,
             FileSystemErrorKind::NoSpace
         );
         assert_eq!(

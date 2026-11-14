@@ -65,7 +65,9 @@ pub trait StreamOps: Send + Sync {
 
     /// Zero-byte writes normally succeed without dereferencing a user pointer.
     /// Control streams may override this to implement an explicit reset command.
-    fn write_empty(&self) -> Result<usize, StreamError> { Ok(0) }
+    fn write_empty(&self) -> Result<usize, StreamError> {
+        Ok(0)
+    }
 
     /// Write data to the stream
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError>;

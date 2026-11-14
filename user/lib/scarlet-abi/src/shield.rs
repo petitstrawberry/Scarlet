@@ -19,7 +19,9 @@ const _: [(); FILE_LABEL_METADATA_NAME_LEN] =
 
 /// Convert a stable file-persistence domain into its reserved native xattr
 /// name. Label metadata never contains policy addresses or numeric label IDs.
-pub const fn file_label_metadata_name(domain: &[u8; FILE_LABEL_DOMAIN_LEN]) -> [u8; FILE_LABEL_METADATA_NAME_LEN] {
+pub const fn file_label_metadata_name(
+    domain: &[u8; FILE_LABEL_DOMAIN_LEN],
+) -> [u8; FILE_LABEL_METADATA_NAME_LEN] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut name = [0u8; FILE_LABEL_METADATA_NAME_LEN];
     let mut index = 0;
@@ -121,17 +123,27 @@ const _: [(); 24] = [(); core::mem::size_of::<RawExecTransition>()];
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RawFileCreate {
-    pub source:u32,pub parent:u32,pub target:u32,pub kind:u32,pub flags:u32,pub reserved:u32,
+    pub source: u32,
+    pub parent: u32,
+    pub target: u32,
+    pub kind: u32,
+    pub flags: u32,
+    pub reserved: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RawFileRelabel {pub source:u32,pub old:u32,pub target:u32,pub kind:u32}
-const _: [();24]=[();core::mem::size_of::<RawFileCreate>()];
-const _: [();16]=[();core::mem::size_of::<RawFileRelabel>()];
+pub struct RawFileRelabel {
+    pub source: u32,
+    pub old: u32,
+    pub target: u32,
+    pub kind: u32,
+}
+const _: [(); 24] = [(); core::mem::size_of::<RawFileCreate>()];
+const _: [(); 16] = [(); core::mem::size_of::<RawFileRelabel>()];
 
 /// Native endpoint labeling authority; separate from ABI permission classes.
-pub const SOCKET_LABEL_CLASS:u32=0x5343_0001;
-pub const SOCKET_LABEL_CREATE:u64=1;
+pub const SOCKET_LABEL_CLASS: u32 = 0x5343_0001;
+pub const SOCKET_LABEL_CREATE: u64 = 1;
 
 /// Append-only update of an administrator-owned policy. The complete batch is
 /// copied and validated before publication. Existing identities and grants are
@@ -192,48 +204,61 @@ pub struct RawPrincipalRangeTransition {
     pub last: u32,
 }
 pub const POLICY_UPDATE_PRINCIPAL_RANGES_VERSION: u32 = 3;
-const _: [();224] = [();core::mem::size_of::<RawPolicyUpdateWithPrincipalRanges>()];
-const _: [();16] = [();core::mem::size_of::<RawPrincipalRangeTransition>()];
+const _: [(); 224] = [(); core::mem::size_of::<RawPolicyUpdateWithPrincipalRanges>()];
+const _: [(); 16] = [(); core::mem::size_of::<RawPrincipalRangeTransition>()];
 pub const MAX_LABEL_SETS: usize = 256;
 pub const MAX_SET_MEMBERS: usize = 16384;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RawLabelSet { pub id:u32, pub reserved:u32 }
+pub struct RawLabelSet {
+    pub id: u32,
+    pub reserved: u32,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RawSetMember { pub set:u32, pub label:u32 }
+pub struct RawSetMember {
+    pub set: u32,
+    pub label: u32,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RawLabelSelector { pub kind:u32, pub id:u32 }
+pub struct RawLabelSelector {
+    pub kind: u32,
+    pub id: u32,
+}
 impl RawLabelSelector {
-    pub const fn label(id:u32)->Self {Self {kind:0,id}}
-    pub const fn set(id:u32)->Self {Self {kind:1,id}}
+    pub const fn label(id: u32) -> Self {
+        Self { kind: 0, id }
+    }
+    pub const fn set(id: u32) -> Self {
+        Self { kind: 1, id }
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RawSetGrant {
-    pub source:RawLabelSelector,
-    pub target:RawLabelSelector,
-    pub class:u32,
-    pub reserved:u32,
-    pub permissions:u64,
+    pub source: RawLabelSelector,
+    pub target: RawLabelSelector,
+    pub class: u32,
+    pub reserved: u32,
+    pub permissions: u64,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RawSetFileRule {
-    pub source:RawLabelSelector,
-    pub origin:RawLabelSelector,
-    pub target:RawLabelSelector,
-    pub kind:u32,
+    pub source: RawLabelSelector,
+    pub origin: RawLabelSelector,
+    pub target: RawLabelSelector,
+    pub kind: u32,
     /// 1: creation authorization, 2: relabel authorization. No default selection.
-    pub action:u32,
+    pub action: u32,
     /// Bit 0 requires different old and new labels (relabel rules only).
-    pub flags:u32,
-    pub reserved:u32,
+    pub flags: u32,
+    pub reserved: u32,
 }
-const _:[();208]=[();core::mem::size_of::<RawPolicyUpdateWithSets>()];
-const _:[();8]=[();core::mem::size_of::<RawLabelSet>()];
-const _:[();8]=[();core::mem::size_of::<RawSetMember>()];
-const _:[();32]=[();core::mem::size_of::<RawSetGrant>()];
-const _:[();40]=[();core::mem::size_of::<RawSetFileRule>()];
+const _: [(); 208] = [(); core::mem::size_of::<RawPolicyUpdateWithSets>()];
+const _: [(); 8] = [(); core::mem::size_of::<RawLabelSet>()];
+const _: [(); 8] = [(); core::mem::size_of::<RawSetMember>()];
+const _: [(); 32] = [(); core::mem::size_of::<RawSetGrant>()];
+const _: [(); 40] = [(); core::mem::size_of::<RawSetFileRule>()];

@@ -135,7 +135,10 @@ mod tests {
     fn detects_android_interpreter_but_not_generic_linux_or_wrong_architecture() {
         assert!(identified(&elf(3, b"/system/bin/linker64\0")));
         assert!(identified(&elf(3, b"/system/bin/bootstrap/linker64\0")));
-        assert!(!identified(&elf(3, b"/system/bin/bootstrap/linker64-other\0")));
+        assert!(!identified(&elf(
+            3,
+            b"/system/bin/bootstrap/linker64-other\0"
+        )));
         assert!(identified(&elf(
             3,
             b"/apex/com.android.runtime/bin/linker64\0"

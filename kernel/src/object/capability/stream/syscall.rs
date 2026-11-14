@@ -141,7 +141,9 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    if count == 0 { return stream.write_empty().unwrap_or_else(stream_error_result); }
+    if count == 0 {
+        return stream.write_empty().unwrap_or_else(stream_error_result);
+    }
 
     // Copy from user space before writing so buffers crossing page boundaries
     // are handled correctly.

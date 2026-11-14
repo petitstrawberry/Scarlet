@@ -51,12 +51,21 @@ impl AbiModule for AndroidAarch64Abi {
         super::detect::is_android_aarch64(file).then_some(100)
     }
 
-    fn execution_domain(&self) -> &'static str { self.linux.execution_domain() }
-    fn handle_user_memory_fault(&mut self, fault: crate::vm::fault::UserMemoryFault,
-        frame: &mut Trapframe) -> Result<bool, &'static str> {
+    fn execution_domain(&self) -> &'static str {
+        self.linux.execution_domain()
+    }
+    fn handle_user_memory_fault(
+        &mut self,
+        fault: crate::vm::fault::UserMemoryFault,
+        frame: &mut Trapframe,
+    ) -> Result<bool, &'static str> {
         self.linux.handle_user_memory_fault(fault, frame)
     }
-    fn handle_execution_denial(&mut self, denial: crate::shield::execution::Denial, frame: &mut Trapframe) -> Result<usize, &'static str> {
+    fn handle_execution_denial(
+        &mut self,
+        denial: crate::shield::execution::Denial,
+        frame: &mut Trapframe,
+    ) -> Result<usize, &'static str> {
         self.linux.handle_execution_denial(denial, frame)
     }
     fn handle_syscall(&mut self, tf: &mut Trapframe) -> Result<usize, &'static str> {

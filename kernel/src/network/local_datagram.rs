@@ -459,5 +459,4 @@ mod tests {
             Err(SocketError::WouldBlock)
         ));
     }
-
 }

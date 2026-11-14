@@ -135,12 +135,22 @@ fn readonly_open_in_atomic_context_succeeds_when_namespace_uncontended() {
 
 #[test_case]
 fn unrelated_inode_number_is_not_mistaken_for_a_bind_source() {
-    let target=VfsManager::new();let source=alloc::sync::Arc::new(VfsManager::new());
-    target.create_file("/unrelated",FileType::RegularFile).unwrap();
+    let target = VfsManager::new();
+    let source = alloc::sync::Arc::new(VfsManager::new());
+    target
+        .create_file("/unrelated", FileType::RegularFile)
+        .unwrap();
     source.create_dir("/source").unwrap();
     target.create_dir("/mount").unwrap();
-    assert_eq!(target.resolve_path("/unrelated").unwrap().0.node().id(),source.resolve_path("/source").unwrap().0.node().id());
-    target.bind_mount_from(&source,"/source","/mount").unwrap();
-    target.remove_with_kind("/unrelated",false).unwrap();assert!(target.metadata("/unrelated").is_err());
-    assert!(source.metadata("/source").is_ok());assert!(target.metadata("/mount").is_ok());
+    assert_eq!(
+        target.resolve_path("/unrelated").unwrap().0.node().id(),
+        source.resolve_path("/source").unwrap().0.node().id()
+    );
+    target
+        .bind_mount_from(&source, "/source", "/mount")
+        .unwrap();
+    target.remove_with_kind("/unrelated", false).unwrap();
+    assert!(target.metadata("/unrelated").is_err());
+    assert!(source.metadata("/source").is_ok());
+    assert!(target.metadata("/mount").is_ok());
 }

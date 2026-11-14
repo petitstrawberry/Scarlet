@@ -397,9 +397,18 @@ fn create_virtual_channel(kind: u32, width: u32, height: u32) -> HandleResult<(H
     let mut handles = [-1i32; 2];
     // SAFETY: output is writable for the complete synchronous call. The kernel
     // returns two independent owned handles only on success.
-    let result = unsafe { scarlet_sys::syscall4(scarlet_sys::Syscall::InputChannelCreate,
-        kind as usize, width as usize, height as usize, handles.as_mut_ptr() as usize) };
-    if result != 0 { return Err(HandleError::SystemError(-1)); }
+    let result = unsafe {
+        scarlet_sys::syscall4(
+            scarlet_sys::Syscall::InputChannelCreate,
+            kind as usize,
+            width as usize,
+            height as usize,
+            handles.as_mut_ptr() as usize,
+        )
+    };
+    if result != 0 {
+        return Err(HandleError::SystemError(-1));
+    }
     // Adopt both handles before propagating errors so either successful
     // adoption is dropped if the other handle's introspection fails.
     let producer = unsafe { Handle::from_raw(handles[0]) };

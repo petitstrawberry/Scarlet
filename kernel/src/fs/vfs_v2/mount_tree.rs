@@ -85,14 +85,25 @@ impl MountRestrictions {
     pub const NO_EXECUTE: u32 = 8;
     pub fn from_bits(bits: u32) -> VfsResult<Self> {
         if bits & !(Self::NO_PRIVILEGE_GAIN | Self::NO_DEVICES | Self::NO_EXECUTE) != 0 {
-            return Err(vfs_error(FileSystemErrorKind::NotSupported, "Unsupported mount restrictions"));
+            return Err(vfs_error(
+                FileSystemErrorKind::NotSupported,
+                "Unsupported mount restrictions",
+            ));
         }
         Ok(Self(bits))
     }
-    pub fn bits(self) -> u32 { self.0 }
-    pub fn allows_execution(self) -> bool { self.0 & Self::NO_EXECUTE == 0 }
-    pub fn allows_devices(self) -> bool { self.0 & Self::NO_DEVICES == 0 }
-    pub fn allows_privilege_gain(self) -> bool { self.0 & Self::NO_PRIVILEGE_GAIN == 0 }
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+    pub fn allows_execution(self) -> bool {
+        self.0 & Self::NO_EXECUTE == 0
+    }
+    pub fn allows_devices(self) -> bool {
+        self.0 & Self::NO_DEVICES == 0
+    }
+    pub fn allows_privilege_gain(self) -> bool {
+        self.0 & Self::NO_PRIVILEGE_GAIN == 0
+    }
 }
 
 /// Mount point information
@@ -127,8 +138,12 @@ impl MountPoint {
         Self::new_regular_restricted(path, root, filesystem, MountRestrictions::default())
     }
 
-    pub fn new_regular_restricted(path: String, root: VfsEntryRef,
-        filesystem: Arc<dyn FileSystemOperations>, restrictions: MountRestrictions) -> Arc<Self> {
+    pub fn new_regular_restricted(
+        path: String,
+        root: VfsEntryRef,
+        filesystem: Arc<dyn FileSystemOperations>,
+        restrictions: MountRestrictions,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: MountId::new(),
             restrictions,
@@ -143,7 +158,11 @@ impl MountPoint {
     }
 
     /// Create a new bind mount point
-    pub fn new_bind(path: String, source: VfsEntryRef, restrictions: MountRestrictions) -> Arc<Self> {
+    pub fn new_bind(
+        path: String,
+        source: VfsEntryRef,
+        restrictions: MountRestrictions,
+    ) -> Arc<Self> {
         let filesystem = source.node().filesystem().and_then(|fs| fs.upgrade());
         Arc::new(Self {
             id: MountId::new(),
@@ -282,7 +301,8 @@ impl MountTree {
         target_mount_point: Arc<MountPoint>,
     ) -> VfsResult<MountId> {
         // Create a new bind mount point. The name of the mount point is the name of the target entry.
-        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry, source_mount.restrictions);
+        let bind_mount =
+            MountPoint::new_bind(target_entry.name(), source_entry, source_mount.restrictions);
         let mount_id = bind_mount.id;
 
         // Add the new mount as a child of the target's containing mount point, attached to the target entry.
@@ -306,8 +326,12 @@ impl MountTree {
         let new_fs_root_entry = VfsEntry::new(None, "/".to_string(), new_fs_root_node);
 
         // Create a new mount point for the filesystem.
-        let new_mount =
-            MountPoint::new_regular_restricted(target_entry.name(), new_fs_root_entry, filesystem.clone(), restrictions);
+        let new_mount = MountPoint::new_regular_restricted(
+            target_entry.name(),
+            new_fs_root_entry,
+            filesystem.clone(),
+            restrictions,
+        );
         let mount_id = new_mount.id;
 
         // Add the new mount as a child to the target's mount point.
@@ -360,16 +384,34 @@ impl MountTree {
 
     /// Check if an entry is a source for a bind mount
     pub fn is_bind_source(&self, entry_to_check: &VfsEntryRef) -> bool {
-        let node=entry_to_check.node();
-        let Some(filesystem)=node.filesystem().and_then(|weak|weak.upgrade()) else {return false;};
-        self.is_bind_source_in_mount(&self.root_mount.read(),filesystem.fs_id(),node.id())
+        let node = entry_to_check.node();
+        let Some(filesystem) = node.filesystem().and_then(|weak| weak.upgrade()) else {
+            return false;
+        };
+        self.is_bind_source_in_mount(&self.root_mount.read(), filesystem.fs_id(), node.id())
     }
 
-    fn is_bind_source_in_mount(&self,mount:&Arc<MountPoint>,filesystem:crate::fs::vfs_v2::core::FileSystemId,node_id:u64)->bool {
-        let root=mount.root.node();
-        if mount.is_bind_mount() && root.id()==node_id
-            && root.filesystem().and_then(|weak|weak.upgrade()).is_some_and(|fs|fs.fs_id()==filesystem) {return true;}
-        mount.children.read().values().any(|child|self.is_bind_source_in_mount(child,filesystem,node_id))
+    fn is_bind_source_in_mount(
+        &self,
+        mount: &Arc<MountPoint>,
+        filesystem: crate::fs::vfs_v2::core::FileSystemId,
+        node_id: u64,
+    ) -> bool {
+        let root = mount.root.node();
+        if mount.is_bind_mount()
+            && root.id() == node_id
+            && root
+                .filesystem()
+                .and_then(|weak| weak.upgrade())
+                .is_some_and(|fs| fs.fs_id() == filesystem)
+        {
+            return true;
+        }
+        mount
+            .children
+            .read()
+            .values()
+            .any(|child| self.is_bind_source_in_mount(child, filesystem, node_id))
     }
 
     /// Check if an entry is used in a mount (either as a mount point or a bind source)
@@ -503,17 +545,25 @@ impl MountTree {
     /// Mounts covering another mount root are children of that root. Keeping
     /// the covered mount in the tree preserves open descriptors, propagation
     /// channels, nested mounts and the exact topology to uncover on detach.
-    fn follow_mounts(mut entry: VfsEntryRef, mut mount: Arc<MountPoint>, stop_before_last: bool)
-        -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+    fn follow_mounts(
+        mut entry: VfsEntryRef,
+        mut mount: Arc<MountPoint>,
+        stop_before_last: bool,
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
         for _ in 0..256 {
-            let Some(child) = mount.get_child(&entry) else { return Ok((entry, mount)); };
+            let Some(child) = mount.get_child(&entry) else {
+                return Ok((entry, mount));
+            };
             if stop_before_last && child.get_child(&child.root).is_none() {
                 return Ok((entry, mount));
             }
             mount = child;
             entry = mount.root.clone();
         }
-        Err(vfs_error(FileSystemErrorKind::InvalidPath, "Mount stack too deep"))
+        Err(vfs_error(
+            FileSystemErrorKind::InvalidPath,
+            "Mount stack too deep",
+        ))
     }
 
     fn resolve_path_internal(
@@ -594,12 +644,18 @@ impl MountTree {
 
                 if is_at_mount_root {
                     loop {
-                        let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.read().clone());
-                        let Some((parent_mount, parent_entry)) = parent_info else { break; };
+                        let parent_info = current_mount
+                            .get_parent()
+                            .zip(current_mount.parent_entry.read().clone());
+                        let Some((parent_mount, parent_entry)) = parent_info else {
+                            break;
+                        };
                         let covered_root = Arc::ptr_eq(&parent_entry, &parent_mount.root);
                         current_mount = parent_mount;
                         current_entry = parent_entry;
-                        if !covered_root { break; }
+                        if !covered_root {
+                            break;
+                        }
                     }
                     if !Arc::ptr_eq(&current_entry, &current_mount.root) {
                         current_entry = self.resolve_component(current_entry, "..")?;
@@ -607,7 +663,11 @@ impl MountTree {
                 } else {
                     current_entry = self.resolve_component(current_entry, component)?;
                 }
-                (current_entry, current_mount) = Self::follow_mounts(current_entry, current_mount, resolve_mount && is_final_component)?;
+                (current_entry, current_mount) = Self::follow_mounts(
+                    current_entry,
+                    current_mount,
+                    resolve_mount && is_final_component,
+                )?;
             } else {
                 // Regular path traversal with symlink handling based on options
                 let should_follow_symlinks = if is_final_component {
@@ -666,7 +726,11 @@ impl MountTree {
                     current_entry = self.resolve_component_no_symlink(current_entry, &component)?;
                 }
 
-                (current_entry, current_mount) = Self::follow_mounts(current_entry, current_mount, resolve_mount && is_final_component)?;
+                (current_entry, current_mount) = Self::follow_mounts(
+                    current_entry,
+                    current_mount,
+                    resolve_mount && is_final_component,
+                )?;
             }
         }
 

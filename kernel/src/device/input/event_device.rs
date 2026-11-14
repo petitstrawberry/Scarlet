@@ -456,7 +456,9 @@ impl EventDevice {
         let mut queue = self.queue.lock();
         let mut count = 0;
         for record in buffer.chunks_exact_mut(InputEvent::size()) {
-            let Some(event) = queue.events.pop_front() else { break; };
+            let Some(event) = queue.events.pop_front() else {
+                break;
+            };
             record[..8].copy_from_slice(&event.time.to_ne_bytes());
             record[8..10].copy_from_slice(&event.type_.to_ne_bytes());
             record[10..12].copy_from_slice(&event.code.to_ne_bytes());

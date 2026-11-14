@@ -72,14 +72,16 @@ fn ext2_block_symlinks_at_inline_boundary_read_and_reclaim_data() {
         fs.write_inode(11, &inode).unwrap();
         let mut buffer = vec![0; 1024];
         buffer[..length].copy_from_slice(target.as_bytes());
-        let results = fs.block_device.submit_requests(vec![Box::new(BlockIORequest {
-            request_type: BlockIORequestType::Write,
-            sector: fs.block_to_sector(300),
-            sector_count: 2,
-            head: 0,
-            cylinder: 0,
-            buffer,
-        })]);
+        let results = fs
+            .block_device
+            .submit_requests(vec![Box::new(BlockIORequest {
+                request_type: BlockIORequestType::Write,
+                sector: fs.block_to_sector(300),
+                sector_count: 2,
+                head: 0,
+                cylinder: 0,
+                buffer,
+            })]);
         assert!(results[0].result.is_ok());
         let root = fs.root_node();
         let node = fs.lookup(&root, &"file".to_string()).unwrap();

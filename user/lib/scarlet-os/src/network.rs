@@ -166,8 +166,7 @@ pub fn list_interface_configs() -> Result<Vec<NetworkInterfaceConfig>, HandleErr
 }
 
 pub use scarlet_abi::network::{
-    NetworkLinkInfoV1, NetworkReadLinkStatisticsV1, NetworkTrafficConfigureV1,
-    NetworkUpdateIpv4V1,
+    NetworkLinkInfoV1, NetworkReadLinkStatisticsV1, NetworkTrafficConfigureV1, NetworkUpdateIpv4V1,
 };
 
 fn network_syscall_status(result: usize) -> Result<(), HandleError> {
@@ -193,7 +192,10 @@ pub fn traffic_capabilities() -> Result<u64, HandleError> {
     };
     // SAFETY: request remains initialized and borrowed for the synchronous call.
     let result = unsafe {
-        syscall1(Syscall::NetworkTrafficConfigureV1, &request as *const _ as usize)
+        syscall1(
+            Syscall::NetworkTrafficConfigureV1,
+            &request as *const _ as usize,
+        )
     };
     HandleError::from_syscall_result(result).map(|mask| mask as u64)
 }

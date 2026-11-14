@@ -30,9 +30,16 @@ pub trait TimerObject: StreamOps + Selectable {
 
     /// Arm against an absolute native wall-clock deadline, or watch clock
     /// changes while disarmed. Discontinuities either rebase or cancel it.
-    fn set_wall_time(&self, first_ns: u64, interval_ns: u64, cancel_on_change: bool) -> Result<(), &'static str>;
+    fn set_wall_time(
+        &self,
+        first_ns: u64,
+        interval_ns: u64,
+        cancel_on_change: bool,
+    ) -> Result<(), &'static str>;
 
-    fn is_wakeup(&self) -> bool { false }
+    fn is_wakeup(&self) -> bool {
+        false
+    }
 
     /// Return remaining time and interval, both in nanoseconds.
     fn snapshot(&self) -> (u64, u64);
@@ -100,10 +107,18 @@ impl Timer {
     }
 
     pub fn new_wakeup(clock_id: i32, nonblocking: bool) -> Result<Self, &'static str> {
-        Ok(Self::with_reservation(clock_id, nonblocking, Some(crate::system_power::wake::Reservation::new()?)))
+        Ok(Self::with_reservation(
+            clock_id,
+            nonblocking,
+            Some(crate::system_power::wake::Reservation::new()?),
+        ))
     }
 
-    fn with_reservation(clock_id: i32, nonblocking: bool, wake: Option<crate::system_power::wake::Reservation>) -> Self {
+    fn with_reservation(
+        clock_id: i32,
+        nonblocking: bool,
+        wake: Option<crate::system_power::wake::Reservation>,
+    ) -> Self {
         let shared = TimerShared::new(wake);
         let handler = Arc::new(TimerCallback {
             shared: Arc::downgrade(&shared),
@@ -133,14 +148,23 @@ impl Timer {
         })
     }
 
-    fn configure(&self, first_ns: u64, interval_ns: u64, absolute: bool, wall_clock: bool, cancel_on_change: bool) -> Result<(), &'static str> {
+    fn configure(
+        &self,
+        first_ns: u64,
+        interval_ns: u64,
+        absolute: bool,
+        wall_clock: bool,
+        cancel_on_change: bool,
+    ) -> Result<(), &'static str> {
         let mut state = self.shared.state.lock();
         if wall_clock && !state.observing_clock {
             let observer: Arc<dyn crate::time::ClockChangeListener> = self.handler.clone();
             crate::time::observe_clock_changes(&observer)?;
             state.observing_clock = true;
         }
-        if let Some(entry_id) = state.timer_entry_id.take() { cancel_timer(entry_id); }
+        if let Some(entry_id) = state.timer_entry_id.take() {
+            cancel_timer(entry_id);
+        }
         state.generation = state.generation.wrapping_add(1);
         state.interval_ns = interval_ns;
         state.next_deadline_ns = None;
@@ -162,7 +186,10 @@ impl Timer {
 impl TimerState {
     fn publish_wake(&self) {
         if let Some(wake) = &self.wake {
-            wake.update(self.next_deadline_ns, self.cancelled || self.expirations != 0);
+            wake.update(
+                self.next_deadline_ns,
+                self.cancelled || self.expirations != 0,
+            );
         }
     }
 }
@@ -182,7 +209,12 @@ impl TimerObject for Timer {
         let _ = self.configure(first_ns, interval_ns, absolute, false, false);
     }
 
-    fn set_wall_time(&self, first_ns: u64, interval_ns: u64, cancel_on_change: bool) -> Result<(), &'static str> {
+    fn set_wall_time(
+        &self,
+        first_ns: u64,
+        interval_ns: u64,
+        cancel_on_change: bool,
+    ) -> Result<(), &'static str> {
         self.configure(first_ns, interval_ns, true, true, cancel_on_change)
     }
 
@@ -326,7 +358,9 @@ struct TimerCallback {
 }
 
 fn wall_deadline_to_monotonic(deadline: u64, wall_now: u64, monotonic_now: u64) -> u64 {
-    monotonic_now.saturating_add(deadline.saturating_sub(wall_now)).max(1)
+    monotonic_now
+        .saturating_add(deadline.saturating_sub(wall_now))
+        .max(1)
 }
 
 impl TimerCallback {
@@ -335,9 +369,16 @@ impl TimerCallback {
         let target = if state.wall_clock {
             let wall = crate::time::system_time_ns().unwrap_or(mono);
             wall_deadline_to_monotonic(source_deadline_ns, wall, mono)
-        } else { source_deadline_ns };
+        } else {
+            source_deadline_ns
+        };
         let handler: Arc<dyn SoftwareTimerHandler> = self.clone();
-        state.timer_entry_id = Some(add_timer(target, crate::timer::TimerPrecision::Normal, &handler, state.generation as usize));
+        state.timer_entry_id = Some(add_timer(
+            target,
+            crate::timer::TimerPrecision::Normal,
+            &handler,
+            state.generation as usize,
+        ));
         state.source_deadline_ns = Some(source_deadline_ns);
         state.next_deadline_ns = Some(target);
         state.active = true;
@@ -346,13 +387,21 @@ impl TimerCallback {
 
 impl crate::time::ClockChangeListener for TimerCallback {
     fn clock_changed(self: Arc<Self>, revision: u64) {
-        let Some(shared) = self.shared.upgrade() else { return; };
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
         let mut state = shared.state.lock();
         // Notifications from concurrent clock updates can arrive out of order.
-        if revision <= state.clock_revision { return; }
+        if revision <= state.clock_revision {
+            return;
+        }
         state.clock_revision = revision;
-        if !state.wall_clock { return; }
-        if let Some(entry_id) = state.timer_entry_id.take() { cancel_timer(entry_id); }
+        if !state.wall_clock {
+            return;
+        }
+        if let Some(entry_id) = state.timer_entry_id.take() {
+            cancel_timer(entry_id);
+        }
         state.generation = state.generation.wrapping_add(1);
         if state.cancel_on_change {
             state.cancelled = true;
@@ -385,7 +434,9 @@ impl SoftwareTimerHandler for TimerCallback {
             state.timer_entry_id = None;
             let now_ns = if state.wall_clock {
                 crate::time::system_time_ns().unwrap_or_else(get_time_ns)
-            } else { get_time_ns() };
+            } else {
+                get_time_ns()
+            };
             let expired_deadline_ns = state.source_deadline_ns.take().unwrap_or(now_ns);
             state.next_deadline_ns = None;
             if state.interval_ns > 0 {
@@ -411,10 +462,10 @@ mod tests {
 
     #[test_case]
     fn wall_deadline_conversion_preserves_remaining_time_and_saturates() {
-        assert_eq!(wall_deadline_to_monotonic(1050,1000,200),250);
-        assert_eq!(wall_deadline_to_monotonic(999,1000,200),200);
-        assert_eq!(wall_deadline_to_monotonic(999,1000,0),1);
-        assert_eq!(wall_deadline_to_monotonic(u64::MAX,0,1),u64::MAX);
+        assert_eq!(wall_deadline_to_monotonic(1050, 1000, 200), 250);
+        assert_eq!(wall_deadline_to_monotonic(999, 1000, 200), 200);
+        assert_eq!(wall_deadline_to_monotonic(999, 1000, 0), 1);
+        assert_eq!(wall_deadline_to_monotonic(u64::MAX, 0, 1), u64::MAX);
     }
 
     #[test_case]
@@ -436,38 +487,79 @@ mod tests {
         };
         timer.handler.clone().on_timer_expired(generation as usize);
         assert!(registrations[0].generation() > readiness_generation);
-        assert_eq!(crate::system_power::wake::snapshot().pending_events, before.pending_events + 1);
-        let mut bytes = [0;8]; assert_eq!(timer.read(&mut bytes).unwrap(), 8);
+        assert_eq!(
+            crate::system_power::wake::snapshot().pending_events,
+            before.pending_events + 1
+        );
+        let mut bytes = [0; 8];
+        assert_eq!(timer.read(&mut bytes).unwrap(), 8);
         assert_eq!(u64::from_ne_bytes(bytes), 1);
-        assert_eq!(crate::system_power::wake::snapshot().pending_events, before.pending_events);
+        assert_eq!(
+            crate::system_power::wake::snapshot().pending_events,
+            before.pending_events
+        );
         timer.set_time(1_000_000_000_000, 0, false);
-        let duplicate = timer.clone(); drop(timer);
+        let duplicate = timer.clone();
+        drop(timer);
         assert!(crate::system_power::wake::snapshot().deadline_ns.is_some());
         drop(duplicate);
-        assert_eq!(crate::system_power::wake::snapshot().deadline_ns, before.deadline_ns);
+        assert_eq!(
+            crate::system_power::wake::snapshot().deadline_ns,
+            before.deadline_ns
+        );
     }
 
     #[test_case]
     fn disarmed_clock_change_monitor_is_readable_and_reports_cancellation_once() {
         let timer = Timer::new(0, true);
         timer.set_wall_time(0, 0, true).unwrap();
-        timer.handler.clone().clock_changed(crate::time::clock_revision() + 1);
-        assert!(timer.current_ready(ReadyInterest { read:true, write:false, except:false }).read);
-        assert!(matches!(timer.read(&mut [0;8]), Err(StreamError::Cancelled)));
-        assert!(matches!(timer.read(&mut [0;8]), Err(StreamError::WouldBlock)));
+        timer
+            .handler
+            .clone()
+            .clock_changed(crate::time::clock_revision() + 1);
+        assert!(
+            timer
+                .current_ready(ReadyInterest {
+                    read: true,
+                    write: false,
+                    except: false
+                })
+                .read
+        );
+        assert!(matches!(
+            timer.read(&mut [0; 8]),
+            Err(StreamError::Cancelled)
+        ));
+        assert!(matches!(
+            timer.read(&mut [0; 8]),
+            Err(StreamError::WouldBlock)
+        ));
     }
 
     #[test_case]
     fn wall_clock_rebase_and_cancel_reject_stale_timer_callbacks() {
         let timer = Timer::new_wakeup(8, true).unwrap();
         let wall = crate::time::system_time_ns().unwrap_or_else(get_time_ns);
-        timer.set_wall_time(wall.saturating_add(1_000_000_000_000), 0, false).unwrap();
+        timer
+            .set_wall_time(wall.saturating_add(1_000_000_000_000), 0, false)
+            .unwrap();
         let old = timer.shared.state.lock().generation;
-        timer.handler.clone().clock_changed(crate::time::clock_revision() + 1);
-        let new = timer.shared.state.lock().generation; assert_ne!(old,new);
+        timer
+            .handler
+            .clone()
+            .clock_changed(crate::time::clock_revision() + 1);
+        let new = timer.shared.state.lock().generation;
+        assert_ne!(old, new);
         timer.handler.clone().on_timer_expired(old as usize);
-        assert!(matches!(timer.read(&mut [0;8]), Err(StreamError::WouldBlock)));
-        timer.cancel(); timer.handler.clone().on_timer_expired(new as usize);
-        assert!(matches!(timer.read(&mut [0;8]), Err(StreamError::WouldBlock)));
+        assert!(matches!(
+            timer.read(&mut [0; 8]),
+            Err(StreamError::WouldBlock)
+        ));
+        timer.cancel();
+        timer.handler.clone().on_timer_expired(new as usize);
+        assert!(matches!(
+            timer.read(&mut [0; 8]),
+            Err(StreamError::WouldBlock)
+        ));
     }
 }

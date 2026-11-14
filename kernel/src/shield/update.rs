@@ -73,12 +73,15 @@ impl PolicyData {
             }
             self.transitions.insert(key);
         }
-        let mut ranges=BTreeSet::new();
+        let mut ranges = BTreeSet::new();
         for rule in update.principal_ranges {
-            let key=(rule.source,rule.target,rule.first.0,rule.last.0);
-            if rule.source==rule.target || rule.first.0>rule.last.0
-                || !self.labels.contains_key(&rule.source) || !self.labels.contains_key(&rule.target)
-                || !ranges.insert(key) {
+            let key = (rule.source, rule.target, rule.first.0, rule.last.0);
+            if rule.source == rule.target
+                || rule.first.0 > rule.last.0
+                || !self.labels.contains_key(&rule.source)
+                || !self.labels.contains_key(&rule.target)
+                || !ranges.insert(key)
+            {
                 return Err("invalid or duplicate principal transition range");
             }
             self.principal_ranges.insert(key);
@@ -101,10 +104,15 @@ impl PolicyData {
         }
         self.files
             .add(&self.labels, update.create, update.relabel)?;
-        self.sets.add(&self.labels, self.files.default.is_some(), update.sets)?;
+        self.sets
+            .add(&self.labels, self.files.default.is_some(), update.sets)?;
         if self.labels.len() > MAX_LABELS
             || self.grants.len() > MAX_RULES
-            || self.transitions.len().saturating_add(self.principal_ranges.len()) > MAX_RULES
+            || self
+                .transitions
+                .len()
+                .saturating_add(self.principal_ranges.len())
+                > MAX_RULES
             || self.exec_transitions.len() > MAX_RULES
         {
             return Err("complete policy exceeds bound");
@@ -119,47 +127,182 @@ mod tests {
     use alloc::vec;
     #[test_case]
     fn principal_ranges_are_inclusive_directional_and_require_complete_identity() {
-        use identity::{Credentials,Identities,Principal};
-        let policy=Policy::new(vec![(1,"parent".into()),(2,"child".into()),(3,"other".into())],vec![]).unwrap();
-        let source=policy.subject(1).unwrap();
+        use identity::{Credentials, Identities, Principal};
+        let policy = Policy::new(
+            vec![
+                (1, "parent".into()),
+                (2, "child".into()),
+                (3, "other".into()),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let source = policy.subject(1).unwrap();
         assert!(!source.can_transition());
-        let range=PrincipalRangeTransitionRule {source:1,target:2,first:Principal(100),last:Principal(199)};
-        policy.extend(1,PolicyUpdate {principal_ranges:vec![range],..Default::default()}).unwrap();
+        let range = PrincipalRangeTransitionRule {
+            source: 1,
+            target: 2,
+            first: Principal(100),
+            last: Principal(199),
+        };
+        policy
+            .extend(
+                1,
+                PolicyUpdate {
+                    principal_ranges: vec![range],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert!(source.can_transition());
-        let mut credentials=Credentials::bootstrap();
-        for principal in [0,99,100,150,199,200,u32::MAX] {
-            credentials.set_principals(Identities::all(Principal(principal))).unwrap();
-            assert_eq!(source.transition(2,&credentials).is_ok(),(100..=199).contains(&principal));
-            assert!(source.transition(3,&credentials).is_err());
-            assert!(policy.subject(2).unwrap().transition(1,&credentials).is_err());
+        let mut credentials = Credentials::bootstrap();
+        for principal in [0, 99, 100, 150, 199, 200, u32::MAX] {
+            credentials
+                .set_principals(Identities::all(Principal(principal)))
+                .unwrap();
+            assert_eq!(
+                source.transition(2, &credentials).is_ok(),
+                (100..=199).contains(&principal)
+            );
+            assert!(source.transition(3, &credentials).is_err());
+            assert!(
+                policy
+                    .subject(2)
+                    .unwrap()
+                    .transition(1, &credentials)
+                    .is_err()
+            );
         }
-        credentials.set_principals(Identities {base:Principal(99),active:Principal(150),retained:Principal(150)}).unwrap();
-        assert!(source.transition(2,&credentials).is_err());
-        credentials.set_principals(Identities {base:Principal(150),active:Principal(150),retained:Principal(200)}).unwrap();
-        assert!(source.transition(2,&credentials).is_err());
-        let derived=policy.with_file_rules(Some(3),vec![],vec![]).unwrap().with_file_persistence([7;16]).unwrap();
-        credentials.set_principals(Identities::all(Principal(199))).unwrap();
-        assert_eq!(derived.subject(1).unwrap().transition(2,&credentials).unwrap().label(),2);
+        credentials
+            .set_principals(Identities {
+                base: Principal(99),
+                active: Principal(150),
+                retained: Principal(150),
+            })
+            .unwrap();
+        assert!(source.transition(2, &credentials).is_err());
+        credentials
+            .set_principals(Identities {
+                base: Principal(150),
+                active: Principal(150),
+                retained: Principal(200),
+            })
+            .unwrap();
+        assert!(source.transition(2, &credentials).is_err());
+        let derived = policy
+            .with_file_rules(Some(3), vec![], vec![])
+            .unwrap()
+            .with_file_persistence([7; 16])
+            .unwrap();
+        credentials
+            .set_principals(Identities::all(Principal(199)))
+            .unwrap();
+        assert_eq!(
+            derived
+                .subject(1)
+                .unwrap()
+                .transition(2, &credentials)
+                .unwrap()
+                .label(),
+            2
+        );
     }
     #[test_case]
     fn range_updates_publish_atomically_and_share_the_transition_resource_bound() {
         use identity::Principal;
-        let policy=Policy::new(vec![(1,"parent".into()),(2,"child".into())],vec![]).unwrap();
-        let rule=PrincipalRangeTransitionRule {source:1,target:2,first:Principal(100),last:Principal(199)};
-        for invalid in [PrincipalRangeTransitionRule {first:Principal(200),..rule},
-            PrincipalRangeTransitionRule {source:2,..rule},PrincipalRangeTransitionRule {target:99,..rule}] {
-            assert!(policy.extend(1,PolicyUpdate {labels:vec![(3,"added".into())],principal_ranges:vec![invalid],..Default::default()}).is_err());
-            assert_eq!(policy.generation(),1);assert!(policy.label(3).is_none());
+        let policy = Policy::new(vec![(1, "parent".into()), (2, "child".into())], vec![]).unwrap();
+        let rule = PrincipalRangeTransitionRule {
+            source: 1,
+            target: 2,
+            first: Principal(100),
+            last: Principal(199),
+        };
+        for invalid in [
+            PrincipalRangeTransitionRule {
+                first: Principal(200),
+                ..rule
+            },
+            PrincipalRangeTransitionRule { source: 2, ..rule },
+            PrincipalRangeTransitionRule { target: 99, ..rule },
+        ] {
+            assert!(
+                policy
+                    .extend(
+                        1,
+                        PolicyUpdate {
+                            labels: vec![(3, "added".into())],
+                            principal_ranges: vec![invalid],
+                            ..Default::default()
+                        }
+                    )
+                    .is_err()
+            );
+            assert_eq!(policy.generation(), 1);
+            assert!(policy.label(3).is_none());
         }
-        assert!(policy.extend(1,PolicyUpdate {principal_ranges:vec![rule,rule],..Default::default()}).is_err());
-        let single=PrincipalRangeTransitionRule {first:Principal(u32::MAX),last:Principal(u32::MAX),..rule};
-        assert_eq!(policy.extend(1,PolicyUpdate {principal_ranges:vec![single],..Default::default()}),Ok(2));
-        assert!(policy.extend(1,PolicyUpdate {principal_ranges:vec![rule],..Default::default()}).is_err());
-        assert_eq!(policy.snapshot().principal_ranges.len(),1);
-        let exact=(0..MAX_RULES as u32).map(|id|TransitionRule {source:1,target:2,principal:Principal(id)}).collect();
-        let full=Policy::with_transitions(vec![(1,"parent".into()),(2,"child".into())],vec![],exact).unwrap();
-        assert!(full.extend(1,PolicyUpdate {principal_ranges:vec![rule],..Default::default()}).is_err());
-        assert_eq!(full.generation(),1);assert!(full.snapshot().principal_ranges.is_empty());
+        assert!(
+            policy
+                .extend(
+                    1,
+                    PolicyUpdate {
+                        principal_ranges: vec![rule, rule],
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        let single = PrincipalRangeTransitionRule {
+            first: Principal(u32::MAX),
+            last: Principal(u32::MAX),
+            ..rule
+        };
+        assert_eq!(
+            policy.extend(
+                1,
+                PolicyUpdate {
+                    principal_ranges: vec![single],
+                    ..Default::default()
+                }
+            ),
+            Ok(2)
+        );
+        assert!(
+            policy
+                .extend(
+                    1,
+                    PolicyUpdate {
+                        principal_ranges: vec![rule],
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(policy.snapshot().principal_ranges.len(), 1);
+        let exact = (0..MAX_RULES as u32)
+            .map(|id| TransitionRule {
+                source: 1,
+                target: 2,
+                principal: Principal(id),
+            })
+            .collect();
+        let full = Policy::with_transitions(
+            vec![(1, "parent".into()), (2, "child".into())],
+            vec![],
+            exact,
+        )
+        .unwrap();
+        assert!(
+            full.extend(
+                1,
+                PolicyUpdate {
+                    principal_ranges: vec![rule],
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(full.generation(), 1);
+        assert!(full.snapshot().principal_ranges.is_empty());
     }
     #[test_case]
     fn updates_publish_a_complete_generation_and_keep_subject_and_inode_identities() {

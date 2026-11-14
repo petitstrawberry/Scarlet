@@ -66,8 +66,13 @@ impl AbiModule for TestImageAbi {
         image.vcpu.lock().set_pc(0x40_0000);
         tf.set_pc(0x40_0000);
         if envp.contains(&"GAIN=1") {
-            image.credentials.write().set_principals(crate::shield::identity::Identities::all(
-                crate::shield::identity::Principal(42))).unwrap();
+            image
+                .credentials
+                .write()
+                .set_principals(crate::shield::identity::Identities::all(
+                    crate::shield::identity::Principal(42),
+                ))
+                .unwrap();
         }
         if envp.contains(&"FAIL=1") {
             return Err("deliberate failure after mapping");
@@ -157,12 +162,7 @@ fn bind_mounted_execution_keeps_the_namespace_visible_path() {
     let file = fs.open("/apex/com.android.art/bin/dex2oat64", 0).unwrap();
     let view = fs.view();
     assert_eq!(
-        stable_execution_path(
-            "/apex/com.android.art/bin/dex2oat64",
-            &view,
-            &file,
-        )
-        .as_deref(),
+        stable_execution_path("/apex/com.android.art/bin/dex2oat64", &view, &file,).as_deref(),
         Some("/apex/com.android.art/bin/dex2oat64")
     );
 }
@@ -406,12 +406,18 @@ fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
     separated.unmount("/mounted").unwrap();
     assert!(separated.open("/mounted/shared-data", 0).is_err());
     assert!(original.open("/mounted/shared-data", 0).is_ok());
-    task.credentials.write().set_principals(crate::shield::identity::Identities::all(
-        crate::shield::identity::Principal(1234))).unwrap();
+    task.credentials
+        .write()
+        .set_principals(crate::shield::identity::Identities::all(
+            crate::shield::identity::Principal(1234),
+        ))
+        .unwrap();
     let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
     assert_execution_sealed(&child);
-    assert_eq!(child.credentials.read().principals().active,
-        crate::shield::identity::Principal(1234));
+    assert_eq!(
+        child.credentials.read().principals().active,
+        crate::shield::identity::Principal(1234)
+    );
     assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
     assert!(Arc::ptr_eq(
         &separated.view(),
@@ -469,8 +475,13 @@ fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits(
     let file = original.open("/txn-image", 0).unwrap();
     let (namespace, fs) = source.prepare_mount_namespace().unwrap();
     source.install_mount_namespace(namespace.clone(), fs.clone());
-    source.credentials.write().set_principals(crate::shield::identity::Identities::all(
-        crate::shield::identity::Principal(1234))).unwrap();
+    source
+        .credentials
+        .write()
+        .set_principals(crate::shield::identity::Identities::all(
+            crate::shield::identity::Principal(1234),
+        ))
+        .unwrap();
     let child = new_user_task("namespace-spawn".into(), 0);
     let mut tf = Trapframe::new();
     TransparentExecutor::execute_in_environment(
@@ -487,8 +498,10 @@ fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits(
     .unwrap();
     child.finish_exec_dispatch();
     assert_execution_sealed(&child);
-    assert_eq!(child.credentials.read().principals().active,
-        crate::shield::identity::Principal(1234));
+    assert_eq!(
+        child.credentials.read().principals().active,
+        crate::shield::identity::Principal(1234)
+    );
     assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
     assert!(Arc::ptr_eq(&fs.view(), &child.get_vfs().unwrap().view()));
     assert!(Arc::ptr_eq(
@@ -528,10 +541,7 @@ fn unshare_rejects_unknown_flags_without_changes_and_private_mounts_stay_private
     assert_eq!(fs.get_cwd_path(), "/work");
     assert_eq!(change_mount_propagation(&task, "/", 0x84000), Ok(()));
     assert_eq!(change_mount_propagation(&task, "/", 0x40000), Ok(()));
-    assert_eq!(
-        change_mount_propagation(&task, "/", 0x100000),
-        Ok(())
-    );
+    assert_eq!(change_mount_propagation(&task, "/", 0x100000), Ok(()));
     assert_eq!(
         change_mount_propagation(&task, "/work", 0x80000),
         Err(errno::EINVAL)
@@ -544,7 +554,10 @@ fn unshare_rejects_unknown_flags_without_changes_and_private_mounts_stay_private
 
 struct ExecutionTestRule;
 impl crate::shield::execution::CallConstraint for ExecutionTestRule {
-    fn evaluate(&self, _: &crate::shield::execution::Invocation) -> crate::shield::execution::Verdict {
+    fn evaluate(
+        &self,
+        _: &crate::shield::execution::Invocation,
+    ) -> crate::shield::execution::Verdict {
         crate::shield::execution::Verdict::ABORT
     }
 }
@@ -556,9 +569,15 @@ fn seal_execution(task: &Task) {
 fn assert_execution_sealed(task: &Task) {
     let state = task.execution_restrictions.read();
     assert!(state.no_new_authority());
-    assert_eq!(state.evaluate(&crate::shield::execution::Invocation {
-        domain: "test", number: 0, instruction: 0, arguments: [0;6],
-    }), Some(crate::shield::execution::Denial::AbortProcess));
+    assert_eq!(
+        state.evaluate(&crate::shield::execution::Invocation {
+            domain: "test",
+            number: 0,
+            instruction: 0,
+            arguments: [0; 6],
+        }),
+        Some(crate::shield::execution::Denial::AbortProcess)
+    );
 }
 
 #[test_case]
@@ -566,40 +585,75 @@ fn mount_restrictions_gate_exec_scripts_and_file_derived_identity_changes() {
     use crate::fs::{drivers::tmpfs::TmpFS, vfs_v2::mount_tree::MountRestrictions as R};
     let (task, fs, _, _) = fixture();
     fs.create_dir("/restricted").unwrap();
-    fs.mount(TmpFS::new(0), "/restricted", R::NO_EXECUTE).unwrap();
-    fs.create_file("/restricted/script", FileType::RegularFile).unwrap();
+    fs.mount(TmpFS::new(0), "/restricted", R::NO_EXECUTE)
+        .unwrap();
+    fs.create_file("/restricted/script", FileType::RegularFile)
+        .unwrap();
     let file = fs.open("/restricted/script", 2).unwrap();
     file.as_stream().unwrap().write(b"#!/txn-image\n").unwrap();
     let mut tf = Trapframe::new();
-    assert!(matches!(TransparentExecutor::execute_binary("/restricted/script", &["script"], &[], &task, &mut tf),
-        Err(ExecutorError::ExecutionFailed(message)) if message == "execution disabled on mount"));
+    assert!(
+        matches!(TransparentExecutor::execute_binary("/restricted/script", &["script"], &[], &task, &mut tf),
+        Err(ExecutorError::ExecutionFailed(message)) if message == "execution disabled on mount")
+    );
     fs.unmount("/restricted").unwrap();
-    fs.mount(TmpFS::new(0), "/restricted", R::NO_PRIVILEGE_GAIN).unwrap();
-    fs.create_file("/restricted/image", FileType::RegularFile).unwrap();
+    fs.mount(TmpFS::new(0), "/restricted", R::NO_PRIVILEGE_GAIN)
+        .unwrap();
+    fs.create_file("/restricted/image", FileType::RegularFile)
+        .unwrap();
     let credentials = task.credentials.read().clone();
-    assert!(TransparentExecutor::execute_with_abi("/restricted/image", &["image"], &["GAIN=1"],
-        TestImageAbi::name(), &task, &mut tf).is_err());
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/restricted/image",
+            &["image"],
+            &["GAIN=1"],
+            TestImageAbi::name(),
+            &task,
+            &mut tf
+        )
+        .is_err()
+    );
     assert_eq!(*task.credentials.read(), credentials);
     assert_eq!(task.vm_manager.memmap_len(), 0);
-    TransparentExecutor::execute_with_abi("/restricted/image", &["image"], &[],
-        TestImageAbi::name(), &task, &mut tf).unwrap();
+    TransparentExecutor::execute_with_abi(
+        "/restricted/image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut tf,
+    )
+    .unwrap();
     assert_eq!(*task.credentials.read(), credentials);
 }
 
 #[test_case]
 fn linux_tmpfs_mount_enforces_flags_options_and_native_mount_authority() {
-    use crate::abi::linux::generic::{fs::mount_tmpfs, errno};
+    use crate::abi::linux::generic::{errno, fs::mount_tmpfs};
     let (task, fs, _, _) = fixture();
     fs.create_dir("/apex").unwrap();
-    assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, "mode=0755,uid=0,gid=0,size=1M"), Ok(()));
+    assert_eq!(
+        mount_tmpfs(&task, "/apex", "tmpfs", 14, "mode=0755,uid=0,gid=0,size=1M"),
+        Ok(())
+    );
     assert_eq!(fs.resolve_path("/apex").unwrap().1.restrictions.bits(), 14);
-    for (flags, options, error) in [(15, "", errno::EOPNOTSUPP), (14, "unknown=1", errno::EOPNOTSUPP),
-        (14, "mode=xyz", errno::EINVAL), (14, "size=invalid", errno::EINVAL)] {
-        assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", flags, options), Err(error));
+    for (flags, options, error) in [
+        (15, "", errno::EOPNOTSUPP),
+        (14, "unknown=1", errno::EOPNOTSUPP),
+        (14, "mode=xyz", errno::EINVAL),
+        (14, "size=invalid", errno::EINVAL),
+    ] {
+        assert_eq!(
+            mount_tmpfs(&task, "/apex", "tmpfs", flags, options),
+            Err(error)
+        );
         assert_eq!(fs.resolve_path("/apex").unwrap().1.restrictions.bits(), 14);
     }
     task.credentials.write().set_authority(0, 0).unwrap();
-    assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, ""), Err(errno::EPERM));
+    assert_eq!(
+        mount_tmpfs(&task, "/apex", "tmpfs", 14, ""),
+        Err(errno::EPERM)
+    );
 }
 
 #[test_case]
@@ -608,8 +662,16 @@ fn linux_tmpfs_mount_applies_root_identity_options_to_the_new_filesystem() {
     use crate::fs::vfs_v2::core::VfsNode;
     let (task, fs, _, _) = fixture();
     fs.create_dir("/data_mirror").unwrap();
-    assert_eq!(mount_tmpfs(&task, "/data_mirror", "tmpfs", 14,
-        "mode=0700,uid=0,gid=1000"), Ok(()));
+    assert_eq!(
+        mount_tmpfs(
+            &task,
+            "/data_mirror",
+            "tmpfs",
+            14,
+            "mode=0700,uid=0,gid=1000"
+        ),
+        Ok(())
+    );
     let root = fs.resolve_path("/data_mirror").unwrap().0.node();
     let owner = root.owner_identity().unwrap();
     assert_eq!(owner.principal.0, 0);
@@ -618,7 +680,7 @@ fn linux_tmpfs_mount_applies_root_identity_options_to_the_new_filesystem() {
 
 #[test_case]
 fn shared_mount_accepts_null_filesystem_type_and_creates_native_peer_group() {
-    use crate::abi::linux::generic::{fs::sys_mount, errno, LinuxAbi};
+    use crate::abi::linux::generic::{LinuxAbi, errno, fs::sys_mount};
     let task = Arc::new(new_user_task("shared-mount-request".into(), 0));
     task.set_vfs(Arc::new(VfsManager::new()));
     let path = 0x20000000;
@@ -642,17 +704,34 @@ fn mount_namespace_capability_restores_view_without_replacing_environment_or_ide
     let (private, local) = task.prepare_mount_namespace().unwrap();
     assert_ne!(private.id(), original.id());
     task.install_mount_namespace(private.clone(), local.clone());
-    local.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/mounted", 14).unwrap();
-    local.create_file("/mounted/private", FileType::RegularFile).unwrap();
+    local
+        .mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/mounted", 14)
+        .unwrap();
+    local
+        .create_file("/mounted/private", FileType::RegularFile)
+        .unwrap();
     let saved = task.capture_mount_namespace().unwrap();
     let credentials = task.credentials.read().clone();
     task.join_mount_namespace(original.clone()).unwrap();
     assert_eq!(task.mount_namespace.read().id(), original.id());
-    assert!(Arc::ptr_eq(&task.execution_environment.read().clone().unwrap(), &environment));
+    assert!(Arc::ptr_eq(
+        &task.execution_environment.read().clone().unwrap(),
+        &environment
+    ));
     assert!(Arc::ptr_eq(&task.get_vfs().unwrap().view(), &fs.view()));
-    assert!(task.get_vfs().unwrap().resolve_path("/mounted/private").is_err());
+    assert!(
+        task.get_vfs()
+            .unwrap()
+            .resolve_path("/mounted/private")
+            .is_err()
+    );
     task.join_mount_namespace(saved).unwrap();
-    assert!(task.get_vfs().unwrap().resolve_path("/mounted/private").is_ok());
+    assert!(
+        task.get_vfs()
+            .unwrap()
+            .resolve_path("/mounted/private")
+            .is_ok()
+    );
     assert_eq!(*task.credentials.read(), credentials);
 }
 
@@ -664,14 +743,22 @@ fn mount_namespace_join_rejects_foreign_environment_and_missing_cwd_transactiona
     let other = new_user_task("foreign-namespace".into(), 0);
     other.set_vfs(Arc::new(VfsManager::new()));
     let foreign = other.capture_mount_namespace().unwrap();
-    assert_eq!(task.join_mount_namespace(foreign), Err(JoinError::IncompatibleView));
+    assert_eq!(
+        task.join_mount_namespace(foreign),
+        Err(JoinError::IncompatibleView)
+    );
     assert!(Arc::ptr_eq(&fs, &task.get_vfs().unwrap()));
     let (private, local) = task.prepare_mount_namespace().unwrap();
     task.install_mount_namespace(private.clone(), local.clone());
-    local.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/work", 0).unwrap();
+    local
+        .mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/work", 0)
+        .unwrap();
     local.create_dir("/work/only-here").unwrap();
     local.set_cwd_by_path("/work/only-here").unwrap();
-    assert_eq!(task.join_mount_namespace(original), Err(JoinError::WorkingDirectory));
+    assert_eq!(
+        task.join_mount_namespace(original),
+        Err(JoinError::WorkingDirectory)
+    );
     assert!(Arc::ptr_eq(&local, &task.get_vfs().unwrap()));
     assert_eq!(task.mount_namespace.read().id(), private.id());
 }
@@ -682,10 +769,21 @@ fn mount_namespace_capture_and_native_handle_duplication_do_not_grant_join_autho
     let (task, fs, _, _) = fixture();
     task.credentials.write().set_authority(0, 0).unwrap();
     let namespace = task.capture_mount_namespace().unwrap();
-    let handle = task.handle_table.insert(KernelObject::MountNamespace(namespace.clone())).unwrap();
-    assert_eq!(task.handle_table.get_object_info(handle).unwrap().object_type, KernelObjectType::MountNamespace);
+    let handle = task
+        .handle_table
+        .insert(KernelObject::MountNamespace(namespace.clone()))
+        .unwrap();
+    assert_eq!(
+        task.handle_table
+            .get_object_info(handle)
+            .unwrap()
+            .object_type,
+        KernelObjectType::MountNamespace
+    );
     let duplicated = task.handle_table.clone_for_dup(handle).unwrap().0;
-    let KernelObject::MountNamespace(copy) = duplicated else { panic!("namespace type lost") };
+    let KernelObject::MountNamespace(copy) = duplicated else {
+        panic!("namespace type lost")
+    };
     assert_eq!(copy.id(), namespace.id());
     assert!(task.handle_table.get(handle).unwrap().as_file().is_none());
     assert_eq!(task.join_mount_namespace(copy), Err(JoinError::Authority));
@@ -694,32 +792,63 @@ fn mount_namespace_capture_and_native_handle_duplication_do_not_grant_join_autho
 
 #[test_case]
 fn mount_namespace_management_captures_only_visible_live_descendants() {
-    use crate::sched::scheduler::{register_task, get_task_by_id, reset};
+    use crate::sched::scheduler::{get_task_by_id, register_task, reset};
     use crate::task::{CloneFlags, TaskState};
     reset();
-    let mut parent = new_user_task("namespace-manager".into(), 0); parent.init();
+    let mut parent = new_user_task("namespace-manager".into(), 0);
+    parent.init();
     parent.set_vfs(Arc::new(VfsManager::new()));
     let parent = get_task_by_id(register_task(parent)).unwrap();
     let original = parent.capture_mount_namespace().unwrap();
-    let child = get_task_by_id(register_task(parent.clone_task(CloneFlags::default()).unwrap())).unwrap();
+    let child = get_task_by_id(register_task(
+        parent.clone_task(CloneFlags::default()).unwrap(),
+    ))
+    .unwrap();
     assert!(parent.adopt_registered_process_child(&child));
-    child.set_namespace(crate::task::namespace::TaskNamespace::new_child(parent.get_namespace(), "managed-child".into()));
+    child.set_namespace(crate::task::namespace::TaskNamespace::new_child(
+        parent.get_namespace(),
+        "managed-child".into(),
+    ));
     let (private, fs) = child.prepare_mount_namespace().unwrap();
     child.install_mount_namespace(private.clone(), fs);
-    let grandchild = get_task_by_id(register_task(child.clone_task(CloneFlags::default()).unwrap())).unwrap();
+    let grandchild = get_task_by_id(register_task(
+        child.clone_task(CloneFlags::default()).unwrap(),
+    ))
+    .unwrap();
     assert!(child.adopt_registered_process_child(&grandchild));
-    let local = parent.get_namespace().resolve_local_id(grandchild.get_id()).unwrap();
+    let local = parent
+        .get_namespace()
+        .resolve_local_id(grandchild.get_id())
+        .unwrap();
     assert_ne!(local, grandchild.get_namespace_id());
     let captured = parent.capture_descendant_mount_namespace(local).unwrap();
     assert_eq!(captured.id(), private.id());
-    assert_eq!(parent.capture_mount_namespace().unwrap().id(), original.id());
-    let mut other = new_user_task("unrelated".into(), 0); other.init();
+    assert_eq!(
+        parent.capture_mount_namespace().unwrap().id(),
+        original.id()
+    );
+    let mut other = new_user_task("unrelated".into(), 0);
+    other.init();
     other.set_vfs(Arc::new(VfsManager::new()));
     let other = get_task_by_id(register_task(other)).unwrap();
-    let unrelated = parent.get_namespace().resolve_local_id(other.get_id()).unwrap();
-    assert!(parent.capture_descendant_mount_namespace(unrelated).is_err());
-    assert!(parent.capture_descendant_mount_namespace(usize::MAX).is_err());
-    let own = parent.get_namespace().resolve_local_id(parent.get_id()).unwrap();
+    let unrelated = parent
+        .get_namespace()
+        .resolve_local_id(other.get_id())
+        .unwrap();
+    assert!(
+        parent
+            .capture_descendant_mount_namespace(unrelated)
+            .is_err()
+    );
+    assert!(
+        parent
+            .capture_descendant_mount_namespace(usize::MAX)
+            .is_err()
+    );
+    let own = parent
+        .get_namespace()
+        .resolve_local_id(parent.get_id())
+        .unwrap();
     assert!(parent.capture_descendant_mount_namespace(own).is_err());
     grandchild.set_state(TaskState::Zombie);
     assert!(parent.capture_descendant_mount_namespace(local).is_err());
@@ -730,15 +859,22 @@ fn mount_namespace_management_captures_only_visible_live_descendants() {
 
 #[test_case]
 fn mount_namespace_descendant_capture_requires_management_authority() {
-    use crate::sched::scheduler::{register_task, get_task_by_id, reset};
+    use crate::sched::scheduler::{get_task_by_id, register_task, reset};
     use crate::task::CloneFlags;
     reset();
-    let mut parent = new_user_task("namespace-unprivileged".into(), 0); parent.init();
+    let mut parent = new_user_task("namespace-unprivileged".into(), 0);
+    parent.init();
     parent.set_vfs(Arc::new(VfsManager::new()));
     let parent = get_task_by_id(register_task(parent)).unwrap();
-    let child = get_task_by_id(register_task(parent.clone_task(CloneFlags::default()).unwrap())).unwrap();
+    let child = get_task_by_id(register_task(
+        parent.clone_task(CloneFlags::default()).unwrap(),
+    ))
+    .unwrap();
     assert!(parent.adopt_registered_process_child(&child));
-    let local = parent.get_namespace().resolve_local_id(child.get_id()).unwrap();
+    let local = parent
+        .get_namespace()
+        .resolve_local_id(child.get_id())
+        .unwrap();
     parent.credentials.write().set_authority(0, 0).unwrap();
     assert!(parent.capture_descendant_mount_namespace(local).is_err());
     assert!(parent.capture_mount_namespace().is_ok());
@@ -748,18 +884,23 @@ fn mount_namespace_descendant_capture_requires_management_authority() {
 
 #[test_case]
 fn mount_namespace_join_rejects_live_clone_fs_but_accepts_an_unshared_context() {
-    use crate::sched::scheduler::{register_task, get_task_by_id, reset};
-    use crate::task::{CloneFlags, CloneFlagsDef};
     use crate::fs::vfs_v2::namespace::JoinError;
+    use crate::sched::scheduler::{get_task_by_id, register_task, reset};
+    use crate::task::{CloneFlags, CloneFlagsDef};
     reset();
-    let mut parent = new_user_task("namespace-parent".into(), 0); parent.init();
+    let mut parent = new_user_task("namespace-parent".into(), 0);
+    parent.init();
     parent.set_vfs(Arc::new(VfsManager::new()));
     let parent = get_task_by_id(register_task(parent)).unwrap();
     let saved = parent.capture_mount_namespace().unwrap();
-    let mut flags = CloneFlags::default(); flags.set(CloneFlagsDef::Fs);
+    let mut flags = CloneFlags::default();
+    flags.set(CloneFlagsDef::Fs);
     let child = parent.clone_task(flags).unwrap();
     let child = get_task_by_id(register_task(child)).unwrap();
-    assert_eq!(parent.join_mount_namespace(saved.clone()), Err(JoinError::SharedContext));
+    assert_eq!(
+        parent.join_mount_namespace(saved.clone()),
+        Err(JoinError::SharedContext)
+    );
     let context = VfsManager::clone_with_shared_mount_namespace(&parent.get_vfs().unwrap());
     parent.set_vfs(context);
     parent.join_mount_namespace(saved).unwrap();
@@ -770,61 +911,165 @@ fn mount_namespace_join_rejects_live_clone_fs_but_accepts_an_unshared_context() 
 }
 
 fn exec_transition_policy(task: &Task) -> Arc<crate::shield::Policy> {
-    let policy = crate::shield::Policy::with_transitions(alloc::vec![
-        (1, "source".into()), (2, "target".into()), (3, "other".into()),
-    ], alloc::vec![], alloc::vec![crate::shield::TransitionRule {
-        source: 1, target: 2, principal: crate::shield::identity::Principal(0),
-    }]).unwrap();
+    let policy = crate::shield::Policy::with_transitions(
+        alloc::vec![
+            (1, "source".into()),
+            (2, "target".into()),
+            (3, "other".into()),
+        ],
+        alloc::vec![],
+        alloc::vec![crate::shield::TransitionRule {
+            source: 1,
+            target: 2,
+            principal: crate::shield::identity::Principal(0),
+        }],
+    )
+    .unwrap();
     *task.security_subject.write() = Some(policy.subject(1).unwrap());
     policy
 }
 #[test_case]
 fn exec_transition_is_consumed_only_on_success_and_commits_the_subject_transactionally() {
-    let (task, _, _, _) = fixture(); let policy = exec_transition_policy(&task);
+    let (task, _, _, _) = fixture();
+    let policy = exec_transition_policy(&task);
     crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
     let mut frame = Trapframe::new();
-    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &["FAIL=1"], TestImageAbi::name(), &task, &mut frame).is_err());
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &["FAIL=1"],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
     assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 1);
     assert!(task.pending_exec_transition.read().is_some());
     assert_eq!(task.vm_manager.memmap_len(), 0);
-    TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).unwrap();
+    TransparentExecutor::execute_with_abi(
+        "/txn-image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut frame,
+    )
+    .unwrap();
     assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 2);
     assert!(task.pending_exec_transition.read().is_none());
 }
 #[test_case]
 fn exec_transition_rechecks_principal_source_and_policy_after_reservation() {
     use crate::shield::identity::{Identities, Principal};
-    let (task, _, _, _) = fixture(); let policy = exec_transition_policy(&task);
+    let (task, _, _, _) = fixture();
+    let policy = exec_transition_policy(&task);
     crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
-    task.credentials.write().set_principals(Identities::all(Principal(42))).unwrap();
+    task.credentials
+        .write()
+        .set_principals(Identities::all(Principal(42)))
+        .unwrap();
     let mut frame = Trapframe::new();
-    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).is_err());
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &[],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
     assert!(task.pending_exec_transition.read().is_some());
-    task.credentials.write().set_principals(Identities::all(Principal(0))).unwrap();
-    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &["GAIN=1"], TestImageAbi::name(), &task, &mut frame).is_err());
-    assert_eq!(task.credentials.read().principals(), Identities::all(Principal(0)));
+    task.credentials
+        .write()
+        .set_principals(Identities::all(Principal(0)))
+        .unwrap();
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &["GAIN=1"],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
+    assert_eq!(
+        task.credentials.read().principals(),
+        Identities::all(Principal(0))
+    );
     *task.security_subject.write() = Some(policy.subject(3).unwrap());
-    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).is_err());
-    let foreign = crate::shield::Policy::new(alloc::vec![(1, "source".into())], alloc::vec![]).unwrap();
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &[],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
+    let foreign =
+        crate::shield::Policy::new(alloc::vec![(1, "source".into())], alloc::vec![]).unwrap();
     *task.security_subject.write() = Some(foreign.subject(1).unwrap());
-    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).is_err());
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &[],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
     crate::shield::exec_transition::cancel(&task).unwrap();
     assert!(task.pending_exec_transition.read().is_none());
-    TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).unwrap();
-    assert!(task.security_subject.read().as_ref().unwrap().same_identity(&foreign.subject(1).unwrap()));
+    TransparentExecutor::execute_with_abi(
+        "/txn-image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut frame,
+    )
+    .unwrap();
+    assert!(
+        task.security_subject
+            .read()
+            .as_ref()
+            .unwrap()
+            .same_identity(&foreign.subject(1).unwrap())
+    );
 }
 #[test_case]
 fn fork_and_explicit_nosuid_exec_keep_delegated_transition_separate_from_file_grants() {
-    let (task, fs, _, _) = fixture(); let policy = exec_transition_policy(&task);
+    let (task, fs, _, _) = fixture();
+    let policy = exec_transition_policy(&task);
     fs.create_dir("/no-grants").unwrap();
-    fs.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/no-grants", 2).unwrap();
-    fs.create_file("/no-grants/image", FileType::RegularFile).unwrap();
+    fs.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/no-grants", 2)
+        .unwrap();
+    fs.create_file("/no-grants/image", FileType::RegularFile)
+        .unwrap();
     crate::shield::information::constrain(&task, 1).unwrap();
     crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
     let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
     assert!(child.pending_exec_transition.read().is_some());
     let mut frame = Trapframe::new();
-    TransparentExecutor::execute_with_abi("/no-grants/image", &["image"], &[], TestImageAbi::name(), &child, &mut frame).unwrap();
+    TransparentExecutor::execute_with_abi(
+        "/no-grants/image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &child,
+        &mut frame,
+    )
+    .unwrap();
     assert_eq!(child.security_subject.read().as_ref().unwrap().label(), 2);
     assert!(child.pending_exec_transition.read().is_none());
     assert!(task.pending_exec_transition.read().is_some());
@@ -834,35 +1079,104 @@ fn fork_and_explicit_nosuid_exec_keep_delegated_transition_separate_from_file_gr
 
 #[test_case]
 fn resource_exec_conditions_enforce_file_identity_principal_nosuid_and_transactional_commit() {
-    use crate::shield::{Policy, ExecTransitionRule, identity::{Principal, Identities}};
+    use crate::shield::{
+        ExecTransitionRule, Policy,
+        identity::{Identities, Principal},
+    };
     let (task, fs, _, _) = fixture();
-    fs.create_file("/wrong-image", FileType::RegularFile).unwrap();
+    fs.create_file("/wrong-image", FileType::RegularFile)
+        .unwrap();
     fs.create_dir("/no-grants").unwrap();
-    fs.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/no-grants", 2).unwrap();
-    fs.create_file("/no-grants/image", FileType::RegularFile).unwrap();
-    let policy = Policy::with_exec_transitions(alloc::vec![
-        (1,"source".into()),(2,"daemon".into()),(3,"trusted-image".into()),
-    ], alloc::vec![],alloc::vec![],alloc::vec![ExecTransitionRule {source:1,resource:3,target:2,principal:Principal(0)}]).unwrap();
-    policy.bind_resource(fs.resolve_path("/txn-image").unwrap().0.node(),3).unwrap();
-    policy.bind_resource(fs.resolve_path("/no-grants/image").unwrap().0.node(),3).unwrap();
+    fs.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/no-grants", 2)
+        .unwrap();
+    fs.create_file("/no-grants/image", FileType::RegularFile)
+        .unwrap();
+    let policy = Policy::with_exec_transitions(
+        alloc::vec![
+            (1, "source".into()),
+            (2, "daemon".into()),
+            (3, "trusted-image".into()),
+        ],
+        alloc::vec![],
+        alloc::vec![],
+        alloc::vec![ExecTransitionRule {
+            source: 1,
+            resource: 3,
+            target: 2,
+            principal: Principal(0)
+        }],
+    )
+    .unwrap();
+    policy
+        .bind_resource(fs.resolve_path("/txn-image").unwrap().0.node(), 3)
+        .unwrap();
+    policy
+        .bind_resource(fs.resolve_path("/no-grants/image").unwrap().0.node(), 3)
+        .unwrap();
     let subject = policy.subject(1).unwrap();
-    assert!(subject.transition(2,&task.credentials.read()).is_err());
+    assert!(subject.transition(2, &task.credentials.read()).is_err());
     *task.security_subject.write() = Some(subject);
-    crate::shield::exec_transition::reserve(&task,&policy,2).unwrap();
+    crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
     let mut frame = Trapframe::new();
-    for (path, env) in [("/wrong-image", &[][..]),("/txn-image", &["FAIL=1"][..]),("/no-grants/image", &[][..])] {
-        assert!(TransparentExecutor::execute_with_abi(path,&["image"],env,TestImageAbi::name(),&task,&mut frame).is_err());
+    for (path, env) in [
+        ("/wrong-image", &[][..]),
+        ("/txn-image", &["FAIL=1"][..]),
+        ("/no-grants/image", &[][..]),
+    ] {
+        assert!(
+            TransparentExecutor::execute_with_abi(
+                path,
+                &["image"],
+                env,
+                TestImageAbi::name(),
+                &task,
+                &mut frame
+            )
+            .is_err()
+        );
         assert!(task.pending_exec_transition.read().is_some());
-        assert_eq!(task.security_subject.read().as_ref().unwrap().label(),1);
-        assert_eq!(task.vm_manager.memmap_len(),0);
+        assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 1);
+        assert_eq!(task.vm_manager.memmap_len(), 0);
     }
-    task.credentials.write().set_principals(Identities::all(Principal(42))).unwrap();
-    assert!(TransparentExecutor::execute_with_abi("/txn-image",&["image"],&[],TestImageAbi::name(),&task,&mut frame).is_err());
-    task.credentials.write().set_principals(Identities::all(Principal(0))).unwrap();
-    TransparentExecutor::execute_with_abi("/txn-image",&["image"],&[],TestImageAbi::name(),&task,&mut frame).unwrap();
-    assert_eq!(task.security_subject.read().as_ref().unwrap().label(),2);
+    task.credentials
+        .write()
+        .set_principals(Identities::all(Principal(42)))
+        .unwrap();
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &[],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
+    task.credentials
+        .write()
+        .set_principals(Identities::all(Principal(0)))
+        .unwrap();
+    TransparentExecutor::execute_with_abi(
+        "/txn-image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut frame,
+    )
+    .unwrap();
+    assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 2);
     assert!(task.pending_exec_transition.read().is_none());
     *task.security_subject.write() = Some(policy.subject(1).unwrap());
-    TransparentExecutor::execute_with_abi("/txn-image",&["image"],&[],TestImageAbi::name(),&task,&mut frame).unwrap();
-    assert_eq!(task.security_subject.read().as_ref().unwrap().label(),2);
+    TransparentExecutor::execute_with_abi(
+        "/txn-image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut frame,
+    )
+    .unwrap();
+    assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 2);
 }

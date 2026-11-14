@@ -39,7 +39,9 @@ impl Selectable for KmsgDevice {
         _timeout_ticks: Option<u64>,
         _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        if disclosure_denied() { return SelectWaitOutcome::Ready; }
+        if disclosure_denied() {
+            return SelectWaitOutcome::Ready;
+        }
         if interest.read && crate::log::is_empty() {
             if let Some(task) = mytask() {
                 if crate::log::READER_WAKER.wait_result(task.get_id(), trapframe)
@@ -80,7 +82,9 @@ impl Device for KmsgDevice {
 
 impl CharDevice for KmsgDevice {
     fn read_byte(&self) -> Option<u8> {
-        if disclosure_denied() { return None; }
+        if disclosure_denied() {
+            return None;
+        }
         while crate::log::is_empty() {
             if let Some(task) = mytask() {
                 if crate::log::READER_WAKER.wait_result(task.get_id(), task.get_trapframe())
@@ -101,11 +105,13 @@ impl CharDevice for KmsgDevice {
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        crate::log::submit_userspace(&[byte]).map(|_| ()).map_err(|error| match error {
-            crate::log::UserspaceLogError::InvalidArgument => "invalid kmsg message",
-            crate::log::UserspaceLogError::TooLarge => "kmsg message too large",
-            crate::log::UserspaceLogError::NoCurrentTask => "kmsg write outside a task",
-        })
+        crate::log::submit_userspace(&[byte])
+            .map(|_| ())
+            .map_err(|error| match error {
+                crate::log::UserspaceLogError::InvalidArgument => "invalid kmsg message",
+                crate::log::UserspaceLogError::TooLarge => "kmsg message too large",
+                crate::log::UserspaceLogError::NoCurrentTask => "kmsg write outside a task",
+            })
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
@@ -125,7 +131,9 @@ impl CharDevice for KmsgDevice {
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        if disclosure_denied() { return Err("kernel log disclosure denied"); }
+        if disclosure_denied() {
+            return Err("kernel log disclosure denied");
+        }
         let pos = position as usize;
         while pos >= crate::log::head() {
             if let Some(task) = mytask() {
@@ -146,7 +154,9 @@ impl CharDevice for KmsgDevice {
             return Ok(0);
         }
 
-        if disclosure_denied() { return Err(StreamError::PermissionDenied); }
+        if disclosure_denied() {
+            return Err(StreamError::PermissionDenied);
+        }
 
         let pos = position as usize;
         while pos >= crate::log::head() {

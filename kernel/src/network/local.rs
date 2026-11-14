@@ -96,7 +96,9 @@ fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
     }
 }
 
-pub(crate) fn datagram_source_address(name:&str)->LocalSocketAddress {local_socket_address_from_registry_name(name)}
+pub(crate) fn datagram_source_address(name: &str) -> LocalSocketAddress {
+    local_socket_address_from_registry_name(name)
+}
 
 /// Immutable sender snapshot; receiving after exit or an identity change must
 /// not consult the sender's current task or manufacture a privileged identity.
@@ -114,7 +116,9 @@ impl PartialEq for SocketCredentials {
             && self.identity == other.identity
             && self.local_id == other.local_id
             && match (&self.subject, &other.subject) {
-                (Some(a),Some(b)) => a.same_identity(b), (None,None) => true, _ => false,
+                (Some(a), Some(b)) => a.same_identity(b),
+                (None, None) => true,
+                _ => false,
             }
             && match (&self.namespace, &other.namespace) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -443,7 +447,7 @@ impl SocketBuffer {
 pub struct LocalSocket {
     /// Socket type (Stream, Datagram, etc.)
     socket_type: SocketType,
-    datagrams:Arc<datagram::Inbox>,
+    datagrams: Arc<datagram::Inbox>,
 
     /// Weak self reference (initialized when wrapped in Arc)
     ///
@@ -554,21 +558,28 @@ impl LocalSocket {
     ///
     /// A new socket in the Unconnected state
     #[cfg(test)]
-    pub fn new(socket_type: SocketType, protocol: SocketProtocol) -> Self {Self::new_labeled(socket_type,protocol,None)}
-    pub fn try_new(socket_type:SocketType,protocol:SocketProtocol)->Result<Self,SocketError> {
-        let label=crate::shield::socket::current_label().map_err(|_|SocketError::PermissionDenied)?;
-        Ok(Self::new_labeled(socket_type,protocol,label))
+    pub fn new(socket_type: SocketType, protocol: SocketProtocol) -> Self {
+        Self::new_labeled(socket_type, protocol, None)
     }
-    fn new_labeled(socket_type:SocketType,protocol:SocketProtocol,label:Option<crate::shield::Subject>)->Self {
+    pub fn try_new(socket_type: SocketType, protocol: SocketProtocol) -> Result<Self, SocketError> {
+        let label =
+            crate::shield::socket::current_label().map_err(|_| SocketError::PermissionDenied)?;
+        Ok(Self::new_labeled(socket_type, protocol, label))
+    }
+    fn new_labeled(
+        socket_type: SocketType,
+        protocol: SocketProtocol,
+        label: Option<crate::shield::Subject>,
+    ) -> Self {
         Self {
             socket_type,
-            datagrams:datagram::Inbox::new(),
+            datagrams: datagram::Inbox::new(),
             protocol,
             state: IrqRwSpinLock::new(SocketState::Unconnected),
             local_addr: IrqRwSpinLock::new(None),
             peer_addr: IrqRwSpinLock::new(None),
-            security_label:label.map(crate::shield::socket::Label::from_subject),
-            peer_security_label:IrqRwSpinLock::new(None),
+            security_label: label.map(crate::shield::socket::Label::from_subject),
+            peer_security_label: IrqRwSpinLock::new(None),
             owner_credentials: IrqRwSpinLock::new(None),
             peer_credentials: IrqRwSpinLock::new(None),
             read_buffer: IrqRwSpinLock::new(SocketBuffer::new()),
@@ -599,8 +610,17 @@ impl LocalSocket {
             .map(|cred| cred.process_id)
             .filter(|pid| *pid != 0)
     }
-    pub fn security_label(&self)->Option<crate::shield::Subject> {self.security_label.as_ref().and_then(|label|label.subject())}
-    pub fn peer_security_label(&self)->Option<crate::shield::Subject> {self.peer_security_label.read().as_ref().and_then(|label|label.subject())}
+    pub fn security_label(&self) -> Option<crate::shield::Subject> {
+        self.security_label
+            .as_ref()
+            .and_then(|label| label.subject())
+    }
+    pub fn peer_security_label(&self) -> Option<crate::shield::Subject> {
+        self.peer_security_label
+            .read()
+            .as_ref()
+            .and_then(|label| label.subject())
+    }
     pub fn peer_credentials(&self) -> Option<SocketCredentials> {
         self.peer_credentials.read().clone()
     }
@@ -692,7 +712,9 @@ impl LocalSocket {
         object: KernelObject,
         metadata: HandleMetadata,
     ) -> Result<(), crate::ipc::IpcError> {
-        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
 
         use crate::ipc::IpcError;
 
@@ -772,7 +794,9 @@ impl LocalSocket {
         handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
-        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
 
         use crate::ipc::IpcError;
 
@@ -828,7 +852,9 @@ impl LocalSocket {
         &self,
         max_data_len: usize,
     ) -> Result<(KernelObject, HandleMetadata, Vec<u8>), crate::ipc::IpcError> {
-        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
 
         use crate::ipc::IpcError;
 
@@ -871,7 +897,9 @@ impl LocalSocket {
         ),
         crate::ipc::IpcError,
     > {
-        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
 
         use crate::ipc::IpcError;
 
@@ -891,7 +919,9 @@ impl LocalSocket {
     ///
     /// The transferred object and exact handle metadata, or an IPC error.
     pub fn recv_handle(&self) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
-        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
 
         use crate::ipc::IpcError;
 
@@ -954,9 +984,7 @@ impl LocalSocket {
                 trapframe,
                 Self::remaining_timeout_ns(deadline),
                 0,
-                || {
-                    *self.state.read() != SocketState::Listening || !self.backlog.read().is_empty()
-                },
+                || *self.state.read() != SocketState::Listening || !self.backlog.read().is_empty(),
             ) {
                 WaitResult::Interrupted => return Err(SocketError::Interrupted),
                 WaitResult::TimedOut => return Err(SocketError::TimedOut),
@@ -992,14 +1020,29 @@ impl LocalSocket {
         local_addr: String,
         peer_addr: String,
     ) -> (Arc<Self>, Arc<Self>) {
-        Self::pair_labeled(socket_type,local_addr,peer_addr,None)
+        Self::pair_labeled(socket_type, local_addr, peer_addr, None)
     }
-    pub fn try_create_connected_pair_with_type(socket_type:SocketType,local_addr:String,peer_addr:String)->Result<(Arc<Self>,Arc<Self>),SocketError> {
-        let label=crate::shield::socket::current_label().map_err(|_|SocketError::PermissionDenied)?;
-        Ok(Self::pair_labeled(socket_type,local_addr,peer_addr,label))
+    pub fn try_create_connected_pair_with_type(
+        socket_type: SocketType,
+        local_addr: String,
+        peer_addr: String,
+    ) -> Result<(Arc<Self>, Arc<Self>), SocketError> {
+        let label =
+            crate::shield::socket::current_label().map_err(|_| SocketError::PermissionDenied)?;
+        Ok(Self::pair_labeled(
+            socket_type,
+            local_addr,
+            peer_addr,
+            label,
+        ))
     }
-    fn pair_labeled(socket_type:SocketType,local_addr:String,peer_addr:String,label:Option<crate::shield::Subject>)->(Arc<Self>,Arc<Self>) {
-        let label=label.map(crate::shield::socket::Label::from_subject);
+    fn pair_labeled(
+        socket_type: SocketType,
+        local_addr: String,
+        peer_addr: String,
+        label: Option<crate::shield::Subject>,
+    ) -> (Arc<Self>, Arc<Self>) {
+        let label = label.map(crate::shield::socket::Label::from_subject);
         let owner = Self::current_credentials(true);
         // Create shared buffers for bidirectional communication
         let local_read_buffer = SocketBuffer::new();
@@ -1009,13 +1052,13 @@ impl LocalSocket {
         // It reads from local_read_buffer, writes to peer_read_buffer
         let local_socket = Arc::new(Self {
             socket_type,
-            datagrams:datagram::Inbox::new(),
+            datagrams: datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
             peer_addr: IrqRwSpinLock::new(Some(peer_addr.clone())),
-            security_label:label.clone(),
-            peer_security_label:IrqRwSpinLock::new(label.clone()),
+            security_label: label.clone(),
+            peer_security_label: IrqRwSpinLock::new(label.clone()),
             owner_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             peer_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             read_buffer: IrqRwSpinLock::new(local_read_buffer.clone()),
@@ -1038,13 +1081,13 @@ impl LocalSocket {
         // It reads from peer_read_buffer, writes to local_read_buffer
         let peer_socket = Arc::new(Self {
             socket_type,
-            datagrams:datagram::Inbox::new(),
+            datagrams: datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(peer_addr)),
             peer_addr: IrqRwSpinLock::new(Some(local_addr)),
-            security_label:label.clone(),
-            peer_security_label:IrqRwSpinLock::new(label.clone()),
+            security_label: label.clone(),
+            peer_security_label: IrqRwSpinLock::new(label.clone()),
             owner_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             peer_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             read_buffer: IrqRwSpinLock::new(peer_read_buffer.clone()),
@@ -1069,11 +1112,19 @@ impl LocalSocket {
         // Set peer references
         *local_socket.peer_socket.write() = Some(Arc::downgrade(&peer_socket));
         *peer_socket.peer_socket.write() = Some(Arc::downgrade(&local_socket));
-        if socket_type==SocketType::Datagram {
-            *local_socket.local_addr.write()=None;*local_socket.peer_addr.write()=None;
-            *peer_socket.local_addr.write()=None;*peer_socket.peer_addr.write()=None;
-            local_socket.datagrams.watch(&peer_socket).expect("fresh datagram inbox");
-            peer_socket.datagrams.watch(&local_socket).expect("fresh datagram inbox");
+        if socket_type == SocketType::Datagram {
+            *local_socket.local_addr.write() = None;
+            *local_socket.peer_addr.write() = None;
+            *peer_socket.local_addr.write() = None;
+            *peer_socket.peer_addr.write() = None;
+            local_socket
+                .datagrams
+                .watch(&peer_socket)
+                .expect("fresh datagram inbox");
+            peer_socket
+                .datagrams
+                .watch(&local_socket)
+                .expect("fresh datagram inbox");
         }
 
         (local_socket, peer_socket)
@@ -1245,8 +1296,17 @@ impl LocalSocket {
     ) -> Result<(usize, SocketCredentials), StreamError> {
         use crate::task::mytask;
         if self.is_datagram() {
-            let message=self.receive_datagram(false,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::TimedOut=>StreamError::TimedOut,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument})?;
-            let n=buffer.len().min(message.data.len());buffer[..n].copy_from_slice(&message.data[..n]);return Ok((n,message.sender));
+            let message = self
+                .receive_datagram(false, false)
+                .map_err(|error| match error {
+                    SocketError::WouldBlock => StreamError::WouldBlock,
+                    SocketError::TimedOut => StreamError::TimedOut,
+                    SocketError::Interrupted => StreamError::Interrupted,
+                    _ => StreamError::InvalidArgument,
+                })?;
+            let n = buffer.len().min(message.data.len());
+            buffer[..n].copy_from_slice(&message.data[..n]);
+            return Ok((n, message.sender));
         }
         if buffer.is_empty() {
             return Ok((0, SocketCredentials::unknown()));
@@ -1341,7 +1401,21 @@ impl StreamOps for LocalSocket {
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
         use crate::task::mytask;
-        if self.is_datagram() {return self.send_datagram(data.to_vec(),Vec::new(),&SocketAddress::Unspecified,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::TimedOut=>StreamError::TimedOut,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument});}
+        if self.is_datagram() {
+            return self
+                .send_datagram(
+                    data.to_vec(),
+                    Vec::new(),
+                    &SocketAddress::Unspecified,
+                    false,
+                )
+                .map_err(|error| match error {
+                    SocketError::WouldBlock => StreamError::WouldBlock,
+                    SocketError::TimedOut => StreamError::TimedOut,
+                    SocketError::Interrupted => StreamError::Interrupted,
+                    _ => StreamError::InvalidArgument,
+                });
+        }
         if data.is_empty() {
             return Ok(0);
         }
@@ -1448,10 +1522,16 @@ impl LocalSocket {
     /// blocking syscall stack.
     fn close_internal(&self) {
         if self.is_datagram() {
-            if let Some(path)=self.local_addr.read().as_ref() {NetworkManager::get_manager().unregister_named_socket(path,self);}
-            *self.state.write()=SocketState::Closed;self.datagrams.close();
-            if let Some(peer)=self.upgrade_peer() {peer.datagrams.event.wake_all();}
-            NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);return;
+            if let Some(path) = self.local_addr.read().as_ref() {
+                NetworkManager::get_manager().unregister_named_socket(path, self);
+            }
+            *self.state.write() = SocketState::Closed;
+            self.datagrams.close();
+            if let Some(peer) = self.upgrade_peer() {
+                peer.datagrams.event.wake_all();
+            }
+            NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);
+            return;
         }
         let state = *self.state.read();
 
@@ -1530,7 +1610,9 @@ impl SocketControl for LocalSocket {
     }
 
     fn listen(&self, backlog: usize) -> Result<(), SocketError> {
-        if self.is_datagram() {return Err(SocketError::NotSupported);}
+        if self.is_datagram() {
+            return Err(SocketError::NotSupported);
+        }
         let mut state = self.state.write();
         if !matches!(*state, SocketState::Bound | SocketState::Listening) {
             return Err(SocketError::InvalidOperation);
@@ -1562,7 +1644,9 @@ impl SocketControl for LocalSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
-        if self.is_datagram() {return self.connect_datagram(address);}
+        if self.is_datagram() {
+            return self.connect_datagram(address);
+        }
         // Validate current state
         let state = self.state.read();
         if *state != SocketState::Unconnected {
@@ -1609,13 +1693,13 @@ impl SocketControl for LocalSocket {
         // Create server-side connection socket that will be added to backlog
         let server_conn = Arc::new(Self {
             socket_type: server_local.socket_type,
-            datagrams:datagram::Inbox::new(),
+            datagrams: datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(name.clone())),
             peer_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
-            security_label:server_local.security_label.clone(),
-            peer_security_label:IrqRwSpinLock::new(self.security_label.clone()),
+            security_label: server_local.security_label.clone(),
+            peer_security_label: IrqRwSpinLock::new(self.security_label.clone()),
             owner_credentials: IrqRwSpinLock::new(server_credentials.clone()),
             peer_credentials: IrqRwSpinLock::new(Some(client_credentials.clone())),
             read_buffer: IrqRwSpinLock::new(server_read_buffer.clone()),
@@ -1688,7 +1772,9 @@ impl SocketControl for LocalSocket {
     }
 
     fn shutdown(&self, how: ShutdownHow) -> Result<(), SocketError> {
-        if self.is_datagram() {return self.shutdown_datagram(how);}
+        if self.is_datagram() {
+            return self.shutdown_datagram(how);
+        }
         if *self.state.read() != SocketState::Connected {
             return Err(SocketError::NotConnected);
         }
@@ -1753,7 +1839,9 @@ impl SocketControl for LocalSocket {
             Some(path) => Ok(SocketAddress::Local(
                 local_socket_address_from_registry_name(path),
             )),
-            None if self.is_datagram() && *self.state.read()==SocketState::Connected => Ok(SocketAddress::Local(LocalSocketAddress::unnamed())),
+            None if self.is_datagram() && *self.state.read() == SocketState::Connected => {
+                Ok(SocketAddress::Local(LocalSocketAddress::unnamed()))
+            }
             None => Err(SocketError::NotConnected),
         }
     }
@@ -1775,16 +1863,56 @@ impl SocketObject for LocalSocket {
         self.close_internal();
     }
 
-    fn sendto(&self,data:&[u8],address:&SocketAddress,flags:u32)->Result<usize,SocketError> {
-        if self.is_datagram() {self.send_datagram(data.to_vec(),Vec::new(),address,flags&super::socket::message_flags::NONBLOCK!=0)}else {self.write(data).map_err(super::socket::stream_error_to_socket_error)}
+    fn sendto(
+        &self,
+        data: &[u8],
+        address: &SocketAddress,
+        flags: u32,
+    ) -> Result<usize, SocketError> {
+        if self.is_datagram() {
+            self.send_datagram(
+                data.to_vec(),
+                Vec::new(),
+                address,
+                flags & super::socket::message_flags::NONBLOCK != 0,
+            )
+        } else {
+            self.write(data)
+                .map_err(super::socket::stream_error_to_socket_error)
+        }
     }
-    fn recvfrom(&self,buffer:&mut[u8],flags:u32)->Result<(usize,SocketAddress),SocketError> {
-        if !self.is_datagram() {return self.read(buffer).map(|n|(n,SocketAddress::Unspecified)).map_err(super::socket::stream_error_to_socket_error);}
-        let message=self.receive_datagram(flags&super::socket::message_flags::PEEK!=0,flags&super::socket::message_flags::NONBLOCK!=0)?;
-        if message.end_of_input {return Ok((0,SocketAddress::Unspecified));}
-        let n=buffer.len().min(message.data.len());buffer[..n].copy_from_slice(&message.data[..n]);
-        let address=message.source.map(|name|SocketAddress::Local(local_socket_address_from_registry_name(&name))).unwrap_or(SocketAddress::Local(LocalSocketAddress::unnamed()));
-        Ok((if flags&super::socket::message_flags::FULL_LENGTH!=0 {message.data.len()}else {n},address))
+    fn recvfrom(
+        &self,
+        buffer: &mut [u8],
+        flags: u32,
+    ) -> Result<(usize, SocketAddress), SocketError> {
+        if !self.is_datagram() {
+            return self
+                .read(buffer)
+                .map(|n| (n, SocketAddress::Unspecified))
+                .map_err(super::socket::stream_error_to_socket_error);
+        }
+        let message = self.receive_datagram(
+            flags & super::socket::message_flags::PEEK != 0,
+            flags & super::socket::message_flags::NONBLOCK != 0,
+        )?;
+        if message.end_of_input {
+            return Ok((0, SocketAddress::Unspecified));
+        }
+        let n = buffer.len().min(message.data.len());
+        buffer[..n].copy_from_slice(&message.data[..n]);
+        let address = message
+            .source
+            .map(|name| SocketAddress::Local(local_socket_address_from_registry_name(&name)))
+            .unwrap_or(SocketAddress::Local(LocalSocketAddress::unnamed()));
+        Ok((
+            if flags & super::socket::message_flags::FULL_LENGTH != 0 {
+                message.data.len()
+            } else {
+                n
+            },
+            address,
+        ))
     }
     fn socket_type(&self) -> SocketType {
         self.socket_type
@@ -1816,17 +1944,22 @@ impl Selectable for LocalSocket {
         // A datagram peer disappearing is not a stream hangup. For connected
         // streams/seqpackets, closure belongs to the logical peer handle, even
         // while temporary kernel Arc references keep its allocation alive.
-        if self.is_datagram() { return false; }
+        if self.is_datagram() {
+            return false;
+        }
         let state = *self.state.read();
         match state {
             SocketState::Closed => true,
-            SocketState::Connected => self.upgrade_peer()
+            SocketState::Connected => self
+                .upgrade_peer()
                 .is_none_or(|peer| *peer.state.read() == SocketState::Closed),
             _ => false,
         }
     }
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
-        if self.is_datagram() {return self.datagram_ready(interest);}
+        if self.is_datagram() {
+            return self.datagram_ready(interest);
+        }
         let mut ready = ReadySet::none();
 
         let state = *self.state.read();
@@ -1901,7 +2034,9 @@ impl Selectable for LocalSocket {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        if self.is_datagram() {return self.wait_datagram(interest,trapframe,timeout_ticks,min_wait_ticks);}
+        if self.is_datagram() {
+            return self.wait_datagram(interest, trapframe, timeout_ticks, min_wait_ticks);
+        }
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
             return SelectWaitOutcome::Ready;
@@ -1935,7 +2070,12 @@ impl Selectable for LocalSocket {
 
     fn set_nonblocking(&self, enabled: bool) {
         *self.nonblocking.write() = enabled;
-        if self.is_datagram() {self.datagrams.event.wake_all();if let Some(peer)=self.upgrade_peer() {peer.datagrams.event.wake_all();}}
+        if self.is_datagram() {
+            self.datagrams.event.wake_all();
+            if let Some(peer) = self.upgrade_peer() {
+                peer.datagrams.event.wake_all();
+            }
+        }
     }
 
     fn is_nonblocking(&self) -> bool {
@@ -2016,14 +2156,15 @@ pub fn local_socket_factory(
     socket_type: SocketType,
     protocol: SocketProtocol,
 ) -> Result<Arc<dyn SocketObject>, SocketError> {
-    let socket=Arc::new(LocalSocket::try_new(socket_type,protocol)?);
-    LocalSocket::init_self_weak(&socket);Ok(socket)
+    let socket = Arc::new(LocalSocket::try_new(socket_type, protocol)?);
+    LocalSocket::init_self_weak(&socket);
+    Ok(socket)
 }
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::Ordering;
     use crate::object::capability::ControlOps;
+    use core::sync::atomic::Ordering;
 
     #[test_case]
     fn listen_again_updates_backlog_and_preserves_pending_connections() {
@@ -2123,7 +2264,9 @@ mod tests {
     fn readiness_registered_before_connection_tracks_all_stream_sources() {
         let socket = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
         let waiter = Arc::new(Waker::new_interruptible("local-state-readiness"));
-        let registrations = socket.subscribe_readiness(ReadyInterest::rw(), &waiter).unwrap();
+        let registrations = socket
+            .subscribe_readiness(ReadyInterest::rw(), &waiter)
+            .unwrap();
         assert_eq!(registrations.len(), 3);
         assert!(registrations.iter().all(|r| r.generation() == 0));
         *socket.state.write() = SocketState::Listening;
@@ -2160,8 +2303,12 @@ mod tests {
 
     #[test_case]
     fn accepted_seqpacket_preserves_type_and_write_boundaries() {
-        let listener = local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
-        let name = format!("seqpacket-accept-{}", listener.as_ref() as *const dyn SocketObject as *const () as usize);
+        let listener =
+            local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
+        let name = format!(
+            "seqpacket-accept-{}",
+            listener.as_ref() as *const dyn SocketObject as *const () as usize
+        );
         let address = SocketAddress::Local(LocalSocketAddress::from_path(name.clone()).unwrap());
         NetworkManager::get_manager()
             .register_named_socket(&name, Arc::clone(&listener))
@@ -2337,10 +2484,8 @@ mod tests {
         set_current_task_for_test(cpu, Some(id));
         remove_from_ready_queues(id);
 
-        let (client, server) = LocalSocket::create_connected_pair(
-            "timeout-client".into(),
-            "timeout-server".into(),
-        );
+        let (client, server) =
+            LocalSocket::create_connected_pair("timeout-client".into(), "timeout-server".into());
         assert_eq!(
             client.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 1),
             Ok(0)
@@ -2373,7 +2518,10 @@ mod tests {
         ));
         // An expired deadline must not hide already available data.
         server.write(b"x").unwrap();
-        assert_eq!(client.read_with_sender_until(&mut byte, Some(0)).unwrap().0, 1);
+        assert_eq!(
+            client.read_with_sender_until(&mut byte, Some(0)).unwrap().0,
+            1
+        );
         assert_eq!(byte, [b'x']);
 
         let (sender, receiver) = LocalSocket::create_connected_pair_with_type(
@@ -2434,7 +2582,10 @@ mod tests {
         let mut data = [0; 16];
         for kind in [SocketType::Stream, SocketType::SeqPacket] {
             let (client, server) = LocalSocket::create_connected_pair_with_type(
-                kind, "hup-client".into(), "hup-server".into());
+                kind,
+                "hup-client".into(),
+                "hup-server".into(),
+            );
             assert!(!server.is_hung_up());
             client.write(b"queued").unwrap();
             let retained = client.clone();
@@ -2445,7 +2596,8 @@ mod tests {
             assert_eq!(&data[..6], b"queued");
             assert_eq!(server.read(&mut data).unwrap(), 0);
         }
-        let (client, server) = LocalSocket::create_connected_pair("half-client".into(), "half-server".into());
+        let (client, server) =
+            LocalSocket::create_connected_pair("half-client".into(), "half-server".into());
         client.shutdown(ShutdownHow::Write).unwrap();
         assert!(!server.is_hung_up());
         assert_eq!(server.read(&mut data).unwrap(), 0);

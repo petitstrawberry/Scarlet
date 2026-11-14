@@ -3,13 +3,13 @@
 //! This module provides the virtual memory abstraction for the kernel. It
 //! includes functions for managing virtual address spaces.
 
-pub mod layout;
 pub mod addr;
 pub mod boot;
 pub mod direct_map;
-pub mod ioremap;
-pub mod manager;
 pub mod fault;
+pub mod ioremap;
+pub mod layout;
+pub mod manager;
 pub mod vmem;
 
 pub use addr::{
@@ -553,7 +553,8 @@ impl KernelKstackAllocator {
             slots: alloc::vec::Vec::new(),
             used_slots: 0,
             limit: crate::sched::task_capacity::default_limits(crate::mem::pmm::stats().0)
-                .stack_bytes / TASK_KERNEL_STACK_SIZE,
+                .stack_bytes
+                / TASK_KERNEL_STACK_SIZE,
         }
     }
 
@@ -915,7 +916,11 @@ mod stack_capacity_tests {
     #[test_case]
     fn stack_windows_grow_lazily_and_reuse_slots_within_the_live_budget() {
         let limit = KERNEL_KSTACK_SLOTS.min(1500);
-        let mut allocator = KernelKstackAllocator { slots: alloc::vec::Vec::new(), used_slots: 0, limit };
+        let mut allocator = KernelKstackAllocator {
+            slots: alloc::vec::Vec::new(),
+            used_slots: 0,
+            limit,
+        };
         assert!(allocator.slots.is_empty());
         for expected in 0..limit {
             let (slot, base, top) = allocator.alloc_slot().unwrap();

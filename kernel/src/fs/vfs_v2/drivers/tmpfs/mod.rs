@@ -81,9 +81,17 @@ impl TmpFS {
     /// Apply the initial identity of the filesystem root. Linux tmpfs takes
     /// these as mount options, so init can create a private mount point whose
     /// first entries are owned by a specific principal/group with a fixed mode.
-    fn set_root_identity(&self, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> Result<(), FileSystemError> {
+    fn set_root_identity(
+        &self,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), FileSystemError> {
         if mode.is_some_and(|mode| mode & !0o7777 != 0) {
-            return Err(FileSystemError::new(FileSystemErrorKind::InvalidOperation, "Invalid tmpfs mode"));
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidOperation,
+                "Invalid tmpfs mode",
+            ));
         }
         let root = self.root.read().clone();
         if let Some(mode) = mode {
@@ -95,8 +103,12 @@ impl TmpFS {
         }
         if uid.is_some() || gid.is_some() {
             let mut owner = root.owner.write();
-            if let Some(uid) = uid { owner.principal = crate::shield::identity::Principal(uid); }
-            if let Some(gid) = gid { owner.group = crate::shield::identity::Group(gid); }
+            if let Some(uid) = uid {
+                owner.principal = crate::shield::identity::Principal(uid);
+            }
+            if let Some(gid) = gid {
+                owner.group = crate::shield::identity::Group(gid);
+            }
         }
         Ok(())
     }
@@ -261,9 +273,16 @@ impl FileSystemOperations for TmpFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent_node,name,file_type,mode,None)
+        self.create_labeled(parent_node, name, file_type, mode, None)
     }
-    fn create_labeled(&self,parent_node:&Arc<dyn VfsNode>,name:&String,file_type:FileType,mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
+    fn create_labeled(
+        &self,
+        parent_node: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone()).map_err(|_| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -340,7 +359,11 @@ impl FileSystemOperations for TmpFS {
         if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
             tmp_node.set_filesystem(fs_ref);
         }
-        if let Some(label)=label {label.initialize(new_node.as_ref()).map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?;}
+        if let Some(label) = label {
+            label.initialize(new_node.as_ref()).map_err(|reason| {
+                FileSystemError::new(FileSystemErrorKind::PermissionDenied, reason)
+            })?;
+        }
         // Add to parent directory
         {
             let mut children = tmp_parent.children.write();
@@ -970,29 +993,56 @@ impl TmpNode {
 }
 
 fn initial_owner() -> crate::shield::identity::ActiveIdentity {
-    crate::task::mytask().map(|task| task.credentials.read().identity()).unwrap_or(crate::shield::identity::ActiveIdentity {
-        principal:crate::shield::identity::Principal(0),group:crate::shield::identity::Group(0),
-    })
+    crate::task::mytask()
+        .map(|task| task.credentials.read().identity())
+        .unwrap_or(crate::shield::identity::ActiveIdentity {
+            principal: crate::shield::identity::Principal(0),
+            group: crate::shield::identity::Group(0),
+        })
 }
 
 impl VfsNode for TmpNode {
-    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.labels.clone())}
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        Some(self.labels.clone())
+    }
 
-    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> { Some(*self.owner.read()) }
-    fn set_owner_identity(&self, principal:Option<crate::shield::identity::Principal>, group:Option<crate::shield::identity::Group>) -> Result<(),FileSystemError> {
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
+        Some(*self.owner.read())
+    }
+    fn set_owner_identity(
+        &self,
+        principal: Option<crate::shield::identity::Principal>,
+        group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
         use crate::shield::identity::MANAGE_OWNERS;
-        let task = crate::task::mytask().ok_or_else(|| FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner authority required"))?;
+        let task = crate::task::mytask().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "Owner authority required",
+            )
+        })?;
         let credentials = task.credentials.read();
         let mut current = self.owner.write();
         if !credentials.permits(MANAGE_OWNERS) {
             let ids = credentials.groups();
-            if credentials.identity().principal != current.principal || principal.is_some_and(|next| next != current.principal)
-                || group.is_some_and(|next| !ids.contains(next) && !credentials.supplementary().contains(&next)) {
-                return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner authority required"));
+            if credentials.identity().principal != current.principal
+                || principal.is_some_and(|next| next != current.principal)
+                || group.is_some_and(|next| {
+                    !ids.contains(next) && !credentials.supplementary().contains(&next)
+                })
+            {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::PermissionDenied,
+                    "Owner authority required",
+                ));
             }
         }
-        if let Some(principal) = principal { current.principal = principal; }
-        if let Some(group) = group { current.group = group; }
+        if let Some(principal) = principal {
+            current.principal = principal;
+        }
+        if let Some(group) = group {
+            current.group = group;
+        }
         Ok(())
     }
 
@@ -1428,8 +1478,9 @@ impl TmpFileObject {
                         // Preserve the device's bulk-write contract, including
                         // atomicity and failures. Returning Ok(0) on a rejected
                         // nonempty write makes userspace write-all loops spin.
-                        return char_device.write(buffer).map_err(|error|
-                            FileSystemError::new(FileSystemErrorKind::IoError,error));
+                        return char_device.write(buffer).map_err(|error| {
+                            FileSystemError::new(FileSystemErrorKind::IoError, error)
+                        });
                     } else {
                         return Err(FileSystemError {
                             kind: FileSystemErrorKind::NotSupported,
@@ -2101,22 +2152,42 @@ impl FileSystemDriver for TmpFSDriver {
                 memory_limit = if option.starts_with("size=") {
                     parse_tmpfs_size_option(option)
                 } else {
-                    option.strip_prefix("mem=").and_then(|value| value.parse::<usize>().ok())
-                }.ok_or_else(|| FileSystemError::new(
-                    FileSystemErrorKind::InvalidOperation, "Invalid tmpfs size option"))?;
-                if memory_limit == 0 { return Err(FileSystemError::new(FileSystemErrorKind::InvalidOperation, "Empty tmpfs size")); }
+                    option
+                        .strip_prefix("mem=")
+                        .and_then(|value| value.parse::<usize>().ok())
+                }
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::InvalidOperation,
+                        "Invalid tmpfs size option",
+                    )
+                })?;
+                if memory_limit == 0 {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidOperation,
+                        "Empty tmpfs size",
+                    ));
+                }
                 continue;
             }
             // The remaining options are mount security flags the VFS enforces
             // through its own mount constraints, plus root identity.
-            if matches!(option, "nodev" | "noexec" | "nosuid" | "relatime" | "rw" | "ro") {
+            if matches!(
+                option,
+                "nodev" | "noexec" | "nosuid" | "relatime" | "rw" | "ro"
+            ) {
                 continue;
             }
             let mut parse = |prefix: &str, radix: u32| -> Result<u32, FileSystemError> {
-                option.strip_prefix(prefix)
+                option
+                    .strip_prefix(prefix)
                     .and_then(|value| u32::from_str_radix(value, radix).ok())
-                    .ok_or_else(|| FileSystemError::new(
-                        FileSystemErrorKind::InvalidOperation, "Invalid tmpfs identity option"))
+                    .ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::InvalidOperation,
+                            "Invalid tmpfs identity option",
+                        )
+                    })
             };
             if option.starts_with("mode=") {
                 mode = Some(parse("mode=", 8)?);
@@ -2126,7 +2197,9 @@ impl FileSystemDriver for TmpFSDriver {
                 gid = Some(parse("gid=", 10)?);
             } else {
                 return Err(FileSystemError::new(
-                    FileSystemErrorKind::InvalidOperation, "Invalid or unsupported tmpfs option"));
+                    FileSystemErrorKind::InvalidOperation,
+                    "Invalid or unsupported tmpfs option",
+                ));
             }
         }
         let fs = TmpFS::new(memory_limit);

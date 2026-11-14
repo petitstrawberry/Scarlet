@@ -135,11 +135,18 @@ pub(super) struct EpollLifetime {
 }
 impl EpollLifetime {
     pub(super) fn new(handle: u32) -> Self {
-        Self { handle, waker: alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("epoll")) }
+        Self {
+            handle,
+            waker: alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("epoll")),
+        }
     }
 }
 impl Drop for EpollLifetime {
-    fn drop(&mut self) { epoll_interests().write().retain(|interest| interest.epoll_handle != self.handle); }
+    fn drop(&mut self) {
+        epoll_interests()
+            .write()
+            .retain(|interest| interest.epoll_handle != self.handle);
+    }
 }
 
 struct EpollDelivery {
@@ -151,30 +158,54 @@ struct EpollDelivery {
 }
 impl EpollDelivery {
     fn new() -> Self {
-        Self { active: true, armed: true, initial: true, last_ready: 0, generations: Vec::new() }
+        Self {
+            active: true,
+            armed: true,
+            initial: true,
+            last_ready: 0,
+            generations: Vec::new(),
+        }
     }
     fn pending(&mut self, events: u32, ready: u32, generations: &[u64]) -> u32 {
         self.last_ready &= ready;
-        if !self.active || !self.armed { return 0; }
-        if events & EPOLLET != 0 && !self.initial && self.generations == generations
-            && ready & !self.last_ready == 0 { return 0; }
+        if !self.active || !self.armed {
+            return 0;
+        }
+        if events & EPOLLET != 0
+            && !self.initial
+            && self.generations == generations
+            && ready & !self.last_ready == 0
+        {
+            return 0;
+        }
         ready
     }
     fn delivered(&mut self, events: u32, ready: u32, generations: Vec<u64>) {
         self.initial = false;
         self.last_ready = ready;
         self.generations = generations;
-        if events & EPOLLONESHOT != 0 { self.armed = false; }
+        if events & EPOLLONESHOT != 0 {
+            self.armed = false;
+        }
     }
 }
 
 impl EpollInterest {
     fn generations(&self) -> Vec<u64> {
-        self.subscriptions.as_ref().map(|registrations| registrations.iter()
-            .map(|registration| registration.generation()).collect()).unwrap_or_default()
+        self.subscriptions
+            .as_ref()
+            .map(|registrations| {
+                registrations
+                    .iter()
+                    .map(|registration| registration.generation())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     fn pending(&self, ready: u32) -> u32 {
-        self.delivery.lock().pending(self.events, ready, &self.generations())
+        self.delivery
+            .lock()
+            .pending(self.events, ready, &self.generations())
     }
 }
 
@@ -241,9 +272,12 @@ fn write_linux_epoll_event(
 }
 
 fn acknowledge_linux_ready(task: &crate::task::Task, handle: u32, events: u32) {
-    if events & (EPOLLIN | EPOLLOUT | EPOLLPRI) == 0 { return; }
+    if events & (EPOLLIN | EPOLLOUT | EPOLLPRI) == 0 {
+        return;
+    }
     if let Some(object) = task.handle_table.get(handle)
-        && let Some(selectable) = object.as_selectable() {
+        && let Some(selectable) = object.as_selectable()
+    {
         selectable.acknowledge_ready(crate::object::capability::selectable::ReadySet {
             read: events & EPOLLIN != 0,
             write: events & EPOLLOUT != 0,
@@ -311,7 +345,9 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: &Epoll
     let want_except = (interest.events & EPOLLPRI) != 0;
 
     if let Some(sel) = kobj.as_selectable() {
-        if sel.is_hung_up() { ready |= 0x10; }
+        if sel.is_hung_up() {
+            ready |= 0x10;
+        }
         let rs = sel.current_ready(crate::object::capability::selectable::ReadyInterest {
             read: want_read,
             write: want_write,
@@ -716,9 +752,15 @@ pub const O_TMPFILE: i32 = 0o20000000 | O_DIRECTORY; // Create unnamed temporary
 // no-follow, direct and large-file bits differ from the native VFS values.
 fn native_open_flags(flags: i32) -> u32 {
     let mut native = (flags & !(O_DIRECTORY | O_NOFOLLOW | O_DIRECT | O_LARGEFILE)) as u32;
-    if flags & O_DIRECTORY != 0 { native |= scarlet_abi::fs::VFS_O_DIRECTORY; }
-    if flags & O_NOFOLLOW != 0 { native |= scarlet_abi::fs::VFS_O_NOFOLLOW; }
-    if flags & O_DIRECT != 0 { native |= 0x4000; }
+    if flags & O_DIRECTORY != 0 {
+        native |= scarlet_abi::fs::VFS_O_DIRECTORY;
+    }
+    if flags & O_NOFOLLOW != 0 {
+        native |= scarlet_abi::fs::VFS_O_NOFOLLOW;
+    }
+    if flags & O_DIRECT != 0 {
+        native |= 0x4000;
+    }
     native
 }
 
@@ -733,13 +775,21 @@ fn open_from_evdev_compatible(
     flags: u32,
 ) -> Result<crate::object::KernelObject, crate::fs::FileSystemError> {
     match vfs.open_from(base_entry, base_mount, path, flags) {
-        Err(original) if original.kind == crate::fs::FileSystemErrorKind::PermissionDenied
-            && flags & scarlet_abi::fs::VFS_O_ACCMODE == scarlet_abi::fs::VFS_O_RDWR => {
-            let object = vfs.open_from(base_entry, base_mount, path,
-                flags & !scarlet_abi::fs::VFS_O_ACCMODE)?;
+        Err(original)
+            if original.kind == crate::fs::FileSystemErrorKind::PermissionDenied
+                && flags & scarlet_abi::fs::VFS_O_ACCMODE == scarlet_abi::fs::VFS_O_RDWR =>
+        {
+            let object = vfs.open_from(
+                base_entry,
+                base_mount,
+                path,
+                flags & !scarlet_abi::fs::VFS_O_ACCMODE,
+            )?;
             if crate::abi::linux::device::evdev::is_receive_only_input(&object) {
                 Ok(object)
-            } else { Err(original) }
+            } else {
+                Err(original)
+            }
         }
         result => result,
     }
@@ -835,11 +885,20 @@ fn filesystem_device(identity: u64) -> Result<u64, usize> {
     identity.checked_add(2).ok_or(errno::EOVERFLOW)
 }
 
-fn apply_node_attributes(stat: &mut LinuxStat, node: &dyn crate::fs::vfs_v2::core::VfsNode) -> Result<(), usize> {
-    if let Some(filesystem) = node.filesystem().and_then(|filesystem| filesystem.upgrade()) {
+fn apply_node_attributes(
+    stat: &mut LinuxStat,
+    node: &dyn crate::fs::vfs_v2::core::VfsNode,
+) -> Result<(), usize> {
+    if let Some(filesystem) = node
+        .filesystem()
+        .and_then(|filesystem| filesystem.upgrade())
+    {
         stat.st_dev = filesystem_device(filesystem.fs_id().get())?;
     }
-    if let Some(owner) = node.owner_identity() { stat.st_uid = owner.principal.0; stat.st_gid = owner.group.0; }
+    if let Some(owner) = node.owner_identity() {
+        stat.st_uid = owner.principal.0;
+        stat.st_gid = owner.group.0;
+    }
     Ok(())
 }
 
@@ -857,7 +916,8 @@ fn stat_from_object(
     #[cfg(feature = "network")]
     if let crate::object::KernelObject::Socket(socket) = object {
         let (identity, owner) = crate::network::NetworkManager::get_manager()
-            .socket_handle_identity(socket.as_arc()).ok_or(errno::EBADF)?;
+            .socket_handle_identity(socket.as_arc())
+            .ok_or(errno::EBADF)?;
         let mut stat = proc_exe_linux_stat(identity, 0);
         stat.st_dev = 2;
         stat.st_mode = S_IFSOCK | 0o777;
@@ -876,7 +936,7 @@ fn stat_from_object(
                 .metadata()
                 .map_err(|error| errno::from_fs_error(&error))?;
             let mut stat = LinuxStat::from_metadata(&metadata);
-            apply_node_attributes(&mut stat,node.as_ref())?;
+            apply_node_attributes(&mut stat, node.as_ref())?;
             if let Some(mode) = super::mode::get(&node) {
                 stat.st_mode = (stat.st_mode & !0o7777) | mode;
             }
@@ -1031,7 +1091,8 @@ fn fill_statx_from_stat(
     statx.stx_rdev_major =
         (((stat.st_rdev >> 8) & 0xfff) | ((stat.st_rdev >> 32) & 0xfffff000)) as u32;
     statx.stx_rdev_minor = ((stat.st_rdev & 0xff) | ((stat.st_rdev >> 12) & 0xffffff00)) as u32;
-    statx.stx_dev_major = (((stat.st_dev >> 8) & 0xfff) | ((stat.st_dev >> 32) & 0xfffff000)) as u32;
+    statx.stx_dev_major =
+        (((stat.st_dev >> 8) & 0xfff) | ((stat.st_dev >> 32) & 0xfffff000)) as u32;
     statx.stx_dev_minor = ((stat.st_dev & 0xff) | ((stat.st_dev >> 12) & 0xffffff00)) as u32;
     statx.stx_mnt_id = 0;
     statx.stx_dio_mem_align = 0;
@@ -1173,18 +1234,34 @@ pub fn sys_umount2(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let address = trapframe.get_arg(0);
     let flags = trapframe.get_arg(1);
     trapframe.increment_pc_next(&task);
-    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
+    if !task
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_MOUNTS)
+    {
         return errno::to_result(errno::EPERM);
     }
-    if flags != 2 { return errno::to_result(errno::EOPNOTSUPP); }
+    if flags != 2 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
     let path = match parse_c_string_from_userspace(&task, address, MAX_PATH_LENGTH) {
-        Ok(path) => path, Err(_) => return errno::to_result(errno::EFAULT),
+        Ok(path) => path,
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
-    if path.is_empty() { return errno::to_result(errno::ENOENT); }
-    let Some(fs) = task.get_vfs() else { return errno::to_result(errno::EIO); };
+    if path.is_empty() {
+        return errno::to_result(errno::ENOENT);
+    }
+    let Some(fs) = task.get_vfs() else {
+        return errno::to_result(errno::EIO);
+    };
     let _composition = crate::executor::syscall::lock_composition();
-    if crate::executor::syscall::is_root_path(&fs, &path) { return errno::to_result(errno::EBUSY); }
-    fs.unmount(&path).map_or_else(|error| errno::to_result(errno::from_fs_error(&error)), |_| 0)
+    if crate::executor::syscall::is_root_path(&fs, &path) {
+        return errno::to_result(errno::EBUSY);
+    }
+    fs.unmount(&path).map_or_else(
+        |error| errno::to_result(errno::from_fs_error(&error)),
+        |_| 0,
+    )
 }
 
 /// Translate Linux mount requests to immutable native mount restrictions.
@@ -1203,81 +1280,157 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if flags & (0x40000 | 0x80000 | 0x100000) != 0 {
         return change_mount_propagation(&task, &path, flags).map_or_else(errno::to_result, |_| 0);
     }
-    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
+    if !task
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_MOUNTS)
+    {
         return errno::to_result(errno::EPERM);
     }
     if flags & 0x1000 != 0 {
-        if flags & !(0x1000 | 0x4000) != 0 { return errno::to_result(errno::EOPNOTSUPP); }
-        let source = match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH) {
-            Ok(path) => path, Err(_) => return errno::to_result(errno::EFAULT),
+        if flags & !(0x1000 | 0x4000) != 0 {
+            return errno::to_result(errno::EOPNOTSUPP);
+        }
+        let source =
+            match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH) {
+                Ok(path) => path,
+                Err(_) => return errno::to_result(errno::EFAULT),
+            };
+        let fs = match task.get_vfs() {
+            Some(fs) => fs,
+            None => return errno::to_result(errno::EIO),
         };
-        let fs = match task.get_vfs() { Some(fs) => fs, None => return errno::to_result(errno::EIO) };
         let _composition = crate::executor::syscall::lock_composition();
-        return fs.bind_mount_recursive(&source, &path, flags & 0x4000 != 0)
+        return fs
+            .bind_mount_recursive(&source, &path, flags & 0x4000 != 0)
             .map_or_else(|e| errno::to_result(errno::from_fs_error(&e)), |_| 0);
     }
     // Propagation/remount requests do not carry a filesystem type. Reject
     // unsupported operations before interpreting their intentionally null pointers.
-    if flags & !0xe != 0 { return errno::to_result(errno::EOPNOTSUPP); }
+    if flags & !0xe != 0 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
     let fstype = match parse_c_string_from_userspace(&task, fstype, MAX_PATH_LENGTH) {
-        Ok(value) => value, Err(_) => return errno::to_result(errno::EFAULT),
+        Ok(value) => value,
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
-    let options = if data == 0 { String::new() } else {
+    let options = if data == 0 {
+        String::new()
+    } else {
         match parse_c_string_from_userspace(&task, data, MAX_PATH_LENGTH) {
-            Ok(value) => value, Err(_) => return errno::to_result(errno::EFAULT),
+            Ok(value) => value,
+            Err(_) => return errno::to_result(errno::EFAULT),
         }
     };
-    if fstype == "cgroup2" { return super::cgroup::mount(&task,&path,flags,&options).map_or_else(errno::to_result, |_| 0); }
-    if fstype == "cpuset" && options.is_empty() { return super::cgroup::mount(&task,&path,flags,"cpuset").map_or_else(errno::to_result, |_| 0); }
-    if fstype == "cgroup" && options == "cpuset" { return super::cgroup::mount(&task,&path,flags,&options).map_or_else(errno::to_result, |_| 0); }
+    if fstype == "cgroup2" {
+        return super::cgroup::mount(&task, &path, flags, &options)
+            .map_or_else(errno::to_result, |_| 0);
+    }
+    if fstype == "cpuset" && options.is_empty() {
+        return super::cgroup::mount(&task, &path, flags, "cpuset")
+            .map_or_else(errno::to_result, |_| 0);
+    }
+    if fstype == "cgroup" && options == "cpuset" {
+        return super::cgroup::mount(&task, &path, flags, &options)
+            .map_or_else(errno::to_result, |_| 0);
+    }
     mount_tmpfs(&task, &path, &fstype, flags, &options).map_or_else(errno::to_result, |_| 0)
 }
 
-pub(crate) fn mount_tmpfs(task: &crate::task::Task, path: &str, fstype: &str, flags: usize, options: &str) -> Result<(), usize> {
+pub(crate) fn mount_tmpfs(
+    task: &crate::task::Task,
+    path: &str,
+    fstype: &str,
+    flags: usize,
+    options: &str,
+) -> Result<(), usize> {
     use crate::fs::vfs_v2::mount_tree::MountRestrictions;
-    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
-    if path.is_empty() { return Err(errno::ENOENT); }
+    if !task
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_MOUNTS)
+    {
+        return Err(errno::EPERM);
+    }
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
     // MS_NOSUID, MS_NODEV, MS_NOEXEC. Read-only, bind, remount and other
     // filesystems require their actual native operations before acceptance.
-    if flags & !0xe != 0 || fstype != "tmpfs" { return Err(errno::EOPNOTSUPP); }
+    if flags & !0xe != 0 || fstype != "tmpfs" {
+        return Err(errno::EOPNOTSUPP);
+    }
     let mut restrictions = 0;
-    if flags & 2 != 0 { restrictions |= MountRestrictions::NO_PRIVILEGE_GAIN; }
-    if flags & 4 != 0 { restrictions |= MountRestrictions::NO_DEVICES; }
-    if flags & 8 != 0 { restrictions |= MountRestrictions::NO_EXECUTE; }
+    if flags & 2 != 0 {
+        restrictions |= MountRestrictions::NO_PRIVILEGE_GAIN;
+    }
+    if flags & 4 != 0 {
+        restrictions |= MountRestrictions::NO_DEVICES;
+    }
+    if flags & 8 != 0 {
+        restrictions |= MountRestrictions::NO_EXECUTE;
+    }
     let mut mode = 0o1777;
     let mut driver_options = String::new();
     for option in options.split(',').filter(|part| !part.is_empty()) {
         if let Some(value) = option.strip_prefix("mode=") {
             mode = u32::from_str_radix(value, 8).map_err(|_| errno::EINVAL)?;
-            if mode & !0o7777 != 0 { return Err(errno::EINVAL); }
-        } else if let Some(value) = option.strip_prefix("uid=").or_else(|| option.strip_prefix("gid=")) {
+            if mode & !0o7777 != 0 {
+                return Err(errno::EINVAL);
+            }
+        } else if let Some(value) = option
+            .strip_prefix("uid=")
+            .or_else(|| option.strip_prefix("gid="))
+        {
             let id = value.parse::<u32>().map_err(|_| errno::EINVAL)?;
             // Mount owners are applied to the fresh root by the tmpfs driver;
             // the numeric identity is Shield authority, never a Linux-only bit.
             let _ = id;
-            if !driver_options.is_empty() { driver_options.push(','); }
+            if !driver_options.is_empty() {
+                driver_options.push(',');
+            }
             driver_options.push_str(option);
         } else if option.starts_with("size=") {
-            if !driver_options.is_empty() { driver_options.push(','); }
+            if !driver_options.is_empty() {
+                driver_options.push(',');
+            }
             driver_options.push_str(option);
-        } else { return Err(errno::EOPNOTSUPP); }
+        } else {
+            return Err(errno::EOPNOTSUPP);
+        }
     }
     let fs = task.get_vfs().ok_or(errno::EIO)?;
     let _composition = crate::executor::syscall::lock_composition();
-    if crate::executor::syscall::is_root_path(&fs, path) { return Err(errno::EBUSY); }
+    if crate::executor::syscall::is_root_path(&fs, path) {
+        return Err(errno::EBUSY);
+    }
     let filesystem = crate::fs::get_fs_driver_manager()
-        .create_from_option_string("tmpfs", &driver_options).map_err(|e| match e.kind {
+        .create_from_option_string("tmpfs", &driver_options)
+        .map_err(|e| match e.kind {
             crate::fs::FileSystemErrorKind::InvalidOperation => errno::EINVAL,
             crate::fs::FileSystemErrorKind::NotSupported => errno::EOPNOTSUPP,
             _ => errno::from_fs_error(&e),
         })?;
     super::mode::set(&filesystem.root_node(), mode);
-    fs.mount(filesystem, path, restrictions).map_err(|e| errno::from_fs_error(&e))
+    fs.mount(filesystem, path, restrictions)
+        .map_err(|e| errno::from_fs_error(&e))
 }
 
-pub(crate) fn change_mount_propagation(task: &crate::task::Task, path: &str, flags: usize) -> Result<(), usize> {
-    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
-    if path.is_empty() { return Err(errno::ENOENT); }
+pub(crate) fn change_mount_propagation(
+    task: &crate::task::Task,
+    path: &str,
+    flags: usize,
+) -> Result<(), usize> {
+    if !task
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_MOUNTS)
+    {
+        return Err(errno::EPERM);
+    }
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
     use crate::fs::vfs_v2::propagation::Propagation;
     const MS_REC: usize = 0x4000;
     let mode = match flags & !MS_REC {
@@ -1288,10 +1441,14 @@ pub(crate) fn change_mount_propagation(task: &crate::task::Task, path: &str, fla
     };
     let fs = task.get_vfs().ok_or(errno::EIO)?;
     let _composition = crate::executor::syscall::lock_composition();
-    fs.set_mount_propagation(path, mode, flags & MS_REC != 0).map_err(|e| {
-        if e.kind == crate::fs::FileSystemErrorKind::InvalidPath { errno::EINVAL }
-        else { errno::from_fs_error(&e) }
-    })
+    fs.set_mount_propagation(path, mode, flags & MS_REC != 0)
+        .map_err(|e| {
+            if e.kind == crate::fs::FileSystemErrorKind::InvalidPath {
+                errno::EINVAL
+            } else {
+                errno::from_fs_error(&e)
+            }
+        })
 }
 
 /// Linux sys_openat implementation for Scarlet VFS v2
@@ -1374,7 +1531,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);
         }
-        if let Some(fd) = super::mount_namespace::open(abi, &task, &absolute, flags) { return fd; }
+        if let Some(fd) = super::mount_namespace::open(abi, &task, &absolute, flags) {
+            return fd;
+        }
         if let Some(fd) = super::proc_text::open_proc_text_file(abi, &task, &absolute, flags) {
             return fd;
         }
@@ -1456,7 +1615,8 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // }
 
     let native_flags = native_open_flags(flags);
-    let file = open_from_evdev_compatible(&vfs, &base_entry, &base_mount, &mapped_path, native_flags);
+    let file =
+        open_from_evdev_compatible(&vfs, &base_entry, &base_mount, &mapped_path, native_flags);
 
     let kernel_obj = match file {
         Ok(obj) => {
@@ -1502,11 +1662,14 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     Err(create_err) => {
                         // Only a concurrent successful creation permits reopening.
                         // Preserve authorization and I/O errors from the create path.
-                        if !matches!(create_err.kind,crate::fs::FileSystemErrorKind::AlreadyExists|crate::fs::FileSystemErrorKind::FileExists) {
+                        if !matches!(
+                            create_err.kind,
+                            crate::fs::FileSystemErrorKind::AlreadyExists
+                                | crate::fs::FileSystemErrorKind::FileExists
+                        ) {
                             return errno::to_result(errno::from_fs_error(&create_err));
                         }
-                        if flags & O_EXCL != 0
-                        {
+                        if flags & O_EXCL != 0 {
                             return errno::to_result(errno::EEXIST); // File exists and O_EXCL is set
                         }
                         // Try to open the existing file
@@ -1821,7 +1984,8 @@ fn current_file_status_flags(abi: &LinuxAbi, task: &crate::task::Task, fd: usize
         if crate::abi::linux::device::tty::is_tty_ioctl_target(
             crate::abi::linux::device::tty::TIOCGWINSZ,
             &object,
-        ) || super::log::is_log_file(&object) {
+        ) || super::log::is_log_file(&object)
+        {
             if let Some(selectable) = object.as_selectable() {
                 flags &= !(O_NONBLOCK as u32);
                 if selectable.is_nonblocking() {
@@ -1942,20 +2106,51 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return result;
     }
 
-    #[cfg(feature="network")]
-    if let Some(local)=kernel_obj.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).filter(|socket|socket.is_datagram()) {
-        if count>crate::network::local::MAX_DATAGRAM_BYTES {return errno::to_result(errno::EMSGSIZE);}
-        let mut bytes=Vec::new();if bytes.try_reserve_exact(count).is_err() {return errno::to_result(errno::ENOMEM);}bytes.resize(count,0);
-        if crate::library::std::usercopy::copy_from_user(&task,user_buf,&mut bytes).is_err() {return errno::to_result(errno::EFAULT);}
-        let nonblocking=current_file_status_flags(abi,&task,fd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0);
-        return local.send_datagram(bytes,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_io_error_to_native_errno(&error) as usize),|n|n);
+    #[cfg(feature = "network")]
+    if let Some(local) = kernel_obj
+        .as_socket()
+        .and_then(crate::network::local::LocalSocket::from_socket_object)
+        .filter(|socket| socket.is_datagram())
+    {
+        if count > crate::network::local::MAX_DATAGRAM_BYTES {
+            return errno::to_result(errno::EMSGSIZE);
+        }
+        let mut bytes = Vec::new();
+        if bytes.try_reserve_exact(count).is_err() {
+            return errno::to_result(errno::ENOMEM);
+        }
+        bytes.resize(count, 0);
+        if crate::library::std::usercopy::copy_from_user(&task, user_buf, &mut bytes).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let nonblocking = current_file_status_flags(abi, &task, fd)
+            .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
+        return local
+            .send_datagram(
+                bytes,
+                Vec::new(),
+                &crate::network::SocketAddress::Unspecified,
+                nonblocking,
+            )
+            .map_or_else(
+                |error| {
+                    errno::to_result(
+                        crate::network::socket::socket_io_error_to_native_errno(&error) as usize,
+                    )
+                },
+                |n| n,
+            );
     }
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => return usize::MAX,
     };
 
-    if count == 0 { return stream.write_empty().unwrap_or_else(|error| errno::to_result(stream_error_to_errno(error))); }
+    if count == 0 {
+        return stream
+            .write_empty()
+            .unwrap_or_else(|error| errno::to_result(stream_error_to_errno(error)));
+    }
     let nonblocking = current_file_status_flags(abi, &task, fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false)
@@ -2626,8 +2821,12 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
-        && let Some(stat) = super::mount_namespace::path_stat(&task, &absolute, flags & AT_SYMLINK_NOFOLLOW != 0) {
-        return write_linux_stat(&task, stat_ptr, &stat).map(|_| 0).unwrap_or_else(errno::to_result);
+        && let Some(stat) =
+            super::mount_namespace::path_stat(&task, &absolute, flags & AT_SYMLINK_NOFOLLOW != 0)
+    {
+        return write_linux_stat(&task, stat_ptr, &stat)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
     }
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
         && let Some(metadata) = super::proc_fd::task_path_metadata(&task, &absolute)
@@ -2727,7 +2926,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
     let mut statistics = LinuxStat::from_metadata(&metadata);
-    if let Err(error) = apply_node_attributes(&mut statistics,node.as_ref()) {
+    if let Err(error) = apply_node_attributes(&mut statistics, node.as_ref()) {
         return errno::to_result(error);
     }
     if let Some(mode) = super::mode::get(&node) {
@@ -2814,10 +3013,14 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
-        && let Some(stat) = super::mount_namespace::path_stat(&task, &absolute, flags & AT_SYMLINK_NOFOLLOW != 0) {
+        && let Some(stat) =
+            super::mount_namespace::path_stat(&task, &absolute, flags & AT_SYMLINK_NOFOLLOW != 0)
+    {
         let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
         fill_statx_from_stat(&mut statx, &stat, 0, mask);
-        return write_linux_statx(&task, statx_ptr, &statx).map(|_| 0).unwrap_or_else(errno::to_result);
+        return write_linux_statx(&task, statx_ptr, &statx)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
     }
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
         && let Some(metadata) = super::proc_fd::task_path_metadata(&task, &absolute)
@@ -2914,7 +3117,7 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let mut stat = LinuxStat::from_metadata(&metadata);
-    if let Err(error) = apply_node_attributes(&mut stat,node.as_ref()) {
+    if let Err(error) = apply_node_attributes(&mut stat, node.as_ref()) {
         return errno::to_result(error);
     }
     if let Some(mode) = super::mode::get(&node) {
@@ -3225,15 +3428,27 @@ fn ioctl_for_task(
         None => return errno::to_result(errno::EBADF),
     };
 
-    if let Some(result) = crate::abi::linux::device::evdev::ioctl(kernel_object.as_kernel_object(), task, request, arg) {
+    if let Some(result) = crate::abi::linux::device::evdev::ioctl(
+        kernel_object.as_kernel_object(),
+        task,
+        request,
+        arg,
+    ) {
         return result;
     }
-    if matches!(kernel_object, crate::object::KernelObject::MountNamespace(_)) {
-        return if request == 0xb703 { 0x20000 } else { errno::to_result(errno::ENOTTY) };
+    if matches!(
+        kernel_object,
+        crate::object::KernelObject::MountNamespace(_)
+    ) {
+        return if request == 0xb703 {
+            0x20000
+        } else {
+            errno::to_result(errno::ENOTTY)
+        };
     }
-    if let Some(result) = abi
-        .extensions
-        .ioctl(abi, task, trapframe, &kernel_object, fd, request, arg)
+    if let Some(result) =
+        abi.extensions
+            .ioctl(abi, task, trapframe, &kernel_object, fd, request, arg)
     {
         return result;
     }
@@ -3444,7 +3659,8 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(crate::executor::executor::ExecutorError::ExecutionFailed(reason)) => {
             errno::to_result(match reason.as_str() {
                 "argument list too large" => errno::E2BIG,
-                "execution disabled on mount" | "file-derived privilege changes disabled on mount" => errno::EACCES,
+                "execution disabled on mount"
+                | "file-derived privilege changes disabled on mount" => errno::EACCES,
                 "runtime delegation loop" => errno::ELOOP,
                 "exec requires an exclusive single-threaded process" => errno::EBUSY,
                 _ => errno::ENOEXEC,
@@ -3492,21 +3708,31 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let Some(pipe) = object.as_pipe() else {
                 return errno::to_result(errno::EINVAL);
             };
-            if cmd == 1032 { return pipe.buffer_size(); }
+            if cmd == 1032 {
+                return pipe.buffer_size();
+            }
             let requested = arg as i32;
-            if requested < 0 { return errno::to_result(errno::EINVAL); }
-            let Some(size) = (requested as usize).max(crate::environment::PAGE_SIZE)
-                .checked_next_power_of_two() else {
+            if requested < 0 {
+                return errno::to_result(errno::EINVAL);
+            }
+            let Some(size) = (requested as usize)
+                .max(crate::environment::PAGE_SIZE)
+                .checked_next_power_of_two()
+            else {
                 return errno::to_result(errno::EINVAL);
             };
             // Bound the Linux adapter's unprivileged per-pipe allocation.
-            if size > 1024 * 1024 { return errno::to_result(errno::EPERM); }
-            return pipe.resize_buffer(size).unwrap_or_else(|error| errno::to_result(match error {
-                StreamError::InvalidArgument => errno::EBUSY,
-                StreamError::NoSpace => errno::ENOMEM,
-                StreamError::NotSupported => errno::EOPNOTSUPP,
-                _ => errno::EIO,
-            }));
+            if size > 1024 * 1024 {
+                return errno::to_result(errno::EPERM);
+            }
+            return pipe.resize_buffer(size).unwrap_or_else(|error| {
+                errno::to_result(match error {
+                    StreamError::InvalidArgument => errno::EBUSY,
+                    StreamError::NoSpace => errno::ENOMEM,
+                    StreamError::NotSupported => errno::EOPNOTSUPP,
+                    _ => errno::EIO,
+                })
+            });
         }
         1033 | 1034 => {
             // F_ADD_SEALS / F_GET_SEALS apply to the underlying memfd, so
@@ -4084,14 +4310,23 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
         total = next;
     }
     if reading {
-        if let Some(result) = super::log::readv_to_user(&object, &task, trapframe, &vectors, total) {
+        if let Some(result) = super::log::readv_to_user(&object, &task, trapframe, &vectors, total)
+        {
             return result;
         }
     } else if let Some(result) = super::log::writev_from_user(&object, &task, &vectors, total) {
         return result;
     }
-    #[cfg(feature="network")]
-    if !reading && object.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).is_some_and(|socket|socket.is_datagram()) && total>crate::network::local::MAX_DATAGRAM_BYTES {return errno::to_result(errno::EMSGSIZE);}
+    #[cfg(feature = "network")]
+    if !reading
+        && object
+            .as_socket()
+            .and_then(crate::network::local::LocalSocket::from_socket_object)
+            .is_some_and(|socket| socket.is_datagram())
+        && total > crate::network::local::MAX_DATAGRAM_BYTES
+    {
+        return errno::to_result(errno::EMSGSIZE);
+    }
     let length = total.min(MAX_TRANSFER);
     if length == 0 {
         return 0;
@@ -4144,11 +4379,32 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
             }
         }
     }
-    #[cfg(feature="network")]
-    if !reading {if let Some(local)=object.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).filter(|socket|socket.is_datagram()) {
-        let nonblocking=current_file_status_flags(abi,&task,fd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0);
-        return local.send_datagram(buffer,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_io_error_to_native_errno(&error) as usize),|n|n);
-    }}
+    #[cfg(feature = "network")]
+    if !reading {
+        if let Some(local) = object
+            .as_socket()
+            .and_then(crate::network::local::LocalSocket::from_socket_object)
+            .filter(|socket| socket.is_datagram())
+        {
+            let nonblocking = current_file_status_flags(abi, &task, fd)
+                .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
+            return local
+                .send_datagram(
+                    buffer,
+                    Vec::new(),
+                    &crate::network::SocketAddress::Unspecified,
+                    nonblocking,
+                )
+                .map_or_else(
+                    |error| {
+                        errno::to_result(crate::network::socket::socket_io_error_to_native_errno(
+                            &error,
+                        ) as usize)
+                    },
+                    |n| n,
+                );
+        }
+    }
     let nonblocking = current_file_status_flags(abi, &task, fd)
         .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
     let transferred = loop {
@@ -4244,51 +4500,105 @@ pub fn sys_fsync(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-fn set_node_owner(node: &dyn crate::fs::vfs_v2::core::VfsNode, owner: usize, group: usize) -> Result<(), usize> {
-    use crate::shield::identity::{Principal,Group};
+fn set_node_owner(
+    node: &dyn crate::fs::vfs_v2::core::VfsNode,
+    owner: usize,
+    group: usize,
+) -> Result<(), usize> {
+    use crate::shield::identity::{Group, Principal};
     if node.owner_identity().is_some() {
-        node.set_owner_identity((owner as u32 != u32::MAX).then_some(Principal(owner as u32)),
-            (group as u32 != u32::MAX).then_some(Group(group as u32))).map_err(|error| errno::from_fs_error(&error))
-    } else { fixed_root_ownership(owner,group) }
+        node.set_owner_identity(
+            (owner as u32 != u32::MAX).then_some(Principal(owner as u32)),
+            (group as u32 != u32::MAX).then_some(Group(group as u32)),
+        )
+        .map_err(|error| errno::from_fs_error(&error))
+    } else {
+        fixed_root_ownership(owner, group)
+    }
 }
 /// Backends without native ownership storage retain their root-only view.
 fn fixed_root_ownership(owner: usize, group: usize) -> Result<(), usize> {
-    if [owner as u32,group as u32].iter().all(|id| *id == 0 || *id == u32::MAX) { Ok(()) } else { Err(errno::EOPNOTSUPP) }
+    if [owner as u32, group as u32]
+        .iter()
+        .all(|id| *id == 0 || *id == u32::MAX)
+    {
+        Ok(())
+    } else {
+        Err(errno::EOPNOTSUPP)
+    }
 }
-fn owner_node_from_fd(task: &crate::task::Task, abi: &LinuxAbi, fd: usize) -> Result<Option<alloc::sync::Arc<dyn crate::fs::vfs_v2::core::VfsNode>>,usize> {
-    let object = abi.get_handle(fd).and_then(|handle| task.handle_table.get(handle)).ok_or(errno::EBADF)?;
+fn owner_node_from_fd(
+    task: &crate::task::Task,
+    abi: &LinuxAbi,
+    fd: usize,
+) -> Result<Option<alloc::sync::Arc<dyn crate::fs::vfs_v2::core::VfsNode>>, usize> {
+    let object = abi
+        .get_handle(fd)
+        .and_then(|handle| task.handle_table.get(handle))
+        .ok_or(errno::EBADF)?;
     let file = object.as_file().ok_or(errno::EINVAL)?;
-    Ok(file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>().map(|file| file.get_vfs_entry().node()))
+    Ok(file
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+        .map(|file| file.get_vfs_entry().node()))
 }
 pub fn sys_fchownat(abi: &mut LinuxAbi, tf: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else { return errno::to_result(errno::EIO); };
-    let [dirfd, address, owner, group, flags] = [tf.get_arg(0),tf.get_arg(1),tf.get_arg(2),tf.get_arg(3),tf.get_arg(4)];
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::EIO);
+    };
+    let [dirfd, address, owner, group, flags] = [
+        tf.get_arg(0),
+        tf.get_arg(1),
+        tf.get_arg(2),
+        tf.get_arg(3),
+        tf.get_arg(4),
+    ];
     tf.increment_pc_next(&task);
     (|| {
-        if flags & !(0x100 | 0x1000) != 0 { return Err(errno::EINVAL); }
-        let path = parse_c_string_from_userspace(&task,address,MAX_PATH_LENGTH).map_err(|_| errno::EFAULT)?;
+        if flags & !(0x100 | 0x1000) != 0 {
+            return Err(errno::EINVAL);
+        }
+        let path = parse_c_string_from_userspace(&task, address, MAX_PATH_LENGTH)
+            .map_err(|_| errno::EFAULT)?;
         let vfs = task.get_vfs().ok_or(errno::EIO)?;
         let node = if path.is_empty() && flags & 0x1000 != 0 && dirfd as i32 != -100 {
-            owner_node_from_fd(&task,abi,dirfd)?.ok_or(errno::EOPNOTSUPP)?
+            owner_node_from_fd(&task, abi, dirfd)?.ok_or(errno::EOPNOTSUPP)?
         } else {
-            let path = if path.is_empty() && flags & 0x1000 != 0 { vfs.get_cwd_path() }
-                else { path_at_to_absolute(abi,&task,&vfs,dirfd as i32,&path)? };
-            vfs.resolve_path_with_options(&path,&crate::fs::vfs_v2::PathResolutionOptions {no_follow: flags & 0x100 != 0})
-                .map_err(|error| errno::from_fs_error(&error))?.0.node()
+            let path = if path.is_empty() && flags & 0x1000 != 0 {
+                vfs.get_cwd_path()
+            } else {
+                path_at_to_absolute(abi, &task, &vfs, dirfd as i32, &path)?
+            };
+            vfs.resolve_path_with_options(
+                &path,
+                &crate::fs::vfs_v2::PathResolutionOptions {
+                    no_follow: flags & 0x100 != 0,
+                },
+            )
+            .map_err(|error| errno::from_fs_error(&error))?
+            .0
+            .node()
         };
-        set_node_owner(node.as_ref(),owner,group).map(|_| 0)
-    })().unwrap_or_else(errno::to_result)
+        set_node_owner(node.as_ref(), owner, group).map(|_| 0)
+    })()
+    .unwrap_or_else(errno::to_result)
 }
 pub fn sys_fchown(abi: &mut LinuxAbi, tf: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else { return errno::to_result(errno::EIO); };
-    let fd = tf.get_arg(0); let owner = tf.get_arg(1); let group = tf.get_arg(2);
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::EIO);
+    };
+    let fd = tf.get_arg(0);
+    let owner = tf.get_arg(1);
+    let group = tf.get_arg(2);
     tf.increment_pc_next(&task);
     (|| {
-        match owner_node_from_fd(&task,abi,fd)? {
-            Some(node) => set_node_owner(node.as_ref(),owner,group),
-            None => fixed_root_ownership(owner,group),
-        }.map(|_| 0)
-    })().unwrap_or_else(errno::to_result)
+        match owner_node_from_fd(&task, abi, fd)? {
+            Some(node) => set_node_owner(node.as_ref(), owner, group),
+            None => fixed_root_ownership(owner, group),
+        }
+        .map(|_| 0)
+    })()
+    .unwrap_or_else(errno::to_result)
 }
 
 /// fadvise64 is advisory; validate its arguments and preserve the file.
@@ -4557,20 +4867,67 @@ pub fn sys_faccessat2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Create a node only for an endpoint already exposed in this View.
 pub fn sys_mknodat(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
-    let Some(task)=mytask() else {return errno::to_result(errno::ESRCH);};
-    let dirfd=frame.get_arg(0) as i32;let path=frame.get_arg(1);let mode=frame.get_arg(2) as u32;let device=frame.get_arg(3);
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::ESRCH);
+    };
+    let dirfd = frame.get_arg(0) as i32;
+    let path = frame.get_arg(1);
+    let mode = frame.get_arg(2) as u32;
+    let device = frame.get_arg(3);
     frame.increment_pc_next(&task);
-    (|| -> Result<usize,usize> {
-        if !task.credentials.read().permits(crate::shield::identity::MANAGE_DEVICES) {return Err(errno::EPERM);}
-        let kind=match mode & 0o170000 {0o020000=>crate::device::DeviceType::Char,0o060000=>crate::device::DeviceType::Block,_=>return Err(errno::EOPNOTSUPP)};
-        let path=parse_c_string_from_userspace(&task,path,MAX_PATH_LENGTH).map_err(|_|errno::EFAULT)?;
-        let view=task.get_vfs().ok_or(errno::EIO)?;let path=path_at_to_absolute(abi,&task,&view,dirfd,&path)?;
-        if view.resolve_path_with_options(&path,&crate::fs::vfs_v2::PathResolutionOptions::no_follow()).is_ok() {return Err(errno::EEXIST);}
-        let endpoint=DeviceManager::get_manager().endpoint_snapshot().0.into_iter().find(|endpoint|endpoint.id==device && endpoint.kind==kind && super::socket::uevent::visible(&view,endpoint)).ok_or(errno::ENODEV)?;
-        view.create_device_file(&path,crate::fs::DeviceFileInfo {device_id:endpoint.id,device_type:endpoint.kind}).map_err(|error|errno::from_fs_error(&error))?;
-        let node=view.resolve_path(&path).map_err(|error|errno::from_fs_error(&error))?.0.node();
-        super::mode::set(&node,mode & 0o7777);Ok(0)
-    })().unwrap_or_else(errno::to_result)
+    (|| -> Result<usize, usize> {
+        if !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_DEVICES)
+        {
+            return Err(errno::EPERM);
+        }
+        let kind = match mode & 0o170000 {
+            0o020000 => crate::device::DeviceType::Char,
+            0o060000 => crate::device::DeviceType::Block,
+            _ => return Err(errno::EOPNOTSUPP),
+        };
+        let path = parse_c_string_from_userspace(&task, path, MAX_PATH_LENGTH)
+            .map_err(|_| errno::EFAULT)?;
+        let view = task.get_vfs().ok_or(errno::EIO)?;
+        let path = path_at_to_absolute(abi, &task, &view, dirfd, &path)?;
+        if view
+            .resolve_path_with_options(
+                &path,
+                &crate::fs::vfs_v2::PathResolutionOptions::no_follow(),
+            )
+            .is_ok()
+        {
+            return Err(errno::EEXIST);
+        }
+        let endpoint = DeviceManager::get_manager()
+            .endpoint_snapshot()
+            .0
+            .into_iter()
+            .find(|endpoint| {
+                endpoint.id == device
+                    && endpoint.kind == kind
+                    && super::socket::uevent::visible(&view, endpoint)
+            })
+            .ok_or(errno::ENODEV)?;
+        view.create_device_file(
+            &path,
+            crate::fs::DeviceFileInfo {
+                device_id: endpoint.id,
+                device_type: endpoint.kind,
+            },
+        )
+        .map_err(|error| errno::from_fs_error(&error))?;
+        let node = view
+            .resolve_path(&path)
+            .map_err(|error| errno::from_fs_error(&error))?
+            .0
+            .node();
+        super::mode::set(&node, mode & 0o7777);
+        Ok(0)
+    })()
+    .unwrap_or_else(errno::to_result)
 }
 
 pub fn sys_mkdirat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -4640,7 +4997,10 @@ fn write_linux_statfs(
     }
 }
 
-fn linux_statfs_for_entry(abi: &LinuxAbi, entry: &crate::fs::vfs_v2::core::VfsEntry) -> LinuxStatFs {
+fn linux_statfs_for_entry(
+    abi: &LinuxAbi,
+    entry: &crate::fs::vfs_v2::core::VfsEntry,
+) -> LinuxStatFs {
     let node = entry.node();
     let filesystem = node
         .filesystem()
@@ -4993,15 +5353,24 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return errno::to_result(errno::EBADF);
                 };
                 Some(child)
-            } else { None };
-            let mut subscriptions = if child_owner.is_some() { Some(Vec::new()) } else {
+            } else {
+                None
+            };
+            let mut subscriptions = if child_owner.is_some() {
+                Some(Vec::new())
+            } else {
                 let Some(object) = task.handle_table.get(watched_handle) else {
                     return errno::to_result(errno::EBADF);
                 };
                 if let Some(file) = object.as_file()
                     && file.as_any().is::<crate::fs::vfs_v2::VfsFileObject>()
-                    && file.metadata().is_ok_and(|metadata| matches!(metadata.file_type,
-                        FileType::RegularFile | FileType::Directory)) {
+                    && file.metadata().is_ok_and(|metadata| {
+                        matches!(
+                            metadata.file_type,
+                            FileType::RegularFile | FileType::Directory
+                        )
+                    })
+                {
                     return errno::to_result(errno::EPERM);
                 }
                 let Some(selectable) = object.as_selectable() else {
@@ -5012,7 +5381,9 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         read: events & EPOLLIN != 0,
                         write: events & EPOLLOUT != 0,
                         except: events & EPOLLPRI != 0,
-                    }, &owner.waker)
+                    },
+                    &owner.waker,
+                )
             };
             // Edge-triggered delivery needs producer notifications, including
             // transitions that happen between two readiness scans.
@@ -5021,7 +5392,11 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
 
             // Linux ignores EPOLLWAKEUP when the caller lacks the authority.
-            if !task.credentials.read().permits(crate::shield::identity::INHIBIT_SUSPEND) {
+            if !task
+                .credentials
+                .read()
+                .permits(crate::shield::identity::INHIBIT_SUSPEND)
+            {
                 events &= !EPOLLWAKEUP;
             }
             let inhibitor = if events & EPOLLWAKEUP != 0 {
@@ -5029,7 +5404,9 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     Ok(token) => Some(alloc::sync::Arc::new(token)),
                     Err(_) => return errno::to_result(errno::ENOMEM),
                 }
-            } else { None };
+            } else {
+                None
+            };
 
             let mut interests = epoll_interests().write();
             if op == EPOLL_CTL_ADD && is_epoll_handle(watched_handle) {
@@ -5069,7 +5446,8 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 existing.watched_handle = watched_handle;
                 existing.inhibitor = inhibitor;
                 existing.delivery.lock().active = false;
-                existing.delivery = alloc::sync::Arc::new(crate::sync::IrqSpinLock::new(EpollDelivery::new()));
+                existing.delivery =
+                    alloc::sync::Arc::new(crate::sync::IrqSpinLock::new(EpollDelivery::new()));
                 existing.subscriptions = subscriptions;
             } else {
                 if op == EPOLL_CTL_MOD {
@@ -5083,7 +5461,9 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     data,
                     inhibitor,
                     subscriptions,
-                    delivery: alloc::sync::Arc::new(crate::sync::IrqSpinLock::new(EpollDelivery::new())),
+                    delivery: alloc::sync::Arc::new(crate::sync::IrqSpinLock::new(
+                        EpollDelivery::new(),
+                    )),
                 });
             }
             drop(interests);
@@ -5100,7 +5480,9 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let remove = interest.epoll_handle == epoll_handle
                     && interest.fd == fd
                     && interest.watched_handle == watched_handle;
-                if remove { interest.delivery.lock().active = false; }
+                if remove {
+                    interest.delivery.lock().active = false;
+                }
                 !remove
             });
             let removed = interests.len() != before;
@@ -5223,8 +5605,10 @@ fn epoll_wait_for_task(
             // array than the number of continuously ready descriptors.
             let mut registry = epoll_interests().write();
             for state in delivered {
-                if let Some(index) = registry.iter().position(|interest|
-                    alloc::sync::Arc::ptr_eq(&interest.delivery, &state)) {
+                if let Some(index) = registry
+                    .iter()
+                    .position(|interest| alloc::sync::Arc::ptr_eq(&interest.delivery, &state))
+                {
                     let interest = registry.remove(index);
                     registry.push(interest);
                 }
@@ -5246,12 +5630,20 @@ fn epoll_wait_for_task(
         let now = crate::timer::get_time_ns();
         let wait_ns = if needs_recheck {
             crate::object::capability::selectable::multi_readiness_recheck_delay(deadline, now)
-        } else { deadline.map(|end| end.saturating_sub(now)) };
+        } else {
+            deadline.map(|end| end.saturating_sub(now))
+        };
         // Sources retain registrations for the whole epoll lifetime. Waker's
         // pre-wait latch closes the scan-to-sleep race, including ctl changes.
-        if matches!(owner.waker.wait_with_timeout_precision_result(
-            task.get_id(), trapframe, wait_ns, crate::timer::TimerPrecision::Exact,
-        ), crate::sync::waker::WaitResult::Interrupted) {
+        if matches!(
+            owner.waker.wait_with_timeout_precision_result(
+                task.get_id(),
+                trapframe,
+                wait_ns,
+                crate::timer::TimerPrecision::Exact,
+            ),
+            crate::sync::waker::WaitResult::Interrupted
+        ) {
             return errno::to_result(errno::EINTR);
         }
     }
@@ -5782,7 +6174,9 @@ fn ppoll_for_task(
         let mut selectable = false;
 
         if let Some(sel) = kobj.as_selectable() {
-            if sel.is_hung_up() { pfd.revents |= POLLHUP; }
+            if sel.is_hung_up() {
+                pfd.revents |= POLLHUP;
+            }
             selectable = want_read || want_write || want_except;
             let rs: ReadySet = sel.current_ready(ReadyInterest {
                 read: want_read,
@@ -6014,7 +6408,9 @@ fn ppoll_for_task(
         }
     }
     for pfd in &fds {
-        if pfd.fd >= 0 && let Some(handle) = abi.get_handle(pfd.fd as usize) {
+        if pfd.fd >= 0
+            && let Some(handle) = abi.get_handle(pfd.fd as usize)
+        {
             acknowledge_linux_ready(task, handle, pfd.revents as u32);
         }
     }
@@ -6220,8 +6616,13 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     if let Some(target) = super::mount_namespace::link(&task, &path_str) {
         let size = target.len().min(bufsiz);
-        return if copy_to_user_pagewise(buf_ptr, &target.as_bytes()[..size], &task.vm_manager) == size { size }
-            else { errno::to_result(errno::EFAULT) };
+        return if copy_to_user_pagewise(buf_ptr, &target.as_bytes()[..size], &task.vm_manager)
+            == size
+        {
+            size
+        } else {
+            errno::to_result(errno::EFAULT)
+        };
     }
     if let Some(target) = super::proc_fd::self_fd_link_target(abi, &task, &path_str) {
         let target = match target {
@@ -6347,7 +6748,7 @@ fn proc_exe_stat(
         .metadata()
         .map_err(|error| errno::from_fs_error(&error))?;
     let mut stat = LinuxStat::from_metadata(&metadata);
-    apply_node_attributes(&mut stat,node.as_ref())?;
+    apply_node_attributes(&mut stat, node.as_ref())?;
     if let Some(mode) = super::mode::get(&node) {
         stat.st_mode = (stat.st_mode & !0o7777) | mode;
     }
@@ -6775,11 +7176,18 @@ mod tests {
     fn fcntl_pipe_capacity_changes_the_shared_pipe_and_preserves_failed_shrinks() {
         use crate::ipc::pipe::UnidirectionalPipe;
         let task = alloc::sync::Arc::new(crate::task::Task::new(
-            "fcntl-pipe-capacity".into(), 1, crate::task::TaskType::User));
+            "fcntl-pipe-capacity".into(),
+            1,
+            crate::task::TaskType::User,
+        ));
         crate::task::set_mock_current_task(task.clone());
         let mut abi = crate::abi::linux::generic::LinuxAbi::default();
         let (reader, writer) = UnidirectionalPipe::create_pair(65536);
-        writer.as_stream().unwrap().write(&alloc::vec![0x5a; 8192]).unwrap();
+        writer
+            .as_stream()
+            .unwrap()
+            .write(&alloc::vec![0x5a; 8192])
+            .unwrap();
         let read_handle = task.handle_table.insert(reader).unwrap();
         let write_handle = task.handle_table.insert(writer).unwrap();
         let read_fd = abi.allocate_fd(read_handle).unwrap();
@@ -6791,47 +7199,103 @@ mod tests {
             (read_fd, 1031, 6145, 8192),
             (write_fd, 1032, 0, 8192),
             (read_fd, 1031, 1024 * 1024, 1024 * 1024),
-            (write_fd, 1031, 2 * 1024 * 1024, errno::to_result(errno::EPERM)),
+            (
+                write_fd,
+                1031,
+                2 * 1024 * 1024,
+                errno::to_result(errno::EPERM),
+            ),
             (read_fd, 1032, 0, 1024 * 1024),
             (read_fd, 1031, usize::MAX, errno::to_result(errno::EINVAL)),
         ] {
-            frame.set_arg(0, fd); frame.set_arg(1, command); frame.set_arg(2, size);
+            frame.set_arg(0, fd);
+            frame.set_arg(1, command);
+            frame.set_arg(2, size);
             assert_eq!(super::sys_fcntl(&mut abi, &mut frame), expected);
         }
         let mut bytes = alloc::vec![0; 8192];
-        assert_eq!(task.handle_table.get(read_handle).unwrap().as_stream().unwrap()
-            .read(&mut bytes).unwrap(), 8192);
+        assert_eq!(
+            task.handle_table
+                .get(read_handle)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .read(&mut bytes)
+                .unwrap(),
+            8192
+        );
         assert!(bytes.iter().all(|byte| *byte == 0x5a));
-        frame.set_arg(0, write_fd); frame.set_arg(1, 1031); frame.set_arg(2, 0);
-        assert_eq!(super::sys_fcntl(&mut abi, &mut frame), crate::environment::PAGE_SIZE);
+        frame.set_arg(0, write_fd);
+        frame.set_arg(1, 1031);
+        frame.set_arg(2, 0);
+        assert_eq!(
+            super::sys_fcntl(&mut abi, &mut frame),
+            crate::environment::PAGE_SIZE
+        );
         crate::task::clear_mock_current_task();
     }
 
-    fn wake_epoll_fixture() -> (alloc::sync::Arc<crate::task::Task>, crate::abi::linux::generic::LinuxAbi, crate::arch::Trapframe, usize, usize) {
-        use crate::environment::{PAGE_SIZE,USER_STACK_END};
-        let mut task=crate::task::Task::new("epoll-wake-lifetime".into(),1,crate::task::TaskType::User);
+    fn wake_epoll_fixture() -> (
+        alloc::sync::Arc<crate::task::Task>,
+        crate::abi::linux::generic::LinuxAbi,
+        crate::arch::Trapframe,
+        usize,
+        usize,
+    ) {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        let mut task =
+            crate::task::Task::new("epoll-wake-lifetime".into(), 1, crate::task::TaskType::User);
         task.set_id(991);
-        let task=alloc::sync::Arc::new(task);
-        let base=USER_STACK_END-PAGE_SIZE;task.allocate_stack_pages(base,1).unwrap();
-        for index in 0..64 {crate::library::std::usercopy::copy_to_user(&task,base+index*4,&0x73u32.to_ne_bytes()).unwrap();}
+        let task = alloc::sync::Arc::new(task);
+        let base = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        for index in 0..64 {
+            crate::library::std::usercopy::copy_to_user(
+                &task,
+                base + index * 4,
+                &0x73u32.to_ne_bytes(),
+            )
+            .unwrap();
+        }
         crate::task::set_mock_current_task(task.clone());
-        let mut abi=crate::abi::linux::generic::LinuxAbi::default();
-        let object=crate::ipc::counter::Counter::create_kernel_object(0,0);
-        let handle=task.handle_table.insert(object).unwrap();let watched=abi.allocate_fd(handle).unwrap();
-        let mut frame=crate::arch::Trapframe::new();frame.set_pc(base as u64);
-        (task,abi,frame,base+512,watched)
+        let mut abi = crate::abi::linux::generic::LinuxAbi::default();
+        let object = crate::ipc::counter::Counter::create_kernel_object(0, 0);
+        let handle = task.handle_table.insert(object).unwrap();
+        let watched = abi.allocate_fd(handle).unwrap();
+        let mut frame = crate::arch::Trapframe::new();
+        frame.set_pc(base as u64);
+        (task, abi, frame, base + 512, watched)
     }
-    fn wake_epoll_ctl(abi:&mut crate::abi::linux::generic::LinuxAbi, frame:&mut crate::arch::Trapframe,
-        task:&crate::task::Task, address:usize, epfd:usize, watched:usize, operation:i32, events:u32)->usize {
-        let mut bytes=[0;16];bytes[..4].copy_from_slice(&events.to_ne_bytes());
-        crate::library::std::usercopy::copy_to_user(task,address,&bytes).unwrap();
-        frame.set_arg(0,epfd);frame.set_arg(1,operation as usize);frame.set_arg(2,watched);frame.set_arg(3,address);
-        super::sys_epoll_ctl(abi,frame)
+    fn wake_epoll_ctl(
+        abi: &mut crate::abi::linux::generic::LinuxAbi,
+        frame: &mut crate::arch::Trapframe,
+        task: &crate::task::Task,
+        address: usize,
+        epfd: usize,
+        watched: usize,
+        operation: i32,
+        events: u32,
+    ) -> usize {
+        let mut bytes = [0; 16];
+        bytes[..4].copy_from_slice(&events.to_ne_bytes());
+        crate::library::std::usercopy::copy_to_user(task, address, &bytes).unwrap();
+        frame.set_arg(0, epfd);
+        frame.set_arg(1, operation as usize);
+        frame.set_arg(2, watched);
+        frame.set_arg(3, address);
+        super::sys_epoll_ctl(abi, frame)
     }
-    fn poll_epoll_now(abi: &mut crate::abi::linux::generic::LinuxAbi,
-        task: &crate::task::Task, frame: &mut crate::arch::Trapframe, epfd: usize, address: usize) -> usize {
-        frame.set_arg(0, epfd); frame.set_arg(1, address);
-        frame.set_arg(2, 1); frame.set_arg(3, 0);
+    fn poll_epoll_now(
+        abi: &mut crate::abi::linux::generic::LinuxAbi,
+        task: &crate::task::Task,
+        frame: &mut crate::arch::Trapframe,
+        epfd: usize,
+        address: usize,
+    ) -> usize {
+        frame.set_arg(0, epfd);
+        frame.set_arg(1, address);
+        frame.set_arg(2, 1);
+        frame.set_arg(3, 0);
         super::epoll_wait_for_task(abi, frame, task)
     }
 
@@ -6841,34 +7305,84 @@ mod tests {
         frame.set_arg(0, 0);
         let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
         let events = super::EPOLLOUT | super::EPOLLET;
-        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 1, events), 0);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
-        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 3, events), 0);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
-        drop(abi); crate::task::clear_mock_current_task();
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut abi, &mut frame, &task, address, epfd, watched, 1, events
+            ),
+            0
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            1
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            0
+        );
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut abi, &mut frame, &task, address, epfd, watched, 3, events
+            ),
+            0
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            1
+        );
+        drop(abi);
+        crate::task::clear_mock_current_task();
     }
 
     #[test_case]
     fn epoll_edge_retains_events_that_arrive_between_waits() {
         let (task, mut abi, mut frame, address, watched) = wake_epoll_fixture();
-        let object = task.handle_table.get(abi.get_handle(watched).unwrap()).unwrap();
+        let object = task
+            .handle_table
+            .get(abi.get_handle(watched).unwrap())
+            .unwrap();
         let stream = object.as_stream().unwrap();
         frame.set_arg(0, 0);
         let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
-        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 1,
-            super::EPOLLIN | super::EPOLLET), 0);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut abi,
+                &mut frame,
+                &task,
+                address,
+                epfd,
+                watched,
+                1,
+                super::EPOLLIN | super::EPOLLET
+            ),
+            0
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            0
+        );
         stream.write(&1u64.to_ne_bytes()).unwrap();
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            1
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            0
+        );
         stream.read(&mut [0; 8]).unwrap();
         stream.write(&1u64.to_ne_bytes()).unwrap();
         // The level is readable on both scans; the producer notification,
         // rather than observing an empty counter, must preserve this edge.
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
-        drop(abi); crate::task::clear_mock_current_task();
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            1
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            0
+        );
+        drop(abi);
+        crate::task::clear_mock_current_task();
     }
 
     #[test_case]
@@ -6877,49 +7391,121 @@ mod tests {
         frame.set_arg(0, 0);
         let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
         let events = super::EPOLLOUT | super::EPOLLONESHOT;
-        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 1, events), 0);
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut abi, &mut frame, &task, address, epfd, watched, 1, events
+            ),
+            0
+        );
         let mut shared = abi.clone();
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
-        assert_eq!(poll_epoll_now(&mut shared, &task, &mut frame, epfd, address + 64), 0);
-        assert_eq!(wake_epoll_ctl(&mut shared, &mut frame, &task, address, epfd, watched, 3, events), 0);
-        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
-        drop(shared); drop(abi); crate::task::clear_mock_current_task();
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            1
+        );
+        assert_eq!(
+            poll_epoll_now(&mut shared, &task, &mut frame, epfd, address + 64),
+            0
+        );
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut shared,
+                &mut frame,
+                &task,
+                address,
+                epfd,
+                watched,
+                3,
+                events
+            ),
+            0
+        );
+        assert_eq!(
+            poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64),
+            1
+        );
+        drop(shared);
+        drop(abi);
+        crate::task::clear_mock_current_task();
     }
     #[test_case]
     fn epoll_wakeup_modify_delete_and_unprivileged_registration_control_real_inhibitors() {
-        let before=crate::system_power::wake::snapshot().inhibitors;
-        let (task,mut abi,mut frame,address,watched)=wake_epoll_fixture();
-        frame.set_arg(0,0);let epfd=super::sys_epoll_create1(&mut abi,&mut frame);
-        for (op,events,expected) in [(1,super::EPOLLIN|super::EPOLLWAKEUP,before+1),
-            (3,super::EPOLLIN,before),(3,super::EPOLLIN|super::EPOLLWAKEUP,before+1),(2,0,before)] {
-            assert_eq!(wake_epoll_ctl(&mut abi,&mut frame,&task,address,epfd,watched,op,events),0);
-            assert_eq!(crate::system_power::wake::snapshot().inhibitors,expected);
+        let before = crate::system_power::wake::snapshot().inhibitors;
+        let (task, mut abi, mut frame, address, watched) = wake_epoll_fixture();
+        frame.set_arg(0, 0);
+        let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
+        for (op, events, expected) in [
+            (1, super::EPOLLIN | super::EPOLLWAKEUP, before + 1),
+            (3, super::EPOLLIN, before),
+            (3, super::EPOLLIN | super::EPOLLWAKEUP, before + 1),
+            (2, 0, before),
+        ] {
+            assert_eq!(
+                wake_epoll_ctl(
+                    &mut abi, &mut frame, &task, address, epfd, watched, op, events
+                ),
+                0
+            );
+            assert_eq!(crate::system_power::wake::snapshot().inhibitors, expected);
         }
-        task.credentials.write().set_authority(0,0).unwrap();
-        assert_eq!(wake_epoll_ctl(&mut abi,&mut frame,&task,address,epfd,watched,1,super::EPOLLIN|super::EPOLLWAKEUP),0);
-        assert_eq!(crate::system_power::wake::snapshot().inhibitors,before);
-        drop(abi);crate::task::clear_mock_current_task();
+        task.credentials.write().set_authority(0, 0).unwrap();
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut abi,
+                &mut frame,
+                &task,
+                address,
+                epfd,
+                watched,
+                1,
+                super::EPOLLIN | super::EPOLLWAKEUP
+            ),
+            0
+        );
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors, before);
+        drop(abi);
+        crate::task::clear_mock_current_task();
     }
     #[test_case]
     fn epoll_wakeup_lifetime_survives_dup_fork_and_exec_and_releases_on_last_close() {
-        let before=crate::system_power::wake::snapshot().inhibitors;
-        let (task,mut abi,mut frame,address,watched)=wake_epoll_fixture();
-        frame.set_arg(0,0);let epfd=super::sys_epoll_create1(&mut abi,&mut frame);
-        assert_eq!(wake_epoll_ctl(&mut abi,&mut frame,&task,address,epfd,watched,1,super::EPOLLIN|super::EPOLLWAKEUP),0);
-        let duplicate=super::duplicate_epoll_fd(&mut abi,epfd,10,false);assert_eq!(duplicate,10);
-        abi.remove_fd(epfd);assert_eq!(crate::system_power::wake::snapshot().inhibitors,before+1);
-        let mut child=abi.clone();child.unshare_fd_table();abi.remove_fd(duplicate);drop(abi);
-        assert_eq!(crate::system_power::wake::snapshot().inhibitors,before+1);
-        let mut image=crate::abi::linux::generic::LinuxAbi::default();
-        image.prepare_exec_fds(Some(&child),&task);
+        let before = crate::system_power::wake::snapshot().inhibitors;
+        let (task, mut abi, mut frame, address, watched) = wake_epoll_fixture();
+        frame.set_arg(0, 0);
+        let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
+        assert_eq!(
+            wake_epoll_ctl(
+                &mut abi,
+                &mut frame,
+                &task,
+                address,
+                epfd,
+                watched,
+                1,
+                super::EPOLLIN | super::EPOLLWAKEUP
+            ),
+            0
+        );
+        let duplicate = super::duplicate_epoll_fd(&mut abi, epfd, 10, false);
+        assert_eq!(duplicate, 10);
+        abi.remove_fd(epfd);
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors, before + 1);
+        let mut child = abi.clone();
+        child.unshare_fd_table();
+        abi.remove_fd(duplicate);
+        drop(abi);
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors, before + 1);
+        let mut image = crate::abi::linux::generic::LinuxAbi::default();
+        image.prepare_exec_fds(Some(&child), &task);
         assert!(image.get_handle(duplicate).is_some());
-        child.set_fd_flags(duplicate,super::FD_CLOEXEC).unwrap();
-        let mut closed_image=crate::abi::linux::generic::LinuxAbi::default();
-        closed_image.prepare_exec_fds(Some(&child),&task);
+        child.set_fd_flags(duplicate, super::FD_CLOEXEC).unwrap();
+        let mut closed_image = crate::abi::linux::generic::LinuxAbi::default();
+        closed_image.prepare_exec_fds(Some(&child), &task);
         assert!(closed_image.get_handle(duplicate).is_none());
-        drop(child);assert_eq!(crate::system_power::wake::snapshot().inhibitors,before+1);
-        drop(image);assert_eq!(crate::system_power::wake::snapshot().inhibitors,before);
-        drop(closed_image);crate::task::clear_mock_current_task();
+        drop(child);
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors, before + 1);
+        drop(image);
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors, before);
+        drop(closed_image);
+        crate::task::clear_mock_current_task();
     }
 
     #[test_case]
@@ -7105,8 +7691,10 @@ mod tests {
     #[test_case]
     fn write_serializes_a_large_relro_without_an_artificial_short_result() {
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
-        use crate::fs::vfs_v2::{core::FileSystemOperations, drivers::tmpfs::TmpFS, manager::VfsManager};
         use crate::fs::FileType;
+        use crate::fs::vfs_v2::{
+            core::FileSystemOperations, drivers::tmpfs::TmpFS, manager::VfsManager,
+        };
         use crate::library::std::usercopy::copy_to_user;
         use crate::task::{Task, TaskType};
         use alloc::sync::Arc;
@@ -7123,7 +7711,13 @@ mod tests {
             copy_to_user(&task, address + offset, &bytes).unwrap();
         }
         let fs = TmpFS::new(0);
-        fs.create(&fs.root_node(), &"relro".into(), FileType::RegularFile, 0o600).unwrap();
+        fs.create(
+            &fs.root_node(),
+            &"relro".into(),
+            FileType::RegularFile,
+            0o600,
+        )
+        .unwrap();
         let view = VfsManager::new_with_root(fs);
         let object = view.open("/relro", 2).unwrap();
         let handle = task.handle_table.insert(object.clone()).unwrap();
@@ -7143,7 +7737,11 @@ mod tests {
             assert_eq!(file.read_at(offset as u64, &mut bytes).unwrap(), 4);
             assert_eq!(bytes, [((offset / PAGE_SIZE) % 251) as u8; 4]);
         }
-        assert_eq!(file.seek(crate::object::capability::SeekFrom::Current(0)).unwrap(), LENGTH as u64);
+        assert_eq!(
+            file.seek(crate::object::capability::SeekFrom::Current(0))
+                .unwrap(),
+            LENGTH as u64
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -7173,37 +7771,61 @@ mod tests {
 
     #[test_case]
     fn vfs_stat_identity_is_nonzero_stable_across_views_and_distinct_between_filesystems() {
-        use crate::fs::vfs_v2::{core::FileSystemOperations, drivers::tmpfs::TmpFS, manager::VfsManager};
         use crate::fs::FileType;
+        use crate::fs::vfs_v2::{
+            core::FileSystemOperations, drivers::tmpfs::TmpFS, manager::VfsManager,
+        };
         let first = TmpFS::new(0);
         let second = TmpFS::new(0);
         let mut identities = alloc::vec::Vec::new();
         for filesystem in [&first, &second] {
-            let node = filesystem.create(&filesystem.root_node(), &"library.so".into(), FileType::RegularFile, 0o644).unwrap();
+            let node = filesystem
+                .create(
+                    &filesystem.root_node(),
+                    &"library.so".into(),
+                    FileType::RegularFile,
+                    0o644,
+                )
+                .unwrap();
             let mut path_stat = super::LinuxStat::from_metadata(&node.metadata().unwrap());
-            super::apply_node_attributes(&mut path_stat,node.as_ref()).unwrap();
+            super::apply_node_attributes(&mut path_stat, node.as_ref()).unwrap();
             assert!(path_stat.st_dev > 2 && path_stat.st_ino != 0);
-            let identity = (path_stat.st_dev,path_stat.st_ino);
+            let identity = (path_stat.st_dev, path_stat.st_ino);
             for _ in 0..2 {
                 let view = VfsManager::new_with_root((*filesystem).clone());
-                let opened = view.open("/library.so",0).unwrap();
+                let opened = view.open("/library.so", 0).unwrap();
                 // A duplicated kernel object retains the same open description.
-                for object in [opened.clone(),opened] {
-                    let (stat,birthtime) = super::stat_from_object(&object,17).unwrap();
-                    assert_eq!((stat.st_dev,stat.st_ino),identity);
-                    let mut statx = unsafe {core::mem::zeroed::<super::LinuxStatx>()};
-                    super::fill_statx_from_stat(&mut statx,&stat,birthtime,super::STATX_BASIC_STATS);
-                    let major = statx.stx_dev_major as u64; let minor = statx.stx_dev_minor as u64;
-                    let device = (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & 0xffff_ff00) << 12) | ((major & 0xffff_f000) << 32);
-                    assert_eq!(device,identity.0);
-                    assert_eq!(statx.stx_ino,identity.1);
+                for object in [opened.clone(), opened] {
+                    let (stat, birthtime) = super::stat_from_object(&object, 17).unwrap();
+                    assert_eq!((stat.st_dev, stat.st_ino), identity);
+                    let mut statx = unsafe { core::mem::zeroed::<super::LinuxStatx>() };
+                    super::fill_statx_from_stat(
+                        &mut statx,
+                        &stat,
+                        birthtime,
+                        super::STATX_BASIC_STATS,
+                    );
+                    let major = statx.stx_dev_major as u64;
+                    let minor = statx.stx_dev_minor as u64;
+                    let device = (minor & 0xff)
+                        | ((major & 0xfff) << 8)
+                        | ((minor & 0xffff_ff00) << 12)
+                        | ((major & 0xffff_f000) << 32);
+                    assert_eq!(device, identity.0);
+                    assert_eq!(statx.stx_ino, identity.1);
                 }
             }
             identities.push(identity);
         }
-        assert_ne!(identities[0].0,identities[1].0);
-        assert_eq!(super::filesystem_device(u64::MAX),Err(super::errno::EOVERFLOW));
-        assert_eq!(super::filesystem_device(u64::MAX-1),Err(super::errno::EOVERFLOW));
+        assert_ne!(identities[0].0, identities[1].0);
+        assert_eq!(
+            super::filesystem_device(u64::MAX),
+            Err(super::errno::EOVERFLOW)
+        );
+        assert_eq!(
+            super::filesystem_device(u64::MAX - 1),
+            Err(super::errno::EOVERFLOW)
+        );
     }
 
     #[test_case]
@@ -7344,42 +7966,93 @@ mod tests {
 
     #[test_case]
     fn linux_opendir_and_receive_only_evdev_use_native_flags() {
-        use super::{copy_from_user_pagewise, native_open_flags, open_from_evdev_compatible,
-            read_linux_dirents_to_user, O_CLOEXEC, O_DIRECTORY, O_LARGEFILE, O_NONBLOCK};
+        use super::{
+            O_CLOEXEC, O_DIRECTORY, O_LARGEFILE, O_NONBLOCK, copy_from_user_pagewise,
+            native_open_flags, open_from_evdev_compatible, read_linux_dirents_to_user,
+        };
         use crate::device::input::virtual_device::InputEndpoint;
-        use crate::fs::{vfs_v2::{capability_files::{CapabilityFiles, Export}, manager::VfsManager}, FileType};
+        use crate::fs::{
+            FileType,
+            vfs_v2::{
+                capability_files::{CapabilityFiles, Export},
+                manager::VfsManager,
+            },
+        };
         use crate::object::capability::StreamError;
         let vfs = VfsManager::new();
         vfs.create_dir("/input").unwrap();
         let (_, receiver) = InputEndpoint::pair(1, 0, 0).unwrap();
-        let input = CapabilityFiles::new(alloc::vec![Export::new("event0".into(), receiver, 1).unwrap()]).unwrap();
+        let input = CapabilityFiles::new(alloc::vec![
+            Export::new("event0".into(), receiver, 1).unwrap()
+        ])
+        .unwrap();
         vfs.mount(input, "/input", 0).unwrap();
         let (root, mount) = vfs.resolve_path("/").unwrap();
         let flags = native_open_flags(O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_LARGEFILE);
-        assert_eq!(flags & scarlet_abi::fs::VFS_O_DIRECTORY, scarlet_abi::fs::VFS_O_DIRECTORY);
+        assert_eq!(
+            flags & scarlet_abi::fs::VFS_O_DIRECTORY,
+            scarlet_abi::fs::VFS_O_DIRECTORY
+        );
         let directory = vfs.open_from(&root, &mount, "/input", flags).unwrap();
         let task = crate::task::new_user_task("published-opendir".into(), 1);
         let address = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
         task.allocate_stack_pages(address, 1).unwrap();
-        assert_eq!(read_linux_dirents_to_user(directory.as_stream().unwrap(), &task.vm_manager, address, 1024), Ok(32));
+        assert_eq!(
+            read_linux_dirents_to_user(
+                directory.as_stream().unwrap(),
+                &task.vm_manager,
+                address,
+                1024
+            ),
+            Ok(32)
+        );
         let mut entry = [0; 32];
-        assert_eq!(copy_from_user_pagewise(&mut entry, address, &task.vm_manager), 32);
+        assert_eq!(
+            copy_from_user_pagewise(&mut entry, address, &task.vm_manager),
+            32
+        );
         assert_eq!(&entry[19..26], b"event0\0");
 
-        let object = open_from_evdev_compatible(&vfs, &root, &mount, "/input/event0", scarlet_abi::fs::VFS_O_RDWR).unwrap();
-        assert!(crate::abi::linux::device::evdev::is_receive_only_input(&object));
+        let object = open_from_evdev_compatible(
+            &vfs,
+            &root,
+            &mount,
+            "/input/event0",
+            scarlet_abi::fs::VFS_O_RDWR,
+        )
+        .unwrap();
+        assert!(crate::abi::linux::device::evdev::is_receive_only_input(
+            &object
+        ));
         let object = crate::abi::linux::device::evdev::wrap(object);
-        assert!(matches!(object.as_file().unwrap().write(&[0; 16]), Err(StreamError::PermissionDenied)));
+        assert!(matches!(
+            object.as_file().unwrap().write(&[0; 16]),
+            Err(StreamError::PermissionDenied)
+        ));
 
         vfs.create_file("/ordinary", FileType::RegularFile).unwrap();
         let source = match vfs.open("/ordinary", 0).unwrap() {
             crate::object::KernelObject::File(file) => file,
             _ => panic!("ordinary source must be a file"),
         };
-        let ordinary = CapabilityFiles::new(alloc::vec![Export::new("data".into(), source, 1).unwrap()]).unwrap();
+        let ordinary =
+            CapabilityFiles::new(alloc::vec![Export::new("data".into(), source, 1).unwrap()])
+                .unwrap();
         vfs.create_dir("/published").unwrap();
         vfs.mount(ordinary, "/published", 0).unwrap();
-        assert_eq!(open_from_evdev_compatible(&vfs, &root, &mount, "/published/data", scarlet_abi::fs::VFS_O_RDWR).err().unwrap().kind, crate::fs::FileSystemErrorKind::PermissionDenied);
+        assert_eq!(
+            open_from_evdev_compatible(
+                &vfs,
+                &root,
+                &mount,
+                "/published/data",
+                scarlet_abi::fs::VFS_O_RDWR
+            )
+            .err()
+            .unwrap()
+            .kind,
+            crate::fs::FileSystemErrorKind::PermissionDenied
+        );
     }
 
     #[test_case]
@@ -7629,7 +8302,7 @@ mod tests {
 
     #[test_case]
     fn proc_process_directory_resolves_relative_status_open() {
-        use super::{proc_directory_path,stat_from_fd,path_at_to_absolute,O_CLOEXEC};
+        use super::{O_CLOEXEC, path_at_to_absolute, proc_directory_path, stat_from_fd};
         use crate::sched::scheduler::{get_task_by_id, register_task, reset};
         use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
 
@@ -7640,13 +8313,9 @@ mod tests {
         let pid = task.get_namespace_id();
         let directory_path = alloc::format!("/proc/{pid}");
         let mut abi = crate::abi::linux::generic::LinuxAbi::default();
-        let dirfd = super::super::proc_fd::open_process_directory(
-            &mut abi,
-            &task,
-            &directory_path,
-            0,
-        )
-        .unwrap();
+        let dirfd =
+            super::super::proc_fd::open_process_directory(&mut abi, &task, &directory_path, 0)
+                .unwrap();
         assert_eq!(
             proc_directory_path(&abi, &task, dirfd as i32),
             Some(directory_path.clone())
@@ -7655,49 +8324,34 @@ mod tests {
         assert_eq!(directory_stat.st_mode & S_IFMT, S_IFDIR);
 
         let vfs = crate::fs::VfsManager::new();
-        let status_path = path_at_to_absolute(
-            &abi,
-            &task,
-            &vfs,
-            dirfd as i32,
-            "status",
-        )
-        .unwrap();
+        let status_path = path_at_to_absolute(&abi, &task, &vfs, dirfd as i32, "status").unwrap();
         assert_eq!(status_path, alloc::format!("{directory_path}/status"));
         set_mock_current_task(task.clone());
-        let status_fd = super::super::proc_text::open_proc_text_file(
-            &mut abi,
-            &task,
-            &status_path,
-            O_CLOEXEC,
-        )
-        .unwrap();
-        let object = task.handle_table.get(abi.get_handle(status_fd).unwrap()).unwrap();
+        let status_fd =
+            super::super::proc_text::open_proc_text_file(&mut abi, &task, &status_path, O_CLOEXEC)
+                .unwrap();
+        let object = task
+            .handle_table
+            .get(abi.get_handle(status_fd).unwrap())
+            .unwrap();
         let file = object.as_file().unwrap();
         let mut status = alloc::vec![0u8; 512];
         let read = file.read(&mut status).unwrap();
-        assert!(core::str::from_utf8(&status[..read])
-            .unwrap()
-            .contains(&alloc::format!("Pid:\t{pid}\n")));
+        assert!(
+            core::str::from_utf8(&status[..read])
+                .unwrap()
+                .contains(&alloc::format!("Pid:\t{pid}\n"))
+        );
 
         drop(object);
-        let task_path = path_at_to_absolute(
-            &abi,
-            &task,
-            &vfs,
-            dirfd as i32,
-            "task",
-        )
-        .unwrap();
+        let task_path = path_at_to_absolute(&abi, &task, &vfs, dirfd as i32, "task").unwrap();
         assert_eq!(task_path, alloc::format!("{directory_path}/task"));
-        let task_fd = super::super::proc_fd::open_task_directory(
-            &mut abi,
-            &task,
-            &task_path,
-            0,
-        )
-        .unwrap();
-        let task_object = task.handle_table.get(abi.get_handle(task_fd).unwrap()).unwrap();
+        let task_fd =
+            super::super::proc_fd::open_task_directory(&mut abi, &task, &task_path, 0).unwrap();
+        let task_object = task
+            .handle_table
+            .get(abi.get_handle(task_fd).unwrap())
+            .unwrap();
         assert_eq!(
             super::super::proc_fd::directory_path(task_object.as_file().unwrap()),
             Some(task_path.as_str())

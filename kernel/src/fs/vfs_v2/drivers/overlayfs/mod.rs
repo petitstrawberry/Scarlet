@@ -208,17 +208,51 @@ impl VfsNode for OverlayNode {
         // Regular-file retained identity remains a separate capability.
         self.file_type == FileType::Directory
     }
-    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.inode.labels.clone())}
-    fn owner_identity(&self)->Option<crate::shield::identity::ActiveIdentity> {
-        Some(self.inode.owner.read().unwrap_or(crate::shield::identity::ActiveIdentity {
-            principal:crate::shield::identity::Principal(0),group:crate::shield::identity::Group(0),
-        }))
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        Some(self.inode.labels.clone())
     }
-    fn set_owner_identity(&self,principal:Option<crate::shield::identity::Principal>,group:Option<crate::shield::identity::Group>)->Result<(),FileSystemError> {
-        let task=crate::task::mytask().ok_or_else(||FileSystemError::new(FileSystemErrorKind::PermissionDenied,"No owner authority"))?;
-        if !task.credentials.read().permits(crate::shield::identity::MANAGE_OWNERS) {return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied,"No owner authority"));}
-        let mut slot=self.inode.owner.write();let mut owner=slot.unwrap_or(crate::shield::identity::ActiveIdentity {principal:crate::shield::identity::Principal(0),group:crate::shield::identity::Group(0)});
-        if let Some(principal)=principal {owner.principal=principal;}if let Some(group)=group {owner.group=group;}*slot=Some(owner);Ok(())
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
+        Some(
+            self.inode
+                .owner
+                .read()
+                .unwrap_or(crate::shield::identity::ActiveIdentity {
+                    principal: crate::shield::identity::Principal(0),
+                    group: crate::shield::identity::Group(0),
+                }),
+        )
+    }
+    fn set_owner_identity(
+        &self,
+        principal: Option<crate::shield::identity::Principal>,
+        group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        let task = crate::task::mytask().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::PermissionDenied, "No owner authority")
+        })?;
+        if !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_OWNERS)
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "No owner authority",
+            ));
+        }
+        let mut slot = self.inode.owner.write();
+        let mut owner = slot.unwrap_or(crate::shield::identity::ActiveIdentity {
+            principal: crate::shield::identity::Principal(0),
+            group: crate::shield::identity::Group(0),
+        });
+        if let Some(principal) = principal {
+            owner.principal = principal;
+        }
+        if let Some(group) = group {
+            owner.group = group;
+        }
+        *slot = Some(owner);
+        Ok(())
     }
 
     fn id(&self) -> u64 {
@@ -780,11 +814,16 @@ impl OverlayFS {
         entry: &Arc<VfsEntry>,
         path: &str,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.resolve_in_layer_with_mount(mount, entry, path).map(|(node, _)| node)
+        self.resolve_in_layer_with_mount(mount, entry, path)
+            .map(|(node, _)| node)
     }
 
-    fn resolve_in_layer_with_mount(&self, mount: &Arc<MountPoint>, entry: &Arc<VfsEntry>, path: &str)
-        -> Result<(Arc<dyn VfsNode>, Arc<MountPoint>), FileSystemError> {
+    fn resolve_in_layer_with_mount(
+        &self,
+        mount: &Arc<MountPoint>,
+        entry: &Arc<VfsEntry>,
+        path: &str,
+    ) -> Result<(Arc<dyn VfsNode>, Arc<MountPoint>), FileSystemError> {
         let mut current_mount = mount.clone();
         let mut current_node = entry.node();
 
@@ -823,14 +862,26 @@ impl OverlayFS {
         Ok((current_node, current_mount))
     }
 
-    fn open_backing(node: Arc<dyn VfsNode>, mount: Arc<MountPoint>, flags: u32)
-        -> Result<Arc<dyn FileObject>, FileSystemError> {
+    fn open_backing(
+        node: Arc<dyn VfsNode>,
+        mount: Arc<MountPoint>,
+        flags: u32,
+    ) -> Result<Arc<dyn FileObject>, FileSystemError> {
         VfsManager::check_device_open(&mount, &node.file_type()?)?;
-        let fs = node.filesystem().and_then(|f| f.upgrade()).ok_or_else(||
-            FileSystemError::new(FileSystemErrorKind::NotSupported, "Missing backing filesystem"))?;
+        let fs = node.filesystem().and_then(|f| f.upgrade()).ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Missing backing filesystem",
+            )
+        })?;
         let inner = fs.open(&node, flags)?;
         let entry = VfsEntry::new(None, "overlay-backing".to_string(), node);
-        Ok(Arc::new(crate::fs::vfs_v2::core::VfsFileObject::new(inner, entry, mount, "overlay-backing".to_string())))
+        Ok(Arc::new(crate::fs::vfs_v2::core::VfsFileObject::new(
+            inner,
+            entry,
+            mount,
+            "overlay-backing".to_string(),
+        )))
     }
 
     /// Check if a file is hidden by a whiteout file
@@ -1249,9 +1300,16 @@ impl FileSystemOperations for OverlayFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent_node,name,file_type,mode,None)
+        self.create_labeled(parent_node, name, file_type, mode, None)
     }
-    fn create_labeled(&self,parent_node:&Arc<dyn VfsNode>,name:&String,file_type:FileType,mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
+    fn create_labeled(
+        &self,
+        parent_node: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let _namespace = self.lock_namespace()?;
         let upper = self.get_upper_layer()?;
         let upper_fs = Self::fs_from_mount(&upper.0)?;
@@ -1339,7 +1397,11 @@ impl FileSystemOperations for OverlayFS {
         if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
             overlay_node.set_overlay_fs(Arc::clone(fs));
         }
-        if let Some(label)=label {label.initialize(overlay_node.as_ref()).map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?;}
+        if let Some(label) = label {
+            label.initialize(overlay_node.as_ref()).map_err(|reason| {
+                FileSystemError::new(FileSystemErrorKind::PermissionDenied, reason)
+            })?;
+        }
         Ok(overlay_node)
     }
 

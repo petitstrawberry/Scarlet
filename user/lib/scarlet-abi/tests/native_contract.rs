@@ -45,13 +45,13 @@ fn policy_update_records_and_operation_numbers_are_stable() {
         exec_transitions:64,exec_transition_count:72,file_create:80,file_create_count:88,
         file_relabel:96,file_relabel_count:104,reserved:112,
     });
-    assert_eq!(abi::shield::POLICY_UPDATE_VERSION,1);
-    assert_eq!(abi::Syscall::ShieldPolicyExtend as usize,1344);
-    assert_eq!(abi::Syscall::ShieldPolicyGeneration as usize,1345);
-    assert_eq!(abi::Syscall::ShieldFilePersistence as usize,1346);
+    assert_eq!(abi::shield::POLICY_UPDATE_VERSION, 1);
+    assert_eq!(abi::Syscall::ShieldPolicyExtend as usize, 1344);
+    assert_eq!(abi::Syscall::ShieldPolicyGeneration as usize, 1345);
+    assert_eq!(abi::Syscall::ShieldFilePersistence as usize, 1346);
     assert_layout!(abi::shield::RawPrincipalRangeTransition,16,4,{source:0,target:4,first:8,last:12});
     assert_layout!(abi::shield::RawPolicyUpdateWithPrincipalRanges,224,8,{base:0,principal_ranges:208,principal_range_count:216});
-    assert_eq!(abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION,3);
+    assert_eq!(abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION, 3);
 }
 
 #[test]
@@ -62,13 +62,12 @@ fn persistent_file_labels_use_symbolic_names_and_isolated_domains() {
     let key_b = abi::shield::file_label_metadata_name(&domain_b);
     assert_eq!(key_a.len(), 55);
     assert_eq!(&key_a[..23], b"trusted.scarlet.shield.".as_slice());
-    assert_eq!(
-        &key_a[23..],
-        b"01010101010101010101010101010101".as_slice()
-    );
+    assert_eq!(&key_a[23..], b"01010101010101010101010101010101".as_slice());
     assert_ne!(key_a, key_b);
     assert!(abi::shield::is_file_label_metadata_name(&key_a));
-    assert!(!abi::shield::is_file_label_metadata_name(b"trusted.scarlet.public"));
+    assert!(!abi::shield::is_file_label_metadata_name(
+        b"trusted.scarlet.public"
+    ));
 
     let mut value = [0u8; abi::shield::FILE_LABEL_METADATA_MAX_BYTES];
     let length = abi::shield::encode_file_label("u:object_r:private_file:s0", &mut value).unwrap();

@@ -688,7 +688,9 @@ impl TaskPool {
                 task.get_namespace().unregister_mapping_for_global(task_id);
                 return Err(error);
             }
-        } else { publish(); }
+        } else {
+            publish();
+        }
         Ok(task_id)
     }
 
@@ -949,7 +951,8 @@ impl TaskPool {
             self.retired_tasks.lock().is_empty(),
             "cannot reset task pool while task handles remain"
         );
-        let limit = self.tasks.lock().limits.stack_bytes / crate::environment::TASK_KERNEL_STACK_SIZE;
+        let limit =
+            self.tasks.lock().limits.stack_bytes / crate::environment::TASK_KERNEL_STACK_SIZE;
         crate::vm::configure_kstack_capacity(limit, || Ok(())).unwrap();
     }
 }
@@ -969,7 +972,9 @@ pub fn task_capacity_snapshot() -> super::task_capacity::CapacitySnapshot {
     })
 }
 
-pub fn configure_task_capacity(limits: super::task_capacity::TaskLimits) -> Result<(), &'static str> {
+pub fn configure_task_capacity(
+    limits: super::task_capacity::TaskLimits,
+) -> Result<(), &'static str> {
     let slots = super::task_capacity::validate(limits, crate::mem::pmm::stats().0)?;
     crate::vm::configure_kstack_capacity(slots, || {
         let mut state = get_task_pool().tasks.lock();
@@ -2360,7 +2365,9 @@ fn current_task_must_switch(task: &Task, current_cpu: usize, now_ns: u64) -> boo
             .peek()
             .is_some_and(|key| key.absolute_deadline_ns < snapshot.absolute_deadline_ns);
     }
-    if task.fixed_priority.effective()!=0 {return !task.cpu_allowed(current_cpu);}
+    if task.fixed_priority.effective() != 0 {
+        return !task.cpu_allowed(current_cpu);
+    }
     !task.cpu_allowed(current_cpu)
         || migration_target_for_task(task, current_cpu, now_ns, false).is_some()
 }
@@ -2396,7 +2403,10 @@ fn cpu_instant_util(cpu_id: usize) -> (u32, u32, usize) {
     drop(queue);
 
     for task_id in FIXED_QUEUES[cpu_id].lock().entries.keys().copied() {
-        if task_id!=idle_id {runnable_tasks=runnable_tasks.saturating_add(1);util_min=util_min.max(task_util_min_by_id(task_id));}
+        if task_id != idle_id {
+            runnable_tasks = runnable_tasks.saturating_add(1);
+            util_min = util_min.max(task_util_min_by_id(task_id));
+        }
     }
     let deadline_queue = deadline_queue(cpu_id).lock();
     for task_id in deadline_queue.task_ids() {
@@ -2549,7 +2559,8 @@ fn account_local_fair_clock(cpu_id: usize, now_ns: u64) {
         return;
     }
     if let Some(task) = TaskPool::get_task(task_id)
-        && !task.deadline_enabled() && task.fixed_priority.effective() == 0
+        && !task.deadline_enabled()
+        && task.fixed_priority.effective() == 0
     {
         update_curr_fair(&task, &mut fair_queue(cpu_id).lock(), now_ns);
     }
@@ -2813,7 +2824,9 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let is_fixed = task.fixed_priority.effective() != 0;
     let duration_ns = if let Some(snapshot) = deadline {
         snapshot.remaining_ns
-    } else if is_fixed {task.time_slice_duration_ns()} else {
+    } else if is_fixed {
+        task.time_slice_duration_ns()
+    } else {
         if fair_slice_ns == 0 {
             task.time_slice_duration_ns()
         } else {
@@ -2828,7 +2841,8 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let deadline_anomaly = deadline.is_some_and(|snapshot| {
         snapshot.throttled || snapshot.remaining_ns == 0 || snapshot.absolute_deadline_ns <= now_ns
     });
-    let fair_anomaly = deadline.is_none() && !is_fixed
+    let fair_anomaly = deadline.is_none()
+        && !is_fixed
         && (duration_ns == 0 || (fair_slice_ns != 0 && fair_vdeadline_ns <= fair_vruntime_ns));
     drop(task);
     let handler = Arc::new(SliceTimerHandler {
@@ -3299,7 +3313,8 @@ fn task_present_on_cpu(cpu_id: usize, task_id: usize) -> bool {
         return true;
     }
 
-    fair_queue(cpu_id).lock().contains(&task_id) || FIXED_QUEUES[cpu_id].lock().entries.contains_key(&task_id)
+    fair_queue(cpu_id).lock().contains(&task_id)
+        || FIXED_QUEUES[cpu_id].lock().entries.contains_key(&task_id)
 }
 
 fn cpu_runnable_weight(cpu_id: usize) -> u64 {
@@ -3321,7 +3336,9 @@ fn cpu_runnable_weight(cpu_id: usize) -> u64 {
 
     drop(queue);
     for task_id in FIXED_QUEUES[cpu_id].lock().entries.keys().copied() {
-        if task_id!=idle_id {weight=weight.saturating_add(runnable_task_weight(task_id));}
+        if task_id != idle_id {
+            weight = weight.saturating_add(runnable_task_weight(task_id));
+        }
     }
     weight
 }
@@ -3635,7 +3652,9 @@ fn steal_fixed_task(target_cpu: usize, now_ns: u64) -> Option<usize> {
 
 fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
     let _pressure_change = SchedulerPressureChange::begin();
-    if let Some(task)=steal_fixed_task(target_cpu,now_ns) {return Some(task);}
+    if let Some(task) = steal_fixed_task(target_cpu, now_ns) {
+        return Some(task);
+    }
     let online_mask = online_cpu_mask();
     let online_count = online_mask.count_ones() as usize;
     if online_count <= 1 || online_mask & cpu_mask_bit(target_cpu) == 0 {
@@ -4144,7 +4163,9 @@ fn validate_deadline_params(params: TaskDeadlineParams) -> Result<(), &'static s
 fn scheduler_affinity_snapshot(task: &Task) -> SchedulerAffinity {
     let mask = task.cpu_affinity_mask();
     match task.scheduler_affinity_kind() {
-        SCHED_AFFINITY_KIND_ANY if task.resource_membership.allowed_cpus() == usize::MAX => SchedulerAffinity::Any,
+        SCHED_AFFINITY_KIND_ANY if task.resource_membership.allowed_cpus() == usize::MAX => {
+            SchedulerAffinity::Any
+        }
         SCHED_AFFINITY_KIND_SINGLE if mask.is_power_of_two() => {
             SchedulerAffinity::Single(mask.trailing_zeros() as usize)
         }
@@ -4161,9 +4182,18 @@ fn supported_cpu_mask() -> usize {
     }
 }
 
-fn validate_scheduler_affinity(task: &Task, affinity: SchedulerAffinity) -> Result<(), SchedulerControlResult> {
-    let mask = match affinity {SchedulerAffinity::Any => usize::MAX, SchedulerAffinity::Single(cpu) => 1usize.checked_shl(cpu as u32).unwrap_or(0), SchedulerAffinity::Mask(mask) => mask};
-    if mask & task.resource_membership.allowed_cpus() & online_cpu_mask() as usize == 0 {return Err(SchedulerControlResult::EmptyCpuMask);}
+fn validate_scheduler_affinity(
+    task: &Task,
+    affinity: SchedulerAffinity,
+) -> Result<(), SchedulerControlResult> {
+    let mask = match affinity {
+        SchedulerAffinity::Any => usize::MAX,
+        SchedulerAffinity::Single(cpu) => 1usize.checked_shl(cpu as u32).unwrap_or(0),
+        SchedulerAffinity::Mask(mask) => mask,
+    };
+    if mask & task.resource_membership.allowed_cpus() & online_cpu_mask() as usize == 0 {
+        return Err(SchedulerControlResult::EmptyCpuMask);
+    }
     match affinity {
         SchedulerAffinity::Any => Ok(()),
         SchedulerAffinity::Single(cpu_id) => {
@@ -4275,7 +4305,8 @@ fn reconfigure_deadline_state(
         state.remaining_ns = params.runtime_ns;
         state.absolute_deadline_ns = now_ns.saturating_add(params.deadline_ns);
         state.next_replenishment_ns = now_ns.saturating_add(params.period_ns);
-        task.resource_membership.record_deadline_cpu(Some(target_cpu));
+        task.resource_membership
+            .record_deadline_cpu(Some(target_cpu));
         state.cpu_id = target_cpu;
         state.throttled = false;
         state.deadline_misses = 0;
@@ -4317,16 +4348,29 @@ fn apply_scheduler_attributes(task: &Task, attributes: SchedulerAttr) -> Schedul
 
     match attributes.policy {
         SchedulerPolicy::Fifo { priority } => {
-            if priority==0 {return SchedulerControlResult::InvalidArgument;}
-            if !task.credentials.read().permits(crate::shield::identity::MANAGE_SCHEDULING) {return SchedulerControlResult::PermissionDenied;}
-            if task.deadline_enabled() {release_task_deadline(task);}
-            publish_fair_fallback(task,attributes,true);
-            if set_task_fifo_priority(task,priority).is_err() {return SchedulerControlResult::Busy;}
+            if priority == 0 {
+                return SchedulerControlResult::InvalidArgument;
+            }
+            if !task
+                .credentials
+                .read()
+                .permits(crate::shield::identity::MANAGE_SCHEDULING)
+            {
+                return SchedulerControlResult::PermissionDenied;
+            }
+            if task.deadline_enabled() {
+                release_task_deadline(task);
+            }
+            publish_fair_fallback(task, attributes, true);
+            if set_task_fifo_priority(task, priority).is_err() {
+                return SchedulerControlResult::Busy;
+            }
             SchedulerControlResult::Ok
         }
         SchedulerPolicy::Fair => {
-            let previous=task.fixed_priority.effective();task.fixed_priority.configure(0);
-            fixed_priority_changed(task,previous);
+            let previous = task.fixed_priority.effective();
+            task.fixed_priority.configure(0);
+            fixed_priority_changed(task, previous);
             if task.deadline_enabled() {
                 let _ = update_curr_deadline(task, get_time_ns());
                 release_task_deadline(task);
@@ -4343,7 +4387,9 @@ fn apply_scheduler_attributes(task: &Task, attributes: SchedulerAttr) -> Schedul
             if cpu_id >= MAX_NUM_CPUS || !is_cpu_online(cpu_id) {
                 return SchedulerControlResult::CpuOffline;
             }
-            if task.resource_membership.allowed_cpus() & (1usize << cpu_id) == 0 {return SchedulerControlResult::EmptyCpuMask;}
+            if task.resource_membership.allowed_cpus() & (1usize << cpu_id) == 0 {
+                return SchedulerControlResult::EmptyCpuMask;
+            }
             let Ok(units) = deadline_bandwidth_units(params) else {
                 return SchedulerControlResult::InvalidArgument;
             };
@@ -4377,7 +4423,9 @@ fn apply_current_task_scheduler_transaction(
     task: &Task,
     transaction: SchedulerTransaction,
 ) -> SchedulerControlResult {
-    let Ok(_placement_transaction) = crate::task::resource_group::transaction() else {return SchedulerControlResult::Busy;};
+    let Ok(_placement_transaction) = crate::task::resource_group::transaction() else {
+        return SchedulerControlResult::Busy;
+    };
     match transaction {
         SchedulerTransaction::Attributes(attributes) => {
             apply_scheduler_attributes(task, attributes)
@@ -4419,7 +4467,9 @@ fn apply_current_task_scheduler_transaction(
                 if !is_cpu_online(cpu_id) {
                     return SchedulerControlResult::CpuOffline;
                 }
-                if task.resource_membership.allowed_cpus() & (1usize << cpu_id) == 0 {return SchedulerControlResult::EmptyCpuMask;}
+                if task.resource_membership.allowed_cpus() & (1usize << cpu_id) == 0 {
+                    return SchedulerControlResult::EmptyCpuMask;
+                }
                 let Ok(units) = deadline_bandwidth_units(params) else {
                     return SchedulerControlResult::InvalidArgument;
                 };
@@ -4870,8 +4920,15 @@ pub fn current_task_scheduler_attr() -> Option<SchedulerAttrSnapshot> {
             params: snapshot.params,
             cpu_id: snapshot.cpu_id,
         })
-        .unwrap_or_else(||if task.fixed_priority.base()==0 {SchedulerPolicy::Fair}
-            else {SchedulerPolicy::Fifo {priority:task.fixed_priority.base()}});
+        .unwrap_or_else(|| {
+            if task.fixed_priority.base() == 0 {
+                SchedulerPolicy::Fair
+            } else {
+                SchedulerPolicy::Fifo {
+                    priority: task.fixed_priority.base(),
+                }
+            }
+        });
     Some(SchedulerAttrSnapshot {
         policy,
         affinity: scheduler_affinity_snapshot(&task),
@@ -4908,7 +4965,9 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
     .then_some(task.last_cpu.load(Ordering::SeqCst))
     .filter(|cpu_id| *cpu_id < MAX_NUM_CPUS);
     let now_ns = get_time_ns();
-    let fair_slice_remaining_ns = if matches!(attributes.policy, SchedulerPolicy::Fair) && task.fixed_priority.effective()==0 {
+    let fair_slice_remaining_ns = if matches!(attributes.policy, SchedulerPolicy::Fair)
+        && task.fixed_priority.effective() == 0
+    {
         let elapsed = task
             .exec_clock
             .started_at()
@@ -5064,8 +5123,10 @@ fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
     }
     let mut queue = fair_queue(cpu_id).lock();
     if task.fixed_priority.effective() != 0 {
-        drop(queue);task.sched_on_rq.store(false,Ordering::SeqCst);
-        enqueue_fixed(cpu_id,task,mode);return;
+        drop(queue);
+        task.sched_on_rq.store(false, Ordering::SeqCst);
+        enqueue_fixed(cpu_id, task, mode);
+        return;
     }
     let key = place_entity(task, &queue, mode);
     queue.insert(task.get_id(), key, key.vruntime, task.sched_weight());
@@ -5263,8 +5324,11 @@ fn push_ready_task_with_mode(cpu_id: usize, task_id: usize, mode: PlaceMode) {
     } else {
         cpu_id
     };
-    if task.fixed_priority.effective() != 0 {enqueue_fixed(cpu_id,&task,mode);}
-    else {enqueue_fair(cpu_id, &task, mode);}
+    if task.fixed_priority.effective() != 0 {
+        enqueue_fixed(cpu_id, &task, mode);
+    } else {
+        enqueue_fair(cpu_id, &task, mode);
+    }
 }
 
 /// Mark a process-fork child for focused first-run tracing.
@@ -5419,7 +5483,8 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
             {
                 if let Ok(target) = u32::try_from(parent_id) {
                     let event = crate::ipc::event::Event::immediate_process_control(
-                        target, crate::ipc::event::ProcessControlType::ChildExit,
+                        target,
+                        crate::ipc::event::ProcessControlType::ChildExit,
                     );
                     parent.event_queue.lock().enqueue(event);
                     wake_task(parent_id);
@@ -5486,13 +5551,21 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         old_id.unwrap_or(0) as u64,
     );
 
-    let keep_current_fixed = old_task.as_deref().is_some_and(|task|keep_running_fixed(task,cpu_id));
+    let keep_current_fixed = old_task
+        .as_deref()
+        .is_some_and(|task| keep_running_fixed(task, cpu_id));
     let mut next_id: Option<usize> = None;
     'outer: loop {
-        if keep_current_deadline { break 'outer; }
-        let candidate=pick_deadline(cpu_id);
-        if candidate.is_none() && keep_current_fixed {break 'outer;}
-        let candidate = candidate.or_else(||pick_fixed(cpu_id)).or_else(|| pick_fair(cpu_id));
+        if keep_current_deadline {
+            break 'outer;
+        }
+        let candidate = pick_deadline(cpu_id);
+        if candidate.is_none() && keep_current_fixed {
+            break 'outer;
+        }
+        let candidate = candidate
+            .or_else(|| pick_fixed(cpu_id))
+            .or_else(|| pick_fair(cpu_id));
         crate::breadcrumb::drop(
             crate::breadcrumb::PICK_QUEUE_DONE,
             cpu_id as u64,
@@ -5906,8 +5979,11 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
     }
 
     let placed = if let Some(reservation) = current_task.deadline_snapshot() {
-        reservation.cpu_id == cpu_id && current_task.resource_membership.allowed_cpus() & (1usize << cpu_id) != 0
-    } else {current_task.cpu_allowed(cpu_id)};
+        reservation.cpu_id == cpu_id
+            && current_task.resource_membership.allowed_cpus() & (1usize << cpu_id) != 0
+    } else {
+        current_task.cpu_allowed(cpu_id)
+    };
     if task_state_requires_exit_reschedule(current_task.get_state()) || !placed {
         schedule(trapframe);
     }
@@ -6157,7 +6233,9 @@ pub fn current_task_is_idle(cpu_id: usize) -> bool {
 
 pub fn has_ready_tasks(cpu_id: usize) -> bool {
     assert_valid_cpu_id(cpu_id);
-    !DEADLINE_QUEUES[cpu_id].lock().is_empty() || !FIXED_QUEUES[cpu_id].lock().entries.is_empty() || !FAIR_QUEUES[cpu_id].lock().is_empty()
+    !DEADLINE_QUEUES[cpu_id].lock().is_empty()
+        || !FIXED_QUEUES[cpu_id].lock().entries.is_empty()
+        || !FAIR_QUEUES[cpu_id].lock().is_empty()
 }
 
 pub fn get_task_by_id(task_id: usize) -> Option<Arc<Task>> {
@@ -6237,7 +6315,8 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
             let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
                 .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
-            DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
+            DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu]
+                .store(get_cpu().get_cpuid(), Ordering::SeqCst);
             DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
             println!(
                 "[SMPDBG wake-ipi-send] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
@@ -6316,7 +6395,9 @@ pub fn remove_from_ready_queues(task_id: usize) {
         if deadline_queue(cpu_id).lock().remove(task_id).is_some() {
             task.deadline_on_rq.store(false, Ordering::SeqCst);
         }
-        if FIXED_QUEUES[cpu_id].lock().remove(task_id) || fair_queue(cpu_id).lock().remove(task_id).is_some() {
+        if FIXED_QUEUES[cpu_id].lock().remove(task_id)
+            || fair_queue(cpu_id).lock().remove(task_id).is_some()
+        {
             task.sched_on_rq.store(false, Ordering::SeqCst);
         }
     });
@@ -6348,7 +6429,9 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
         }
 
         for task_id in FIXED_QUEUES[cpu_id].lock().entries.keys().copied() {
-            if !ids.contains(&task_id) {ids.push(task_id);}
+            if !ids.contains(&task_id) {
+                ids.push(task_id);
+            }
         }
         let queue = fair_queue(cpu_id).lock();
         for task_id in queue.task_ids() {
@@ -6605,7 +6688,7 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &Task) {
 pub fn reset() {
     for cpu_id in 0..MAX_NUM_CPUS {
         fair_queue(cpu_id).lock().clear();
-        *FIXED_QUEUES[cpu_id].lock()=FixedQueue::new();
+        *FIXED_QUEUES[cpu_id].lock() = FixedQueue::new();
         deadline_queue(cpu_id).lock().clear();
         DEADLINE_ADMISSION[cpu_id].store(0, Ordering::SeqCst);
         set_current_task_id(cpu_id, None);
@@ -6826,57 +6909,91 @@ mod tests {
 
     #[test_case]
     fn fixed_priority_queue_orders_priority_then_fifo_and_preserves_fair_work() {
-        reset();register_online_cpu(0);
-        let mut ids=Vec::new();
-        for priority in [0,5,5,8] {
-            let id=register_task(Task::new("fixed-order".into(),0,TaskType::Kernel));
-            let task=TaskPool::get_task(id).unwrap();task.fixed_priority.configure(priority);
-            task.state.store(TaskState::Ready,Ordering::SeqCst);
-            push_ready_task_with_mode(0,id,PlaceMode::New);ids.push(id);
+        reset();
+        register_online_cpu(0);
+        let mut ids = Vec::new();
+        for priority in [0, 5, 5, 8] {
+            let id = register_task(Task::new("fixed-order".into(), 0, TaskType::Kernel));
+            let task = TaskPool::get_task(id).unwrap();
+            task.fixed_priority.configure(priority);
+            task.state.store(TaskState::Ready, Ordering::SeqCst);
+            push_ready_task_with_mode(0, id, PlaceMode::New);
+            ids.push(id);
         }
-        assert_eq!(pick_fixed(0),Some(ids[3]));assert_eq!(pick_fixed(0),Some(ids[1]));assert_eq!(pick_fixed(0),Some(ids[2]));
-        assert_eq!(pick_fixed(0),None);assert_eq!(pick_fair(0),Some(ids[0]));reset();
+        assert_eq!(pick_fixed(0), Some(ids[3]));
+        assert_eq!(pick_fixed(0), Some(ids[1]));
+        assert_eq!(pick_fixed(0), Some(ids[2]));
+        assert_eq!(pick_fixed(0), None);
+        assert_eq!(pick_fair(0), Some(ids[0]));
+        reset();
     }
 
     #[test_case]
     fn fifo_keeps_equal_priority_preemption_order_and_yields_only_to_peers() {
-        reset();let cpu=get_cpu().get_cpuid();register_online_cpu(cpu);
-        let running_id=register_task(Task::new("fifo-running".into(),0,TaskType::Kernel));
-        let running=TaskPool::get_task(running_id).unwrap();running.fixed_priority.configure(5);
-        let original=running.fixed_priority.enqueue_ticket(true);
-        running.state.store(TaskState::Running,Ordering::SeqCst);running.running_cpu.store(cpu,Ordering::SeqCst);
-        set_current_task_id(cpu,Some(running_id));
-        let peer_id=register_task(Task::new("fifo-peer".into(),0,TaskType::Kernel));
-        let peer=TaskPool::get_task(peer_id).unwrap();peer.fixed_priority.configure(5);peer.state.store(TaskState::Ready,Ordering::SeqCst);
-        push_ready_task_with_mode(cpu,peer_id,PlaceMode::New);
-        assert!(keep_running_fixed(&running,cpu));
-        running.fixed_priority.request_yield();assert!(!keep_running_fixed(&running,cpu));
-        assert!(running.fixed_priority.enqueue_ticket(false)>original);
+        reset();
+        let cpu = get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let running_id = register_task(Task::new("fifo-running".into(), 0, TaskType::Kernel));
+        let running = TaskPool::get_task(running_id).unwrap();
+        running.fixed_priority.configure(5);
+        let original = running.fixed_priority.enqueue_ticket(true);
+        running.state.store(TaskState::Running, Ordering::SeqCst);
+        running.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_id(cpu, Some(running_id));
+        let peer_id = register_task(Task::new("fifo-peer".into(), 0, TaskType::Kernel));
+        let peer = TaskPool::get_task(peer_id).unwrap();
+        peer.fixed_priority.configure(5);
+        peer.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task_with_mode(cpu, peer_id, PlaceMode::New);
+        assert!(keep_running_fixed(&running, cpu));
+        running.fixed_priority.request_yield();
+        assert!(!keep_running_fixed(&running, cpu));
+        assert!(running.fixed_priority.enqueue_ticket(false) > original);
         // A normal scheduling boundary does not rotate equal-priority FIFO.
-        assert!(keep_running_fixed(&running,cpu));
-        peer.fixed_priority.configure(8);fixed_priority_changed(&peer,5);
-        assert!(!keep_running_fixed(&running,cpu));
-        assert_eq!(pick_next(get_cpu()),(Some(running_id),Some(peer_id)));
+        assert!(keep_running_fixed(&running, cpu));
+        peer.fixed_priority.configure(8);
+        fixed_priority_changed(&peer, 5);
+        assert!(!keep_running_fixed(&running, cpu));
+        assert_eq!(pick_next(get_cpu()), (Some(running_id), Some(peer_id)));
         release_deferred_prev(cpu);
         assert!(FIXED_QUEUES[cpu].lock().entries.contains_key(&running_id));
-        running.running_cpu.store(NO_CPU,Ordering::SeqCst);peer.running_cpu.store(NO_CPU,Ordering::SeqCst);
-        drop(running);drop(peer);reset();
+        running.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        peer.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        drop(running);
+        drop(peer);
+        reset();
     }
 
     #[test_case]
     fn fifo_configuration_requires_authority_and_donation_rekeys_a_queued_task() {
-        reset();register_online_cpu(0);
-        let id=register_task(Task::new("fifo-authority".into(),0,TaskType::Kernel));
-        let task=TaskPool::get_task(id).unwrap();task.state.store(TaskState::Ready,Ordering::SeqCst);
-        push_ready_task_with_mode(0,id,PlaceMode::New);
-        let lease=crate::task::fixed_priority::PriorityLease::enter(&task,7).unwrap();
-        assert!(!fair_queue(0).lock().contains(&id));assert!(FIXED_QUEUES[0].lock().entries.contains_key(&id));
-        drop(lease);assert!(fair_queue(0).lock().contains(&id));assert!(!FIXED_QUEUES[0].lock().entries.contains_key(&id));
-        task.credentials.write().set_authority(0,0).unwrap();
-        assert_eq!(apply_scheduler_attributes(&task,SchedulerAttr {
-            policy:SchedulerPolicy::Fifo {priority:9},affinity:SchedulerAffinity::Any,nice:0,util_min:0,
-        }),SchedulerControlResult::PermissionDenied);
-        assert_eq!(task.fixed_priority.base(),0);drop(task);reset();
+        reset();
+        register_online_cpu(0);
+        let id = register_task(Task::new("fifo-authority".into(), 0, TaskType::Kernel));
+        let task = TaskPool::get_task(id).unwrap();
+        task.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task_with_mode(0, id, PlaceMode::New);
+        let lease = crate::task::fixed_priority::PriorityLease::enter(&task, 7).unwrap();
+        assert!(!fair_queue(0).lock().contains(&id));
+        assert!(FIXED_QUEUES[0].lock().entries.contains_key(&id));
+        drop(lease);
+        assert!(fair_queue(0).lock().contains(&id));
+        assert!(!FIXED_QUEUES[0].lock().entries.contains_key(&id));
+        task.credentials.write().set_authority(0, 0).unwrap();
+        assert_eq!(
+            apply_scheduler_attributes(
+                &task,
+                SchedulerAttr {
+                    policy: SchedulerPolicy::Fifo { priority: 9 },
+                    affinity: SchedulerAffinity::Any,
+                    nice: 0,
+                    util_min: 0,
+                }
+            ),
+            SchedulerControlResult::PermissionDenied
+        );
+        assert_eq!(task.fixed_priority.base(), 0);
+        drop(task);
+        reset();
     }
 
     #[test_case]
@@ -7391,21 +7508,33 @@ mod tests {
 
     #[test_case]
     fn child_completion_event_is_queued_once_and_respects_notification_suppression() {
-        use crate::ipc::event::{EventContent,ProcessControlType};
+        use crate::ipc::event::{EventContent, ProcessControlType};
         reset();
-        let parent_id=register_task(Task::new("parent".into(),1,TaskType::User));
-        let child_id=register_task(Task::new("child".into(),1,TaskType::User));
-        let parent=get_task_by_id(parent_id).unwrap();let child=get_task_by_id(child_id).unwrap();
-        assert!(parent.adopt_registered_child(&child));child.set_state(TaskState::Zombie);
-        finalize_zombie(child_id,Some(parent_id));finalize_zombie(child_id,Some(parent_id));
-        let event=parent.event_queue.lock().dequeue().unwrap();
-        assert!(matches!(event.content,EventContent::ProcessControl(ProcessControlType::ChildExit)));
+        let parent_id = register_task(Task::new("parent".into(), 1, TaskType::User));
+        let child_id = register_task(Task::new("child".into(), 1, TaskType::User));
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(parent.adopt_registered_child(&child));
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(parent_id));
+        finalize_zombie(child_id, Some(parent_id));
+        let event = parent.event_queue.lock().dequeue().unwrap();
+        assert!(matches!(
+            event.content,
+            EventContent::ProcessControl(ProcessControlType::ChildExit)
+        ));
         assert!(parent.event_queue.lock().dequeue().is_none());
-        let quiet_id=register_task(Task::new("quiet-child".into(),1,TaskType::User));
-        let quiet=get_task_by_id(quiet_id).unwrap();assert!(parent.adopt_registered_child(&quiet));
-        quiet.parent_exit_event.store(false,Ordering::Release);quiet.set_state(TaskState::Zombie);
-        finalize_zombie(quiet_id,Some(parent_id));assert!(parent.event_queue.lock().dequeue().is_none());
-        drop(child);drop(quiet);drop(parent);reset();
+        let quiet_id = register_task(Task::new("quiet-child".into(), 1, TaskType::User));
+        let quiet = get_task_by_id(quiet_id).unwrap();
+        assert!(parent.adopt_registered_child(&quiet));
+        quiet.parent_exit_event.store(false, Ordering::Release);
+        quiet.set_state(TaskState::Zombie);
+        finalize_zombie(quiet_id, Some(parent_id));
+        assert!(parent.event_queue.lock().dequeue().is_none());
+        drop(child);
+        drop(quiet);
+        drop(parent);
+        reset();
     }
     #[test_case]
     fn test_finalize_zombie_wakes_parent_thread_when_parent_is_missing() {
@@ -7490,10 +7619,7 @@ mod tests {
         reset();
         let cpu_id = get_cpu().get_cpuid();
         let task = Task::new("UnregisteredCurrent".to_string(), 1, TaskType::Kernel);
-        CURRENT_TASK_PTRS[cpu_id].store(
-            core::ptr::from_ref(&task) as *mut Task,
-            Ordering::SeqCst,
-        );
+        CURRENT_TASK_PTRS[cpu_id].store(core::ptr::from_ref(&task) as *mut Task, Ordering::SeqCst);
         CURRENT_TASK_IDS[cpu_id].store(encode_task_id(Some(1)), Ordering::SeqCst);
         assert!(current_task(cpu_id).is_none());
         set_current_task_id(cpu_id, None);
@@ -8367,10 +8493,7 @@ mod tests {
             drop(task);
             assert!(task_pool.remove_task(task_id));
         }
-        assert_eq!(
-            task_pool.reap_retired_tasks_for_test(),
-            capacity
-        );
+        assert_eq!(task_pool.reap_retired_tasks_for_test(), capacity);
     }
 
     #[test_case]
@@ -8385,8 +8508,16 @@ mod tests {
         configure_task_capacity(limits).unwrap();
         let first = register_task(Task::new("capacity-first".into(), 1, TaskType::User));
         let second = register_task(Task::new("capacity-second".into(), 1, TaskType::User));
-        assert!(try_register_task(Task::new("capacity-overflow".into(), 1, TaskType::User)).is_err());
-        assert!(configure_task_capacity(super::super::task_capacity::TaskLimits { max_user: 1, ..limits }).is_err());
+        assert!(
+            try_register_task(Task::new("capacity-overflow".into(), 1, TaskType::User)).is_err()
+        );
+        assert!(
+            configure_task_capacity(super::super::task_capacity::TaskLimits {
+                max_user: 1,
+                ..limits
+            })
+            .is_err()
+        );
         assert_eq!(task_capacity_snapshot().limits, limits);
         for id in [first, second] {
             let task = get_task_by_id(id).unwrap();

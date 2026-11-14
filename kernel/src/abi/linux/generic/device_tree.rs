@@ -1,10 +1,6 @@
 //! View-filtered Linux device discovery. Storage and lifecycle remain native.
 use crate::{
-    device::{
-        DeviceType,
-        lifecycle::Endpoint,
-        manager::DeviceManager,
-    },
+    device::{DeviceType, lifecycle::Endpoint, manager::DeviceManager},
     fs::{
         FileMetadata, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind as K,
         FileSystemType, FileType, SeekFrom,
@@ -55,7 +51,16 @@ impl Node {
     }
 }
 impl VfsNode for Node {
-    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {let fs=self.fs.upgrade()?;let mut labels=fs.labels.write();Some(labels.entry(self.id).or_insert_with(crate::shield::file::Labels::new).clone())}
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        let fs = self.fs.upgrade()?;
+        let mut labels = fs.labels.write();
+        Some(
+            labels
+                .entry(self.id)
+                .or_insert_with(crate::shield::file::Labels::new)
+                .clone(),
+        )
+    }
 
     fn id(&self) -> u64 {
         self.id
@@ -93,14 +98,16 @@ impl VfsNode for Node {
     }
 }
 struct DeviceTree {
-    labels: crate::sync::IrqRwSpinLock<alloc::collections::BTreeMap<u64,Arc<crate::shield::file::Labels>>>,
+    labels: crate::sync::IrqRwSpinLock<
+        alloc::collections::BTreeMap<u64, Arc<crate::shield::file::Labels>>,
+    >,
     id: FileSystemId,
     root: Arc<Node>,
 }
 impl DeviceTree {
     fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            labels:crate::sync::IrqRwSpinLock::new(alloc::collections::BTreeMap::new()),
+            labels: crate::sync::IrqRwSpinLock::new(alloc::collections::BTreeMap::new()),
             id: FileSystemId::new(),
             root: Arc::new(Node {
                 id: 1,

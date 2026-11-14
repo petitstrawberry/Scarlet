@@ -607,7 +607,10 @@ impl TaskEventQueue {
     /// consumers' events or the FIFO order within a priority.
     pub(crate) fn dequeue_matching(&mut self, matches: impl Fn(&Event) -> bool) -> Option<Event> {
         let (priority, index) = self.events.iter().rev().find_map(|(&priority, queue)| {
-            queue.iter().position(&matches).map(|index| (priority, index))
+            queue
+                .iter()
+                .position(&matches)
+                .map(|index| (priority, index))
         })?;
         let queue = self.events.get_mut(&priority).unwrap();
         let event = queue.remove(index);
@@ -1749,16 +1752,39 @@ mod tests {
     #[test_case]
     fn selective_dequeue_preserves_unmatched_events_and_priority_order() {
         let mut queue = TaskEventQueue::new();
-        queue.enqueue(Event::direct_process_control(1, ProcessControlType::Alarm, EventPriority::Low, true));
-        queue.enqueue(Event::direct_process_control(2, ProcessControlType::ChildExit, EventPriority::High, true));
-        queue.enqueue(Event::direct_process_control(3, ProcessControlType::ChildExit, EventPriority::High, true));
-        let child_exit = |event: &Event| matches!(event.content, EventContent::ProcessControl(ProcessControlType::ChildExit));
+        queue.enqueue(Event::direct_process_control(
+            1,
+            ProcessControlType::Alarm,
+            EventPriority::Low,
+            true,
+        ));
+        queue.enqueue(Event::direct_process_control(
+            2,
+            ProcessControlType::ChildExit,
+            EventPriority::High,
+            true,
+        ));
+        queue.enqueue(Event::direct_process_control(
+            3,
+            ProcessControlType::ChildExit,
+            EventPriority::High,
+            true,
+        ));
+        let child_exit = |event: &Event| {
+            matches!(
+                event.content,
+                EventContent::ProcessControl(ProcessControlType::ChildExit)
+            )
+        };
         let first = queue.dequeue_matching(child_exit).unwrap();
         let second = queue.dequeue_matching(child_exit).unwrap();
         assert!(first.metadata.event_id < second.metadata.event_id);
         assert_eq!(queue.len(), 1);
         assert!(queue.dequeue_matching(child_exit).is_none());
-        assert!(matches!(queue.dequeue().unwrap().content, EventContent::ProcessControl(ProcessControlType::Alarm)));
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Alarm)
+        ));
         assert!(queue.is_empty());
     }
     use super::*;

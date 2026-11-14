@@ -21,7 +21,7 @@ use alloc::{
 
 /// Android 13's stock service and app inventory needs more exact labels than
 /// the original 512-entry bound; the limit stays a fixed, checked resource.
-pub use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
+pub use scarlet_abi::shield::{MAX_LABEL_BYTES, MAX_LABELS, MAX_RULES};
 pub mod sets;
 
 #[derive(Clone, Copy)]
@@ -223,11 +223,11 @@ impl Policy {
     }
     pub fn allowed(&self, source: u32, target: u32, class: u32) -> u64 {
         let data = self.data.read();
-        data
-            .grants
+        data.grants
             .get(&(source, target, class))
             .copied()
-            .unwrap_or(0) | data.sets.allowed(source, target, class)
+            .unwrap_or(0)
+            | data.sets.allowed(source, target, class)
     }
     pub fn decision(&self, source: u32, target: u32, class: u32) -> (u64, u64) {
         let data = self.data.read();
@@ -235,7 +235,8 @@ impl Policy {
             data.grants
                 .get(&(source, target, class))
                 .copied()
-                .unwrap_or(0) | data.sets.allowed(source, target, class),
+                .unwrap_or(0)
+                | data.sets.allowed(source, target, class),
             data.generation,
         )
     }
@@ -276,9 +277,15 @@ impl Subject {
         self.label == other.label && Arc::ptr_eq(&self.policy, &other.policy)
     }
     pub fn can_transition(&self) -> bool {
-        let policy=self.policy.snapshot();
-        policy.transitions.iter().any(|&(source, _, _)| source == self.label)
-            || policy.principal_ranges.iter().any(|&(source, _, _, _)| source == self.label)
+        let policy = self.policy.snapshot();
+        policy
+            .transitions
+            .iter()
+            .any(|&(source, _, _)| source == self.label)
+            || policy
+                .principal_ranges
+                .iter()
+                .any(|&(source, _, _, _)| source == self.label)
     }
     pub fn transition(
         &self,
@@ -286,11 +293,19 @@ impl Subject {
         credentials: &identity::Credentials,
     ) -> Result<Self, &'static str> {
         let ids = credentials.principals();
-        let policy=self.policy.snapshot();
+        let policy = self.policy.snapshot();
         if ids != identity::Identities::all(ids.active)
-            || !(policy.transitions.contains(&(self.label, target, ids.active.0))
-                || policy.principal_ranges.iter().any(|&(source,next,first,last)|
-                    source==self.label && next==target && (first..=last).contains(&ids.active.0)))
+            || !(policy
+                .transitions
+                .contains(&(self.label, target, ids.active.0))
+                || policy
+                    .principal_ranges
+                    .iter()
+                    .any(|&(source, next, first, last)| {
+                        source == self.label
+                            && next == target
+                            && (first..=last).contains(&ids.active.0)
+                    }))
         {
             return Err("label transition not delegated for these identities");
         }

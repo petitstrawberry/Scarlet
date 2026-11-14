@@ -8,13 +8,13 @@
 
 pub mod data_model;
 pub mod environment;
-pub mod shield;
 pub mod fs;
 pub mod hypervisor;
 pub mod native_scalar;
 pub mod network;
 pub mod power_supply;
 pub mod shared_image;
+pub mod shield;
 pub mod tls;
 pub mod video_image;
 pub mod wireless;
@@ -292,7 +292,7 @@ pub const SCHED_POLICY_FAIR: u32 = 0;
 /// Periodic deadline-reservation scheduler policy.
 pub const SCHED_POLICY_DEADLINE: u32 = 1;
 /// Preemptive fixed-priority FIFO scheduling. Priority 1..=255 is in reserved0.
-pub const SCHED_POLICY_FIFO:u32=2;
+pub const SCHED_POLICY_FIFO: u32 = 2;
 
 /// Allow execution on any online CPU.
 pub const SCHED_AFFINITY_ANY: u32 = 0;

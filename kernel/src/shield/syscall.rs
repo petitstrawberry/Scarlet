@@ -42,7 +42,10 @@ pub(crate) fn extend(
     }
     let spec = read::<128>(task, pointer)?;
     let version = u32_at(&spec, 0);
-    if !matches!((version,length),(1,128)|(2,208)|(3,224)) || u32_at(&spec, 4) != 0 || spec[112..].iter().any(|byte| *byte != 0) {
+    if !matches!((version, length), (1, 128) | (2, 208) | (3, 224))
+        || u32_at(&spec, 4) != 0
+        || spec[112..].iter().any(|byte| *byte != 0)
+    {
         return Err("policy update version or reserved fields");
     }
     let labels = update_array::<16, _>(
@@ -147,15 +150,39 @@ pub(crate) fn extend(
         },
     )?;
     let sets = if version >= 2 {
-        parse_set_update(task, pointer.checked_add(128).ok_or("set update address overflow")?)?
-    } else { sets::Update::default() };
-    let principal_ranges=if version==3 {
-        let ranges=read::<16>(task,pointer.checked_add(208).ok_or("range update address overflow")?)?;
-        update_array::<16,_>(task,u64_at(&ranges,0),u64_at(&ranges,8),MAX_RULES,|raw| Ok(PrincipalRangeTransitionRule {
-            source:u32_at(&raw,0),target:u32_at(&raw,4),
-            first:identity::Principal(u32_at(&raw,8)),last:identity::Principal(u32_at(&raw,12)),
-        }))?
-    }else {Vec::new()};
+        parse_set_update(
+            task,
+            pointer
+                .checked_add(128)
+                .ok_or("set update address overflow")?,
+        )?
+    } else {
+        sets::Update::default()
+    };
+    let principal_ranges = if version == 3 {
+        let ranges = read::<16>(
+            task,
+            pointer
+                .checked_add(208)
+                .ok_or("range update address overflow")?,
+        )?;
+        update_array::<16, _>(
+            task,
+            u64_at(&ranges, 0),
+            u64_at(&ranges, 8),
+            MAX_RULES,
+            |raw| {
+                Ok(PrincipalRangeTransitionRule {
+                    source: u32_at(&raw, 0),
+                    target: u32_at(&raw, 4),
+                    first: identity::Principal(u32_at(&raw, 8)),
+                    last: identity::Principal(u32_at(&raw, 12)),
+                })
+            },
+        )?
+    } else {
+        Vec::new()
+    };
     policy.extend(
         u64_at(&spec, 8),
         update::PolicyUpdate {
@@ -172,27 +199,84 @@ pub(crate) fn extend(
     Ok(())
 }
 
-fn parse_set_update(task:&Task, pointer:usize)->Result<sets::Update,&'static str> {
-    let spec=read::<80>(task,pointer)?;
-    if spec[64..].iter().any(|byte|*byte!=0) {return Err("set update reserved fields");}
-    let selector=|bytes:&[u8],offset:usize|->Result<sets::Selector,&'static str> {
-        match u32_at(bytes,offset) {0=>Ok(sets::Selector::Label(u32_at(bytes,offset+4))),
-            1=>Ok(sets::Selector::Set(u32_at(bytes,offset+4))),_=>Err("unknown label selector")}
+fn parse_set_update(task: &Task, pointer: usize) -> Result<sets::Update, &'static str> {
+    let spec = read::<80>(task, pointer)?;
+    if spec[64..].iter().any(|byte| *byte != 0) {
+        return Err("set update reserved fields");
+    }
+    let selector = |bytes: &[u8], offset: usize| -> Result<sets::Selector, &'static str> {
+        match u32_at(bytes, offset) {
+            0 => Ok(sets::Selector::Label(u32_at(bytes, offset + 4))),
+            1 => Ok(sets::Selector::Set(u32_at(bytes, offset + 4))),
+            _ => Err("unknown label selector"),
+        }
     };
-    let declarations=update_array::<8,_>(task,u64_at(&spec,0),u64_at(&spec,8),sets::MAX_SETS,|raw| {
-        if u32_at(&raw,4)!=0 {return Err("set declaration reserved fields");} Ok(u32_at(&raw,0))
-    })?;
-    let members=update_array::<8,_>(task,u64_at(&spec,16),u64_at(&spec,24),sets::MAX_MEMBERS,|raw|Ok((u32_at(&raw,0),u32_at(&raw,4))))?;
-    let grants=update_array::<32,_>(task,u64_at(&spec,32),u64_at(&spec,40),MAX_RULES,|raw| {
-        if u32_at(&raw,20)!=0 {return Err("set grant reserved fields");}
-        Ok(sets::Grant {source:selector(&raw,0)?,target:selector(&raw,8)?,class:u32_at(&raw,16),permissions:u64_at(&raw,24)})
-    })?;
-    let files=update_array::<40,_>(task,u64_at(&spec,48),u64_at(&spec,56),MAX_RULES,|raw| {
-        if u32_at(&raw,36)!=0 || u32_at(&raw,32)>1 {return Err("set file flags");}
-        let action=match u32_at(&raw,28) {1=>sets::FileAction::Create,2=>sets::FileAction::Relabel,_=>return Err("set file action")};
-        Ok(sets::FileRule {source:selector(&raw,0)?,origin:selector(&raw,8)?,target:selector(&raw,16)?,kind:u32_at(&raw,24),action,different:u32_at(&raw,32)==1})
-    })?;
-    Ok(sets::Update {sets:declarations,members,grants,files})
+    let declarations = update_array::<8, _>(
+        task,
+        u64_at(&spec, 0),
+        u64_at(&spec, 8),
+        sets::MAX_SETS,
+        |raw| {
+            if u32_at(&raw, 4) != 0 {
+                return Err("set declaration reserved fields");
+            }
+            Ok(u32_at(&raw, 0))
+        },
+    )?;
+    let members = update_array::<8, _>(
+        task,
+        u64_at(&spec, 16),
+        u64_at(&spec, 24),
+        sets::MAX_MEMBERS,
+        |raw| Ok((u32_at(&raw, 0), u32_at(&raw, 4))),
+    )?;
+    let grants = update_array::<32, _>(
+        task,
+        u64_at(&spec, 32),
+        u64_at(&spec, 40),
+        MAX_RULES,
+        |raw| {
+            if u32_at(&raw, 20) != 0 {
+                return Err("set grant reserved fields");
+            }
+            Ok(sets::Grant {
+                source: selector(&raw, 0)?,
+                target: selector(&raw, 8)?,
+                class: u32_at(&raw, 16),
+                permissions: u64_at(&raw, 24),
+            })
+        },
+    )?;
+    let files = update_array::<40, _>(
+        task,
+        u64_at(&spec, 48),
+        u64_at(&spec, 56),
+        MAX_RULES,
+        |raw| {
+            if u32_at(&raw, 36) != 0 || u32_at(&raw, 32) > 1 {
+                return Err("set file flags");
+            }
+            let action = match u32_at(&raw, 28) {
+                1 => sets::FileAction::Create,
+                2 => sets::FileAction::Relabel,
+                _ => return Err("set file action"),
+            };
+            Ok(sets::FileRule {
+                source: selector(&raw, 0)?,
+                origin: selector(&raw, 8)?,
+                target: selector(&raw, 16)?,
+                kind: u32_at(&raw, 24),
+                action,
+                different: u32_at(&raw, 32) == 1,
+            })
+        },
+    )?;
+    Ok(sets::Update {
+        sets: declarations,
+        members,
+        grants,
+        files,
+    })
 }
 pub fn sys_shield_policy_extend(tf: &mut Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
@@ -238,20 +322,26 @@ pub fn policy_handle(task: &Task, handle: usize, admin: bool) -> Result<Arc<Poli
     }
 }
 fn can_create(task: &Task) -> bool {
-    task.bootstrap_environment.load(Ordering::Acquire) || task.handle_table.active_handles().iter().any(|&h| {
-        match task.handle_table.get(h) {
-            Some(KernelObject::ShieldPolicyFactory(_)) => true,
-            Some(KernelObject::ShieldPolicy(cap)) => cap.administer,
-            _ => false,
-        }
-    })
+    task.bootstrap_environment.load(Ordering::Acquire)
+        || task
+            .handle_table
+            .active_handles()
+            .iter()
+            .any(|&h| match task.handle_table.get(h) {
+                Some(KernelObject::ShieldPolicyFactory(_)) => true,
+                Some(KernelObject::ShieldPolicy(cap)) => cap.administer,
+                _ => false,
+            })
 }
 
 fn acquire_factory(task: &Task) -> Result<usize, &'static str> {
     if !can_create(task) {
         return Err("policy construction authority required");
     }
-    insert_object(task, KernelObject::ShieldPolicyFactory(Arc::new(PolicyFactory { _private: () })))
+    insert_object(
+        task,
+        KernelObject::ShieldPolicyFactory(Arc::new(PolicyFactory { _private: () })),
+    )
 }
 
 /// Materialize transferable, close-on-exec construction authority. Possession
@@ -411,23 +501,34 @@ pub fn transition(task: &Task, policy: &Arc<Policy>, target: u32) -> Result<(), 
 }
 
 pub fn sys_shield_reserve_exec(tf: &mut Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
     (|| -> Result<(), &'static str> {
         let policy = policy_handle(&task, tf.get_arg(0), false)?;
-        crate::shield::exec_transition::reserve(&task, &policy, u32::try_from(tf.get_arg(1)).map_err(|_| "invalid label")?)
-    })().map_or(usize::MAX, |_| 0)
+        crate::shield::exec_transition::reserve(
+            &task,
+            &policy,
+            u32::try_from(tf.get_arg(1)).map_err(|_| "invalid label")?,
+        )
+    })()
+    .map_or(usize::MAX, |_| 0)
 }
 pub fn sys_shield_clear_exec(tf: &mut Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
     crate::shield::exec_transition::cancel(&task).map_or(usize::MAX, |_| 0)
 }
 pub fn sys_shield_constrain_information(tf: &mut Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
-    let Ok(flags) = u32::try_from(tf.get_arg(0)) else { return usize::MAX };
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    let Ok(flags) = u32::try_from(tf.get_arg(0)) else {
+        return usize::MAX;
+    };
     crate::shield::information::constrain(&task, flags).map_or(usize::MAX, |_| 0)
 }
 pub fn sys_shield_information(tf: &mut Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
     crate::shield::information::constraints(&task) as usize
 }
 
@@ -481,18 +582,30 @@ mod tests {
         issuer.bootstrap_environment.store(true, Ordering::Release);
         let issued = acquire_factory(&issuer).unwrap() as u32;
         let (object, metadata) = issuer.handle_table.clone_for_dup(issued).unwrap();
-        assert_eq!(metadata.special_semantics, Some(SpecialSemantics::CloseOnExec));
+        assert_eq!(
+            metadata.special_semantics,
+            Some(SpecialSemantics::CloseOnExec)
+        );
 
         let mut task = Task::new("factory-recipient".into(), 0, crate::task::TaskType::User);
         task.set_id(60034);
         let factory = task.handle_table.insert(object).unwrap();
-        task.handle_table.update_metadata(factory, metadata).unwrap();
+        task.handle_table
+            .update_metadata(factory, metadata)
+            .unwrap();
         issuer.handle_table.remove(issued).unwrap();
         assert!(can_create(&task));
         assert!(policy_handle(&task, factory as usize, false).is_err());
         assert!(apply(&task, factory as usize, 1).is_err());
         let host_policy = Policy::new(alloc::vec![(1, "host".into())], Vec::new()).unwrap();
-        let query = insert(&task, PolicyHandle { policy: host_policy.clone(), administer: false }).unwrap();
+        let query = insert(
+            &task,
+            PolicyHandle {
+                policy: host_policy.clone(),
+                administer: false,
+            },
+        )
+        .unwrap();
         assert!(policy_handle(&task, query, true).is_err());
 
         let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
@@ -571,8 +684,8 @@ mod tests {
 
     #[test_case]
     fn file_persistence_derives_a_management_policy_with_a_nonzero_domain() {
-        use alloc::vec;
         use crate::library::std::usercopy::copy_to_user;
+        use alloc::vec;
         let mut task = Task::new("file-persistence".into(), 0, crate::task::TaskType::User);
         task.set_id(60033);
         let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
@@ -609,63 +722,137 @@ mod tests {
 /// Extended immutable policy specification: eight u64 pointer/count fields.
 pub fn sys_shield_policy_create_exec(tf: &mut Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
-    let pointer = tf.get_arg(0); let length = tf.get_arg(1);
+    let pointer = tf.get_arg(0);
+    let length = tf.get_arg(1);
     tf.increment_pc_next(&task);
     (|| {
-        if !can_create(&task) || length != 64 { return Err("invalid exec policy request"); }
+        if !can_create(&task) || length != 64 {
+            return Err("invalid exec policy request");
+        }
         let spec = read::<64>(&task, pointer)?;
-        let fields: Vec<usize> = (0..8).map(|i| address(u64_at(&spec, i * 8))).collect::<Result<_, _>>()?;
-        if fields[7] > MAX_RULES { return Err("exec rule bound"); }
-        fields[6].checked_add(fields[7] * 24).ok_or("exec rule pointer overflow")?;
+        let fields: Vec<usize> = (0..8)
+            .map(|i| address(u64_at(&spec, i * 8)))
+            .collect::<Result<_, _>>()?;
+        if fields[7] > MAX_RULES {
+            return Err("exec rule bound");
+        }
+        fields[6]
+            .checked_add(fields[7] * 24)
+            .ok_or("exec rule pointer overflow")?;
         let mut rules = Vec::with_capacity(fields[7]);
         for i in 0..fields[7] {
             let rule = read::<24>(&task, fields[6] + i * 24)?;
-            if u64_at(&rule, 16) != 0 { return Err("exec rule reserved bits"); }
-            rules.push(ExecTransitionRule {source:u32_at(&rule,0),resource:u32_at(&rule,4),
-                target:u32_at(&rule,8),principal:identity::Principal(u32_at(&rule,12))});
+            if u64_at(&rule, 16) != 0 {
+                return Err("exec rule reserved bits");
+            }
+            rules.push(ExecTransitionRule {
+                source: u32_at(&rule, 0),
+                resource: u32_at(&rule, 4),
+                target: u32_at(&rule, 8),
+                principal: identity::Principal(u32_at(&rule, 12)),
+            });
         }
-        create(&task, fields[0],fields[1],fields[2],fields[3],fields[4],fields[5], rules)
-    })().unwrap_or(usize::MAX)
+        create(
+            &task, fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], rules,
+        )
+    })()
+    .unwrap_or(usize::MAX)
 }
 
-pub fn bind_file(task: &Task, policy_handle_id: usize, file: usize, label: usize) -> Result<(), &'static str> {
+pub fn bind_file(
+    task: &Task,
+    policy_handle_id: usize,
+    file: usize,
+    label: usize,
+) -> Result<(), &'static str> {
     let policy = policy_handle(task, policy_handle_id, true)?;
-    let object = task.handle_table.get(u32::try_from(file).map_err(|_| "file handle")?).ok_or("file handle")?;
-    let file = object.as_file().and_then(|file| file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()).ok_or("retained VFS file required")?;
-    policy.bind_resource(file.get_vfs_entry().node(), u32::try_from(label).map_err(|_| "resource label")?)
+    let object = task
+        .handle_table
+        .get(u32::try_from(file).map_err(|_| "file handle")?)
+        .ok_or("file handle")?;
+    let file = object
+        .as_file()
+        .and_then(|file| {
+            file.as_any()
+                .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+        })
+        .ok_or("retained VFS file required")?;
+    policy.bind_resource(
+        file.get_vfs_entry().node(),
+        u32::try_from(label).map_err(|_| "resource label")?,
+    )
 }
 pub fn sys_shield_bind_file(tf: &mut Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
     tf.increment_pc_next(&task);
-    bind_file(&task, tf.get_arg(0),tf.get_arg(1),tf.get_arg(2)).map_or(usize::MAX, |_| 0)
+    bind_file(&task, tf.get_arg(0), tf.get_arg(1), tf.get_arg(2)).map_or(usize::MAX, |_| 0)
 }
 
 /// Construct a new policy identity from an administrator-owned immutable blueprint.
-pub fn sys_shield_file_policy(tf:&mut Trapframe)->usize {
-    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
-    (||->Result<usize,&'static str> {
-        let policy=policy_handle(&task,tf.get_arg(0),true)?;
-        if tf.get_arg(2)!=40 {return Err("file policy specification size");}
-        let raw=read::<40>(&task,tf.get_arg(1))?;
-        if u32_at(&raw,4)!=0 {return Err("file policy flags");}
-        let create_count=address(u64_at(&raw,16))?;let relabel_count=address(u64_at(&raw,32))?;
-        if create_count>MAX_RULES || relabel_count>MAX_RULES {return Err("file rule bound");}
-        let create_ptr=address(u64_at(&raw,8))?;let relabel_ptr=address(u64_at(&raw,24))?;
-        create_ptr.checked_add(create_count*24).ok_or("create pointer overflow")?;
-        relabel_ptr.checked_add(relabel_count*16).ok_or("relabel pointer overflow")?;
-        let mut create=Vec::with_capacity(create_count);let mut relabel=Vec::with_capacity(relabel_count);
+pub fn sys_shield_file_policy(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    (|| -> Result<usize, &'static str> {
+        let policy = policy_handle(&task, tf.get_arg(0), true)?;
+        if tf.get_arg(2) != 40 {
+            return Err("file policy specification size");
+        }
+        let raw = read::<40>(&task, tf.get_arg(1))?;
+        if u32_at(&raw, 4) != 0 {
+            return Err("file policy flags");
+        }
+        let create_count = address(u64_at(&raw, 16))?;
+        let relabel_count = address(u64_at(&raw, 32))?;
+        if create_count > MAX_RULES || relabel_count > MAX_RULES {
+            return Err("file rule bound");
+        }
+        let create_ptr = address(u64_at(&raw, 8))?;
+        let relabel_ptr = address(u64_at(&raw, 24))?;
+        create_ptr
+            .checked_add(create_count * 24)
+            .ok_or("create pointer overflow")?;
+        relabel_ptr
+            .checked_add(relabel_count * 16)
+            .ok_or("relabel pointer overflow")?;
+        let mut create = Vec::with_capacity(create_count);
+        let mut relabel = Vec::with_capacity(relabel_count);
         for index in 0..create_count {
-            let record=read::<24>(&task,create_ptr+index*24)?;let flags=u32_at(&record,16);
-            if flags>1 || u32_at(&record,20)!=0 {return Err("file create flags");}
-            create.push(file::CreateRule {source:u32_at(&record,0),parent:u32_at(&record,4),target:u32_at(&record,8),kind:u32_at(&record,12),default:flags==1});
+            let record = read::<24>(&task, create_ptr + index * 24)?;
+            let flags = u32_at(&record, 16);
+            if flags > 1 || u32_at(&record, 20) != 0 {
+                return Err("file create flags");
+            }
+            create.push(file::CreateRule {
+                source: u32_at(&record, 0),
+                parent: u32_at(&record, 4),
+                target: u32_at(&record, 8),
+                kind: u32_at(&record, 12),
+                default: flags == 1,
+            });
         }
         for index in 0..relabel_count {
-            let record=read::<16>(&task,relabel_ptr+index*16)?;
-            relabel.push(file::RelabelRule {source:u32_at(&record,0),old:u32_at(&record,4),target:u32_at(&record,8),kind:u32_at(&record,12)});
+            let record = read::<16>(&task, relabel_ptr + index * 16)?;
+            relabel.push(file::RelabelRule {
+                source: u32_at(&record, 0),
+                old: u32_at(&record, 4),
+                target: u32_at(&record, 8),
+                kind: u32_at(&record, 12),
+            });
         }
-        let default=u32_at(&raw,0);
-        insert(&task,PolicyHandle {policy:policy.with_file_rules((default!=0).then_some(default),create,relabel)?,administer:true})
-    })().unwrap_or(usize::MAX)
+        let default = u32_at(&raw, 0);
+        insert(
+            &task,
+            PolicyHandle {
+                policy: policy.with_file_rules(
+                    (default != 0).then_some(default),
+                    create,
+                    relabel,
+                )?,
+                administer: true,
+            },
+        )
+    })()
+    .unwrap_or(usize::MAX)
 }
 
 fn derive_file_persistence(
@@ -676,39 +863,78 @@ fn derive_file_persistence(
     let policy = policy_handle(task, handle, true)?;
     let domain = read::<16>(task, domain_ptr)?;
     let derived = policy.with_file_persistence(domain)?;
-    insert(task, PolicyHandle { policy: derived, administer: true })
+    insert(
+        task,
+        PolicyHandle {
+            policy: derived,
+            administer: true,
+        },
+    )
 }
 
 /// Derive a fresh management capability whose file labels use a stable
 /// 16-byte domain shared with the filesystem metadata backend.
-pub fn sys_shield_file_persistence(tf:&mut Trapframe)->usize {
-    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
-    derive_file_persistence(&task,tf.get_arg(0),tf.get_arg(1)).unwrap_or(usize::MAX)
+pub fn sys_shield_file_persistence(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    derive_file_persistence(&task, tf.get_arg(0), tf.get_arg(1)).unwrap_or(usize::MAX)
 }
 
-pub fn sys_shield_creation_label(tf:&mut Trapframe)->usize {
-    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
-    let Ok(target)=u32::try_from(tf.get_arg(0)) else {return usize::MAX;};
-    file::select_creation_label(&task,(target!=0).then_some(target)).map_or(usize::MAX,|_|0)
+pub fn sys_shield_creation_label(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    let Ok(target) = u32::try_from(tf.get_arg(0)) else {
+        return usize::MAX;
+    };
+    file::select_creation_label(&task, (target != 0).then_some(target)).map_or(usize::MAX, |_| 0)
 }
 
-pub fn sys_shield_relabel_file(tf:&mut Trapframe)->usize {
-    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
-    (||->Result<(),&'static str> {
-        let policy=policy_handle(&task,tf.get_arg(0),false)?;
-        let object=task.handle_table.get(u32::try_from(tf.get_arg(1)).map_err(|_|"file handle")?).ok_or("file handle")?;
-        let file=object.as_file().and_then(|file|file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()).ok_or("retained VFS file required")?;
-        let node=file.get_vfs_entry().node();
-        if node.filesystem().and_then(|weak|weak.upgrade()).is_none_or(|fs|fs.is_read_only()) {return Err("resource filesystem is read-only or gone");}
-        let subject=task.security_subject.read().clone().ok_or("subject missing")?;
-        policy.relabel_file(&subject,node.as_ref(),u32::try_from(tf.get_arg(2)).map_err(|_|"file label")?)
-    })().map_or(usize::MAX,|_|0)
+pub fn sys_shield_relabel_file(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    (|| -> Result<(), &'static str> {
+        let policy = policy_handle(&task, tf.get_arg(0), false)?;
+        let object = task
+            .handle_table
+            .get(u32::try_from(tf.get_arg(1)).map_err(|_| "file handle")?)
+            .ok_or("file handle")?;
+        let file = object
+            .as_file()
+            .and_then(|file| {
+                file.as_any()
+                    .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+            })
+            .ok_or("retained VFS file required")?;
+        let node = file.get_vfs_entry().node();
+        if node
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .is_none_or(|fs| fs.is_read_only())
+        {
+            return Err("resource filesystem is read-only or gone");
+        }
+        let subject = task
+            .security_subject
+            .read()
+            .clone()
+            .ok_or("subject missing")?;
+        policy.relabel_file(
+            &subject,
+            node.as_ref(),
+            u32::try_from(tf.get_arg(2)).map_err(|_| "file label")?,
+        )
+    })()
+    .map_or(usize::MAX, |_| 0)
 }
 
-pub fn sys_shield_socket_creation_label(tf:&mut Trapframe)->usize {
-    let task=crate::task::mytask().unwrap();let target=tf.get_arg(0);tf.increment_pc_next(&task);
-    let Ok(target)=u32::try_from(target) else {return usize::MAX;};
-    socket::select(&task,(target!=0).then_some(target)).map_or(usize::MAX,|_|0)
+pub fn sys_shield_socket_creation_label(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    let target = tf.get_arg(0);
+    tf.increment_pc_next(&task);
+    let Ok(target) = u32::try_from(target) else {
+        return usize::MAX;
+    };
+    socket::select(&task, (target != 0).then_some(target)).map_or(usize::MAX, |_| 0)
 }
 
 #[cfg(test)]
@@ -719,63 +945,170 @@ mod update_tests {
     fn principal_range_update_abi_requires_authority_and_validates_the_complete_batch() {
         use crate::library::std::usercopy::copy_to_user;
         use scarlet_abi::shield::*;
-        fn bytes<T>(value:&T)->&[u8] {
-            unsafe {core::slice::from_raw_parts(value as *const T as *const u8,core::mem::size_of::<T>())}
+        fn bytes<T>(value: &T) -> &[u8] {
+            unsafe {
+                core::slice::from_raw_parts(
+                    value as *const T as *const u8,
+                    core::mem::size_of::<T>(),
+                )
+            }
         }
-        let mut task=Task::new("policy-ranges".into(),0,crate::task::TaskType::User);task.set_id(60033);
-        let base=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
-        task.allocate_stack_pages(base,1).unwrap();
-        let policy=Policy::new(vec![(1,"parent".into()),(2,"child".into())],vec![]).unwrap();
-        let admin=insert(&task,PolicyHandle {policy:policy.clone(),administer:true}).unwrap();
-        let readonly=insert(&task,PolicyHandle {policy:policy.clone(),administer:false}).unwrap();
-        let mut spec=RawPolicyUpdateWithPrincipalRanges {base:RawPolicyUpdateWithSets {
-            base:RawPolicyUpdate {version:3,expected_generation:1,..Default::default()},..Default::default()},
-            principal_ranges:(base+256) as u64,principal_range_count:1};
-        let mut range=RawPrincipalRangeTransition {source:1,target:2,first:100,last:199};
-        copy_to_user(&task,base,bytes(&spec)).unwrap();copy_to_user(&task,base+256,bytes(&range)).unwrap();
-        assert!(extend(&task,readonly,base,224).is_err());
-        assert!(extend(&task,admin,base,208).is_err());
-        range.first=200;copy_to_user(&task,base+256,bytes(&range)).unwrap();
-        assert!(extend(&task,admin,base,224).is_err());assert_eq!(policy.generation(),1);
-        range.first=100;copy_to_user(&task,base+256,bytes(&range)).unwrap();
-        extend(&task,admin,base,224).unwrap();assert_eq!(policy.generation(),2);
-        assert!(extend(&task,admin,base,224).is_err());
-        spec.base.base.expected_generation=2;spec.principal_range_count=MAX_RULES as u64+1;
-        copy_to_user(&task,base,bytes(&spec)).unwrap();
-        assert!(extend(&task,admin,base,224).is_err());assert_eq!(policy.generation(),2);
+        let mut task = Task::new("policy-ranges".into(), 0, crate::task::TaskType::User);
+        task.set_id(60033);
+        let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        let policy = Policy::new(vec![(1, "parent".into()), (2, "child".into())], vec![]).unwrap();
+        let admin = insert(
+            &task,
+            PolicyHandle {
+                policy: policy.clone(),
+                administer: true,
+            },
+        )
+        .unwrap();
+        let readonly = insert(
+            &task,
+            PolicyHandle {
+                policy: policy.clone(),
+                administer: false,
+            },
+        )
+        .unwrap();
+        let mut spec = RawPolicyUpdateWithPrincipalRanges {
+            base: RawPolicyUpdateWithSets {
+                base: RawPolicyUpdate {
+                    version: 3,
+                    expected_generation: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            principal_ranges: (base + 256) as u64,
+            principal_range_count: 1,
+        };
+        let mut range = RawPrincipalRangeTransition {
+            source: 1,
+            target: 2,
+            first: 100,
+            last: 199,
+        };
+        copy_to_user(&task, base, bytes(&spec)).unwrap();
+        copy_to_user(&task, base + 256, bytes(&range)).unwrap();
+        assert!(extend(&task, readonly, base, 224).is_err());
+        assert!(extend(&task, admin, base, 208).is_err());
+        range.first = 200;
+        copy_to_user(&task, base + 256, bytes(&range)).unwrap();
+        assert!(extend(&task, admin, base, 224).is_err());
+        assert_eq!(policy.generation(), 1);
+        range.first = 100;
+        copy_to_user(&task, base + 256, bytes(&range)).unwrap();
+        extend(&task, admin, base, 224).unwrap();
+        assert_eq!(policy.generation(), 2);
+        assert!(extend(&task, admin, base, 224).is_err());
+        spec.base.base.expected_generation = 2;
+        spec.principal_range_count = MAX_RULES as u64 + 1;
+        copy_to_user(&task, base, bytes(&spec)).unwrap();
+        assert!(extend(&task, admin, base, 224).is_err());
+        assert_eq!(policy.generation(), 2);
     }
     #[test_case]
     fn set_update_abi_is_atomic_bounded_and_requires_management_authority() {
         use crate::library::std::usercopy::copy_to_user;
         use scarlet_abi::shield::*;
-        fn bytes<T>(value:&T)->&[u8] {
+        fn bytes<T>(value: &T) -> &[u8] {
             // The test uses initialized fixed-width records with no padding.
-            unsafe {core::slice::from_raw_parts(value as *const T as *const u8,core::mem::size_of::<T>())}
+            unsafe {
+                core::slice::from_raw_parts(
+                    value as *const T as *const u8,
+                    core::mem::size_of::<T>(),
+                )
+            }
         }
-        let mut task=Task::new("policy-sets".into(),0,crate::task::TaskType::User);task.set_id(60032);
-        let base=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
-        task.allocate_stack_pages(base,1).unwrap();
-        let policy=Policy::new(vec![(1,"source".into()),(2,"target".into())],vec![]).unwrap().with_file_rules(Some(1),vec![],vec![]).unwrap();
-        let admin=insert(&task,PolicyHandle {policy:policy.clone(),administer:true}).unwrap();
-        let readonly=insert(&task,PolicyHandle {policy:policy.clone(),administer:false}).unwrap();
-        let mut spec=RawPolicyUpdateWithSets {base:RawPolicyUpdate {version:2,expected_generation:1,..Default::default()},
-            sets:(base+256) as u64,set_count:1,members:(base+272) as u64,member_count:1,
-            set_grants:(base+288) as u64,set_grant_count:1,set_files:(base+336) as u64,set_file_count:1,..Default::default()};
-        let set=RawLabelSet {id:9,reserved:0};let member=RawSetMember {set:9,label:1};
-        let mut grant=RawSetGrant {source:RawLabelSelector::set(9),target:RawLabelSelector::label(2),class:1,reserved:0,permissions:2};
-        let file=RawSetFileRule {source:RawLabelSelector::set(9),origin:RawLabelSelector::label(1),target:RawLabelSelector::label(2),kind:1,action:1,flags:0,reserved:0};
-        for (offset,data) in [(0,bytes(&spec)),(256,bytes(&set)),(272,bytes(&member)),(288,bytes(&grant)),(336,bytes(&file))] {
-            copy_to_user(&task,base+offset,data).unwrap();
+        let mut task = Task::new("policy-sets".into(), 0, crate::task::TaskType::User);
+        task.set_id(60032);
+        let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        let policy = Policy::new(vec![(1, "source".into()), (2, "target".into())], vec![])
+            .unwrap()
+            .with_file_rules(Some(1), vec![], vec![])
+            .unwrap();
+        let admin = insert(
+            &task,
+            PolicyHandle {
+                policy: policy.clone(),
+                administer: true,
+            },
+        )
+        .unwrap();
+        let readonly = insert(
+            &task,
+            PolicyHandle {
+                policy: policy.clone(),
+                administer: false,
+            },
+        )
+        .unwrap();
+        let mut spec = RawPolicyUpdateWithSets {
+            base: RawPolicyUpdate {
+                version: 2,
+                expected_generation: 1,
+                ..Default::default()
+            },
+            sets: (base + 256) as u64,
+            set_count: 1,
+            members: (base + 272) as u64,
+            member_count: 1,
+            set_grants: (base + 288) as u64,
+            set_grant_count: 1,
+            set_files: (base + 336) as u64,
+            set_file_count: 1,
+            ..Default::default()
+        };
+        let set = RawLabelSet { id: 9, reserved: 0 };
+        let member = RawSetMember { set: 9, label: 1 };
+        let mut grant = RawSetGrant {
+            source: RawLabelSelector::set(9),
+            target: RawLabelSelector::label(2),
+            class: 1,
+            reserved: 0,
+            permissions: 2,
+        };
+        let file = RawSetFileRule {
+            source: RawLabelSelector::set(9),
+            origin: RawLabelSelector::label(1),
+            target: RawLabelSelector::label(2),
+            kind: 1,
+            action: 1,
+            flags: 0,
+            reserved: 0,
+        };
+        for (offset, data) in [
+            (0, bytes(&spec)),
+            (256, bytes(&set)),
+            (272, bytes(&member)),
+            (288, bytes(&grant)),
+            (336, bytes(&file)),
+        ] {
+            copy_to_user(&task, base + offset, data).unwrap();
         }
-        assert!(extend(&task,readonly,base,208).is_err());
-        assert!(extend(&task,admin,base,128).is_err());
-        grant.source.kind=2;copy_to_user(&task,base+288,bytes(&grant)).unwrap();
-        assert!(extend(&task,admin,base,208).is_err());assert_eq!(policy.generation(),1);assert_eq!(policy.allowed(1,2,1),0);
-        grant.source.kind=1;copy_to_user(&task,base+288,bytes(&grant)).unwrap();
-        extend(&task,admin,base,208).unwrap();assert_eq!(policy.generation(),2);assert_eq!(policy.allowed(1,2,1),2);
-        assert!(extend(&task,admin,base,208).is_err());
-        spec.base.expected_generation=2;spec.member_count=MAX_SET_MEMBERS as u64+1;
-        copy_to_user(&task,base,bytes(&spec)).unwrap();assert!(extend(&task,admin,base,208).is_err());assert_eq!(policy.generation(),2);
+        assert!(extend(&task, readonly, base, 208).is_err());
+        assert!(extend(&task, admin, base, 128).is_err());
+        grant.source.kind = 2;
+        copy_to_user(&task, base + 288, bytes(&grant)).unwrap();
+        assert!(extend(&task, admin, base, 208).is_err());
+        assert_eq!(policy.generation(), 1);
+        assert_eq!(policy.allowed(1, 2, 1), 0);
+        grant.source.kind = 1;
+        copy_to_user(&task, base + 288, bytes(&grant)).unwrap();
+        extend(&task, admin, base, 208).unwrap();
+        assert_eq!(policy.generation(), 2);
+        assert_eq!(policy.allowed(1, 2, 1), 2);
+        assert!(extend(&task, admin, base, 208).is_err());
+        spec.base.expected_generation = 2;
+        spec.member_count = MAX_SET_MEMBERS as u64 + 1;
+        copy_to_user(&task, base, bytes(&spec)).unwrap();
+        assert!(extend(&task, admin, base, 208).is_err());
+        assert_eq!(policy.generation(), 2);
     }
     #[test_case]
     fn update_requires_the_admin_capability_and_copies_the_whole_batch_before_publication() {

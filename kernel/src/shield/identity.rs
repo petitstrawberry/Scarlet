@@ -44,7 +44,19 @@ pub const RESERVE_WAKE: u32 = 512;
 pub const INHIBIT_SUSPEND: u32 = 1024;
 pub const MANAGE_TRAFFIC: u32 = 2048;
 pub const MANAGE_RECLAIM: u32 = 4096;
-pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL | CHANGE_GROUPS | MANAGE_MOUNTS | MANAGE_RESOURCES | MANAGE_OWNERS | MANAGE_DEVICES | MANAGE_LAYOUT | MANAGE_SCHEDULING | MANAGE_DELEGATION | RESERVE_WAKE | INHIBIT_SUSPEND | MANAGE_TRAFFIC | MANAGE_RECLAIM;
+pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL
+    | CHANGE_GROUPS
+    | MANAGE_MOUNTS
+    | MANAGE_RESOURCES
+    | MANAGE_OWNERS
+    | MANAGE_DEVICES
+    | MANAGE_LAYOUT
+    | MANAGE_SCHEDULING
+    | MANAGE_DELEGATION
+    | RESERVE_WAKE
+    | INHIBIT_SUSPEND
+    | MANAGE_TRAFFIC
+    | MANAGE_RECLAIM;
 pub const MAX_GROUPS: usize = 65536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,10 +106,18 @@ impl Credentials {
             group: self.groups.active,
         }
     }
-    pub fn permits_owner_change(&self,owner:ActiveIdentity,principal:Option<Principal>,group:Option<Group>)->bool {
-        self.permits(MANAGE_OWNERS) || (self.identity().principal==owner.principal
-            && principal.is_none_or(|next|next==owner.principal)
-            && group.is_none_or(|next|self.groups().contains(next) || self.supplementary().contains(&next)))
+    pub fn permits_owner_change(
+        &self,
+        owner: ActiveIdentity,
+        principal: Option<Principal>,
+        group: Option<Group>,
+    ) -> bool {
+        self.permits(MANAGE_OWNERS)
+            || (self.identity().principal == owner.principal
+                && principal.is_none_or(|next| next == owner.principal)
+                && group.is_none_or(|next| {
+                    self.groups().contains(next) || self.supplementary().contains(&next)
+                }))
     }
     pub fn permits(&self, authority: u32) -> bool {
         self.active & authority == authority
@@ -138,7 +158,9 @@ impl Credentials {
         }
         self.permitted = permitted;
         self.active = active;
-        if let Some(reserved) = self.exec_reserved {self.exec_reserved=Some(reserved & permitted);}
+        if let Some(reserved) = self.exec_reserved {
+            self.exec_reserved = Some(reserved & permitted);
+        }
         Ok(())
     }
     pub fn inheritable_authority(&self) -> u32 {
@@ -191,8 +213,6 @@ impl Credentials {
             self.exec_reserved = Some(authority);
         }
     }
-
-
 }
 
 #[cfg(test)]
@@ -200,16 +220,21 @@ mod tests {
     use super::*;
     #[test_case]
     fn exec_reservations_cannot_exceed_the_delegated_ceiling_or_modify_a_failed_image_source() {
-        let mut source=Credentials::bootstrap();
-        assert_eq!(source.reserve_exec_authority(MANAGE_SCHEDULING),Err(()));
+        let mut source = Credentials::bootstrap();
+        assert_eq!(source.reserve_exec_authority(MANAGE_SCHEDULING), Err(()));
         source.set_inheritable_authority(MANAGE_SCHEDULING).unwrap();
         source.reserve_exec_authority(MANAGE_SCHEDULING).unwrap();
-        let original=source.clone();let mut image=source.clone();image.apply_exec_reservation();
-        assert_eq!(source,original);assert_eq!(image.active_authority(),MANAGE_SCHEDULING);
-        assert_eq!(image.permitted_authority(),MANAGE_SCHEDULING);
-        assert_eq!(image.set_authority(ALL_AUTHORITY,ALL_AUTHORITY),Err(()));
-        image.set_inheritable_authority(0).unwrap();image.apply_exec_reservation();
-        assert_eq!(image.active_authority(),0);assert_eq!(image.permitted_authority(),0);
+        let original = source.clone();
+        let mut image = source.clone();
+        image.apply_exec_reservation();
+        assert_eq!(source, original);
+        assert_eq!(image.active_authority(), MANAGE_SCHEDULING);
+        assert_eq!(image.permitted_authority(), MANAGE_SCHEDULING);
+        assert_eq!(image.set_authority(ALL_AUTHORITY, ALL_AUTHORITY), Err(()));
+        image.set_inheritable_authority(0).unwrap();
+        image.apply_exec_reservation();
+        assert_eq!(image.active_authority(), 0);
+        assert_eq!(image.permitted_authority(), 0);
     }
 
     #[test_case]

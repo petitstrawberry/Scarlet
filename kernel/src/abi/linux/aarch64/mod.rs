@@ -84,16 +84,27 @@ impl AbiModule for LinuxAarch64Abi {
         Box::new(self.clone())
     }
 
-    fn execution_domain(&self) -> &'static str { "linux-aarch64" }
-    fn handle_user_memory_fault(&mut self, fault: crate::vm::fault::UserMemoryFault,
-        frame: &mut crate::arch::Trapframe) -> Result<bool, &'static str> {
+    fn execution_domain(&self) -> &'static str {
+        "linux-aarch64"
+    }
+    fn handle_user_memory_fault(
+        &mut self,
+        fault: crate::vm::fault::UserMemoryFault,
+        frame: &mut crate::arch::Trapframe,
+    ) -> Result<bool, &'static str> {
         let task = crate::task::mytask().ok_or("memory fault without task")?;
         self.0.bind_task_signals(&task);
         let result = signal::deliver_memory_fault(&self.0, &task, frame, fault);
-        if !matches!(result, Ok(true)) { task.mark_signal_termination(11); }
+        if !matches!(result, Ok(true)) {
+            task.mark_signal_termination(11);
+        }
         result
     }
-    fn handle_execution_denial(&mut self, denial: crate::shield::execution::Denial, frame: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
+    fn handle_execution_denial(
+        &mut self,
+        denial: crate::shield::execution::Denial,
+        frame: &mut crate::arch::Trapframe,
+    ) -> Result<usize, &'static str> {
         Ok(generic::seccomp::handle_denial(&mut self.0, denial, frame))
     }
 
@@ -155,7 +166,9 @@ impl AbiModule for LinuxAarch64Abi {
         }
         let thread = _flags.is_set(crate::task::CloneFlagsDef::Thread);
         self.0.clone_signal_state_with_group(
-            self.0.thread_state.pending_clone_share_sighand || thread, thread);
+            self.0.thread_state.pending_clone_share_sighand || thread,
+            thread,
+        );
         self.0.bind_task_signals(_child_task);
 
         let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
@@ -391,9 +404,13 @@ impl AbiModule for LinuxAarch64Abi {
                     }
                     Err(e) => {
                         crate::println!("Failed to load Linux ELF binary: {:?}", e);
-                        if e.message == "interpreter execution disabled on mount" || e.message == "execution disabled on mount" {
+                        if e.message == "interpreter execution disabled on mount"
+                            || e.message == "execution disabled on mount"
+                        {
                             Err("execution disabled on mount")
-                        } else { Err("Failed to load Linux ELF binary") }
+                        } else {
+                            Err("Failed to load Linux ELF binary")
+                        }
                     }
                 }
             }

@@ -1205,7 +1205,9 @@ impl KernelObject {
             KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
             KernelObject::ResourceGroup(group) => KernelObject::ResourceGroup(group.clone()),
             KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
-            KernelObject::MountNamespace(namespace) => KernelObject::MountNamespace(namespace.clone()),
+            KernelObject::MountNamespace(namespace) => {
+                KernelObject::MountNamespace(namespace.clone())
+            }
             KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
             KernelObject::ShieldPolicyFactory(factory) => {
                 KernelObject::ShieldPolicyFactory(Arc::clone(factory))
@@ -1245,8 +1247,10 @@ impl Clone for KernelObject {
                 }
                 KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
                 KernelObject::ResourceGroup(group) => KernelObject::ResourceGroup(group.clone()),
-            KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
-            KernelObject::MountNamespace(namespace) => KernelObject::MountNamespace(namespace.clone()),
+                KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
+                KernelObject::MountNamespace(namespace) => {
+                    KernelObject::MountNamespace(namespace.clone())
+                }
                 KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
                 KernelObject::ShieldPolicyFactory(factory) => {
                     KernelObject::ShieldPolicyFactory(Arc::clone(factory))

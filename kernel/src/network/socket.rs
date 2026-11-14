@@ -376,9 +376,9 @@ pub(crate) fn socket_io_error_to_native_errno(error: &SocketError) -> i32 {
 
 /// Native message options; ABI modules translate their own flag encodings.
 pub mod message_flags {
-    pub const NONBLOCK:u32=1;
-    pub const PEEK:u32=2;
-    pub const FULL_LENGTH:u32=4;
+    pub const NONBLOCK: u32 = 1;
+    pub const PEEK: u32 = 2;
+    pub const FULL_LENGTH: u32 = 4;
 }
 
 /// Socket control operations trait
@@ -524,14 +524,8 @@ mod tests {
             stream_error_to_socket_error(StreamError::TimedOut),
             SocketError::TimedOut
         );
-        assert_eq!(
-            socket_error_to_native_errno(&SocketError::TimedOut),
-            110
-        );
-        assert_eq!(
-            socket_io_error_to_native_errno(&SocketError::TimedOut),
-            11
-        );
+        assert_eq!(socket_error_to_native_errno(&SocketError::TimedOut), 110);
+        assert_eq!(socket_io_error_to_native_errno(&SocketError::TimedOut), 11);
     }
 
     #[test_case]

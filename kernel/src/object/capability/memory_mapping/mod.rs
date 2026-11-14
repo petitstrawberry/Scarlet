@@ -69,10 +69,14 @@ impl MemoryMappingInfo {
 pub trait MemoryMappingOps: Send + Sync {
     /// Whether a process fork inherits this mapping. Process-specific receive
     /// buffers can opt out; threads sharing the address space keep the mapping.
-    fn inherit_on_fork(&self) -> bool { true }
+    fn inherit_on_fork(&self) -> bool {
+        true
+    }
 
     /// Permanent permission ceiling, including subsequent protection changes.
-    fn maximum_mapping_permissions(&self) -> usize { usize::MAX }
+    fn maximum_mapping_permissions(&self) -> usize {
+        usize::MAX
+    }
 
     /// Admit a new mapping and capture its permission ceiling. Restrictions
     /// added later must not revoke permissions from an already admitted VMA.
@@ -85,8 +89,13 @@ pub trait MemoryMappingOps: Send + Sync {
 
     /// Optional range-specific owner, retaining the object's backing and offset
     /// independently of virtual addresses reused in other processes.
-    fn mapping_owner_for_range(&self, _offset: usize, _length: usize)
-        -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> { None }
+    fn mapping_owner_for_range(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {
+        None
+    }
 
     /// Get mapping information for a region of the object
     ///
@@ -189,7 +198,9 @@ pub trait MemoryMappingOps: Send + Sync {
 
     /// Whether shared mappings may regain permissions within the ceiling
     /// captured at admission. Device and other shared owners must opt in.
-    fn supports_shared_permission_changes(&self) -> bool { false }
+    fn supports_shared_permission_changes(&self) -> bool {
+        false
+    }
 
     /// Whether private normal-memory backing can move while preserving page
     /// indices. Owners opting in must not track the original virtual address.

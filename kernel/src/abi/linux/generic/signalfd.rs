@@ -20,7 +20,7 @@ use crate::{
     sync::{IrqSpinLock, waker::WaitResult},
     task::mytask,
 };
-use alloc::{sync::Arc,vec,vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, Ordering},

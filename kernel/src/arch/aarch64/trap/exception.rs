@@ -361,7 +361,6 @@ mod user_data_fault_tests {
         assert!(user_data_abort_is_write(0x9200_004f)); // store permission fault
     }
 
-
     #[test_case]
     fn user_fault_tags_do_not_change_mapping_identity_or_hide_invalid_bits() {
         assert_eq!(
@@ -496,7 +495,10 @@ fn terminate_current_user_fault(
     use crate::vm::fault::{UserFaultResolutionError, UserMemoryFaultReason};
     let reason = match failure {
         UserFaultResolutionError::User(fault) => {
-            if matches!(crate::abi::dispatch_user_memory_fault(fault, trapframe), Ok(true)) {
+            if matches!(
+                crate::abi::dispatch_user_memory_fault(fault, trapframe),
+                Ok(true)
+            ) {
                 return;
             }
             match fault.reason {

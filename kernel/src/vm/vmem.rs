@@ -135,7 +135,9 @@ impl VirtualMemoryMap {
             vmarea,
             vm_start: vmarea.start,
             mapping_origin: MappingOrigin::new(),
-            maximum_permissions: owner.as_ref().map_or(usize::MAX, |o| o.maximum_mapping_permissions()),
+            maximum_permissions: owner
+                .as_ref()
+                .map_or(usize::MAX, |o| o.maximum_mapping_permissions()),
             permissions,
             is_shared,
             memory_attribute: MemoryAttribute::Normal,

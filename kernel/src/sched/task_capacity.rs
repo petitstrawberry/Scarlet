@@ -5,9 +5,7 @@
 //! within the same physical and virtual ceilings.
 
 use crate::arch::Trapframe;
-use crate::environment::{
-    KERNEL_KSTACK_SLOTS, PAGE_SIZE, TASK_KERNEL_STACK_SIZE,
-};
+use crate::environment::{KERNEL_KSTACK_SLOTS, PAGE_SIZE, TASK_KERNEL_STACK_SIZE};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::task::{Task, mytask};
 
@@ -48,8 +46,7 @@ pub struct CapacitySnapshot {
 /// least one eighth of the remaining policy up to 128 slots; user tasks receive
 /// the rest.
 pub fn default_limits(total_pages: usize) -> TaskLimits {
-    let physical_stack_slots = total_pages
-        .saturating_mul(PAGE_SIZE)
+    let physical_stack_slots = total_pages.saturating_mul(PAGE_SIZE)
         / STACK_PHYSICAL_BUDGET_DIVISOR
         / TASK_KERNEL_STACK_SIZE;
     default_limits_for_slots(physical_stack_slots)
@@ -66,8 +63,8 @@ fn default_limits_for_slots(physical_stack_slots: usize) -> TaskLimits {
     }
 
     let kernel_share = core::cmp::max(1, stack_slots / 8);
-    let max_kernel = core::cmp::min(KERNEL_ROLE_MAX, kernel_share)
-        .min(stack_slots - BOOTSTRAP_STACK_SLOTS - 1);
+    let max_kernel =
+        core::cmp::min(KERNEL_ROLE_MAX, kernel_share).min(stack_slots - BOOTSTRAP_STACK_SLOTS - 1);
     let max_user = stack_slots - BOOTSTRAP_STACK_SLOTS - max_kernel;
     TaskLimits {
         max_user,
@@ -166,21 +163,9 @@ fn encode_snapshot(snapshot: &CapacitySnapshot) -> Option<[u8; SNAPSHOT_V1_SIZE]
         u64::try_from(snapshot.limits.stack_bytes).ok()?,
     );
     encode_native_u64(&mut bytes, 32, u64::try_from(snapshot.active_user).ok()?);
-    encode_native_u64(
-        &mut bytes,
-        40,
-        u64::try_from(snapshot.active_kernel).ok()?,
-    );
-    encode_native_u64(
-        &mut bytes,
-        48,
-        u64::try_from(snapshot.pending_user).ok()?,
-    );
-    encode_native_u64(
-        &mut bytes,
-        56,
-        u64::try_from(snapshot.pending_kernel).ok()?,
-    );
+    encode_native_u64(&mut bytes, 40, u64::try_from(snapshot.active_kernel).ok()?);
+    encode_native_u64(&mut bytes, 48, u64::try_from(snapshot.pending_user).ok()?);
+    encode_native_u64(&mut bytes, 56, u64::try_from(snapshot.pending_kernel).ok()?);
     encode_native_u64(&mut bytes, 64, u64::try_from(snapshot.stack_slots).ok()?);
     encode_native_u64(
         &mut bytes,
@@ -236,8 +221,7 @@ pub fn sys_control(frame: &mut Trapframe) -> usize {
             if validate(limits, crate::mem::pmm::page_counts().0).is_err() {
                 return usize::MAX;
             }
-            crate::sched::scheduler::configure_task_capacity(limits)
-                .map_or(usize::MAX, |_| 0)
+            crate::sched::scheduler::configure_task_capacity(limits).map_or(usize::MAX, |_| 0)
         }
         _ => usize::MAX,
     }
@@ -246,8 +230,8 @@ pub fn sys_control(frame: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
     use crate::task::TaskType;
+    use alloc::string::ToString;
 
     #[test_case]
     fn large_ram_uses_geometry_instead_of_a_fixed_user_cap() {
@@ -261,10 +245,7 @@ mod tests {
         assert!(KERNEL_KSTACK_SLOTS > 1023);
         assert!(limits.max_user > 895);
         assert_eq!(limits.max_kernel, KERNEL_ROLE_MAX);
-        assert_eq!(
-            validate(limits, total_pages).unwrap(),
-            KERNEL_KSTACK_SLOTS
-        );
+        assert_eq!(validate(limits, total_pages).unwrap(), KERNEL_KSTACK_SLOTS);
     }
 
     #[test_case]
@@ -295,10 +276,9 @@ mod tests {
             max_kernel: 1,
             stack_bytes: (KERNEL_KSTACK_SLOTS + 1) * TASK_KERNEL_STACK_SIZE,
         };
-        let enough_pages = (KERNEL_KSTACK_SLOTS + 1)
-            * TASK_KERNEL_STACK_SIZE
-            * STACK_PHYSICAL_BUDGET_DIVISOR
-            / PAGE_SIZE;
+        let enough_pages =
+            (KERNEL_KSTACK_SLOTS + 1) * TASK_KERNEL_STACK_SIZE * STACK_PHYSICAL_BUDGET_DIVISOR
+                / PAGE_SIZE;
         assert!(validate(too_many_slots, enough_pages).is_err());
     }
 
@@ -312,14 +292,16 @@ mod tests {
         let total_pages = 3 * TASK_KERNEL_STACK_SIZE * STACK_PHYSICAL_BUDGET_DIVISOR / PAGE_SIZE;
         assert_eq!(validate(limits, total_pages), Ok(3));
 
-        assert!(validate(
-            TaskLimits {
-                max_kernel: 2,
-                ..limits
-            },
-            total_pages,
-        )
-        .is_err());
+        assert!(
+            validate(
+                TaskLimits {
+                    max_kernel: 2,
+                    ..limits
+                },
+                total_pages,
+            )
+            .is_err()
+        );
     }
 
     #[test_case]
@@ -330,38 +312,46 @@ mod tests {
             stack_bytes: 3 * TASK_KERNEL_STACK_SIZE,
         };
         let total_pages = 3 * TASK_KERNEL_STACK_SIZE * STACK_PHYSICAL_BUDGET_DIVISOR / PAGE_SIZE;
-        assert!(validate(
-            TaskLimits {
-                max_user: 0,
-                ..valid
-            },
-            total_pages,
-        )
-        .is_err());
-        assert!(validate(
-            TaskLimits {
-                max_kernel: 0,
-                ..valid
-            },
-            total_pages,
-        )
-        .is_err());
-        assert!(validate(
-            TaskLimits {
-                stack_bytes: 0,
-                ..valid
-            },
-            total_pages,
-        )
-        .is_err());
-        assert!(validate(
-            TaskLimits {
-                max_user: usize::MAX,
-                ..valid
-            },
-            total_pages,
-        )
-        .is_err());
+        assert!(
+            validate(
+                TaskLimits {
+                    max_user: 0,
+                    ..valid
+                },
+                total_pages,
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                TaskLimits {
+                    max_kernel: 0,
+                    ..valid
+                },
+                total_pages,
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                TaskLimits {
+                    stack_bytes: 0,
+                    ..valid
+                },
+                total_pages,
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                TaskLimits {
+                    max_user: usize::MAX,
+                    ..valid
+                },
+                total_pages,
+            )
+            .is_err()
+        );
     }
 
     #[test_case]

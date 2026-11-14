@@ -256,36 +256,60 @@ struct PendingSignals {
 impl Clone for PendingSignals {
     fn clone(&self) -> Self {
         let records = self.records.clone();
-        let realtime_count = records.iter().filter(|(signal, _)| **signal as u32 >= 32)
-            .map(|(_, records)| records.len()).sum();
-        Self { records, realtime_count, control_epoch: self.control_epoch }
+        let realtime_count = records
+            .iter()
+            .filter(|(signal, _)| **signal as u32 >= 32)
+            .map(|(_, records)| records.len())
+            .sum();
+        Self {
+            records,
+            realtime_count,
+            control_epoch: self.control_epoch,
+        }
     }
 }
 
 impl PendingSignals {
     fn accept_job_control(&mut self, signal: LinuxSignal) {
-        if is_job_signal(signal) { self.control_epoch = self.control_epoch.wrapping_add(1); }
+        if is_job_signal(signal) {
+            self.control_epoch = self.control_epoch.wrapping_add(1);
+        }
         self.discard_job_opposite(signal);
     }
     fn discard_job_opposite(&mut self, signal: LinuxSignal) {
         if signal == LinuxSignal::SIGCONT {
-            for stop in [LinuxSignal::SIGSTOP, LinuxSignal::SIGTSTP, LinuxSignal::SIGTTIN, LinuxSignal::SIGTTOU] {
+            for stop in [
+                LinuxSignal::SIGSTOP,
+                LinuxSignal::SIGTSTP,
+                LinuxSignal::SIGTTIN,
+                LinuxSignal::SIGTTOU,
+            ] {
                 self.records.remove(&stop);
             }
-        } else if is_stop_signal(signal) { self.records.remove(&LinuxSignal::SIGCONT); }
+        } else if is_stop_signal(signal) {
+            self.records.remove(&LinuxSignal::SIGCONT);
+        }
     }
     fn mask(&self) -> u64 {
-        self.records.keys().fold(0, |mask, signal| mask | (1u64 << (*signal as u32 - 1)))
+        self.records
+            .keys()
+            .fold(0, |mask, signal| mask | (1u64 << (*signal as u32 - 1)))
     }
 
     fn push(&mut self, signal: LinuxSignal, info: SignalInfo) -> Result<(), usize> {
         let realtime = signal as u32 >= 32;
         // Standard signals retain the first record while pending. Realtime
         // signals retain every admitted record and preserve FIFO per number.
-        if !realtime && self.records.contains_key(&signal) { return Ok(()); }
-        if realtime && self.realtime_count == MAX_REALTIME_PENDING { return Err(errno::EAGAIN); }
+        if !realtime && self.records.contains_key(&signal) {
+            return Ok(());
+        }
+        if realtime && self.realtime_count == MAX_REALTIME_PENDING {
+            return Err(errno::EAGAIN);
+        }
         self.records.entry(signal).or_default().push_back(info);
-        if realtime { self.realtime_count += 1; }
+        if realtime {
+            self.realtime_count += 1;
+        }
         Ok(())
     }
 
@@ -296,8 +320,12 @@ impl PendingSignals {
     fn take(&mut self, signal: LinuxSignal) -> Option<SignalInfo> {
         let queue = self.records.get_mut(&signal)?;
         let info = queue.pop_front()?;
-        if queue.is_empty() { self.records.remove(&signal); }
-        if signal as u32 >= 32 { self.realtime_count -= 1; }
+        if queue.is_empty() {
+            self.records.remove(&signal);
+        }
+        if signal as u32 >= 32 {
+            self.realtime_count -= 1;
+        }
         Some(info)
     }
 
@@ -305,12 +333,16 @@ impl PendingSignals {
         let info = self.take(signal)?;
         // A user copy may allocate or resolve COW. Keep its realtime slot
         // charged while the record is outside the spin lock.
-        if signal as u32 >= 32 { self.realtime_count += 1; }
+        if signal as u32 >= 32 {
+            self.realtime_count += 1;
+        }
         Some(info)
     }
 
     fn finish_reservation(&mut self, signal: LinuxSignal, info: SignalInfo, restore: bool) {
-        if signal as u32 >= 32 { self.realtime_count -= 1; }
+        if signal as u32 >= 32 {
+            self.realtime_count -= 1;
+        }
         if restore {
             if signal as u32 >= 32 {
                 self.records.entry(signal).or_default().push_front(info);
@@ -342,42 +374,72 @@ struct PendingReservation {
 
 impl PendingReservation {
     fn finish(&mut self, restore: bool) {
-        if !self.active { return; }
+        if !self.active {
+            return;
+        }
         match &self.origin {
             PendingOrigin::Thread(state) => {
                 let mut state = state.lock();
                 let epoch = state.shared_pending.lock().control_epoch;
-                state.pending.finish_reservation(self.signal, self.info,
-                    restore && (!is_job_signal(self.signal) || epoch == self.epoch));
+                state.pending.finish_reservation(
+                    self.signal,
+                    self.info,
+                    restore && (!is_job_signal(self.signal) || epoch == self.epoch),
+                );
             }
             PendingOrigin::Process(pending) => {
                 let mut pending = pending.lock();
-                let restore = restore && (!is_job_signal(self.signal) || pending.control_epoch == self.epoch);
+                let restore =
+                    restore && (!is_job_signal(self.signal) || pending.control_epoch == self.epoch);
                 pending.finish_reservation(self.signal, self.info, restore);
             }
         }
-        if restore { self.waker.wake_all(); }
+        if restore {
+            self.waker.wake_all();
+        }
         self.active = false;
     }
 }
 
 impl Drop for PendingReservation {
-    fn drop(&mut self) { self.finish(true); }
+    fn drop(&mut self) {
+        self.finish(true);
+    }
 }
 
-fn reserve_pending(state: &Arc<crate::sync::IrqSpinLock<SignalState>>, mask: u64) -> Option<PendingReservation> {
+fn reserve_pending(
+    state: &Arc<crate::sync::IrqSpinLock<SignalState>>,
+    mask: u64,
+) -> Option<PendingReservation> {
     let mut locked = state.lock();
     let process = locked.shared_pending.clone();
     let mut shared = process.lock();
     let mask = (locked.pending.mask() | shared.mask()) & mask;
-    if mask == 0 { return None; }
+    if mask == 0 {
+        return None;
+    }
     let signal = LinuxSignal::from_u32(mask.trailing_zeros() + 1).unwrap();
     let (origin, info, epoch) = if let Some(info) = locked.pending.reserve(signal) {
-        (PendingOrigin::Thread(state.clone()), info, locked.pending.control_epoch)
+        (
+            PendingOrigin::Thread(state.clone()),
+            info,
+            locked.pending.control_epoch,
+        )
     } else {
-        (PendingOrigin::Process(process.clone()), shared.reserve(signal).unwrap(), shared.control_epoch)
+        (
+            PendingOrigin::Process(process.clone()),
+            shared.reserve(signal).unwrap(),
+            shared.control_epoch,
+        )
     };
-    Some(PendingReservation { origin, signal, info, epoch, active: true, waker: locked.pending_waker.clone() })
+    Some(PendingReservation {
+        origin,
+        signal,
+        info,
+        epoch,
+        active: true,
+        waker: locked.pending_waker.clone(),
+    })
 }
 
 /// Per-thread mask and pending signals, with separately shareable dispositions.
@@ -403,7 +465,9 @@ impl Clone for SignalState {
             )),
             blocked: self.blocked,
             pending: self.pending.clone(),
-            shared_pending: Arc::new(crate::sync::IrqSpinLock::new(self.shared_pending.lock().clone())),
+            shared_pending: Arc::new(crate::sync::IrqSpinLock::new(
+                self.shared_pending.lock().clone(),
+            )),
             pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
             suspend_restore_mask: None,
         }
@@ -461,10 +525,16 @@ impl SignalState {
             dispositions,
             blocked: self.blocked,
             pending: PendingSignals::default(),
-            shared_pending: if share_pending { self.shared_pending.clone() }
-                else { Arc::new(crate::sync::IrqSpinLock::new(PendingSignals::default())) },
-            pending_waker: if share_pending { self.pending_waker.clone() }
-                else { Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")) },
+            shared_pending: if share_pending {
+                self.shared_pending.clone()
+            } else {
+                Arc::new(crate::sync::IrqSpinLock::new(PendingSignals::default()))
+            },
+            pending_waker: if share_pending {
+                self.pending_waker.clone()
+            } else {
+                Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal"))
+            },
             suspend_restore_mask: None,
         }
     }
@@ -531,15 +601,25 @@ impl SignalState {
         let _ = self.queue_pending_info(signal, SignalInfo::kernel(signal));
     }
 
-    pub(crate) fn queue_pending_info(&mut self, signal: LinuxSignal, info: SignalInfo) -> Result<(), usize> {
-        if is_job_signal(signal) { self.pending.control_epoch = self.shared_pending.lock().control_epoch; }
+    pub(crate) fn queue_pending_info(
+        &mut self,
+        signal: LinuxSignal,
+        info: SignalInfo,
+    ) -> Result<(), usize> {
+        if is_job_signal(signal) {
+            self.pending.control_epoch = self.shared_pending.lock().control_epoch;
+        }
         self.pending.discard_job_opposite(signal);
         self.pending.push(signal, info)?;
         self.pending_waker.wake_all();
         Ok(())
     }
 
-    pub(crate) fn add_process_pending(&self, signal: LinuxSignal, info: SignalInfo) -> Result<(), usize> {
+    pub(crate) fn add_process_pending(
+        &self,
+        signal: LinuxSignal,
+        info: SignalInfo,
+    ) -> Result<(), usize> {
         self.publish_process_signal(signal, info).map(|_| ())
     }
 
@@ -563,7 +643,9 @@ impl SignalState {
     }
 
     fn take_pending_with_epoch(&mut self, signal: LinuxSignal) -> Option<(SignalInfo, u64)> {
-        if let Some(info) = self.pending.take(signal) { return Some((info, self.pending.control_epoch)); }
+        if let Some(info) = self.pending.take(signal) {
+            return Some((info, self.pending.control_epoch));
+        }
         let mut shared = self.shared_pending.lock();
         shared.take(signal).map(|info| (info, shared.control_epoch))
     }
@@ -571,9 +653,15 @@ impl SignalState {
     pub(crate) fn take_pending_matching(&mut self, mask: u64) -> Option<(LinuxSignal, SignalInfo)> {
         let mut shared = self.shared_pending.lock();
         let matching = (self.pending.mask() | shared.mask()) & mask;
-        if matching == 0 { return None; }
+        if matching == 0 {
+            return None;
+        }
         let signal = LinuxSignal::from_u32(matching.trailing_zeros() + 1).unwrap();
-        let info = self.pending.take(signal).or_else(|| shared.take(signal)).unwrap();
+        let info = self
+            .pending
+            .take(signal)
+            .or_else(|| shared.take(signal))
+            .unwrap();
         Some((signal, info))
     }
 
@@ -828,23 +916,29 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
 #[cfg(target_arch = "aarch64")]
 pub fn sys_rt_sigsuspend(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
     use crate::library::std::usercopy::copy_from_user;
-    let Some(task) = mytask() else { return errno::to_result(errno::ESRCH); };
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::ESRCH);
+    };
     let mask_address = frame.get_arg(0);
     let size = frame.get_arg(1);
     frame.increment_pc_next(&task);
-    if size != 8 { return errno::to_result(errno::EINVAL); }
+    if size != 8 {
+        return errno::to_result(errno::EINVAL);
+    }
     let mut bytes = [0; 8];
     if copy_from_user(&task, mask_address, &mut bytes).is_err() {
         return errno::to_result(errno::EFAULT);
     }
-    let unmaskable = (1u64 << (LinuxSignal::SIGKILL as u32 - 1))
-        | (1u64 << (LinuxSignal::SIGSTOP as u32 - 1));
+    let unmaskable =
+        (1u64 << (LinuxSignal::SIGKILL as u32 - 1)) | (1u64 << (LinuxSignal::SIGSTOP as u32 - 1));
     abi.bind_task_signals(&task);
     let state = abi.signal_state.clone();
     let waker = {
         let mut state = state.lock();
         state.suspend_restore_mask = Some(state.blocked.raw());
-        state.blocked.set_raw(u64::from_ne_bytes(bytes) & !unmaskable);
+        state
+            .blocked
+            .set_raw(u64::from_ne_bytes(bytes) & !unmaskable);
         state.pending_waker.clone()
     };
     loop {
@@ -853,11 +947,17 @@ pub fn sys_rt_sigsuspend(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
         // ignored signals cannot incorrectly complete this wait. Non-signal
         // events remain queued for their own consumers.
         loop {
-            let event = task.event_queue.lock()
+            let event = task
+                .event_queue
+                .lock()
                 .dequeue_matching(|event| handle_event_to_signal(event).is_some());
-            let Some(event) = event else { break; };
+            let Some(event) = event else {
+                break;
+            };
             if !is_pending_wake(&event) {
-                state.lock().add_pending(handle_event_to_signal(&event).unwrap());
+                state
+                    .lock()
+                    .add_pending(handle_event_to_signal(&event).unwrap());
             }
         }
         if task.termination_signal().is_some() {
@@ -867,14 +967,19 @@ pub fn sys_rt_sigsuspend(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
             let mut state = state.lock();
             state.next_deliverable_signal().map(|signal| {
                 let action = state.get_handler(signal);
-                if matches!(action, SignalAction::Ignore | SignalAction::Continue | SignalAction::Stop) {
+                if matches!(
+                    action,
+                    SignalAction::Ignore | SignalAction::Continue | SignalAction::Stop
+                ) {
                     state.remove_pending(signal);
                 }
                 action
             })
         };
         match action {
-            Some(SignalAction::Custom(_) | SignalAction::Terminate | SignalAction::ForceTerminate) => {
+            Some(
+                SignalAction::Custom(_) | SignalAction::Terminate | SignalAction::ForceTerminate,
+            ) => {
                 // Leave the signal pending for the ordinary delivery path.
                 // Its frame saves -EINTR and the mask from before sigsuspend.
                 return errno::to_result(errno::EINTR);
@@ -883,7 +988,9 @@ pub fn sys_rt_sigsuspend(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
             Some(SignalAction::Stop) => {
                 // Keep Continue's enqueue/wake atomic with entering Stop.
                 let events = task.event_queue.lock();
-                if events.has_pending_continue() { continue; }
+                if events.has_pending_continue() {
+                    continue;
+                }
                 stop_target_for_signal(&task);
                 drop(events);
                 crate::sched::scheduler::schedule(frame);
@@ -908,7 +1015,9 @@ fn take_waited_signal(
     mask: u64,
     info: usize,
 ) -> Result<Option<usize>, usize> {
-    let Some(mut record) = reserve_pending(state, mask) else { return Ok(None); };
+    let Some(mut record) = reserve_pending(state, mask) else {
+        return Ok(None);
+    };
     if info != 0 {
         crate::library::std::usercopy::copy_to_user(task, info, &record.info.bytes)
             .map_err(|_| errno::EFAULT)?;
@@ -988,34 +1097,61 @@ pub fn sys_rt_sigtimedwait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
 
 fn process_signal_members(target: &Task) -> alloc::vec::Vec<Arc<Task>> {
     let group = target.get_thread_group_id();
-    crate::sched::scheduler::get_task_pool().task_ids_snapshot()
-        .into_iter().filter_map(get_task_by_id)
-        .filter(|member| member.get_thread_group_id() == group
-            && !matches!(member.get_state(), crate::task::TaskState::Zombie | crate::task::TaskState::Terminated))
+    crate::sched::scheduler::get_task_pool()
+        .task_ids_snapshot()
+        .into_iter()
+        .filter_map(get_task_by_id)
+        .filter(|member| {
+            member.get_thread_group_id() == group
+                && !matches!(
+                    member.get_state(),
+                    crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
+                )
+        })
         .collect()
 }
 
 fn is_stop_signal(signal: LinuxSignal) -> bool {
-    matches!(signal, LinuxSignal::SIGSTOP | LinuxSignal::SIGTSTP | LinuxSignal::SIGTTIN | LinuxSignal::SIGTTOU)
+    matches!(
+        signal,
+        LinuxSignal::SIGSTOP | LinuxSignal::SIGTSTP | LinuxSignal::SIGTTIN | LinuxSignal::SIGTTOU
+    )
 }
 
-fn is_job_signal(signal: LinuxSignal) -> bool { signal == LinuxSignal::SIGCONT || is_stop_signal(signal) }
+fn is_job_signal(signal: LinuxSignal) -> bool {
+    signal == LinuxSignal::SIGCONT || is_stop_signal(signal)
+}
 
-fn queue_process_signal(current: &Task, target: &Task, signal: LinuxSignal,
-    info: SignalInfo) -> Result<(), usize> {
+fn queue_process_signal(
+    current: &Task,
+    target: &Task,
+    signal: LinuxSignal,
+    info: SignalInfo,
+) -> Result<(), usize> {
     let members = process_signal_members(target);
-    let states: alloc::vec::Vec<_> = members.iter().filter_map(|member| {
-        member.linux_signal_state.lock().as_ref().and_then(|state| state.upgrade())
-            .map(|state| (member, state))
-    }).collect();
-    let Some((_, state)) = states.first() else { return Err(errno::ESRCH); };
+    let states: alloc::vec::Vec<_> = members
+        .iter()
+        .filter_map(|member| {
+            member
+                .linux_signal_state
+                .lock()
+                .as_ref()
+                .and_then(|state| state.upgrade())
+                .map(|state| (member, state))
+        })
+        .collect();
+    let Some((_, state)) = states.first() else {
+        return Err(errno::ESRCH);
+    };
     let epoch = state.lock().publish_process_signal(signal, info)?;
     if is_job_signal(signal) {
         for (member, state) in &states {
             let shared = {
                 let mut state = state.lock();
                 let shared = state.shared_pending.clone();
-                if shared.lock().control_epoch == epoch { state.pending.discard_job_opposite(signal); }
+                if shared.lock().control_epoch == epoch {
+                    state.pending.discard_job_opposite(signal);
+                }
                 shared
             };
             if signal == LinuxSignal::SIGCONT {
@@ -1024,7 +1160,12 @@ fn queue_process_signal(current: &Task, target: &Task, signal: LinuxSignal,
                 let mut events = member.event_queue.lock();
                 let shared = shared.lock();
                 if shared.control_epoch == epoch {
-                    events.enqueue(pending_wake_event(member, signal, info, Some(current.get_id() as u32)));
+                    events.enqueue(pending_wake_event(
+                        member,
+                        signal,
+                        info,
+                        Some(current.get_id() as u32),
+                    ));
                     wake_target_for_signal(member);
                 }
             }
@@ -1040,20 +1181,38 @@ fn queue_process_signal(current: &Task, target: &Task, signal: LinuxSignal,
     Ok(())
 }
 
-fn notify_process_signal(target: &Task, signal: LinuxSignal, info: SignalInfo,
-    sender: Option<u32>, exclude: Option<usize>) {
+fn notify_process_signal(
+    target: &Task,
+    signal: LinuxSignal,
+    info: SignalInfo,
+    sender: Option<u32>,
+    exclude: Option<usize>,
+) {
     for member in process_signal_members(target) {
-        if exclude == Some(member.get_id()) { continue; }
-        let state = member.linux_signal_state.lock().as_ref().and_then(|state| state.upgrade());
-        let Some(state) = state else { continue; };
+        if exclude == Some(member.get_id()) {
+            continue;
+        }
+        let state = member
+            .linux_signal_state
+            .lock()
+            .as_ref()
+            .and_then(|state| state.upgrade());
+        let Some(state) = state else {
+            continue;
+        };
         let (eligible, shared) = {
             let state = state.lock();
-            (!state.blocked.is_blocked(signal), state.shared_pending.clone())
+            (
+                !state.blocked.is_blocked(signal),
+                state.shared_pending.clone(),
+            )
         };
         if eligible {
             let mut events = member.event_queue.lock();
             let shared = shared.lock();
-            if shared.peek(signal).is_none() { return; }
+            if shared.peek(signal).is_none() {
+                return;
+            }
             events.enqueue(pending_wake_event(&member, signal, info, sender));
             crate::sched::scheduler::wake_task(member.get_id());
             break;
@@ -1061,8 +1220,16 @@ fn notify_process_signal(target: &Task, signal: LinuxSignal, info: SignalInfo,
     }
 }
 
-fn pending_wake_event(target: &Task, signal: LinuxSignal, info: SignalInfo, sender: Option<u32>) -> Event {
-    let mut event = Event::immediate_process_control(target.get_id() as u32, signal_process_control(signal).unwrap());
+fn pending_wake_event(
+    target: &Task,
+    signal: LinuxSignal,
+    info: SignalInfo,
+    sender: Option<u32>,
+) -> Event {
+    let mut event = Event::immediate_process_control(
+        target.get_id() as u32,
+        signal_process_control(signal).unwrap(),
+    );
     let mut payload = PENDING_WAKE.to_vec();
     payload.extend_from_slice(&info.bytes);
     event.payload = EventPayload::Custom(payload);
@@ -1070,17 +1237,31 @@ fn pending_wake_event(target: &Task, signal: LinuxSignal, info: SignalInfo, send
     event
 }
 
-pub(super) fn deliver_process_signal(abi: &LinuxAbi, current: &Task, target: &Task,
-    signal: LinuxSignal) -> usize {
+pub(super) fn deliver_process_signal(
+    abi: &LinuxAbi,
+    current: &Task,
+    target: &Task,
+    signal: LinuxSignal,
+) -> usize {
     if matches!(signal, LinuxSignal::SIGKILL | LinuxSignal::SIGSTOP)
-        || target.linux_signal_state.lock().as_ref().and_then(|state| state.upgrade()).is_none() {
+        || target
+            .linux_signal_state
+            .lock()
+            .as_ref()
+            .and_then(|state| state.upgrade())
+            .is_none()
+    {
         return deliver_signal(abi, current, target, signal);
     }
     let mut info = SignalInfo::kernel(signal);
     info.bytes[8..12].copy_from_slice(&0i32.to_ne_bytes()); // SI_USER
-    let sender = target.get_namespace().resolve_local_id(current.get_thread_group_id()).unwrap_or(0);
+    let sender = target
+        .get_namespace()
+        .resolve_local_id(current.get_thread_group_id())
+        .unwrap_or(0);
     info.bytes[16..20].copy_from_slice(&(sender as i32).to_ne_bytes());
-    info.bytes[20..24].copy_from_slice(&current.credentials.read().principals().base.0.to_ne_bytes());
+    info.bytes[20..24]
+        .copy_from_slice(&current.credentials.read().principals().base.0.to_ne_bytes());
     queue_process_signal(current, target, signal, info).map_or_else(errno::to_result, |_| 0)
 }
 
@@ -1089,28 +1270,40 @@ pub(super) fn deliver_process_signal(abi: &LinuxAbi, current: &Task, target: &Ta
 /// including a blocked SignalCatcher using sigwait. PID/UID for SI_QUEUE are
 /// derived from the sender and translated into the receiver's PID namespace.
 pub fn sys_rt_sigqueueinfo(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
-    let Some(caller) = mytask() else { return errno::to_result(errno::ESRCH); };
+    let Some(caller) = mytask() else {
+        return errno::to_result(errno::ESRCH);
+    };
     let pid = frame.get_arg(0) as i32;
     let number = frame.get_arg(1) as i32;
     let address = frame.get_arg(2);
     frame.increment_pc_next(&caller);
-    if pid <= 0 || !(0..=64).contains(&number) { return errno::to_result(errno::EINVAL); }
+    if pid <= 0 || !(0..=64).contains(&number) {
+        return errno::to_result(errno::EINVAL);
+    }
     let mut info = SignalInfo { bytes: [0; 128] };
     if crate::library::std::usercopy::copy_from_user(&caller, address, &mut info.bytes).is_err() {
         return errno::to_result(errno::EFAULT);
     }
-    let Some(target) = resolve_task_by_linux_tid(&caller, pid) else { return errno::to_result(errno::ESRCH); };
+    let Some(target) = resolve_task_by_linux_tid(&caller, pid) else {
+        return errno::to_result(errno::ESRCH);
+    };
     let code = i32::from_ne_bytes(info.bytes[8..12].try_into().unwrap());
     if code >= 0 || code == -6 && target.get_thread_group_id() != caller.get_thread_group_id() {
         return errno::to_result(errno::EPERM);
     }
-    if number == 0 { return 0; }
+    if number == 0 {
+        return 0;
+    }
     let signal = LinuxSignal::from_u32(number as u32).unwrap();
     info.bytes[..4].copy_from_slice(&number.to_ne_bytes());
     if code == -1 {
-        let sender = target.get_namespace().resolve_local_id(caller.get_thread_group_id()).unwrap_or(0);
+        let sender = target
+            .get_namespace()
+            .resolve_local_id(caller.get_thread_group_id())
+            .unwrap_or(0);
         info.bytes[16..20].copy_from_slice(&(sender as i32).to_ne_bytes());
-        info.bytes[20..24].copy_from_slice(&caller.credentials.read().principals().base.0.to_ne_bytes());
+        info.bytes[20..24]
+            .copy_from_slice(&caller.credentials.read().principals().base.0.to_ne_bytes());
     }
     if matches!(signal, LinuxSignal::SIGKILL | LinuxSignal::SIGSTOP) {
         return deliver_signal(abi, &caller, &target, signal);
@@ -1136,7 +1329,9 @@ pub fn process_control_to_signal(control_type: ProcessControlType) -> Option<Lin
         ProcessControlType::PipeBroken => Some(LinuxSignal::SIGPIPE),
         ProcessControlType::Alarm => Some(LinuxSignal::SIGALRM),
         ProcessControlType::IoReady => Some(LinuxSignal::SIGIO),
-        ProcessControlType::User(sig) if (257..288).contains(&sig) => LinuxSignal::from_u32(sig - 256),
+        ProcessControlType::User(sig) if (257..288).contains(&sig) => {
+            LinuxSignal::from_u32(sig - 256)
+        }
         ProcessControlType::User(sig) => LinuxSignal::from_u32(sig + 32), // Map to RT signals
     }
 }
@@ -1189,12 +1384,18 @@ pub(crate) fn handle_event_for_task(
             && signal != LinuxSignal::SIGSTOP
             && signal_state.blocked.is_blocked(signal)
         {
-            if !is_pending_wake(event) { signal_state.add_pending(signal); }
-            else {
+            if !is_pending_wake(event) {
+                signal_state.add_pending(signal);
+            } else {
                 drop(signal_state);
                 if let Some(target) = get_task_by_id(target_task_id) {
-                    notify_process_signal(&target, signal, SignalInfo::kernel(signal),
-                        event.metadata.sender, Some(target_task_id));
+                    notify_process_signal(
+                        &target,
+                        signal,
+                        SignalInfo::kernel(signal),
+                        event.metadata.sender,
+                        Some(target_task_id),
+                    );
                 }
             }
             return Ok(EventProcessOutcome::Continue);
@@ -1206,8 +1407,18 @@ pub(crate) fn handle_event_for_task(
                 return Ok(EventProcessOutcome::Continue);
             };
             record
-        } else { (SignalInfo::kernel(signal), signal_state.shared_pending.lock().control_epoch) };
-        (signal_state.get_handler(signal), info, epoch, signal_state.shared_pending.clone())
+        } else {
+            (
+                SignalInfo::kernel(signal),
+                signal_state.shared_pending.lock().control_epoch,
+            )
+        };
+        (
+            signal_state.get_handler(signal),
+            info,
+            epoch,
+            signal_state.shared_pending.clone(),
+        )
     };
 
     // Preserve owned lookup semantics for nonfatal and remote targets. Fatal
@@ -1242,12 +1453,17 @@ pub(crate) fn handle_event_for_task(
             EventProcessOutcome::Exited(exit_code)
         }
         SignalAction::Stop => {
-            if apply_signal_stop(&target_task, &shared, epoch) { EventProcessOutcome::NeedReschedule }
-                else { EventProcessOutcome::Continue }
+            if apply_signal_stop(&target_task, &shared, epoch) {
+                EventProcessOutcome::NeedReschedule
+            } else {
+                EventProcessOutcome::Continue
+            }
         }
         SignalAction::Continue => {
             let shared = shared.lock();
-            if shared.control_epoch != epoch { return Ok(EventProcessOutcome::Continue); }
+            if shared.control_epoch != epoch {
+                return Ok(EventProcessOutcome::Continue);
+            }
             let current_state = target_task.get_state();
             if matches!(current_state, crate::task::TaskState::Blocked(_)) {
                 target_task.set_state(crate::task::TaskState::Ready);
@@ -1424,10 +1640,16 @@ fn stop_target_for_signal(target: &Task) {
     remove_from_ready_queues(target.get_id());
 }
 
-fn apply_signal_stop(target: &Task, shared: &crate::sync::IrqSpinLock<PendingSignals>, epoch: u64) -> bool {
+fn apply_signal_stop(
+    target: &Task,
+    shared: &crate::sync::IrqSpinLock<PendingSignals>,
+    epoch: u64,
+) -> bool {
     let events = target.event_queue.lock();
     let shared = shared.lock();
-    if shared.control_epoch != epoch || events.has_pending_continue() { return false; }
+    if shared.control_epoch != epoch || events.has_pending_continue() {
+        return false;
+    }
     stop_target_for_signal(target);
     true
 }
@@ -1446,8 +1668,12 @@ fn apply_signal_stop(target: &Task, shared: &crate::sync::IrqSpinLock<PendingSig
 /// * `abi` - Linux ABI state that owns the signal handler table
 /// * `task` - Currently running task
 /// * `signal` - Signal to deliver
-fn deliver_signal_to_self(abi: &LinuxAbi, task: &Task, signal: LinuxSignal,
-    job: Option<&(Arc<crate::sync::IrqSpinLock<PendingSignals>>, u64)>) {
+fn deliver_signal_to_self(
+    abi: &LinuxAbi,
+    task: &Task,
+    signal: LinuxSignal,
+    job: Option<&(Arc<crate::sync::IrqSpinLock<PendingSignals>>, u64)>,
+) {
     let action = {
         let mut signal_state = abi.signal_state.lock();
         if signal != LinuxSignal::SIGKILL && signal_state.blocked.is_blocked(signal) {
@@ -1471,8 +1697,11 @@ fn deliver_signal_to_self(abi: &LinuxAbi, task: &Task, signal: LinuxSignal,
             task.request_deferred_exit_group(status);
         }
         SignalAction::Stop => {
-            if let Some((shared, epoch)) = job { apply_signal_stop(task, shared, *epoch); }
-            else { stop_target_for_signal(task); }
+            if let Some((shared, epoch)) = job {
+                apply_signal_stop(task, shared, *epoch);
+            } else {
+                stop_target_for_signal(task);
+            }
         }
         SignalAction::Ignore | SignalAction::Continue | SignalAction::Custom(_) => {}
     }
@@ -1500,9 +1729,13 @@ fn signal_process_control(signal: LinuxSignal) -> Option<ProcessControlType> {
     ]
     .into_iter()
     .find(|control| process_control_to_signal(*control) == Some(signal))
-    .or_else(|| Some(if signal as u32 >= 32 {
-        ProcessControlType::User(signal as u32 - 32)
-    } else { ProcessControlType::User(256 + signal as u32) }))
+    .or_else(|| {
+        Some(if signal as u32 >= 32 {
+            ProcessControlType::User(signal as u32 - 32)
+        } else {
+            ProcessControlType::User(256 + signal as u32)
+        })
+    })
 }
 
 /// Honor the receiver's disposition. Wine registers SIGQUIT to terminate a
@@ -1511,8 +1744,12 @@ fn deliver_signal_to_remote(current: &Task, target: &Task, signal: LinuxSignal) 
     deliver_signal_to_remote_with_job(current, target, signal, None)
 }
 
-fn deliver_signal_to_remote_with_job(current: &Task, target: &Task, signal: LinuxSignal,
-    job: Option<&(Arc<crate::sync::IrqSpinLock<PendingSignals>>, u64)>) -> usize {
+fn deliver_signal_to_remote_with_job(
+    current: &Task,
+    target: &Task,
+    signal: LinuxSignal,
+    job: Option<&(Arc<crate::sync::IrqSpinLock<PendingSignals>>, u64)>,
+) -> usize {
     // An unreaped task still exists for kill(), but cannot receive a signal.
     // In particular, Wine's delayed SIGKILL after a process has exited must
     // not replace the recorded cause of death observed by wait4()/waitid().
@@ -1568,8 +1805,11 @@ fn deliver_signal_to_remote_with_job(current: &Task, target: &Task, signal: Linu
             wake_target_for_signal(target);
         }
         SignalAction::Stop => {
-            if let Some((shared, epoch)) = job { apply_signal_stop(target, shared, *epoch); }
-            else { stop_target_for_signal(target); }
+            if let Some((shared, epoch)) = job {
+                apply_signal_stop(target, shared, *epoch);
+            } else {
+                stop_target_for_signal(target);
+            }
         }
         SignalAction::Continue => wake_target_for_signal(target),
         SignalAction::Ignore => {}
@@ -1592,7 +1832,11 @@ fn deliver_signal_to_remote_with_job(current: &Task, target: &Task, signal: Linu
 pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: LinuxSignal) -> usize {
     let mut job = None;
     if is_job_signal(signal) {
-        let state = target.linux_signal_state.lock().as_ref().and_then(|state| state.upgrade());
+        let state = target
+            .linux_signal_state
+            .lock()
+            .as_ref()
+            .and_then(|state| state.upgrade());
         if let Some(state) = state {
             if signal == LinuxSignal::SIGCONT {
                 return deliver_process_signal(abi, current, target, signal);
@@ -1607,7 +1851,12 @@ pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: Lin
             };
             job = Some((shared, epoch));
             for member in process_signal_members(target) {
-                if let Some(state) = member.linux_signal_state.lock().as_ref().and_then(|state| state.upgrade()) {
+                if let Some(state) = member
+                    .linux_signal_state
+                    .lock()
+                    .as_ref()
+                    .and_then(|state| state.upgrade())
+                {
                     state.lock().pending.discard_job_opposite(signal);
                 }
             }
@@ -1668,8 +1917,14 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 
         let (action, epoch, shared) = {
             let mut signal_state = abi.signal_state.lock();
-            let Some((_, epoch)) = signal_state.take_pending_with_epoch(signal) else { continue; };
-            (signal_state.get_handler(signal), epoch, signal_state.shared_pending.clone())
+            let Some((_, epoch)) = signal_state.take_pending_with_epoch(signal) else {
+                continue;
+            };
+            (
+                signal_state.get_handler(signal),
+                epoch,
+                signal_state.shared_pending.clone(),
+            )
         };
 
         match action {
@@ -1687,7 +1942,9 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
                 return;
             }
             SignalAction::Stop => {
-                if apply_signal_stop(&task, &shared, epoch) { return; }
+                if apply_signal_stop(&task, &shared, epoch) {
+                    return;
+                }
             }
             SignalAction::Ignore | SignalAction::Continue | SignalAction::Custom(_) => continue,
         }
@@ -1724,10 +1981,7 @@ mod tests {
                 3,
             )
             .unwrap();
-        assert_eq!(
-            take_waited_signal(&task, &state, mask, info),
-            Ok(Some(10))
-        );
+        assert_eq!(take_waited_signal(&task, &state, mask, info), Ok(Some(10)));
         let mut record = [0xff; 128];
         copy_from_user(&task, info, &mut record).unwrap();
         assert_eq!(u32::from_ne_bytes(record[..4].try_into().unwrap()), 10);
@@ -2021,33 +2275,72 @@ mod signal_delivery_tests {
             state.lock().add_process_pending(signal, info).unwrap();
         }
         let record = reserve_pending(&state, 1u64 << (signal as u32 - 1)).unwrap();
-        assert_eq!(u64::from_ne_bytes(record.info.bytes[24..32].try_into().unwrap()), 0);
-        assert_eq!(state.lock().add_process_pending(signal, SignalInfo::kernel(signal)), Err(errno::EAGAIN));
+        assert_eq!(
+            u64::from_ne_bytes(record.info.bytes[24..32].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            state
+                .lock()
+                .add_process_pending(signal, SignalInfo::kernel(signal)),
+            Err(errno::EAGAIN)
+        );
         // Cloning a process snapshot cannot inherit a slot charged to another
         // thread's in-progress user copy without inheriting that reservation.
         let snapshot = state.lock().clone();
-        assert_eq!(snapshot.shared_pending.lock().realtime_count, MAX_REALTIME_PENDING - 1);
+        assert_eq!(
+            snapshot.shared_pending.lock().realtime_count,
+            MAX_REALTIME_PENDING - 1
+        );
         drop(record);
         let mut state = state.lock();
-        assert_eq!(u64::from_ne_bytes(state.take_pending_info(signal).unwrap().bytes[24..32].try_into().unwrap()), 0);
-        assert_eq!(u64::from_ne_bytes(state.take_pending_info(signal).unwrap().bytes[24..32].try_into().unwrap()), 1);
-        state.add_process_pending(signal, SignalInfo::kernel(signal)).unwrap();
+        assert_eq!(
+            u64::from_ne_bytes(
+                state.take_pending_info(signal).unwrap().bytes[24..32]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
+        assert_eq!(
+            u64::from_ne_bytes(
+                state.take_pending_info(signal).unwrap().bytes[24..32]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        state
+            .add_process_pending(signal, SignalInfo::kernel(signal))
+            .unwrap();
     }
 
     #[test_case]
     fn continuation_invalidates_an_inflight_stop_and_later_stop_supersedes_continue() {
         let mut state = SignalState::new();
         let stop = LinuxSignal::SIGTSTP;
-        state.publish_process_signal(stop, SignalInfo::kernel(stop)).unwrap();
+        state
+            .publish_process_signal(stop, SignalInfo::kernel(stop))
+            .unwrap();
         let (_, epoch) = state.take_pending_with_epoch(stop).unwrap();
-        state.publish_process_signal(LinuxSignal::SIGCONT, SignalInfo::kernel(LinuxSignal::SIGCONT)).unwrap();
+        state
+            .publish_process_signal(
+                LinuxSignal::SIGCONT,
+                SignalInfo::kernel(LinuxSignal::SIGCONT),
+            )
+            .unwrap();
         let task = Task::new("stale-stop".into(), 0, TaskType::Kernel);
         let before = task.get_state();
         assert!(!apply_signal_stop(&task, &state.shared_pending, epoch));
         assert_eq!(task.get_state(), before);
         assert!(!state.is_pending(stop));
         assert!(state.is_pending(LinuxSignal::SIGCONT));
-        state.publish_process_signal(LinuxSignal::SIGTTOU, SignalInfo::kernel(LinuxSignal::SIGTTOU)).unwrap();
+        state
+            .publish_process_signal(
+                LinuxSignal::SIGTTOU,
+                SignalInfo::kernel(LinuxSignal::SIGTTOU),
+            )
+            .unwrap();
         assert!(!state.is_pending(LinuxSignal::SIGCONT));
         assert!(state.is_pending(LinuxSignal::SIGTTOU));
     }
@@ -2070,22 +2363,46 @@ mod signal_delivery_tests {
         member_abi.clone_signal_state_with_group(true, true);
         member_abi.bind_task_signals(&member);
         let signal = LinuxSignal::SIGUSR1;
-        leader_abi.signal_state.lock().set_handler(signal, SignalAction::Custom(0x400000));
+        leader_abi
+            .signal_state
+            .lock()
+            .set_handler(signal, SignalAction::Custom(0x400000));
         let mut info = SignalInfo::kernel(signal);
         info.bytes[24] = 42;
         queue_process_signal(&leader, &leader, signal, info).unwrap();
         let event = leader.event_queue.lock().dequeue().unwrap();
         assert!(is_pending_wake(&event));
         leader_abi.signal_state.lock().blocked.block_signal(signal);
-        assert!(matches!(handle_event_for_task(&leader_abi, &event, leader_id,
-            |_,_,_,_,_,_| panic!("masked thread must not handle signal")).unwrap(), EventProcessOutcome::Continue));
+        assert!(matches!(
+            handle_event_for_task(&leader_abi, &event, leader_id, |_, _, _, _, _, _| panic!(
+                "masked thread must not handle signal"
+            ))
+            .unwrap(),
+            EventProcessOutcome::Continue
+        ));
         let event = member.event_queue.lock().dequeue().unwrap();
-        assert!(matches!(handle_event_for_task(&member_abi, &event, member_id,
-            |_,_,_,_,received,record| { assert_eq!(received, signal); assert_eq!(record, info); Ok(()) }).unwrap(),
-            EventProcessOutcome::UserHandlerArmed));
+        assert!(matches!(
+            handle_event_for_task(
+                &member_abi,
+                &event,
+                member_id,
+                |_, _, _, _, received, record| {
+                    assert_eq!(received, signal);
+                    assert_eq!(record, info);
+                    Ok(())
+                }
+            )
+            .unwrap(),
+            EventProcessOutcome::UserHandlerArmed
+        ));
         assert!(!leader_abi.signal_state.lock().is_pending(signal));
-        assert!(matches!(handle_event_for_task(&member_abi, &event, member_id,
-            |_,_,_,_,_,_| panic!("stale marker must not deliver twice")).unwrap(), EventProcessOutcome::Continue));
+        assert!(matches!(
+            handle_event_for_task(&member_abi, &event, member_id, |_, _, _, _, _, _| panic!(
+                "stale marker must not deliver twice"
+            ))
+            .unwrap(),
+            EventProcessOutcome::Continue
+        ));
         drop(member);
         drop(leader);
         reset();
@@ -2097,7 +2414,12 @@ mod signal_delivery_tests {
         let mut thread = parent.clone_for_child(true, true);
         let mut sighand_only = parent.clone_for_child(true, false);
         let mut fork = parent.clone_for_child(false, false);
-        parent.add_process_pending(LinuxSignal::SIGQUIT, SignalInfo::kernel(LinuxSignal::SIGQUIT)).unwrap();
+        parent
+            .add_process_pending(
+                LinuxSignal::SIGQUIT,
+                SignalInfo::kernel(LinuxSignal::SIGQUIT),
+            )
+            .unwrap();
         assert!(thread.is_pending(LinuxSignal::SIGQUIT));
         assert!(!sighand_only.is_pending(LinuxSignal::SIGQUIT));
         assert!(!fork.is_pending(LinuxSignal::SIGQUIT));
@@ -2123,15 +2445,28 @@ mod signal_delivery_tests {
             info.bytes[24..32].copy_from_slice(&(n as u64).to_ne_bytes());
             queue.push(LinuxSignal::SIGRT0, info).unwrap();
         }
-        assert_eq!(queue.push(LinuxSignal::SIGRT1, SignalInfo::kernel(LinuxSignal::SIGRT1)), Err(errno::EAGAIN));
+        assert_eq!(
+            queue.push(LinuxSignal::SIGRT1, SignalInfo::kernel(LinuxSignal::SIGRT1)),
+            Err(errno::EAGAIN)
+        );
         // Realtime exhaustion must not prevent an ordinary control signal.
-        queue.push(LinuxSignal::SIGQUIT, SignalInfo::kernel(LinuxSignal::SIGQUIT)).unwrap();
+        queue
+            .push(
+                LinuxSignal::SIGQUIT,
+                SignalInfo::kernel(LinuxSignal::SIGQUIT),
+            )
+            .unwrap();
         for n in 0..MAX_REALTIME_PENDING {
             let info = queue.take(LinuxSignal::SIGRT0).unwrap();
-            assert_eq!(u64::from_ne_bytes(info.bytes[24..32].try_into().unwrap()), n as u64);
+            assert_eq!(
+                u64::from_ne_bytes(info.bytes[24..32].try_into().unwrap()),
+                n as u64
+            );
         }
         assert_eq!(queue.realtime_count, 0);
-        queue.push(LinuxSignal::SIGRT1, SignalInfo::kernel(LinuxSignal::SIGRT1)).unwrap();
+        queue
+            .push(LinuxSignal::SIGRT1, SignalInfo::kernel(LinuxSignal::SIGRT1))
+            .unwrap();
     }
 
     #[test_case]
@@ -2176,22 +2511,50 @@ mod signal_delivery_tests {
         assert_eq!(sys_rt_sigqueueinfo(&mut sender_abi, &mut frame), 0);
         let state = catcher_abi.signal_state.clone();
         let mask = 1u64 << (LinuxSignal::SIGQUIT as u32 - 1);
-        assert_eq!(take_waited_signal(&catcher, &state, mask, 1), Err(errno::EFAULT));
+        assert_eq!(
+            take_waited_signal(&catcher, &state, mask, 1),
+            Err(errno::EFAULT)
+        );
         assert!(state.lock().is_pending(LinuxSignal::SIGQUIT));
-        assert_eq!(take_waited_signal(&catcher, &state, mask, base), Ok(Some(3)));
+        assert_eq!(
+            take_waited_signal(&catcher, &state, mask, base),
+            Ok(Some(3))
+        );
         drop(state);
         let mut received = [0; 128];
         copy_from_user(&catcher, base, &mut received).unwrap();
         assert_eq!(i32::from_ne_bytes(received[8..12].try_into().unwrap()), -1);
-        assert_eq!(i32::from_ne_bytes(received[16..20].try_into().unwrap()), sender.get_namespace_id() as i32);
-        assert_eq!(u32::from_ne_bytes(received[20..24].try_into().unwrap()), sender.credentials.read().principals().base.0);
-        assert_eq!(u64::from_ne_bytes(received[24..32].try_into().unwrap()), 0x12345678);
-        assert!(!leader_abi.signal_state.lock().is_pending(LinuxSignal::SIGQUIT));
+        assert_eq!(
+            i32::from_ne_bytes(received[16..20].try_into().unwrap()),
+            sender.get_namespace_id() as i32
+        );
+        assert_eq!(
+            u32::from_ne_bytes(received[20..24].try_into().unwrap()),
+            sender.credentials.read().principals().base.0
+        );
+        assert_eq!(
+            u64::from_ne_bytes(received[24..32].try_into().unwrap()),
+            0x12345678
+        );
+        assert!(
+            !leader_abi
+                .signal_state
+                .lock()
+                .is_pending(LinuxSignal::SIGQUIT)
+        );
         // Invalid kernel-origin codes are rejected without creating a record.
         info.bytes[8..12].copy_from_slice(&128i32.to_ne_bytes());
         copy_to_user(&sender, base, &info.bytes).unwrap();
-        assert_eq!(sys_rt_sigqueueinfo(&mut sender_abi, &mut frame), errno::to_result(errno::EPERM));
-        assert!(!leader_abi.signal_state.lock().is_pending(LinuxSignal::SIGQUIT));
+        assert_eq!(
+            sys_rt_sigqueueinfo(&mut sender_abi, &mut frame),
+            errno::to_result(errno::EPERM)
+        );
+        assert!(
+            !leader_abi
+                .signal_state
+                .lock()
+                .is_pending(LinuxSignal::SIGQUIT)
+        );
         clear_mock_current_task();
         drop(catcher);
         drop(leader);

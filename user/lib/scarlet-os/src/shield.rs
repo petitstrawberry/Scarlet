@@ -7,22 +7,27 @@ use crate::{
     handle::{HandleError, HandleResult, introspection::KernelObjectType},
 };
 use alloc::vec::Vec;
-use scarlet_abi::shield::{RawLabel, RawRule};
-pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition, RawFileCreate as FileCreate, RawFileRelabel as FileRelabel};
-use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 pub use scarlet_abi::shield::{
-    MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES, MAX_LABEL_SETS, MAX_SET_MEMBERS,
+    MAX_LABEL_BYTES, MAX_LABEL_SETS, MAX_LABELS, MAX_RULES, MAX_SET_MEMBERS,
 };
-pub use scarlet_abi::shield::{RawLabelSet as LabelSet, RawSetMember as SetMember,
-    RawLabelSelector as LabelSelector, RawSetGrant as SetGrant, RawSetFileRule as SetFileRule,
-    RawPrincipalRangeTransition as PrincipalRangeTransition};
+pub use scarlet_abi::shield::{
+    RawExecTransition as ExecTransition, RawFileCreate as FileCreate,
+    RawFileRelabel as FileRelabel, RawRule as Rule, RawTransition as Transition,
+};
+use scarlet_abi::shield::{RawLabel, RawRule};
+pub use scarlet_abi::shield::{
+    RawLabelSelector as LabelSelector, RawLabelSet as LabelSet,
+    RawPrincipalRangeTransition as PrincipalRangeTransition, RawSetFileRule as SetFileRule,
+    RawSetGrant as SetGrant, RawSetMember as SetMember,
+};
+use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 
 #[derive(Default)]
 pub struct LabelSetUpdate<'a> {
-    pub sets:&'a [LabelSet],
-    pub members:&'a [SetMember],
-    pub grants:&'a [SetGrant],
-    pub files:&'a [SetFileRule],
+    pub sets: &'a [LabelSet],
+    pub members: &'a [SetMember],
+    pub grants: &'a [SetGrant],
+    pub files: &'a [SetFileRule],
 }
 
 /// Transferable authority to construct new policies without carrying an
@@ -83,44 +88,70 @@ impl Policy {
         create: &[FileCreate],
         relabel: &[FileRelabel],
     ) -> HandleResult<()> {
-        self.extend_with_sets(expected_generation,labels,rules,transitions,exec,create,relabel,LabelSetUpdate::default())
+        self.extend_with_sets(
+            expected_generation,
+            labels,
+            rules,
+            transitions,
+            exec,
+            create,
+            relabel,
+            LabelSetUpdate::default(),
+        )
     }
 
     /// Atomically add label sets, memberships and shared rules along with an
     /// ordinary update. Set identifiers are scoped to this policy capability.
     pub fn extend_with_sets(
         &self,
-        expected_generation:u64,
-        labels:&[(u32,&str)],
-        rules:&[Rule],
-        transitions:&[Transition],
-        exec:&[ExecTransition],
-        create:&[FileCreate],
-        relabel:&[FileRelabel],
-        sets:LabelSetUpdate<'_>,
-    )->HandleResult<()> {
-        self.extend_with_principal_ranges(expected_generation,labels,rules,transitions,exec,create,relabel,sets,&[])
+        expected_generation: u64,
+        labels: &[(u32, &str)],
+        rules: &[Rule],
+        transitions: &[Transition],
+        exec: &[ExecTransition],
+        create: &[FileCreate],
+        relabel: &[FileRelabel],
+        sets: LabelSetUpdate<'_>,
+    ) -> HandleResult<()> {
+        self.extend_with_principal_ranges(
+            expected_generation,
+            labels,
+            rules,
+            transitions,
+            exec,
+            create,
+            relabel,
+            sets,
+            &[],
+        )
     }
 
     /// Publish principal intervals and their labels/grants in one generation.
     /// The existing management capability remains required by the kernel.
     pub fn extend_with_principal_ranges(
         &self,
-        expected_generation:u64,
-        labels:&[(u32,&str)],
-        rules:&[Rule],
-        transitions:&[Transition],
-        exec:&[ExecTransition],
-        create:&[FileCreate],
-        relabel:&[FileRelabel],
-        sets:LabelSetUpdate<'_>,
-        principal_ranges:&[PrincipalRangeTransition],
-    )->HandleResult<()> {
-        if principal_ranges.len()>MAX_RULES || principal_ranges.iter().any(|rule| rule.first>rule.last) {
+        expected_generation: u64,
+        labels: &[(u32, &str)],
+        rules: &[Rule],
+        transitions: &[Transition],
+        exec: &[ExecTransition],
+        create: &[FileCreate],
+        relabel: &[FileRelabel],
+        sets: LabelSetUpdate<'_>,
+        principal_ranges: &[PrincipalRangeTransition],
+    ) -> HandleResult<()> {
+        if principal_ranges.len() > MAX_RULES
+            || principal_ranges.iter().any(|rule| rule.first > rule.last)
+        {
             return Err(HandleError::InvalidParameter);
         }
-        if sets.sets.len()>scarlet_abi::shield::MAX_LABEL_SETS || sets.members.len()>scarlet_abi::shield::MAX_SET_MEMBERS
-            || sets.grants.len()>MAX_RULES || sets.files.len()>MAX_RULES {return Err(HandleError::InvalidParameter);}
+        if sets.sets.len() > scarlet_abi::shield::MAX_LABEL_SETS
+            || sets.members.len() > scarlet_abi::shield::MAX_SET_MEMBERS
+            || sets.grants.len() > MAX_RULES
+            || sets.files.len() > MAX_RULES
+        {
+            return Err(HandleError::InvalidParameter);
+        }
         if labels.len() > MAX_LABELS
             || labels
                 .iter()
@@ -145,10 +176,18 @@ impl Policy {
                 name: name.as_ptr() as u64,
             })
             .collect();
-        let has_sets = !sets.sets.is_empty() || !sets.members.is_empty() || !sets.grants.is_empty() || !sets.files.is_empty();
+        let has_sets = !sets.sets.is_empty()
+            || !sets.members.is_empty()
+            || !sets.grants.is_empty()
+            || !sets.files.is_empty();
         let raw = scarlet_abi::shield::RawPolicyUpdate {
-            version: if !principal_ranges.is_empty() {scarlet_abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION}
-                else if has_sets {scarlet_abi::shield::POLICY_UPDATE_SETS_VERSION} else {scarlet_abi::shield::POLICY_UPDATE_VERSION},
+            version: if !principal_ranges.is_empty() {
+                scarlet_abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION
+            } else if has_sets {
+                scarlet_abi::shield::POLICY_UPDATE_SETS_VERSION
+            } else {
+                scarlet_abi::shield::POLICY_UPDATE_VERSION
+            },
             expected_generation,
             labels: labels.as_ptr() as u64,
             label_count: labels.len() as u64,
@@ -166,15 +205,20 @@ impl Policy {
         };
         let extended = scarlet_abi::shield::RawPolicyUpdateWithSets {
             base: raw,
-            sets:sets.sets.as_ptr() as u64,set_count:sets.sets.len() as u64,
-            members:sets.members.as_ptr() as u64,member_count:sets.members.len() as u64,
-            set_grants:sets.grants.as_ptr() as u64,set_grant_count:sets.grants.len() as u64,
-            set_files:sets.files.as_ptr() as u64,set_file_count:sets.files.len() as u64,
-            reserved:[0;2],
+            sets: sets.sets.as_ptr() as u64,
+            set_count: sets.sets.len() as u64,
+            members: sets.members.as_ptr() as u64,
+            member_count: sets.members.len() as u64,
+            set_grants: sets.grants.as_ptr() as u64,
+            set_grant_count: sets.grants.len() as u64,
+            set_files: sets.files.as_ptr() as u64,
+            set_file_count: sets.files.len() as u64,
+            reserved: [0; 2],
         };
-        let ranged=scarlet_abi::shield::RawPolicyUpdateWithPrincipalRanges {
-            base:extended,principal_ranges:principal_ranges.as_ptr() as u64,
-            principal_range_count:principal_ranges.len() as u64,
+        let ranged = scarlet_abi::shield::RawPolicyUpdateWithPrincipalRanges {
+            base: extended,
+            principal_ranges: principal_ranges.as_ptr() as u64,
+            principal_range_count: principal_ranges.len() as u64,
         };
         // SAFETY: the specification, records and names are borrowed until return.
         let result = unsafe {
@@ -182,7 +226,13 @@ impl Policy {
                 Syscall::ShieldPolicyExtend,
                 self.0.as_raw() as usize,
                 &ranged as *const _ as usize,
-                if !principal_ranges.is_empty() {224} else if has_sets {208} else {128},
+                if !principal_ranges.is_empty() {
+                    224
+                } else if has_sets {
+                    208
+                } else {
+                    128
+                },
             )
         };
         if result == 0 {
@@ -251,19 +301,61 @@ impl Policy {
         })
     }
     /// Create file-dependent exec rules without delegating direct set-label authority.
-    pub fn create_with_exec_transitions(labels: &[(u32, &str)], rules: &[Rule], transitions: &[Transition], exec: &[ExecTransition]) -> HandleResult<Self> {
-        if labels.iter().any(|(_, name)| name.len() > 255) { return Err(HandleError::InvalidParameter); }
-        let raw: Vec<_> = labels.iter().map(|(id, name)| RawLabel {id:*id, name_len:name.len() as u32, name:name.as_ptr() as u64}).collect();
-        let spec = [raw.as_ptr() as u64, raw.len() as u64, rules.as_ptr() as u64, rules.len() as u64,
-            transitions.as_ptr() as u64, transitions.len() as u64, exec.as_ptr() as u64, exec.len() as u64];
+    pub fn create_with_exec_transitions(
+        labels: &[(u32, &str)],
+        rules: &[Rule],
+        transitions: &[Transition],
+        exec: &[ExecTransition],
+    ) -> HandleResult<Self> {
+        if labels.iter().any(|(_, name)| name.len() > 255) {
+            return Err(HandleError::InvalidParameter);
+        }
+        let raw: Vec<_> = labels
+            .iter()
+            .map(|(id, name)| RawLabel {
+                id: *id,
+                name_len: name.len() as u32,
+                name: name.as_ptr() as u64,
+            })
+            .collect();
+        let spec = [
+            raw.as_ptr() as u64,
+            raw.len() as u64,
+            rules.as_ptr() as u64,
+            rules.len() as u64,
+            transitions.as_ptr() as u64,
+            transitions.len() as u64,
+            exec.as_ptr() as u64,
+            exec.len() as u64,
+        ];
         // SAFETY: fixed-width specification and all borrowed arrays live through the copy.
-        Self::returned(unsafe { syscall2(Syscall::ShieldPolicyCreateExec, spec.as_ptr() as usize, 64) })
+        Self::returned(unsafe {
+            syscall2(Syscall::ShieldPolicyCreateExec, spec.as_ptr() as usize, 64)
+        })
     }
     /// Derive a fresh immutable policy before binding administrator-pinned files.
-    pub fn with_file_rules(&self,default:u32,create:&[FileCreate],relabel:&[FileRelabel])->HandleResult<Self> {
-        let spec=[default as u64,create.as_ptr() as u64,create.len() as u64,relabel.as_ptr() as u64,relabel.len() as u64];
+    pub fn with_file_rules(
+        &self,
+        default: u32,
+        create: &[FileCreate],
+        relabel: &[FileRelabel],
+    ) -> HandleResult<Self> {
+        let spec = [
+            default as u64,
+            create.as_ptr() as u64,
+            create.len() as u64,
+            relabel.as_ptr() as u64,
+            relabel.len() as u64,
+        ];
         // SAFETY: fixed-width specification and borrowed arrays live through the synchronous copy.
-        Self::returned(unsafe {scarlet_sys::syscall3(Syscall::ShieldFilePolicy,self.0.as_raw() as usize,spec.as_ptr() as usize,40)})
+        Self::returned(unsafe {
+            scarlet_sys::syscall3(
+                Syscall::ShieldFilePolicy,
+                self.0.as_raw() as usize,
+                spec.as_ptr() as usize,
+                40,
+            )
+        })
     }
     /// Derive a fresh policy capability whose file labels use a stable,
     /// nonzero 16-byte domain. Management authority is checked by the kernel.
@@ -284,13 +376,36 @@ impl Policy {
     /// Requires management authority; a different existing binding is rejected.
     pub fn bind_file(&self, file: &Handle, label: u32) -> HandleResult<()> {
         // SAFETY: both live capabilities are validated by the kernel.
-        let result = unsafe { scarlet_sys::syscall3(Syscall::ShieldBindFile, self.0.as_raw() as usize, file.as_raw() as usize, label as usize) };
-        if result == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
+        let result = unsafe {
+            scarlet_sys::syscall3(
+                Syscall::ShieldBindFile,
+                self.0.as_raw() as usize,
+                file.as_raw() as usize,
+                label as usize,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(HandleError::InvalidParameter)
+        }
     }
     /// Change inode metadata only when the current subject has an explicit rule.
-    pub fn relabel_file(&self,file:&Handle,label:u32)->HandleResult<()> {
+    pub fn relabel_file(&self, file: &Handle, label: u32) -> HandleResult<()> {
         // SAFETY: native policy identity, retained file and current subject are checked together.
-        if unsafe {scarlet_sys::syscall3(Syscall::ShieldRelabelFile,self.0.as_raw() as usize,file.as_raw() as usize,label as usize)}==0 {Ok(())}else {Err(HandleError::InvalidParameter)}
+        if unsafe {
+            scarlet_sys::syscall3(
+                Syscall::ShieldRelabelFile,
+                self.0.as_raw() as usize,
+                file.as_raw() as usize,
+                label as usize,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(HandleError::InvalidParameter)
+        }
     }
     /// Apply only a transition explicitly delegated by this immutable policy.
     /// Query authority identifies the policy; it does not grant transitions.
@@ -312,8 +427,18 @@ impl Policy {
     /// Reserve an explicitly delegated transition for the next successful exec.
     pub fn reserve_exec(&self, label: u32) -> HandleResult<()> {
         // SAFETY: the kernel checks the policy, current subject and native identities.
-        if unsafe { syscall2(Syscall::ShieldReserveExec, self.0.as_raw() as usize, label as usize) } == 0 { Ok(()) }
-        else { Err(HandleError::InvalidParameter) }
+        if unsafe {
+            syscall2(
+                Syscall::ShieldReserveExec,
+                self.0.as_raw() as usize,
+                label as usize,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(HandleError::InvalidParameter)
+        }
     }
     /// Returns query authority only; arbitrary assignment remains forbidden.
     pub fn current() -> HandleResult<Self> {
@@ -359,12 +484,20 @@ impl Policy {
 /// Cancel this task's reserved exec transition without consuming an exec.
 pub fn clear_exec_transition() -> HandleResult<()> {
     // SAFETY: scalar operation restricted to the current task.
-    if unsafe { syscall0(Syscall::ShieldClearExec) } == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
+    if unsafe { syscall0(Syscall::ShieldClearExec) } == 0 {
+        Ok(())
+    } else {
+        Err(HandleError::InvalidParameter)
+    }
 }
 /// Monotonically suppress privileged address introspection. Fork/spawn/exec inherit it.
 pub fn hide_kernel_addresses() -> HandleResult<()> {
     // SAFETY: tightening this caller's information constraint requires no pointer.
-    if unsafe { syscall1(Syscall::ShieldConstrainInformation, 1) } == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
+    if unsafe { syscall1(Syscall::ShieldConstrainInformation, 1) } == 0 {
+        Ok(())
+    } else {
+        Err(HandleError::InvalidParameter)
+    }
 }
 pub fn kernel_addresses_hidden() -> bool {
     // SAFETY: scalar query of this caller's inherited restrictions.
@@ -372,15 +505,28 @@ pub fn kernel_addresses_hidden() -> bool {
 }
 
 /// Select a label authorized by this task's native policy, or zero to clear it.
-pub fn file_creation_label(label:u32)->HandleResult<()> {
+pub fn file_creation_label(label: u32) -> HandleResult<()> {
     // SAFETY: the kernel checks the current subject and immutable create grants.
-    if unsafe {syscall1(Syscall::ShieldCreationLabel,label as usize)}==0 {Ok(())}else {Err(HandleError::InvalidParameter)}
+    if unsafe { syscall1(Syscall::ShieldCreationLabel, label as usize) } == 0 {
+        Ok(())
+    } else {
+        Err(HandleError::InvalidParameter)
+    }
 }
 
-pub use scarlet_abi::shield::{SOCKET_LABEL_CLASS,SOCKET_LABEL_CREATE};
+pub use scarlet_abi::shield::{SOCKET_LABEL_CLASS, SOCKET_LABEL_CREATE};
 /// Select a delegated native local-socket endpoint label. Zero clears the selection.
-pub fn set_socket_creation_label(target:Option<u32>)->HandleResult<()> {
+pub fn set_socket_creation_label(target: Option<u32>) -> HandleResult<()> {
     // SAFETY: no pointers; Shield checks current-subject authority.
-    let result=unsafe {syscall1(Syscall::ShieldSocketCreationLabel,target.unwrap_or(0) as usize)};
-    if result==0 {Ok(())}else {Err(HandleError::SystemError(-1))}
+    let result = unsafe {
+        syscall1(
+            Syscall::ShieldSocketCreationLabel,
+            target.unwrap_or(0) as usize,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(HandleError::SystemError(-1))
+    }
 }

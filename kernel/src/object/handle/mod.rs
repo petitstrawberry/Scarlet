@@ -1,5 +1,10 @@
 use crate::sync::IrqRwSpinLock;
-use alloc::{boxed::Box, sync::{Arc,Weak}, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 
 use crate::object::{KernelObject, KernelObjectRef, introspection};
 
@@ -37,7 +42,9 @@ pub struct HandleTable {
 #[derive(Clone)]
 pub(crate) struct WeakHandleTable(Weak<IrqRwSpinLock<HandleTableInner>>);
 impl WeakHandleTable {
-    pub(crate) fn upgrade(&self)->Option<HandleTable> {self.0.upgrade().map(|inner|HandleTable{inner})}
+    pub(crate) fn upgrade(&self) -> Option<HandleTable> {
+        self.0.upgrade().map(|inner| HandleTable { inner })
+    }
 }
 
 /// An unpublished descriptor slot reserved before an operation with filesystem
@@ -70,7 +77,9 @@ impl Drop for HandleReservation<'_> {
 }
 
 impl HandleTable {
-    pub(crate) fn downgrade(&self)->WeakHandleTable {WeakHandleTable(Arc::downgrade(&self.inner))}
+    pub(crate) fn downgrade(&self) -> WeakHandleTable {
+        WeakHandleTable(Arc::downgrade(&self.inner))
+    }
     /// Bounded kernel-object namespace shared by files, GPU resources and
     /// completion notifications. This is not a POSIX descriptor-set size.
     pub const MAX_HANDLES: usize = 16_384;
@@ -133,9 +142,11 @@ impl HandleTable {
                 }
             }
         }
-        let handles_clone = handles.try_into()
+        let handles_clone = handles
+            .try_into()
             .unwrap_or_else(|_| panic!("slice with incorrect length"));
-        let metadata_clone = metadata.try_into()
+        let metadata_clone = metadata
+            .try_into()
             .unwrap_or_else(|_| panic!("slice with incorrect length"));
         Self {
             inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
@@ -613,7 +624,8 @@ impl HandleTable {
                 Some(info)
             }
             KernelObject::ShieldPolicy(cap) => {
-                let mut info = introspection::KernelObjectInfo::for_environment(false, cap.administer);
+                let mut info =
+                    introspection::KernelObjectInfo::for_environment(false, cap.administer);
                 info.object_type = introspection::KernelObjectType::ShieldPolicy;
                 Some(info)
             }

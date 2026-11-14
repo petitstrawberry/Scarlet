@@ -326,16 +326,26 @@ pub fn handle_denial(abi: &mut LinuxAbi, denial: Denial, frame: &mut Trapframe) 
             }
         }
         Denial::AbortThread => {
-            crate::println!("[linux] fatal signal=31 execution denied syscall={} pc={:#x} tid={} name={} action=abort-thread",
-                number, address, task.get_namespace_id(), task.name.read());
+            crate::println!(
+                "[linux] fatal signal=31 execution denied syscall={} pc={:#x} tid={} name={} action=abort-thread",
+                number,
+                address,
+                task.get_namespace_id(),
+                task.name.read()
+            );
             task.mark_signal_termination(31);
             task.request_deferred_exit(159);
             return 0;
         }
         _ => {}
     }
-    crate::println!("[linux] fatal signal=31 execution denied syscall={} pc={:#x} tid={} name={} action=abort-group",
-        number, address, task.get_namespace_id(), task.name.read());
+    crate::println!(
+        "[linux] fatal signal=31 execution denied syscall={} pc={:#x} tid={} name={} action=abort-group",
+        number,
+        address,
+        task.get_namespace_id(),
+        task.name.read()
+    );
     task.mark_signal_termination(31);
     task.request_deferred_exit_group(159);
     0

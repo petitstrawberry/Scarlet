@@ -567,8 +567,13 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let data_ptr = trapframe.get_arg(4);
 
     trapframe.increment_pc_next(&task);
-    let flags = match u32::try_from(flags_raw) { Ok(flags) => flags, Err(_) => return usize::MAX };
-    if super::mount_tree::MountRestrictions::from_bits(flags).is_err() { return usize::MAX; }
+    let flags = match u32::try_from(flags_raw) {
+        Ok(flags) => flags,
+        Err(_) => return usize::MAX,
+    };
+    if super::mount_tree::MountRestrictions::from_bits(flags).is_err() {
+        return usize::MAX;
+    }
 
     let source_str = match parse_c_string_from_userspace(&task, source_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
@@ -614,7 +619,9 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     match fstype_str.as_str() {
         "bind" => {
             // Handle bind mount - this is a special case handled by VFS
-            if flags != 0 { return usize::MAX; }
+            if flags != 0 {
+                return usize::MAX;
+            }
             match vfs.bind_mount(&source_str, &target_str) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
@@ -623,7 +630,13 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
         _ => {
             // Handle filesystem creation using drivers
             let options = data_str.unwrap_or_default();
-            match create_filesystem_and_mount(&vfs, &fstype_str, &target_str, &options, flags as u32) {
+            match create_filesystem_and_mount(
+                &vfs,
+                &fstype_str,
+                &target_str,
+                &options,
+                flags as u32,
+            ) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
             }

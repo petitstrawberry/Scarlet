@@ -43,8 +43,12 @@ pub struct Restrictions {
     cost: usize,
 }
 impl Restrictions {
-    pub fn kernel_addresses_hidden(&self) -> bool { self.kernel_addresses_hidden }
-    pub fn hide_kernel_addresses(&mut self) { self.kernel_addresses_hidden = true; }
+    pub fn kernel_addresses_hidden(&self) -> bool {
+        self.kernel_addresses_hidden
+    }
+    pub fn hide_kernel_addresses(&mut self) {
+        self.kernel_addresses_hidden = true;
+    }
     pub fn no_new_authority(&self) -> bool {
         self.no_new_authority
     }

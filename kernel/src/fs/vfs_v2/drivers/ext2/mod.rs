@@ -735,8 +735,12 @@ impl Ext2FileSystem {
 
     /// Caller holds this inode's operation lock. The token is released only
     /// after final close writeback; separate aliases share this inode key.
-    fn labels_for_inode(&self,inode:u32)->Arc<crate::shield::file::Labels> {
-        self.inode_labels.lock().entry(inode).or_insert_with(crate::shield::file::Labels::new).clone()
+    fn labels_for_inode(&self, inode: u32) -> Arc<crate::shield::file::Labels> {
+        self.inode_labels
+            .lock()
+            .entry(inode)
+            .or_insert_with(crate::shield::file::Labels::new)
+            .clone()
     }
     /// The parent operation lock must cover reading its directory entry through
     /// pinning the child. Otherwise unlink can reclaim/reuse that inode between
@@ -879,18 +883,14 @@ impl Ext2FileSystem {
                 XattrError::NoSpace
             }
             FileSystemErrorKind::PermissionDenied => XattrError::PermissionDenied,
-            FileSystemErrorKind::IoError | FileSystemErrorKind::DeviceError => {
-                XattrError::Io
-            }
+            FileSystemErrorKind::IoError | FileSystemErrorKind::DeviceError => XattrError::Io,
             _ => XattrError::Unsupported,
         }
     }
 
     /// Split a VFS xattr name into the Linux ext2 index and on-disk suffix.
     /// Index zero is the format's opaque-name representation.
-    fn xattr_name_parts(
-        name: &[u8],
-    ) -> Result<(u8, &[u8]), crate::fs::vfs_v2::xattr::Error> {
+    fn xattr_name_parts(name: &[u8]) -> Result<(u8, &[u8]), crate::fs::vfs_v2::xattr::Error> {
         use crate::fs::vfs_v2::xattr::{self, Error};
         if name.is_empty() || name.len() > xattr::MAX_NAME || name.contains(&0) {
             return Err(Error::InvalidName);
@@ -901,13 +901,29 @@ impl Ext2FileSystem {
         } else if name == b"system.posix_acl_default" {
             Ok((EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT, &name[name.len()..]))
         } else if let Some(suffix) = name.strip_prefix(b"user.") {
-            if suffix.is_empty() { Err(Error::InvalidName) } else { Ok((EXT2_XATTR_INDEX_USER, suffix)) }
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_USER, suffix))
+            }
         } else if let Some(suffix) = name.strip_prefix(b"trusted.") {
-            if suffix.is_empty() { Err(Error::InvalidName) } else { Ok((EXT2_XATTR_INDEX_TRUSTED, suffix)) }
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_TRUSTED, suffix))
+            }
         } else if let Some(suffix) = name.strip_prefix(b"security.") {
-            if suffix.is_empty() { Err(Error::InvalidName) } else { Ok((EXT2_XATTR_INDEX_SECURITY, suffix)) }
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_SECURITY, suffix))
+            }
         } else if let Some(suffix) = name.strip_prefix(b"system.") {
-            if suffix.is_empty() { Err(Error::InvalidName) } else { Ok((EXT2_XATTR_INDEX_SYSTEM, suffix)) }
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_SYSTEM, suffix))
+            }
         } else {
             Ok((0, name))
         }
@@ -919,7 +935,13 @@ impl Ext2FileSystem {
     ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
         use crate::fs::vfs_v2::xattr::{self, Error};
         let prefix: &[u8] = match name_index {
-            0 => return if name.is_empty() { Err(Error::Unsupported) } else { Ok(name.to_vec()) },
+            0 => {
+                return if name.is_empty() {
+                    Err(Error::Unsupported)
+                } else {
+                    Ok(name.to_vec())
+                };
+            }
             EXT2_XATTR_INDEX_USER => b"user.",
             EXT2_XATTR_INDEX_POSIX_ACL_ACCESS | EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT => {
                 if !name.is_empty() {
@@ -937,7 +959,10 @@ impl Ext2FileSystem {
             EXT2_XATTR_INDEX_SYSTEM => b"system.",
             _ => return Err(Error::Unsupported),
         };
-        let total = prefix.len().checked_add(name.len()).ok_or(Error::Unsupported)?;
+        let total = prefix
+            .len()
+            .checked_add(name.len())
+            .ok_or(Error::Unsupported)?;
         if name.is_empty() || total > xattr::MAX_NAME {
             return Err(Error::Unsupported);
         }
@@ -1024,7 +1049,10 @@ impl Ext2FileSystem {
         let mut records = Vec::with_capacity(raw_entries.len());
         for (name_index, name, value_offset, value_size) in raw_entries {
             let key = (name_index, name.len(), name.clone());
-            if previous_key.as_ref().is_some_and(|previous| previous >= &key) {
+            if previous_key
+                .as_ref()
+                .is_some_and(|previous| previous >= &key)
+            {
                 return Err(Error::Io);
             }
             previous_key = Some(key);
@@ -1047,18 +1075,26 @@ impl Ext2FileSystem {
                 let value_end = value_offset.checked_add(size).ok_or(Error::Io)?;
                 let padded_len = ext2_xattr_value_len(size).ok_or(Error::Io)?;
                 let padded_end = value_offset.checked_add(padded_len).ok_or(Error::Io)?;
-                if value_offset < terminator_end || value_end > data.len() || padded_end > data.len() {
+                if value_offset < terminator_end
+                    || value_end > data.len()
+                    || padded_end > data.len()
+                {
                     return Err(Error::Io);
                 }
-                if value_ranges.iter().any(|&(start, end): &(usize, usize)| {
-                    value_offset < end && start < padded_end
-                }) {
+                if value_ranges
+                    .iter()
+                    .any(|&(start, end): &(usize, usize)| value_offset < end && start < padded_end)
+                {
                     return Err(Error::Io);
                 }
                 value_ranges.push((value_offset, padded_end));
                 data[value_offset..value_end].to_vec()
             };
-            records.push(Ext2XattrRecord { name_index, name, value });
+            records.push(Ext2XattrRecord {
+                name_index,
+                name,
+                value,
+            });
         }
 
         Ok((header, records))
@@ -1090,10 +1126,7 @@ impl Ext2FileSystem {
             }
         }
 
-        let entries_limit = self
-            .block_size
-            .checked_sub(4)
-            .ok_or(Error::Unsupported)? as usize;
+        let entries_limit = self.block_size.checked_sub(4).ok_or(Error::Unsupported)? as usize;
         let mut cursor = EXT2_XATTR_HEADER_SIZE;
         let mut positions = Vec::with_capacity(records.len());
         for record in &records {
@@ -1201,9 +1234,7 @@ impl Ext2FileSystem {
             }
             EXT2_GOOD_OLD_INODE_SIZE + extra_isize
         };
-        if body_offset == data.len()
-            || body_offset + EXT2_XATTR_IBODY_HEADER_SIZE > data.len()
-        {
+        if body_offset == data.len() || body_offset + EXT2_XATTR_IBODY_HEADER_SIZE > data.len() {
             return Ok(Ext2InodeXattrBody {
                 data,
                 body_offset,
@@ -1291,9 +1322,10 @@ impl Ext2FileSystem {
                 {
                     return Err(Error::Io);
                 }
-                if value_ranges.iter().any(|&(start, end): &(usize, usize)| {
-                    value_offset < end && start < padded_end
-                }) {
+                if value_ranges
+                    .iter()
+                    .any(|&(start, end): &(usize, usize)| value_offset < end && start < padded_end)
+                {
                     return Err(Error::Io);
                 }
                 value_ranges.push((value_offset, padded_end));
@@ -1352,9 +1384,7 @@ impl Ext2FileSystem {
             .len()
             .checked_sub(body.body_offset)
             .ok_or(Error::NoSpace)?;
-        let entries_limit = body_len
-            .checked_sub(EXT2_XATTR_PAD)
-            .ok_or(Error::NoSpace)?;
+        let entries_limit = body_len.checked_sub(EXT2_XATTR_PAD).ok_or(Error::NoSpace)?;
         let mut cursor = EXT2_XATTR_IBODY_HEADER_SIZE;
         let mut positions = Vec::with_capacity(records.len());
         for record in &records {
@@ -1398,14 +1428,12 @@ impl Ext2FileSystem {
             let value_offs = u16::try_from(value_offset).map_err(|_| Error::NoSpace)?;
             data[absolute_position + 2..absolute_position + 4]
                 .copy_from_slice(&value_offs.to_le_bytes());
-            data[absolute_position + 4..absolute_position + 8]
-                .copy_from_slice(&0u32.to_le_bytes());
+            data[absolute_position + 4..absolute_position + 8].copy_from_slice(&0u32.to_le_bytes());
             data[absolute_position + 8..absolute_position + 12]
                 .copy_from_slice(&(record.value.len() as u32).to_le_bytes());
             data[absolute_position + 12..absolute_position + 16]
                 .copy_from_slice(&0u32.to_le_bytes());
-            data[absolute_position + EXT2_XATTR_ENTRY_SIZE..name_end]
-                .copy_from_slice(&record.name);
+            data[absolute_position + EXT2_XATTR_ENTRY_SIZE..name_end].copy_from_slice(&record.name);
             if !record.value.is_empty() {
                 let absolute_value = entries_start + value_offset;
                 data[absolute_value..absolute_value + record.value.len()]
@@ -1427,7 +1455,10 @@ impl Ext2FileSystem {
             .map(|block| block.records.clone())
             .unwrap_or_default();
         for record in inline {
-            if let Some(existing) = records.iter().find(|existing| existing.key() == record.key()) {
+            if let Some(existing) = records
+                .iter()
+                .find(|existing| existing.key() == record.key())
+            {
                 if existing.value != record.value {
                     return Err(Error::Io);
                 }
@@ -1596,8 +1627,7 @@ impl Ext2FileSystem {
             if let Some(now) = current_timestamp() {
                 inode.ctime = now.to_le();
             }
-            let inode_data =
-                self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
+            let inode_data = self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
             return self
                 .write_inode_record_bytes(inode_number, &inode_data)
                 .map_err(Self::xattr_error);
@@ -1622,18 +1652,14 @@ impl Ext2FileSystem {
             if let Some(now) = current_timestamp() {
                 inode.ctime = now.to_le();
             }
-            let inode_data =
-                self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
+            let inode_data = self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
 
             if encoded_external.is_none() {
                 self.write_inode_record_bytes(inode_number, &inode_data)
                     .map_err(Self::xattr_error)?;
                 if let Err(error) = self.release_xattr_block_locked(&old_block) {
                     if old_block.header.refcount() > 1 {
-                        let _ = self.write_inode_record_bytes(
-                            inode_number,
-                            &original_inode_data,
-                        );
+                        let _ = self.write_inode_record_bytes(inode_number, &original_inode_data);
                     }
                     return Err(error);
                 }
@@ -1642,9 +1668,7 @@ impl Ext2FileSystem {
 
             let encoded_external = encoded_external.expect("external data exists");
             if old_block.header.refcount() > 1 {
-                let new_number = self
-                    .allocate_block_locked()
-                    .map_err(Self::xattr_error)? as u32;
+                let new_number = self.allocate_block_locked().map_err(Self::xattr_error)? as u32;
                 if let Err(error) =
                     self.write_block_cached(u64::from(new_number), &encoded_external)
                 {
@@ -1652,11 +1676,8 @@ impl Ext2FileSystem {
                     return Err(Self::xattr_error(error));
                 }
                 inode.set_file_acl(new_number);
-                let inode_data = match self.inode_record_with_xattrs(
-                    &inode,
-                    &body,
-                    &inline_records,
-                ) {
+                let inode_data = match self.inode_record_with_xattrs(&inode, &body, &inline_records)
+                {
                     Ok(data) => data,
                     Err(error) => {
                         self.abandon_allocated_xattr_block(new_number);
@@ -1679,7 +1700,8 @@ impl Ext2FileSystem {
                 return Ok(());
             }
 
-            if let Err(error) = self.write_block_cached(u64::from(old_block.number), &encoded_external)
+            if let Err(error) =
+                self.write_block_cached(u64::from(old_block.number), &encoded_external)
             {
                 return Err(Self::xattr_error(error));
             }
@@ -1692,9 +1714,7 @@ impl Ext2FileSystem {
 
         if let Some(encoded_external) = encoded_external {
             self.ensure_xattr_feature().map_err(Self::xattr_error)?;
-            let new_number = self
-                .allocate_block_locked()
-                .map_err(Self::xattr_error)? as u32;
+            let new_number = self.allocate_block_locked().map_err(Self::xattr_error)? as u32;
             if let Err(error) = self.write_block_cached(u64::from(new_number), &encoded_external) {
                 self.abandon_allocated_xattr_block(new_number);
                 return Err(Self::xattr_error(error));
@@ -1707,11 +1727,7 @@ impl Ext2FileSystem {
             if let Some(now) = current_timestamp() {
                 inode.ctime = now.to_le();
             }
-            let inode_data = match self.inode_record_with_xattrs(
-                &inode,
-                &body,
-                &inline_records,
-            ) {
+            let inode_data = match self.inode_record_with_xattrs(&inode, &body, &inline_records) {
                 Ok(data) => data,
                 Err(error) => {
                     self.abandon_allocated_xattr_block(new_number);
@@ -1754,8 +1770,7 @@ impl Ext2FileSystem {
         if old_block.is_some() && inode.get_blocks() < self.block_size / 512 {
             return Err(Error::Io);
         }
-        let existing =
-            Self::merge_inode_and_external_xattrs(&body.records, old_block.as_ref())?;
+        let existing = Self::merge_inode_and_external_xattrs(&body.records, old_block.as_ref())?;
         let key = (name_index, name_suffix);
         let exists = existing.iter().any(|record| record.key() == key);
         match (mode, exists) {
@@ -1774,9 +1789,7 @@ impl Ext2FileSystem {
             name: name_suffix.to_vec(),
             value: value.to_vec(),
         };
-        let inline_position = inline_records
-            .iter()
-            .position(|record| record.key() == key);
+        let inline_position = inline_records.iter().position(|record| record.key() == key);
         let external_position = external_records
             .iter()
             .position(|record| record.key() == key);
@@ -1839,9 +1852,7 @@ impl Ext2FileSystem {
         let key = (key.0, key.1);
         Self::merge_inode_and_external_xattrs(&body.records, old_block.as_ref())?;
         let mut inline_records = body.records.clone();
-        let inline_position = inline_records
-            .iter()
-            .position(|record| record.key() == key);
+        let inline_position = inline_records.iter().position(|record| record.key() == key);
         let mut external_records = old_block
             .as_ref()
             .map(|block| block.records.clone())
@@ -1905,18 +1916,16 @@ impl Ext2FileSystem {
         &self,
         inode: &Ext2Inode,
     ) -> Result<(), FileSystemError> {
-        let block = self
-            .read_xattr_block(inode)
-            .map_err(|error| {
-                FileSystemError::new(
-                    if error == crate::fs::vfs_v2::xattr::Error::Unsupported {
-                        FileSystemErrorKind::InvalidData
-                    } else {
-                        FileSystemErrorKind::IoError
-                    },
-                    "Failed to validate ext2 xattr block during inode reclamation",
-                )
-            })?;
+        let block = self.read_xattr_block(inode).map_err(|error| {
+            FileSystemError::new(
+                if error == crate::fs::vfs_v2::xattr::Error::Unsupported {
+                    FileSystemErrorKind::InvalidData
+                } else {
+                    FileSystemErrorKind::IoError
+                },
+                "Failed to validate ext2 xattr block during inode reclamation",
+            )
+        })?;
         if let Some(block) = block {
             self.release_xattr_block_locked(&block).map_err(|error| {
                 FileSystemError::new(
@@ -2819,15 +2828,51 @@ impl Ext2FileSystem {
     }
 
     /// Persist selected times without losing cached writes or a later fsync.
-    fn set_inode_owner(&self,inode_num:u32,principal:Option<crate::shield::identity::Principal>,group:Option<crate::shield::identity::Group>)->Result<(),FileSystemError> {
-        if u32::from_le(self.superblock.creator_os)!=0 {return Err(FileSystemError::new(FileSystemErrorKind::NotSupported,"Unknown ext2 ownership format"));}
-        let task=crate::task::mytask().ok_or_else(||FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner authority required"))?;
-        let inode_lock=self.get_inode_lock(inode_num);let _guard=inode_lock.lock();let mut inode=self.read_inode(inode_num)?;
-        let mut owner=inode.native_owner();
-        if !task.credentials.read().permits_owner_change(owner,principal,group) {return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner change denied"));}
-        if let Some(principal)=principal {owner.principal=principal;}if let Some(group)=group {owner.group=group;}
-        inode.set_native_owner(owner);if let Some(now)=current_timestamp() {inode.ctime=now.to_le();}
-        self.write_inode(inode_num,&inode)?;self.inode_cache.write().insert(inode_num,inode);Ok(())
+    fn set_inode_owner(
+        &self,
+        inode_num: u32,
+        principal: Option<crate::shield::identity::Principal>,
+        group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        if u32::from_le(self.superblock.creator_os) != 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Unknown ext2 ownership format",
+            ));
+        }
+        let task = crate::task::mytask().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "Owner authority required",
+            )
+        })?;
+        let inode_lock = self.get_inode_lock(inode_num);
+        let _guard = inode_lock.lock();
+        let mut inode = self.read_inode(inode_num)?;
+        let mut owner = inode.native_owner();
+        if !task
+            .credentials
+            .read()
+            .permits_owner_change(owner, principal, group)
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "Owner change denied",
+            ));
+        }
+        if let Some(principal) = principal {
+            owner.principal = principal;
+        }
+        if let Some(group) = group {
+            owner.group = group;
+        }
+        inode.set_native_owner(owner);
+        if let Some(now) = current_timestamp() {
+            inode.ctime = now.to_le();
+        }
+        self.write_inode(inode_num, &inode)?;
+        self.inode_cache.write().insert(inode_num, inode);
+        Ok(())
     }
     fn set_inode_times(
         &self,
@@ -2893,10 +2938,17 @@ impl Ext2FileSystem {
     /// identity's extra fields and inode-body attributes, including labels.
     fn write_new_inode(&self, inode_number: u32, inode: &Ext2Inode) -> Result<(), FileSystemError> {
         let mut record = vec![0; self.superblock.get_inode_size() as usize];
-        let prefix = record.get_mut(..mem::size_of::<Ext2Inode>()).ok_or_else(||
-            FileSystemError::new(FileSystemErrorKind::InvalidData, "Short ext2 inode record"))?;
-        let bytes = unsafe { core::slice::from_raw_parts(
-            inode as *const Ext2Inode as *const u8, mem::size_of::<Ext2Inode>()) };
+        let prefix = record
+            .get_mut(..mem::size_of::<Ext2Inode>())
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::InvalidData, "Short ext2 inode record")
+            })?;
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Ext2Inode as *const u8,
+                mem::size_of::<Ext2Inode>(),
+            )
+        };
         prefix.copy_from_slice(bytes);
         self.write_inode_record_bytes(inode_number, &record)
     }
@@ -3041,53 +3093,52 @@ impl Ext2FileSystem {
     /// Allocate a block while the caller already serializes allocator state
     /// through `allocation_lock`. The sleepable mutex is not re-entrant.
     fn allocate_block_locked(&self) -> Result<u64, FileSystemError> {
-            // Try to allocate from any available group
-            let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group
-                - 1)
-                / self.superblock.blocks_per_group;
+        // Try to allocate from any available group
+        let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
+            / self.superblock.blocks_per_group;
 
+        #[cfg(test)]
+        {
+            let blocks_count = self.superblock.blocks_count;
+            let blocks_per_group = self.superblock.blocks_per_group;
+
+            crate::println!(
+                "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
+                total_groups,
+                blocks_count,
+                blocks_per_group
+            );
+        }
+
+        for group in 0..total_groups {
             #[cfg(test)]
-            {
-                let blocks_count = self.superblock.blocks_count;
-                let blocks_per_group = self.superblock.blocks_per_group;
+            crate::println!("[ext2] allocate_block: trying group {}", group);
 
-                crate::println!(
-                    "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
-                    total_groups,
-                    blocks_count,
-                    blocks_per_group
-                );
-            }
-
-            for group in 0..total_groups {
-                #[cfg(test)]
-                crate::println!("[ext2] allocate_block: trying group {}", group);
-
-                match self.allocate_block_in_group(group) {
-                    Ok(block_num) => {
-                        return Ok(block_num);
-                    }
-                    Err(FileSystemError {
-                        kind: FileSystemErrorKind::NoSpace,
-                        ..
-                    }) => {
-                        // Try next group
-                        #[cfg(test)]
-                        crate::println!("[ext2] allocate_block: group {} full, trying next", group);
-                        continue;
-                    }
-                    Err(e) => {
-                        #[cfg(test)]
-                        crate::println!("[ext2] allocate_block: group {} error: {:?}", group, e);
-                        return Err(e);
-                    }
+            match self.allocate_block_in_group(group) {
+                Ok(block_num) => {
+                    return Ok(block_num);
+                }
+                Err(FileSystemError {
+                    kind: FileSystemErrorKind::NoSpace,
+                    ..
+                }) => {
+                    // Try next group
+                    #[cfg(test)]
+                    crate::println!("[ext2] allocate_block: group {} full, trying next", group);
+                    continue;
+                }
+                Err(e) => {
+                    #[cfg(test)]
+                    crate::println!("[ext2] allocate_block: group {} error: {:?}", group, e);
+                    return Err(e);
                 }
             }
+        }
 
-            Err(FileSystemError::new(
-                FileSystemErrorKind::NoSpace,
-                "No free blocks available in any group",
-            ))
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NoSpace,
+            "No free blocks available in any group",
+        ))
     }
 
     /// Allocate a block in a specific group - OPTIMIZED VERSION  
@@ -6466,9 +6517,16 @@ impl FileSystemOperations for Ext2FileSystem {
         file_type: FileType,
         _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent,name,file_type,_mode,None)
+        self.create_labeled(parent, name, file_type, _mode, None)
     }
-    fn create_labeled(&self,parent:&Arc<dyn VfsNode>,name:&String,file_type:FileType,_mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
+    fn create_labeled(
+        &self,
+        parent: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        _mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let ext2_parent = parent.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -6622,8 +6680,10 @@ impl FileSystemOperations for Ext2FileSystem {
             }
         }
 
-        if u32::from_le(self.superblock.creator_os)==0 {
-            if let Some(task)=crate::task::mytask() {new_inode.set_native_owner(task.credentials.read().identity());}
+        if u32::from_le(self.superblock.creator_os) == 0 {
+            if let Some(task) = crate::task::mytask() {
+                new_inode.set_native_owner(task.credentials.read().identity());
+            }
         }
         // Handle device file information storage
         if let FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) = &file_type {
@@ -7089,13 +7149,12 @@ impl FileSystemOperations for Ext2FileSystem {
         // Directory readers now use these per-inode locks independently: keep
         // both parents stable while publishing the move, in inode order.
         let first_parent = self.get_inode_lock(old_parent_ino.min(new_parent_ino));
-        let second_parent = (!same_parent)
-            .then(|| self.get_inode_lock(old_parent_ino.max(new_parent_ino)));
+        let second_parent =
+            (!same_parent).then(|| self.get_inode_lock(old_parent_ino.max(new_parent_ino)));
         let _first_guard = first_parent.lock();
         let _second_guard = second_parent.as_ref().map(|lock| lock.lock());
 
-        let source_lock = (src_is_dir && !same_parent)
-            .then(|| self.get_inode_lock(src_inode_num));
+        let source_lock = (src_is_dir && !same_parent).then(|| self.get_inode_lock(src_inode_num));
         let _source_guard = source_lock.as_ref().map(|lock| lock.lock());
         let parent_update = if src_is_dir && !same_parent {
             Some(self.directory_parent_update(src_inode_num, old_parent_ino, new_parent_ino)?)

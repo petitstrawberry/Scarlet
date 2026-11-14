@@ -122,7 +122,9 @@ pub(super) fn stable_execution_path(
     view: &Arc<crate::fs::vfs_v2::manager::VfsView>,
     file: &KernelObject,
 ) -> Option<String> {
-    let resolved = VfsManager::from_view(view.clone()).resolve_path(path).ok()?;
+    let resolved = VfsManager::from_view(view.clone())
+        .resolve_path(path)
+        .ok()?;
     let expected = file
         .as_file()?
         .as_any()
@@ -199,7 +201,9 @@ impl TransparentExecutor {
             error,
         })?;
         if let Some(file_obj) = file.as_file() {
-            if !file_obj.allows_execution() { return Err(failure("execution disabled on mount")); }
+            if !file_obj.allows_execution() {
+                return Err(failure("execution disabled on mount"));
+            }
             let mut header = [0u8; 256];
             if let Ok(n) = file_obj.read_at(0, &mut header) {
                 if n >= 2 && &header[..2] == b"#!" {
@@ -448,7 +452,10 @@ impl TransparentExecutor {
 
         let pending_transition = source.pending_exec_transition.read().clone();
         let mut image = task.new_exec_image();
-        image.vm_manager.configure_layout(source.vm_manager.layout_policy()).map_err(failure)?;
+        image
+            .vm_manager
+            .configure_layout(source.vm_manager.layout_policy())
+            .map_err(failure)?;
         if explicit_transition {
             *image.security_subject.write() = source.security_subject.read().clone();
             *image.credentials.write() = source.credentials.read().clone();
@@ -486,12 +493,23 @@ impl TransparentExecutor {
         // This native restriction applies even when the destination changes ABI.
         // Only the unpublished image is narrowed; failed exec leaves its source intact.
         image.credentials.write().apply_exec_reservation();
-        let no_file_grants = file.as_file().is_some_and(|f| !f.allows_execution_privilege_gain());
+        let no_file_grants = file
+            .as_file()
+            .is_some_and(|f| !f.allows_execution_privilege_gain());
         let inherited_credentials = no_file_grants.then(|| image.credentials.read().clone());
         let inherited_subject = image.security_subject.read().clone();
-        let resource_label = inherited_subject.as_ref().and_then(|subject| file.as_file()
-            .and_then(|file| file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>())
-            .and_then(|file| subject.policy().resource_label(file.get_vfs_entry().node().as_ref())));
+        let resource_label = inherited_subject.as_ref().and_then(|subject| {
+            file.as_file()
+                .and_then(|file| {
+                    file.as_any()
+                        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+                })
+                .and_then(|file| {
+                    subject
+                        .policy()
+                        .resource_label(file.get_vfs_entry().node().as_ref())
+                })
+        });
         let mut next_trapframe = trapframe.clone();
         abi.execute_binary(file, argv, envp, &image, &mut next_trapframe)
             .map_err(failure)?;
@@ -506,18 +524,47 @@ impl TransparentExecutor {
             }
         }
         if let Some(pending) = pending_transition {
-            let source_subject = source.security_subject.read().clone().ok_or_else(|| failure("exec transition source lost"))?;
-            let prepared_subject = image.security_subject.read().clone().ok_or_else(|| failure("exec transition source lost"))?;
-            if !source_subject.same_identity(&prepared_subject) { return Err(failure("exec transition source changed")); }
-            let target = pending.resolve_for_resource(&source_subject, &image.credentials.read(), resource_label, !no_file_grants).map_err(failure)?;
+            let source_subject = source
+                .security_subject
+                .read()
+                .clone()
+                .ok_or_else(|| failure("exec transition source lost"))?;
+            let prepared_subject = image
+                .security_subject
+                .read()
+                .clone()
+                .ok_or_else(|| failure("exec transition source lost"))?;
+            if !source_subject.same_identity(&prepared_subject) {
+                return Err(failure("exec transition source changed"));
+            }
+            let target = pending
+                .resolve_for_resource(
+                    &source_subject,
+                    &image.credentials.read(),
+                    resource_label,
+                    !no_file_grants,
+                )
+                .map_err(failure)?;
             *image.security_subject.write() = Some(target);
         } else if let (Some(subject), Some(resource)) = (&inherited_subject, resource_label) {
-            if subject.policy().has_exec_resource(subject.label(), resource) {
-                if !image.security_subject.read().as_ref().is_some_and(|prepared| prepared.same_identity(subject)) {
+            if subject
+                .policy()
+                .has_exec_resource(subject.label(), resource)
+            {
+                if !image
+                    .security_subject
+                    .read()
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.same_identity(subject))
+                {
                     return Err(failure("exec resource source changed"));
                 }
-                let target = subject.resource_exec(resource, &image.credentials.read()).map_err(failure)?;
-                if no_file_grants && !target.same_identity(subject) { return Err(failure("file-derived label change disabled on mount")); }
+                let target = subject
+                    .resource_exec(resource, &image.credentials.read())
+                    .map_err(failure)?;
+                if no_file_grants && !target.same_identity(subject) {
+                    return Err(failure("file-derived label change disabled on mount"));
+                }
                 *image.security_subject.write() = Some(target);
             }
         }
@@ -527,12 +574,21 @@ impl TransparentExecutor {
         // state; no filesystem I/O, loader callbacks, or allocation occurs.
         let commit_guard = crate::sync::IrqGuard::new();
         task.vm_manager.exchange_exec_image(&image.vm_manager);
-        core::mem::swap(&mut *task.security_subject.write(), &mut *image.security_subject.write());
+        core::mem::swap(
+            &mut *task.security_subject.write(),
+            &mut *image.security_subject.write(),
+        );
         *task.pending_exec_transition.write() = None;
         *task.creation_label.write() = None;
         *task.socket_creation_label.write() = None;
-        core::mem::swap(&mut *task.credentials.write(), &mut *image.credentials.write());
-        core::mem::swap(&mut *task.execution_restrictions.write(), &mut *image.execution_restrictions.write());
+        core::mem::swap(
+            &mut *task.credentials.write(),
+            &mut *image.credentials.write(),
+        );
+        core::mem::swap(
+            &mut *task.execution_restrictions.write(),
+            &mut *image.execution_restrictions.write(),
+        );
         task.handle_table.exchange_exec_table(&image.handle_table);
         core::mem::swap(&mut *task.name.write(), &mut *image.name.write());
         core::mem::swap(&mut *task.vcpu.lock(), &mut *image.vcpu.lock());

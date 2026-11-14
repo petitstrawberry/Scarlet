@@ -429,18 +429,11 @@ impl SocketObject for UdpSocket {
                     return Err(SocketError::WouldBlock);
                 };
                 let trapframe = task.get_trapframe();
-                let remaining =
-                    deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
+                let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
                 if remaining == Some(0) {
                     return Err(SocketError::TimedOut);
                 }
-                let outcome = Selectable::wait_until_ready(
-                    self,
-                    interest,
-                    trapframe,
-                    remaining,
-                    0,
-                );
+                let outcome = Selectable::wait_until_ready(self, interest, trapframe, remaining, 0);
                 match outcome {
                     crate::object::capability::selectable::SelectWaitOutcome::TimedOut => {
                         return Err(SocketError::TimedOut);

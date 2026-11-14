@@ -134,10 +134,14 @@ pub(crate) fn change_ids(
         }
         next.set_authority(permitted, active)
             .map_err(|_| errno::EPERM)?;
-        if ids.active!=old.active.0 {next.reserve_exec_authority(0).map_err(|_|errno::EPERM)?;}
-        if ids.active==0 {next.clear_exec_reservation();}
-        else if next.exec_reserved_authority().is_none() {next.reserve_exec_authority(0).map_err(|_|errno::EPERM)?;}
-
+        if ids.active != old.active.0 {
+            next.reserve_exec_authority(0).map_err(|_| errno::EPERM)?;
+        }
+        if ids.active == 0 {
+            next.clear_exec_reservation();
+        } else if next.exec_reserved_authority().is_none() {
+            next.reserve_exec_authority(0).map_err(|_| errno::EPERM)?;
+        }
     }
     *creds = next;
     Ok(())
@@ -350,12 +354,19 @@ fn capabilities(frame: &mut Trapframe, write: bool) -> usize {
             Ok(v) => v,
             Err(e) => return errno::to_result(e),
         };
-        let inheritable=match native_caps(sets[2]) {Ok(value)=>value,Err(error)=>return errno::to_result(error)};
-        let mut credentials=task.credentials.write();let mut next=credentials.clone();
-        if next.set_inheritable_authority(inheritable).is_err() || next.set_authority(permitted,effective).is_err() {
+        let inheritable = match native_caps(sets[2]) {
+            Ok(value) => value,
+            Err(error) => return errno::to_result(error),
+        };
+        let mut credentials = task.credentials.write();
+        let mut next = credentials.clone();
+        if next.set_inheritable_authority(inheritable).is_err()
+            || next.set_authority(permitted, effective).is_err()
+        {
             return errno::to_result(errno::EPERM);
         }
-        *credentials=next;0
+        *credentials = next;
+        0
     } else {
         let (effective, permitted, inheritable) = {
             let c = task.credentials.read();
@@ -379,22 +390,40 @@ fn capabilities(frame: &mut Trapframe, write: bool) -> usize {
 pub(super) fn securebits(abi: &mut LinuxAbi, task: &Task, option: i32, value: usize) -> usize {
     const KEEP: usize = 1 << 4;
     const LOCKED: usize = 1 << 5;
-    if option == 27 { return usize::from(abi.keep_caps)*KEEP | usize::from(abi.keep_caps_locked)*LOCKED; }
-    if value & !(KEEP|LOCKED) != 0 {return errno::to_result(errno::EOPNOTSUPP);}
+    if option == 27 {
+        return usize::from(abi.keep_caps) * KEEP | usize::from(abi.keep_caps_locked) * LOCKED;
+    }
+    if value & !(KEEP | LOCKED) != 0 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
     if !task.credentials.read().permits(MANAGE_DELEGATION)
-        || abi.keep_caps_locked && (value & LOCKED == 0 || (value & KEEP != 0) != abi.keep_caps) {
+        || abi.keep_caps_locked && (value & LOCKED == 0 || (value & KEEP != 0) != abi.keep_caps)
+    {
         return errno::to_result(errno::EPERM);
     }
-    abi.keep_caps=value & KEEP != 0;abi.keep_caps_locked=value & LOCKED != 0;0
+    abi.keep_caps = value & KEEP != 0;
+    abi.keep_caps_locked = value & LOCKED != 0;
+    0
 }
 pub(super) fn bounding(task: &Task, operation: i32, capability: usize) -> usize {
     // Linux 5.10/Android 13 capability numbers; absent native authority reads
     // as unavailable. Removing an absent grant still requires delegation power.
-    if capability > 40 {return errno::to_result(errno::EINVAL);}
-    let authority=CAP_MAP.iter().filter(|(_,bit)|*bit == 1u64 << capability).fold(0,|mask,(value,_)|mask|*value);
-    let mut credentials=task.credentials.write();
-    if operation==23 {return usize::from(authority!=0 && credentials.delegable_authority() & authority == authority);}
-    credentials.drop_delegable_authority(authority).map_or_else(|_|errno::to_result(errno::EPERM),|_|0)
+    if capability > 40 {
+        return errno::to_result(errno::EINVAL);
+    }
+    let authority = CAP_MAP
+        .iter()
+        .filter(|(_, bit)| *bit == 1u64 << capability)
+        .fold(0, |mask, (value, _)| mask | *value);
+    let mut credentials = task.credentials.write();
+    if operation == 23 {
+        return usize::from(
+            authority != 0 && credentials.delegable_authority() & authority == authority,
+        );
+    }
+    credentials
+        .drop_delegable_authority(authority)
+        .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0)
 }
 pub(super) fn ambient(task: &Task, operation: usize, capability: usize) -> usize {
     if operation == 4 {
@@ -469,23 +498,38 @@ mod tests {
     use super::*;
     #[test_case]
     fn securebits_and_bounding_set_preserve_delegation_limits_across_exec() {
-        let task=Task::new("capability-delegation".into(),0,crate::task::TaskType::User);
-        let mut abi=LinuxAbi::default();
-        assert_eq!(securebits(&mut abi,&task,27,0),0);
-        assert_eq!(securebits(&mut abi,&task,28,48),0);
-        assert_eq!(securebits(&mut abi,&task,28,16),errno::to_result(errno::EPERM));
-        assert_eq!(securebits(&mut abi,&task,28,1),errno::to_result(errno::EOPNOTSUPP));
-        assert_eq!(bounding(&task,23,23),1);
-        assert_eq!(bounding(&task,24,23),0);
-        assert_eq!(bounding(&task,23,23),0);
+        let task = Task::new(
+            "capability-delegation".into(),
+            0,
+            crate::task::TaskType::User,
+        );
+        let mut abi = LinuxAbi::default();
+        assert_eq!(securebits(&mut abi, &task, 27, 0), 0);
+        assert_eq!(securebits(&mut abi, &task, 28, 48), 0);
+        assert_eq!(
+            securebits(&mut abi, &task, 28, 16),
+            errno::to_result(errno::EPERM)
+        );
+        assert_eq!(
+            securebits(&mut abi, &task, 28, 1),
+            errno::to_result(errno::EOPNOTSUPP)
+        );
+        assert_eq!(bounding(&task, 23, 23), 1);
+        assert_eq!(bounding(&task, 24, 23), 0);
+        assert_eq!(bounding(&task, 23, 23), 0);
         assert!(task.credentials.read().permits(MANAGE_SCHEDULING));
-        assert_eq!(task.credentials.write().set_inheritable_authority(MANAGE_SCHEDULING),Err(()));
-        let mut image_abi=LinuxAbi::default();
-        image_abi.prepare_exec_fds(Some(&abi),&task);
-        assert_eq!(securebits(&mut image_abi,&task,27,0),32);
-        task.credentials.write().set_authority(0,0).unwrap();
-        assert_eq!(bounding(&task,24,8),errno::to_result(errno::EPERM));
-        assert_eq!(bounding(&task,23,41),errno::to_result(errno::EINVAL));
+        assert_eq!(
+            task.credentials
+                .write()
+                .set_inheritable_authority(MANAGE_SCHEDULING),
+            Err(())
+        );
+        let mut image_abi = LinuxAbi::default();
+        image_abi.prepare_exec_fds(Some(&abi), &task);
+        assert_eq!(securebits(&mut image_abi, &task, 27, 0), 32);
+        task.credentials.write().set_authority(0, 0).unwrap();
+        assert_eq!(bounding(&task, 24, 8), errno::to_result(errno::EPERM));
+        assert_eq!(bounding(&task, 23, 41), errno::to_result(errno::EINVAL));
     }
     #[test_case]
     fn linux_identity_drop_saved_restore_and_permanent_capability_loss() {

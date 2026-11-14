@@ -550,9 +550,9 @@ impl FileObject for MemfdFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::linux::generic::{errno, fs, LinuxAbi};
+    use crate::abi::linux::generic::{LinuxAbi, errno, fs};
     use crate::object::KernelObject;
-    use crate::task::{clear_mock_current_task, set_mock_current_task, Task, TaskType};
+    use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
     use alloc::sync::Arc;
 
     fn assert_sealed<T: core::fmt::Debug>(result: Result<T, StreamError>) {

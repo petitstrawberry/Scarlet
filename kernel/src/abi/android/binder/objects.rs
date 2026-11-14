@@ -101,9 +101,15 @@ pub(super) struct Node {
     waker: Weak<Waker>,
 }
 impl Node {
-    pub(super) fn accepts_fds(&self)->bool {self.flags & 0x100!=0}
-    pub(super) fn inherits_rt(&self)->bool {self.flags & 0x800!=0}
-    pub(super) fn requests_context(&self)->bool {self.flags & 0x1000!=0}
+    pub(super) fn accepts_fds(&self) -> bool {
+        self.flags & 0x100 != 0
+    }
+    pub(super) fn inherits_rt(&self) -> bool {
+        self.flags & 0x800 != 0
+    }
+    pub(super) fn requests_context(&self) -> bool {
+        self.flags & 0x1000 != 0
+    }
     pub(super) fn acquired(&self) -> bool {
         !self.references.lock().acquisition_needed()
     }
@@ -326,8 +332,15 @@ impl Objects {
         if self.nodes.len() + self.retired.len() >= MAX_NODES {
             return Err(errno::ENOSPC);
         }
-        let minimum=if (flags>>9)&3==1 {(flags&0xff) as u8}else{0};
-        let object = file.endpoint.create_object_with_scheduling(minimum,flags&0x800!=0).map_err(|_| errno::ENOMEM)?;
+        let minimum = if (flags >> 9) & 3 == 1 {
+            (flags & 0xff) as u8
+        } else {
+            0
+        };
+        let object = file
+            .endpoint
+            .create_object_with_scheduling(minimum, flags & 0x800 != 0)
+            .map_err(|_| errno::ENOMEM)?;
         let node = Arc::new(Node {
             subject: file.subject.clone(),
             object,
@@ -682,30 +695,41 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
         if !offset.is_multiple_of(4) || offset < end {
             return Err(errno::EINVAL);
         }
-        if offset.checked_add(8).is_none_or(|end|end>data.len()) {
+        if offset.checked_add(8).is_none_or(|end| end > data.len()) {
             return Err(errno::EINVAL);
         }
         let kind = u32_at(data, offset);
-        let size=match kind {
-            BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE|buffers::FD=>24,
-            buffers::PTR=>40,
-            buffers::FDA=>32,
-            _=>return Err(errno::EOPNOTSUPP),
+        let size = match kind {
+            BINDER | WEAK_BINDER | HANDLE | WEAK_HANDLE | buffers::FD => 24,
+            buffers::PTR => 40,
+            buffers::FDA => 32,
+            _ => return Err(errno::EOPNOTSUPP),
         };
-        end=offset.checked_add(size).ok_or(errno::EINVAL)?;
-        if end>data.len() {return Err(errno::EINVAL);}
+        end = offset.checked_add(size).ok_or(errno::EINVAL)?;
+        if end > data.len() {
+            return Err(errno::EINVAL);
+        }
         let flags = u32_at(data, offset + 4);
         // FIFO requests become native object scheduling contracts. Caller
         // labels are delivered from native RPC metadata, never wire bytes.
-        if matches!(kind,BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE) {
-            let policy=(flags>>9)&3;let priority=flags&0xff;
-            if flags & !0x1bff !=0 || !match policy {0=>matches!(priority,0|19),1=>(1..=99).contains(&priority),_=>false} {
+        if matches!(kind, BINDER | WEAK_BINDER | HANDLE | WEAK_HANDLE) {
+            let policy = (flags >> 9) & 3;
+            let priority = flags & 0xff;
+            if flags & !0x1bff != 0
+                || !match policy {
+                    0 => matches!(priority, 0 | 19),
+                    1 => (1..=99).contains(&priority),
+                    _ => false,
+                }
+            {
                 return Err(errno::EOPNOTSUPP);
             }
         }
         // FD/FDA carry padding here, not Binder object scheduler flags. Stock
         // libbinder writes 0x17f into the flat-FD padding; it grants no authority.
-        if kind==buffers::PTR && flags & !1 !=0 {return Err(errno::EINVAL);}
+        if kind == buffers::PTR && flags & !1 != 0 {
+            return Err(errno::EINVAL);
+        }
         result.push(offset);
     }
     Ok(result)
@@ -714,7 +738,7 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
 pub(super) struct Prepared {
     bytes: Vec<u8>,
     offsets: Vec<usize>,
-    pub capabilities: Vec<(KernelObject,crate::object::handle::HandleMetadata)>,
+    pub capabilities: Vec<(KernelObject, crate::object::handle::HandleMetadata)>,
 }
 pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepared, usize> {
     let len = u64_at(data, 32);
@@ -745,10 +769,20 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
             .map_err(|_| errno::EFAULT)?;
     }
     let offsets = offsets(&bytes[HEADER..HEADER + len], &bytes[HEADER + aligned..])?;
-    let budget=if data.len()==72 {u64_at(data,64)}else{0};
-    if budget>crate::ipc::rpc::MAX_MESSAGE_SIZE {return Err(errno::E2BIG);}
-    let capabilities=buffers::prepare(task,abi,&mut bytes,&offsets,budget)?;
-    Ok(Prepared { bytes, offsets, capabilities })
+    let budget = if data.len() == 72 {
+        u64_at(data, 64)
+    } else {
+        0
+    };
+    if budget > crate::ipc::rpc::MAX_MESSAGE_SIZE {
+        return Err(errno::E2BIG);
+    }
+    let capabilities = buffers::prepare(task, abi, &mut bytes, &offsets, budget)?;
+    Ok(Prepared {
+        bytes,
+        offsets,
+        capabilities,
+    })
 }
 impl BinderFile {
     pub(super) fn encode(
@@ -758,7 +792,11 @@ impl BinderFile {
         prepared: Prepared,
         target: Option<Lease>,
     ) -> Result<(RpcMessage, Vec<Arc<Node>>), usize> {
-        let Prepared { mut bytes, offsets, capabilities } = prepared;
+        let Prepared {
+            mut bytes,
+            offsets,
+            capabilities,
+        } = prepared;
         let mut leases = Vec::new();
         let mut objects = Vec::new();
         let mut acquisitions = Vec::new();
@@ -766,7 +804,9 @@ impl BinderFile {
         for offset in offsets {
             let position = HEADER + offset;
             let kind = u32_at(&bytes, position);
-            if matches!(kind,buffers::FD|buffers::PTR|buffers::FDA) {continue;}
+            if matches!(kind, buffers::FD | buffers::PTR | buffers::FDA) {
+                continue;
+            }
             let strong = matches!(kind, BINDER | HANDLE);
             let value = if matches!(kind, BINDER | WEAK_BINDER) {
                 u64_at(&bytes, position + 8)
@@ -780,8 +820,12 @@ impl BinderFile {
                     }
                     continue;
                 }
-                if ((u32_at(&bytes,position+4)>>9)&3)==1
-                    && !task.credentials.read().permits(crate::shield::identity::MANAGE_SCHEDULING) {
+                if ((u32_at(&bytes, position + 4) >> 9) & 3) == 1
+                    && !task
+                        .credentials
+                        .read()
+                        .permits(crate::shield::identity::MANAGE_SCHEDULING)
+                {
                     return Err(errno::EPERM);
                 }
                 table.local(
@@ -810,7 +854,9 @@ impl BinderFile {
             put64(&mut bytes, position + 16, 0);
         }
         drop(table);
-        if objects.len()+capabilities.len()>MAX_MESSAGE_OBJECTS {return Err(errno::E2BIG);}
+        if objects.len() + capabilities.len() > MAX_MESSAGE_OBJECTS {
+            return Err(errno::E2BIG);
+        }
         if let Some(target) = target {
             leases.push(target);
         }
@@ -832,49 +878,76 @@ impl BinderFile {
         address: usize,
         arena: &Arena,
     ) -> Result<(usize, usize), usize> {
-        self.decode_received(message,address,arena,None)
+        self.decode_received(message, address, arena, None)
     }
-    pub(super) fn decode_received(&self,message:&RpcMessage,address:usize,arena:&Arena,installed:Option<&mut buffers::Installed<'_>>)
-        ->Result<(usize,usize),usize> {
-        self.decode_received_context(message,address,arena,installed,None).map(|(length,offsets,_)|(length,offsets))
+    pub(super) fn decode_received(
+        &self,
+        message: &RpcMessage,
+        address: usize,
+        arena: &Arena,
+        installed: Option<&mut buffers::Installed<'_>>,
+    ) -> Result<(usize, usize), usize> {
+        self.decode_received_context(message, address, arena, installed, None)
+            .map(|(length, offsets, _)| (length, offsets))
     }
-    pub(super) fn decode_received_context(&self,message:&RpcMessage,address:usize,arena:&Arena,installed:Option<&mut buffers::Installed<'_>>,context:Option<&str>)
-        ->Result<(usize,usize,Option<usize>),usize> {
+    pub(super) fn decode_received_context(
+        &self,
+        message: &RpcMessage,
+        address: usize,
+        arena: &Arena,
+        installed: Option<&mut buffers::Installed<'_>>,
+        context: Option<&str>,
+    ) -> Result<(usize, usize, Option<usize>), usize> {
         if message.bytes.len() < HEADER {
             return Err(errno::EINVAL);
         }
         let len = u32_at(&message.bytes, 12) as usize;
         let offsets_len = u32_at(&message.bytes, 16) as usize;
         let aligned = len.checked_add(7).ok_or(errno::EINVAL)? & !7;
-        let extra=u32_at(&message.bytes,20) as usize;
+        let extra = u32_at(&message.bytes, 20) as usize;
         if HEADER
             .checked_add(aligned)
             .and_then(|n| n.checked_add(offsets_len))
             .and_then(|n| n.checked_add(extra))
-            .and_then(|n| n.checked_add(message.capabilities.len()*4))
+            .and_then(|n| n.checked_add(message.capabilities.len() * 4))
             != Some(message.bytes.len())
         {
             return Err(errno::EINVAL);
         }
-        let payload_length=aligned+offsets_len+extra;
-        let context_offset=payload_length.checked_add(7).ok_or(errno::EINVAL)? & !7;
-        if let Some(context)=context {
-            if context.len()>crate::shield::MAX_LABEL_BYTES || !super::super::security::valid_context_name(context) {
+        let payload_length = aligned + offsets_len + extra;
+        let context_offset = payload_length.checked_add(7).ok_or(errno::EINVAL)? & !7;
+        if let Some(context) = context {
+            if context.len() > crate::shield::MAX_LABEL_BYTES
+                || !super::super::security::valid_context_name(context)
+            {
                 return Err(errno::EACCES);
             }
-            if context_offset.checked_add(context.len()+1).is_none_or(|size|size>4*1024*1024) {
+            if context_offset
+                .checked_add(context.len() + 1)
+                .is_none_or(|size| size > 4 * 1024 * 1024)
+            {
                 return Err(errno::E2BIG);
             }
         }
-        let mut payload = message.bytes[HEADER..HEADER+payload_length].to_vec();
-        let offsets = offsets(&payload[..len], &payload[aligned..aligned+offsets_len])?;
-        buffers::receive(message,&mut payload,&offsets,address,len,offsets_len,installed)?;
+        let mut payload = message.bytes[HEADER..HEADER + payload_length].to_vec();
+        let offsets = offsets(&payload[..len], &payload[aligned..aligned + offsets_len])?;
+        buffers::receive(
+            message,
+            &mut payload,
+            &offsets,
+            address,
+            len,
+            offsets_len,
+            installed,
+        )?;
         let mut references = Vec::new();
         let mut table = self.objects.lock();
         let result = (|| {
             for offset in offsets {
                 let kind = u32_at(&payload, offset);
-                if matches!(kind,buffers::FD|buffers::PTR|buffers::FDA) {continue;}
+                if matches!(kind, buffers::FD | buffers::PTR | buffers::FDA) {
+                    continue;
+                }
                 if matches!(kind, BINDER | WEAK_BINDER) && u64_at(&payload, offset + 8) == 0 {
                     continue;
                 }
@@ -915,13 +988,16 @@ impl BinderFile {
                 put64(&mut payload, offset + 16, cookie);
                 references.push(reference);
             }
-            let context_address=if let Some(context)=context {
-                payload.resize(context_offset,0);
-                payload.extend_from_slice(context.as_bytes());payload.push(0);
+            let context_address = if let Some(context) = context {
+                payload.resize(context_offset, 0);
+                payload.extend_from_slice(context.as_bytes());
+                payload.push(0);
                 Some(address.checked_add(context_offset).ok_or(errno::EINVAL)?)
-            } else {None};
+            } else {
+                None
+            };
             arena.store(address, &payload)?;
-            Ok((len, offsets_len,context_address))
+            Ok((len, offsets_len, context_address))
         })();
         if result.is_ok() && table.closed {
             drop(table);
@@ -1098,13 +1174,22 @@ mod tests {
         drop(lease);
         assert!(!owner.objects.lock().ready_for(1, false));
         assert!(owner.objects.lock().ready_for(1, true));
-        assert!(owner.objects.lock().reference_record_for(1, false).is_none());
+        assert!(
+            owner
+                .objects
+                .lock()
+                .reference_record_for(1, false)
+                .is_none()
+        );
         assert!(owner.ready(1));
         assert_eq!(owner.read_record(&task, output, 4), Ok(4));
         assert_eq!(u32_at(&read::<4>(&task, output).unwrap(), 0), BR_COMPLETE);
         assert!(owner.ready(1));
         assert_eq!(owner.read_record(&task, output, 12), Ok(12));
-        assert_eq!(u32_at(&read::<12>(&task, output).unwrap(), 0), death::BR_DEAD_BINDER);
+        assert_eq!(
+            u32_at(&read::<12>(&task, output).unwrap(), 0),
+            death::BR_DEAD_BINDER
+        );
         assert_eq!(owner.read_record(&task, output, 20), Ok(20));
         assert_eq!(u32_at(&read::<20>(&task, output).unwrap(), 0), BR_RELEASE);
     }
@@ -1335,23 +1420,23 @@ mod tests {
         assert_eq!(offsets(&data, &[0; 7]), Err(errno::EINVAL));
         data[..4].copy_from_slice(&0x66642a85u32.to_le_bytes());
         assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
-        for padding in [0x17fu32,u32::MAX] {
+        for padding in [0x17fu32, u32::MAX] {
             data[4..8].copy_from_slice(&padding.to_le_bytes());
-            assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+            assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
         }
         data[4..8].fill(0);
         data[..4].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
         assert_eq!(offsets(&data, &[0; 8]), Err(errno::EOPNOTSUPP));
         data[..4].copy_from_slice(&BINDER.to_le_bytes());
         data[4..8].copy_from_slice(&0x900u32.to_le_bytes());
-        assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+        assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
         data[4..8].copy_from_slice(&0xb02u32.to_le_bytes());
-        assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+        assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
         data[4..8].copy_from_slice(&0x1900u32.to_le_bytes());
-        assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
-        for flags in [0xb00u32,0xd00,0x3900,0x901] {
+        assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
+        for flags in [0xb00u32, 0xd00, 0x3900, 0x901] {
             data[4..8].copy_from_slice(&flags.to_le_bytes());
-            assert_eq!(offsets(&data,&[0;8]),Err(errno::EOPNOTSUPP));
+            assert_eq!(offsets(&data, &[0; 8]), Err(errno::EOPNOTSUPP));
         }
     }
     #[test_case]
@@ -1452,7 +1537,11 @@ mod tests {
             .imported(&client, node.clone(), true)
             .unwrap();
         let handle = reference.handle.unwrap();
-        client.objects.lock().buffers.insert(0x3000, vec![reference]);
+        client
+            .objects
+            .lock()
+            .buffers
+            .insert(0x3000, vec![reference]);
         client
             .objects
             .lock()

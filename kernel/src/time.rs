@@ -62,18 +62,29 @@ pub trait ClockChangeListener: Send + Sync {
     fn clock_changed(self: Arc<Self>, revision: u64);
 }
 static CLOCK_REVISION: AtomicU64 = AtomicU64::new(0);
-static CLOCK_LISTENERS: IrqSpinLock<Vec<Weak<dyn ClockChangeListener>>> = IrqSpinLock::new(Vec::new());
-pub fn clock_revision() -> u64 { CLOCK_REVISION.load(Ordering::Acquire) }
+static CLOCK_LISTENERS: IrqSpinLock<Vec<Weak<dyn ClockChangeListener>>> =
+    IrqSpinLock::new(Vec::new());
+pub fn clock_revision() -> u64 {
+    CLOCK_REVISION.load(Ordering::Acquire)
+}
 pub fn observe_clock_changes(listener: &Arc<dyn ClockChangeListener>) -> Result<(), &'static str> {
     let mut listeners = CLOCK_LISTENERS.lock();
     listeners.retain(|listener| listener.strong_count() != 0);
-    if listeners.len() >= 4096 { return Err("clock observer limit"); }
+    if listeners.len() >= 4096 {
+        return Err("clock observer limit");
+    }
     listeners.push(Arc::downgrade(listener));
     Ok(())
 }
 fn notify_clock_changes(revision: u64) {
-    let listeners: Vec<_> = CLOCK_LISTENERS.lock().iter().filter_map(Weak::upgrade).collect();
-    for listener in listeners { listener.clock_changed(revision); }
+    let listeners: Vec<_> = CLOCK_LISTENERS
+        .lock()
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect();
+    for listener in listeners {
+        listener.clock_changed(revision);
+    }
 }
 
 /// Get the current wall-clock time in nanoseconds since the Unix epoch.

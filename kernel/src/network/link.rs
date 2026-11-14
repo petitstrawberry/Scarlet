@@ -88,13 +88,19 @@ impl NetworkManager {
         match meters.get(name) {
             Some(meter) => meter.reset(remaining),
             None => {
-                meters.insert(String::from(name), super::traffic_policy::Meter::new(remaining));
+                meters.insert(
+                    String::from(name),
+                    super::traffic_policy::Meter::new(remaining),
+                );
                 Ok(())
             }
         }
     }
 
-    pub fn traffic_meter(&self, name: &str) -> Option<alloc::sync::Arc<super::traffic_policy::Meter>> {
+    pub fn traffic_meter(
+        &self,
+        name: &str,
+    ) -> Option<alloc::sync::Arc<super::traffic_policy::Meter>> {
         self.traffic_meters.read().get(name).cloned()
     }
 
@@ -162,7 +168,9 @@ impl NetworkManager {
         if !Self::valid_traffic_name(name) {
             return Err("Invalid traffic meter name");
         }
-        let Some(meter) = self.traffic_meter(name) else { return Ok(()); };
+        let Some(meter) = self.traffic_meter(name) else {
+            return Ok(());
+        };
         self.ipv4_layer()?
             .as_any()
             .downcast_ref::<super::ipv4::Ipv4Layer>()
@@ -182,14 +190,19 @@ impl NetworkManager {
     ) -> Result<(), &'static str> {
         let mut links = self.link_lifecycle.lock();
         links.refresh(self);
-        let link = links.records.values().find(|link| link.id == id)
+        let link = links
+            .records
+            .values()
+            .find(|link| link.id == id)
             .ok_or("Link removed")?;
         if link.generation != generation {
             return Err("Link changed");
         }
         let name = link.interface_name().ok_or("Invalid link name")?;
         let layer = self.get_layer("ip").ok_or("IPv4 layer missing")?;
-        let ip = layer.as_any().downcast_ref::<super::ipv4::Ipv4Layer>()
+        let ip = layer
+            .as_any()
+            .downcast_ref::<super::ipv4::Ipv4Layer>()
             .ok_or("IPv4 layer unavailable")?;
         ip.set_traffic_policy(name, policy);
         Ok(())
@@ -390,10 +403,7 @@ mod tests {
     fn statistics_round_trip_exact_link_counters_and_identity() {
         let (manager, _interface, link) = manager_with_stats();
         let result = manager
-            .read_link_statistics(NetworkReadLinkStatisticsV1::query(
-                link.id,
-                link.generation,
-            ))
+            .read_link_statistics(NetworkReadLinkStatisticsV1::query(link.id, link.generation))
             .unwrap();
         assert_eq!(result.version, LINK_STATISTICS_VERSION_V1);
         assert_eq!(result.size, LINK_STATISTICS_SIZE_V1);
@@ -438,10 +448,10 @@ mod tests {
 
         interface.state.store(LINK_UP, Ordering::Release);
         assert_eq!(
-            manager.read_link_statistics(NetworkReadLinkStatisticsV1::query(
-                link.id,
-                link.generation,
-            )),
+            manager
+                .read_link_statistics(
+                    NetworkReadLinkStatisticsV1::query(link.id, link.generation,)
+                ),
             Err(LinkStatisticsError::Changed)
         );
     }

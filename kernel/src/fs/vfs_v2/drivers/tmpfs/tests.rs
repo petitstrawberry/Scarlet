@@ -19,34 +19,59 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_accepts_linux_mount_identity_and_security_options() {
-        use crate::fs::vfs_v2::core::FileSystemOperations;
         use crate::fs::FileSystemDriver;
-        let driver=crate::fs::drivers::tmpfs::TmpFSDriver;
-        let fs=driver.create_from_option_string("mode=0700,uid=0,gid=1000,nodev,noexec,nosuid,size=4M").unwrap();
-        let root=fs.root_node();
-        let metadata=root.metadata().unwrap();
-        assert!(metadata.permissions.read&&metadata.permissions.write&&metadata.permissions.execute);
-        let owner=root.owner_identity().unwrap();
-        assert_eq!(owner.principal.0,0);assert_eq!(owner.group.0,1000);
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        let driver = crate::fs::drivers::tmpfs::TmpFSDriver;
+        let fs = driver
+            .create_from_option_string("mode=0700,uid=0,gid=1000,nodev,noexec,nosuid,size=4M")
+            .unwrap();
+        let root = fs.root_node();
+        let metadata = root.metadata().unwrap();
+        assert!(
+            metadata.permissions.read && metadata.permissions.write && metadata.permissions.execute
+        );
+        let owner = root.owner_identity().unwrap();
+        assert_eq!(owner.principal.0, 0);
+        assert_eq!(owner.group.0, 1000);
         assert!(driver.create_from_option_string("size=1M,bogus").is_err());
-        assert!(driver.create_from_option_string("size=1M,mode=0999").is_err());
+        assert!(
+            driver
+                .create_from_option_string("size=1M,mode=0999")
+                .is_err()
+        );
     }
 
     #[test_case]
     fn test_character_device_write_failure_is_not_zero_byte_success() {
+        use crate::device::{DeviceType, manager::DeviceManager};
         use crate::fs::vfs_v2::core::FileSystemOperations;
-        use crate::device::{DeviceType,manager::DeviceManager};
         use alloc::sync::Arc;
-        let manager=DeviceManager::get_manager();
-        let id=manager.register_device_with_name("tmpfs-rejected-write-test".into(),Arc::new(crate::random::RandomCharDevice::new()));
-        let fs=TmpFS::new(0);let node=fs.create(&fs.root_node(),&"random".into(),
-            FileType::CharDevice(crate::fs::DeviceFileInfo {device_id:id,device_type:DeviceType::Char}),0o666).unwrap();
-        let file=fs.open(&node,2).unwrap();
-        assert!(matches!(file.write(b"uncredited seed"),Err(StreamError::FileSystemError(error)) if error.kind==FileSystemErrorKind::IoError));
+        let manager = DeviceManager::get_manager();
+        let id = manager.register_device_with_name(
+            "tmpfs-rejected-write-test".into(),
+            Arc::new(crate::random::RandomCharDevice::new()),
+        );
+        let fs = TmpFS::new(0);
+        let node = fs
+            .create(
+                &fs.root_node(),
+                &"random".into(),
+                FileType::CharDevice(crate::fs::DeviceFileInfo {
+                    device_id: id,
+                    device_type: DeviceType::Char,
+                }),
+                0o666,
+            )
+            .unwrap();
+        let file = fs.open(&node, 2).unwrap();
+        assert!(
+            matches!(file.write(b"uncredited seed"),Err(StreamError::FileSystemError(error)) if error.kind==FileSystemErrorKind::IoError)
+        );
         // A rejected write leaves the read side usable and doesn't pretend to
         // have accepted or credited caller-controlled entropy.
-        assert_eq!(file.read(&mut [0u8;32]).unwrap(),32);
-        drop(file);assert!(manager.unregister_device(id).is_some());
+        assert_eq!(file.read(&mut [0u8; 32]).unwrap(), 32);
+        drop(file);
+        assert!(manager.unregister_device(id).is_some());
     }
 
     #[test_case]

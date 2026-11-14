@@ -114,15 +114,23 @@ struct SharedPipeData {
 
 impl SharedPipeData {
     fn resize_buffer(&self, size: usize) -> Result<usize, StreamError> {
-        if size == 0 { return Err(StreamError::InvalidArgument); }
-        if self.state.lock().max_size == size { return Ok(size); }
+        if size == 0 {
+            return Err(StreamError::InvalidArgument);
+        }
+        if self.state.lock().max_size == size {
+            return Ok(size);
+        }
         // Allocate before taking the queue lock. Readers and writers may make
         // progress meanwhile; validate the current queue before publishing.
         let mut replacement = VecDeque::new();
-        replacement.try_reserve_exact(size).map_err(|_| StreamError::NoSpace)?;
+        replacement
+            .try_reserve_exact(size)
+            .map_err(|_| StreamError::NoSpace)?;
         let old = {
             let mut state = self.state.lock();
-            if state.buffer.len() > size { return Err(StreamError::InvalidArgument); }
+            if state.buffer.len() > size {
+                return Err(StreamError::InvalidArgument);
+            }
             replacement.extend(state.buffer.iter().copied());
             state.max_size = size;
             core::mem::replace(&mut state.buffer, replacement)
@@ -712,10 +720,15 @@ mod tests {
         writer.set_nonblocking(true);
         assert_eq!(writer.write(b"12345678").unwrap(), 8);
         let waiter = Arc::new(Waker::new_interruptible("pipe-resize"));
-        let registrations = writer.subscribe_readiness(ReadyInterest::write(), &waiter).unwrap();
+        let registrations = writer
+            .subscribe_readiness(ReadyInterest::write(), &waiter)
+            .unwrap();
         let generation = registrations[0].generation();
         assert!(!writer.current_ready(ReadyInterest::write()).write);
-        assert!(matches!(reader.resize_buffer(4), Err(StreamError::InvalidArgument)));
+        assert!(matches!(
+            reader.resize_buffer(4),
+            Err(StreamError::InvalidArgument)
+        ));
         assert_eq!(clone.buffer_size(), 8);
         assert_eq!(reader.resize_buffer(16).unwrap(), 16);
         assert_eq!(clone.buffer_size(), 16);
@@ -729,7 +742,10 @@ mod tests {
         assert!(writer.current_ready(ReadyInterest::write()).write);
         assert_eq!(writer.resize_buffer(4).unwrap(), 4);
         assert_eq!(reader.buffer_size(), 4);
-        assert!(matches!(reader.resize_buffer(0), Err(StreamError::InvalidArgument)));
+        assert!(matches!(
+            reader.resize_buffer(0),
+            Err(StreamError::InvalidArgument)
+        ));
         assert_eq!(reader.buffer_size(), 4);
     }
 

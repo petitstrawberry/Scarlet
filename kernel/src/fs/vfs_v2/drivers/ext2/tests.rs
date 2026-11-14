@@ -3158,10 +3158,7 @@ mod inode_table_request_tests {
 
     fn observe_table_lock(fs: &Ext2FileSystem, block: u64) {
         assert_eq!(block, INODE_TABLE_BLOCK);
-        assert!(fs
-            .get_inode_table_block_lock(block)
-            .try_lock()
-            .is_none());
+        assert!(fs.get_inode_table_block_lock(block).try_lock().is_none());
         INODE_TABLE_LOCK_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -3186,9 +3183,11 @@ mod inode_table_request_tests {
         };
         assert_eq!(&block[256..384], expected);
         assert!(block[384..512].iter().all(|byte| *byte == 0x5a));
-        assert!(block[NEIGHBOR_INODE_OFFSET..NEIGHBOR_INODE_OFFSET + 128]
-            .iter()
-            .all(|byte| *byte == 0x33));
+        assert!(
+            block[NEIGHBOR_INODE_OFFSET..NEIGHBOR_INODE_OFFSET + 128]
+                .iter()
+                .all(|byte| *byte == 0x33)
+        );
         assert!(block[640..768].iter().all(|byte| *byte == 0xc3));
         assert!(block[768..896].iter().all(|byte| *byte == 0x44));
         assert!(block[896..1024].iter().all(|byte| *byte == 0x7d));
@@ -3212,7 +3211,11 @@ mod inode_table_request_tests {
         assert_eq!(queued[0].request.request_type, BlockIORequestType::Write);
         assert_eq!(queued[0].request.sector, 600);
         assert!(queued[0].result.is_ok());
-        assert!(read_mock_block(&device, 300).iter().all(|byte| *byte == 0x4f));
+        assert!(
+            read_mock_block(&device, 300)
+                .iter()
+                .all(|byte| *byte == 0x4f)
+        );
 
         let block = read_mock_block(&device, INODE_TABLE_BLOCK);
         assert_eq!(
@@ -3220,9 +3223,11 @@ mod inode_table_request_tests {
             EXT2_S_IFREG | 0o600
         );
         assert!(block[384..512].iter().all(|byte| *byte == 0x5a));
-        assert!(block[NEIGHBOR_INODE_OFFSET..NEIGHBOR_INODE_OFFSET + 128]
-            .iter()
-            .all(|byte| *byte == 0x33));
+        assert!(
+            block[NEIGHBOR_INODE_OFFSET..NEIGHBOR_INODE_OFFSET + 128]
+                .iter()
+                .all(|byte| *byte == 0x33)
+        );
     }
 
     struct FailingTableReadDevice {

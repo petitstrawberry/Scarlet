@@ -194,11 +194,13 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     prot_perm |= 0x08;
 
     if is_map_private_flag && !is_shared {
-        let owner = match memory_mappable.mapping_owner_for_range(offset, aligned_length).or_else(|| task
-            .handle_table
-            .get_arc_clone(handle)
-            .and_then(|obj| obj.as_memory_mappable_arc()))
-        {
+        let owner = match memory_mappable
+            .mapping_owner_for_range(offset, aligned_length)
+            .or_else(|| {
+                task.handle_table
+                    .get_arc_clone(handle)
+                    .and_then(|obj| obj.as_memory_mappable_arc())
+            }) {
             Some(owner) => owner,
             None => return usize::MAX,
         };
@@ -263,10 +265,13 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         perm
     } | 0x08;
 
-    let owner = memory_mappable.mapping_owner_for_range(offset, aligned_length).or_else(|| task
-        .handle_table
-        .get_arc_clone(handle)
-        .and_then(|obj| obj.as_memory_mappable_arc()));
+    let owner = memory_mappable
+        .mapping_owner_for_range(offset, aligned_length)
+        .or_else(|| {
+            task.handle_table
+                .get_arc_clone(handle)
+                .and_then(|obj| obj.as_memory_mappable_arc())
+        });
     let mut vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
         .with_memory_attribute(mapping_info.memory_attribute);
     vm_map.maximum_permissions = maximum_permissions;
@@ -285,10 +290,13 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 Some(area) => area,
                 None => return usize::MAX,
             };
-            let owner = memory_mappable.mapping_owner_for_range(offset, aligned_length).or_else(|| task
-                .handle_table
-                .get_arc_clone(handle)
-                .and_then(|obj| obj.as_memory_mappable_arc()));
+            let owner = memory_mappable
+                .mapping_owner_for_range(offset, aligned_length)
+                .or_else(|| {
+                    task.handle_table
+                        .get_arc_clone(handle)
+                        .and_then(|obj| obj.as_memory_mappable_arc())
+                });
             let mut retry_map =
                 VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
                     .with_memory_attribute(mapping_info.memory_attribute);

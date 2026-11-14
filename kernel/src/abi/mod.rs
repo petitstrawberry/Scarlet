@@ -90,9 +90,13 @@ pub trait AbiModule: Send + Sync + 'static {
 
     /// Call-number domain used by inherited Shield execution constraints.
     /// Unknown adapters cannot impersonate another ABI's filtered calls.
-    fn execution_domain(&self) -> &'static str { "unknown" }
+    fn execution_domain(&self) -> &'static str {
+        "unknown"
+    }
     fn handle_execution_denial(
-        &mut self, _denial: crate::shield::execution::Denial, frame: &mut Trapframe,
+        &mut self,
+        _denial: crate::shield::execution::Denial,
+        frame: &mut Trapframe,
     ) -> Result<usize, &'static str> {
         let task = mytask().ok_or("no current task")?;
         frame.increment_pc_next(&task);
@@ -131,7 +135,9 @@ pub trait AbiModule: Send + Sync + 'static {
         &mut self,
         _fault: crate::vm::fault::UserMemoryFault,
         _frame: &mut Trapframe,
-    ) -> Result<bool, &'static str> { Ok(false) }
+    ) -> Result<bool, &'static str> {
+        Ok(false)
+    }
 
     /// Deliver an unrecoverable synchronous userspace exception through this ABI.
     ///
@@ -651,9 +657,10 @@ pub enum EventProcessOutcome {
     Exited(i32),
 }
 
-pub fn dispatch_user_memory_fault(fault: crate::vm::fault::UserMemoryFault, frame: &mut Trapframe)
-    -> Result<bool, &'static str>
-{
+pub fn dispatch_user_memory_fault(
+    fault: crate::vm::fault::UserMemoryFault,
+    frame: &mut Trapframe,
+) -> Result<bool, &'static str> {
     let task = mytask().ok_or("user memory fault without a task")?;
     let pc = frame.get_current_pc() as usize;
     task.with_resolve_abi_mut(pc, |abi| abi.handle_user_memory_fault(fault, frame))
@@ -699,7 +706,8 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
         }
     } else {
         task.with_resolve_abi_mut(pc, |abi_module| {
-            if let Some(denial) = execution_denial(&task, trapframe, abi_module.execution_domain()) {
+            if let Some(denial) = execution_denial(&task, trapframe, abi_module.execution_domain())
+            {
                 abi_module.handle_execution_denial(denial, trapframe)
             } else {
                 abi_module.handle_syscall(trapframe)
@@ -718,13 +726,18 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     res
 }
 
-fn execution_denial(task: &crate::task::Task, frame: &Trapframe, domain: &'static str)
-    -> Option<crate::shield::execution::Denial>
-{
+fn execution_denial(
+    task: &crate::task::Task,
+    frame: &Trapframe,
+    domain: &'static str,
+) -> Option<crate::shield::execution::Denial> {
     let restrictions = task.execution_restrictions.read();
-    if !restrictions.is_constrained() { return None; }
+    if !restrictions.is_constrained() {
+        return None;
+    }
     restrictions.evaluate(&crate::shield::execution::Invocation {
-        domain, number: frame.get_syscall_number() as u64,
+        domain,
+        number: frame.get_syscall_number() as u64,
         instruction: frame.get_current_pc() as u64,
         arguments: core::array::from_fn(|i| frame.get_arg(i) as u64),
     })

@@ -201,15 +201,14 @@ impl fmt::Debug for VfsEntry {
 /// All operation APIs (lookup, create, remove, open, etc.) are consolidated in FileSystemOperations for clear separation of concerns.
 pub trait VfsNode: Send + Sync + Any {
     /// Native labels belong to the inode rather than its pathname or an ABI.
-    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {None}
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        None
+    }
 
     /// Read the persistent Shield label for one stable policy domain.
     /// Memory-backed nodes retain the value in inode-owned RAM metadata;
     /// persistent filesystems override these methods to use durable storage.
-    fn read_label_metadata(
-        &self,
-        domain: &[u8; 16],
-    ) -> Result<Option<Vec<u8>>, FileSystemError> {
+    fn read_label_metadata(&self, domain: &[u8; 16]) -> Result<Option<Vec<u8>>, FileSystemError> {
         let labels = self.shield_labels().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -223,11 +222,7 @@ pub trait VfsNode: Send + Sync + Any {
     /// empty value is stored as malformed metadata, not treated as removal.
     /// The per-inode Shield transaction lock, rather than an IRQ spin lock,
     /// spans read/check/write operations that may perform disk I/O.
-    fn write_label_metadata(
-        &self,
-        domain: &[u8; 16],
-        value: &[u8],
-    ) -> Result<(), FileSystemError> {
+    fn write_label_metadata(&self, domain: &[u8; 16], value: &[u8]) -> Result<(), FileSystemError> {
         let labels = self.shield_labels().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -246,8 +241,11 @@ pub trait VfsNode: Send + Sync + Any {
     /// Directory watches require a non-reused identity until removal retires
     /// the watch. This does not grant retained file authority or advisory locks.
     fn supports_directory_notifications(&self) -> bool {
-        self.is_directory().unwrap_or(false) && self.filesystem().and_then(|fs| fs.upgrade())
-            .is_some_and(|fs| fs.supports_retained_node_identity())
+        self.is_directory().unwrap_or(false)
+            && self
+                .filesystem()
+                .and_then(|fs| fs.upgrade())
+                .is_some_and(|fs| fs.supports_retained_node_identity())
     }
 
     /// Get metadata for this node
@@ -255,9 +253,18 @@ pub trait VfsNode: Send + Sync + Any {
 
     /// Optional native ownership metadata. Backends that expose delegation may
     /// store it and enforce changes; unsupported backends retain their current model.
-    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> { None }
-    fn set_owner_identity(&self, _principal: Option<crate::shield::identity::Principal>, _group: Option<crate::shield::identity::Group>) -> Result<(), FileSystemError> {
-        Err(FileSystemError::new(FileSystemErrorKind::NotSupported,"Owner metadata unsupported"))
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
+        None
+    }
+    fn set_owner_identity(
+        &self,
+        _principal: Option<crate::shield::identity::Principal>,
+        _group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Owner metadata unsupported",
+        ))
     }
 
     /// Update only selected timestamps. Unsupported filesystems must fail.
@@ -345,7 +352,9 @@ pub trait FileSystemOperations: Send + Sync {
 
     /// Retaining a node pins a stable inode identity across aliases and unlink.
     /// Used by native metadata authorities that must never label a reused inode.
-    fn supports_retained_node_identity(&self) -> bool { false }
+    fn supports_retained_node_identity(&self) -> bool {
+        false
+    }
 
     /// Whether `(fs_id(), VfsNode::id())` is a safe advisory-lock identity.
     ///
@@ -389,9 +398,21 @@ pub trait FileSystemOperations: Send + Sync {
 
     /// Create a new file in the specified directory
     /// Backends initialize native labels before publishing a directory entry.
-    fn create_labeled(&self,parent:&Arc<dyn VfsNode>,name:&String,file_type:FileType,mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
-        if label.is_some() {return Err(FileSystemError::new(FileSystemErrorKind::NotSupported,"Filesystem cannot atomically publish inode labels"));}
-        self.create(parent,name,file_type,mode)
+    fn create_labeled(
+        &self,
+        parent: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        if label.is_some() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem cannot atomically publish inode labels",
+            ));
+        }
+        self.create(parent, name, file_type, mode)
     }
     fn create(
         &self,
@@ -606,7 +627,9 @@ impl VfsFileObject {
 }
 
 impl StreamOps for VfsFileObject {
-    fn write_empty(&self) -> Result<usize, StreamError> { self.inner.write_empty() }
+    fn write_empty(&self) -> Result<usize, StreamError> {
+        self.inner.write_empty()
+    }
 
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         self.inner.read(buffer)
@@ -628,7 +651,11 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
-    fn mapping_owner_for_range(&self, offset: usize, length: usize) -> Option<Arc<dyn MemoryMappingOps>> {
+    fn mapping_owner_for_range(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Option<Arc<dyn MemoryMappingOps>> {
         self.inner.mapping_owner_for_range(offset, length)
     }
     fn new_mapping_permissions(&self, is_shared: bool) -> usize {
@@ -636,9 +663,12 @@ impl MemoryMappingOps for VfsFileObject {
     }
 
     fn maximum_mapping_permissions(&self) -> usize {
-        self.inner.maximum_mapping_permissions() & if self.mount_point.restrictions.allows_execution() {
-            usize::MAX
-        } else { !(crate::vm::vmem::VirtualMemoryPermission::Execute as usize) }
+        self.inner.maximum_mapping_permissions()
+            & if self.mount_point.restrictions.allows_execution() {
+                usize::MAX
+            } else {
+                !(crate::vm::vmem::VirtualMemoryPermission::Execute as usize)
+            }
     }
 
     fn get_mapping_info(
@@ -663,7 +693,8 @@ impl MemoryMappingOps for VfsFileObject {
     }
 
     fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {
-        self.inner.on_mapping_inherited(vaddr, paddr, length, vm_start);
+        self.inner
+            .on_mapping_inherited(vaddr, paddr, length, vm_start);
     }
 
     fn on_unmapped(&self, vaddr: usize, length: usize) {
@@ -696,7 +727,8 @@ impl FileObject for VfsFileObject {
         self.mount_point.restrictions.allows_execution() && self.inner.allows_execution()
     }
     fn allows_execution_privilege_gain(&self) -> bool {
-        self.mount_point.restrictions.allows_privilege_gain() && self.inner.allows_execution_privilege_gain()
+        self.mount_point.restrictions.allows_privilege_gain()
+            && self.inner.allows_execution_privilege_gain()
     }
 
     fn supports_append(&self) -> bool {

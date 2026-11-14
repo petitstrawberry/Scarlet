@@ -62,8 +62,8 @@ pub fn parse_c_string_from_userspace(
             .ok_or(StringConversionError::TranslationError)?;
         // Do not touch the next page before finding out whether this page
         // terminates the string. Batch translations within that boundary.
-        let page_left = crate::environment::PAGE_SIZE
-            - (address & (crate::environment::PAGE_SIZE - 1));
+        let page_left =
+            crate::environment::PAGE_SIZE - (address & (crate::environment::PAGE_SIZE - 1));
         let length = buffer.len().min(page_left).min(max_len - bytes.len());
         copy_from_user(task, address, &mut buffer[..length])
             .map_err(|_| StringConversionError::TranslationError)?;

@@ -117,9 +117,14 @@ pub(crate) fn push_string_vector(
 /// Publish the Linux accounting unit used by Bionic's sysconf(_SC_CLK_TCK).
 /// This is an ABI conversion unit, independent of the hardware timer frequency.
 pub(crate) fn add_clock_auxv(auxv: &mut Vec<AuxVec>) -> Result<(), &'static str> {
-    let end = auxv.iter().position(|entry| entry.a_type == AT_NULL)
+    let end = auxv
+        .iter()
+        .position(|entry| entry.a_type == AT_NULL)
         .ok_or("Missing auxiliary vector terminator")?;
-    if let Some(entry) = auxv[..end].iter_mut().find(|entry| entry.a_type == AT_CLKTCK) {
+    if let Some(entry) = auxv[..end]
+        .iter_mut()
+        .find(|entry| entry.a_type == AT_CLKTCK)
+    {
         entry.a_val = super::time::USER_HZ;
     } else {
         auxv.insert(end, AuxVec::new(AT_CLKTCK, super::time::USER_HZ));

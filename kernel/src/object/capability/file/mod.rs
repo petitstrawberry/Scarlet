@@ -34,11 +34,15 @@ pub enum SeekFrom {
 /// through normal `read()` operations.
 pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// Executable authority retained by this open description, independent of its pathname.
-    fn allows_execution(&self) -> bool { true }
+    fn allows_execution(&self) -> bool {
+        true
+    }
 
     /// Whether execution may derive privileges from this file. Current loaders
     /// preserve credentials; future file-derived grants must honor this gate.
-    fn allows_execution_privilege_gain(&self) -> bool { true }
+    fn allows_execution_privilege_gain(&self) -> bool {
+        true
+    }
 
     /// Seek to an absolute position or a displacement relative to the cursor or EOF.
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;

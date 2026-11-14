@@ -149,7 +149,8 @@ fn task_stat(task: &Task, thread: bool) -> String {
     let nice = task.sched_nice.load(core::sync::atomic::Ordering::Relaxed);
     fields[18 - 4] = (20 + nice) as i128;
     fields[19 - 4] = nice as i128;
-    fields[20 - 4] = crate::sched::scheduler::get_task_pool().task_ids_snapshot()
+    fields[20 - 4] = crate::sched::scheduler::get_task_pool()
+        .task_ids_snapshot()
         .into_iter()
         .filter(|id| {
             crate::sched::scheduler::get_task_by_id(*id).is_some_and(|other| {
@@ -240,7 +241,10 @@ fn task_status(caller: &Task, task: &Task) -> String {
         .filter(|id| {
             crate::sched::scheduler::get_task_by_id(*id).is_some_and(|member| {
                 member.get_thread_group_id() == task.get_thread_group_id()
-                    && !matches!(member.get_state(), TaskState::Zombie | TaskState::Terminated)
+                    && !matches!(
+                        member.get_state(),
+                        TaskState::Zombie | TaskState::Terminated
+                    )
             })
         })
         .count()
@@ -292,32 +296,68 @@ fn mount_field(value: &str) -> String {
 }
 
 fn mounts_content(fs: &crate::fs::VfsManager) -> String {
-    use crate::fs::vfs_v2::drivers::{tmpfs::TmpFS, overlayfs::OverlayFS, devfs::DevFS, cpiofs::CpioFS};
+    use crate::fs::vfs_v2::drivers::{
+        cpiofs::CpioFS, devfs::DevFS, overlayfs::OverlayFS, tmpfs::TmpFS,
+    };
     let mut content = String::new();
     for (path, mount) in fs.mounted_paths() {
-        let filesystem = mount.filesystem.clone().or_else(|| mount.root.node().filesystem().and_then(|fs| fs.upgrade()));
-        let Some(filesystem) = filesystem else { continue };
-        let kind = if filesystem.as_any().is::<TmpFS>() { "tmpfs" }
-            else if filesystem.as_any().is::<OverlayFS>() { "overlay" }
-            else if filesystem.as_any().is::<DevFS>() { "devfs" }
-            else if filesystem.as_any().is::<CpioFS>() { "cpiofs" }
-            else { filesystem.name() };
+        let filesystem = mount
+            .filesystem
+            .clone()
+            .or_else(|| mount.root.node().filesystem().and_then(|fs| fs.upgrade()));
+        let Some(filesystem) = filesystem else {
+            continue;
+        };
+        let kind = if filesystem.as_any().is::<TmpFS>() {
+            "tmpfs"
+        } else if filesystem.as_any().is::<OverlayFS>() {
+            "overlay"
+        } else if filesystem.as_any().is::<DevFS>() {
+            "devfs"
+        } else if filesystem.as_any().is::<CpioFS>() {
+            "cpiofs"
+        } else {
+            filesystem.name()
+        };
         let restrictions = mount.restrictions;
         let mut options = String::from("rw");
-        if !restrictions.allows_privilege_gain() { options.push_str(",nosuid"); }
-        if !restrictions.allows_devices() { options.push_str(",nodev"); }
-        if !restrictions.allows_execution() { options.push_str(",noexec"); }
-        content.push_str(&format!("none {} {} {options} 0 0\n", mount_field(&path), mount_field(kind)));
+        if !restrictions.allows_privilege_gain() {
+            options.push_str(",nosuid");
+        }
+        if !restrictions.allows_devices() {
+            options.push_str(",nodev");
+        }
+        if !restrictions.allows_execution() {
+            options.push_str(",noexec");
+        }
+        content.push_str(&format!(
+            "none {} {} {options} 0 0\n",
+            mount_field(&path),
+            mount_field(kind)
+        ));
     }
     content
 }
 
-fn layout_field(path:&str)->Option<bool> {
-    match path {"/proc/sys/vm/mmap_rnd_bits"=>Some(false),"/proc/sys/vm/mmap_rnd_compat_bits"=>Some(true),_=>None}
+fn layout_field(path: &str) -> Option<bool> {
+    match path {
+        "/proc/sys/vm/mmap_rnd_bits" => Some(false),
+        "/proc/sys/vm/mmap_rnd_compat_bits" => Some(true),
+        _ => None,
+    }
 }
-fn layout_text(path:&str)->Option<String> {
-    let low=layout_field(path)?;let task=crate::task::mytask()?;let policy=task.vm_manager.layout_policy();
-    Some(format!("{}\n",if low {policy.low_bits}else {policy.native_bits}))
+fn layout_text(path: &str) -> Option<String> {
+    let low = layout_field(path)?;
+    let task = crate::task::mytask()?;
+    let policy = task.vm_manager.layout_policy();
+    Some(format!(
+        "{}\n",
+        if low {
+            policy.low_bits
+        } else {
+            policy.native_bits
+        }
+    ))
 }
 fn text_content(path: &str) -> Option<String> {
     if let Some(content) = super::oom::text_content(path) {
@@ -331,22 +371,43 @@ fn text_content(path: &str) -> Option<String> {
         let kib_per_page = crate::environment::PAGE_SIZE / 1024;
         // Expose existing PMM counters. Scarlet has no swap; unknown cache,
         // reclaimability and kernel-category statistics remain absent.
-        return Some(format!("MemTotal: {} kB\nMemFree: {} kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
-            total.saturating_mul(kib_per_page), free.saturating_mul(kib_per_page)));
+        return Some(format!(
+            "MemTotal: {} kB\nMemFree: {} kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+            total.saturating_mul(kib_per_page),
+            free.saturating_mul(kib_per_page)
+        ));
     }
-    if let Some(text)=layout_text(path) {return Some(text);}
+    if let Some(text) = layout_text(path) {
+        return Some(text);
+    }
     if path == "/proc/sys/kernel/kptr_restrict" {
         let caller = crate::task::mytask()?;
-        return Some(String::from(if caller.execution_restrictions.read().kernel_addresses_hidden() { "2\n" } else { "0\n" }));
+        return Some(String::from(
+            if caller
+                .execution_restrictions
+                .read()
+                .kernel_addresses_hidden()
+            {
+                "2\n"
+            } else {
+                "0\n"
+            },
+        ));
     }
-    if matches!(path, "/proc/mounts" | "/proc/self/mounts" | "/proc/thread-self/mounts") {
+    if matches!(
+        path,
+        "/proc/mounts" | "/proc/self/mounts" | "/proc/thread-self/mounts"
+    ) {
         let fs = crate::task::mytask()?.get_vfs()?;
         return Some(mounts_content(&fs));
     }
     if path.trim_end_matches('/').ends_with("/stat") {
         let caller = crate::task::mytask()?;
         let target = proc_task(&caller, path, "stat")?;
-        return Some(task_stat(&target, target.get_id() != target.get_thread_group_id()));
+        return Some(task_stat(
+            &target,
+            target.get_id() != target.get_thread_group_id(),
+        ));
     }
     if path.trim_end_matches('/').ends_with("/status") {
         let caller = crate::task::mytask()?;
@@ -392,8 +453,7 @@ fn is_cpu_directory(path: &str) -> bool {
         .and_then(|suffix| suffix.strip_prefix("/cpu"))
         .and_then(|id| id.parse::<usize>().ok())
         .is_some_and(|id| {
-            path == format!("{CPU_DIRECTORY}/cpu{id}")
-                && crate::sched::scheduler::is_cpu_online(id)
+            path == format!("{CPU_DIRECTORY}/cpu{id}") && crate::sched::scheduler::is_cpu_online(id)
         })
 }
 
@@ -476,10 +536,18 @@ fn network_path(path: &str) -> Option<NetworkPath> {
     match tail {
         None => Some(NetworkPath::Interface),
         Some("statistics") => Some(NetworkPath::Statistics),
-        Some("statistics/rx_bytes") => Some(NetworkPath::Statistic(link, NetworkStatistic::RxBytes)),
-        Some("statistics/rx_packets") => Some(NetworkPath::Statistic(link, NetworkStatistic::RxPackets)),
-        Some("statistics/tx_bytes") => Some(NetworkPath::Statistic(link, NetworkStatistic::TxBytes)),
-        Some("statistics/tx_packets") => Some(NetworkPath::Statistic(link, NetworkStatistic::TxPackets)),
+        Some("statistics/rx_bytes") => {
+            Some(NetworkPath::Statistic(link, NetworkStatistic::RxBytes))
+        }
+        Some("statistics/rx_packets") => {
+            Some(NetworkPath::Statistic(link, NetworkStatistic::RxPackets))
+        }
+        Some("statistics/tx_bytes") => {
+            Some(NetworkPath::Statistic(link, NetworkStatistic::TxBytes))
+        }
+        Some("statistics/tx_packets") => {
+            Some(NetworkPath::Statistic(link, NetworkStatistic::TxPackets))
+        }
         Some(_) => None,
     }
 }
@@ -516,7 +584,11 @@ fn network_directory_entries(path: &str) -> Option<Vec<ProcDirectoryEntry>> {
         }
         NetworkPath::Statistics => {
             let mut entries = base_directory_entries();
-            entries.extend(NETWORK_STATISTICS_FILES.iter().map(|name| (String::from(*name), false)));
+            entries.extend(
+                NETWORK_STATISTICS_FILES
+                    .iter()
+                    .map(|name| (String::from(*name), false)),
+            );
             Some(entries)
         }
         NetworkPath::Statistic(_, _) => None,
@@ -524,7 +596,10 @@ fn network_directory_entries(path: &str) -> Option<Vec<ProcDirectoryEntry>> {
 }
 
 #[cfg(feature = "network")]
-fn network_statistic_content(link: NetworkLinkInfoV1, statistic: NetworkStatistic) -> Option<Vec<u8>> {
+fn network_statistic_content(
+    link: NetworkLinkInfoV1,
+    statistic: NetworkStatistic,
+) -> Option<Vec<u8>> {
     let statistics = crate::network::NetworkManager::get_manager()
         .read_link_statistics(NetworkReadLinkStatisticsV1::query(link.id, link.generation))
         .ok()?;
@@ -534,15 +609,17 @@ fn network_statistic_content(link: NetworkLinkInfoV1, statistic: NetworkStatisti
 #[cfg(feature = "network")]
 fn network_snapshot(path: &str) -> Option<NetworkSnapshot> {
     match network_path(path)? {
-        NetworkPath::Statistic(link, statistic) => {
-            Some(NetworkSnapshot::File(network_statistic_content(link, statistic)?))
-        }
+        NetworkPath::Statistic(link, statistic) => Some(NetworkSnapshot::File(
+            network_statistic_content(link, statistic)?,
+        )),
         _ => Some(NetworkSnapshot::Directory(network_directory_entries(path)?)),
     }
 }
 
 #[cfg(not(feature = "network"))]
-fn network_snapshot(_path: &str) -> Option<NetworkSnapshot> { None }
+fn network_snapshot(_path: &str) -> Option<NetworkSnapshot> {
+    None
+}
 
 fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
     // Stable across open/stat, distinct for each synthetic entry.
@@ -637,7 +714,11 @@ pub(super) fn open_proc_text_file(
     } else {
         snapshot_content(path)?
     };
-    if flags & 3 == 3 || (flags & 3 != 0 && path != "/proc/sys/kernel/kptr_restrict" && layout_field(path).is_none()) {
+    if flags & 3 == 3
+        || (flags & 3 != 0
+            && path != "/proc/sys/kernel/kptr_restrict"
+            && layout_field(path).is_none())
+    {
         return Some(errno::to_result(errno::EACCES));
     }
     if flags & O_DIRECTORY != 0 && !directory {
@@ -683,7 +764,9 @@ impl StreamOps for ProcTextFile {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let mut position = self.position.write();
         if self.directory {
-            let entry = self.directory_entries.as_ref()
+            let entry = self
+                .directory_entries
+                .as_ref()
                 .and_then(|entries| entries.get(*position).cloned())
                 .or_else(|| cpu_directory_entry(&self.path, *position));
             let Some((name, directory)) = entry else {
@@ -691,7 +774,11 @@ impl StreamOps for ProcTextFile {
             };
             let path = match name.as_str() {
                 "." => self.path.clone(),
-                ".." => self.path.rsplit_once('/').map(|(parent, _)| String::from(parent)).unwrap_or_default(),
+                ".." => self
+                    .path
+                    .rsplit_once('/')
+                    .map(|(parent, _)| String::from(parent))
+                    .unwrap_or_default(),
                 _ => format!("{}/{}", self.path, name),
             };
             let entry = DirectoryEntry::from_internal(&DirectoryEntryInternal {
@@ -723,23 +810,59 @@ impl StreamOps for ProcTextFile {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        if self.access==0 {return Err(StreamError::PermissionDenied);}
-        if let Some(low)=layout_field(&self.path) {
-            let caller=crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
-            if !caller.credentials.read().permits(crate::shield::identity::MANAGE_LAYOUT) {return Err(StreamError::PermissionDenied);}
-            let value=core::str::from_utf8(buffer).map_err(|_|StreamError::InvalidArgument)?.trim().parse::<u8>().map_err(|_|StreamError::InvalidArgument)?;
-            let mut policy=caller.vm_manager.layout_policy();if low {policy.low_bits=value;}else {policy.native_bits=value;}
-            policy.validate().map_err(|_|StreamError::InvalidArgument)?;
-            caller.vm_manager.configure_layout(policy).map_err(|_|StreamError::NotSupported)?;return Ok(buffer.len());
+        if self.access == 0 {
+            return Err(StreamError::PermissionDenied);
         }
-        if self.path!="/proc/sys/kernel/kptr_restrict" {return Err(StreamError::PermissionDenied);}
+        if let Some(low) = layout_field(&self.path) {
+            let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
+            if !caller
+                .credentials
+                .read()
+                .permits(crate::shield::identity::MANAGE_LAYOUT)
+            {
+                return Err(StreamError::PermissionDenied);
+            }
+            let value = core::str::from_utf8(buffer)
+                .map_err(|_| StreamError::InvalidArgument)?
+                .trim()
+                .parse::<u8>()
+                .map_err(|_| StreamError::InvalidArgument)?;
+            let mut policy = caller.vm_manager.layout_policy();
+            if low {
+                policy.low_bits = value;
+            } else {
+                policy.native_bits = value;
+            }
+            policy
+                .validate()
+                .map_err(|_| StreamError::InvalidArgument)?;
+            caller
+                .vm_manager
+                .configure_layout(policy)
+                .map_err(|_| StreamError::NotSupported)?;
+            return Ok(buffer.len());
+        }
+        if self.path != "/proc/sys/kernel/kptr_restrict" {
+            return Err(StreamError::PermissionDenied);
+        }
         let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
-        let value = core::str::from_utf8(buffer).map_err(|_| StreamError::InvalidArgument)?.trim();
-        if !matches!(value, "0" | "1" | "2") { return Err(StreamError::InvalidArgument); }
+        let value = core::str::from_utf8(buffer)
+            .map_err(|_| StreamError::InvalidArgument)?
+            .trim();
+        if !matches!(value, "0" | "1" | "2") {
+            return Err(StreamError::InvalidArgument);
+        }
         // The manager installs the inherited constraint before launching Android.
         // A proc write may confirm it, but cannot impersonate a global kernel
         // policy change or loosen a stronger native restriction.
-        if value != "2" || !caller.execution_restrictions.read().kernel_addresses_hidden() { return Err(StreamError::PermissionDenied); }
+        if value != "2"
+            || !caller
+                .execution_restrictions
+                .read()
+                .kernel_addresses_hidden()
+        {
+            return Err(StreamError::PermissionDenied);
+        }
         Ok(buffer.len())
     }
 }
@@ -800,16 +923,27 @@ impl FileObject for ProcTextFile {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        if self.access == 1 { return Err(StreamError::PermissionDenied); }
+        if self.access == 1 {
+            return Err(StreamError::PermissionDenied);
+        }
         if self.directory {
             return Err(StreamError::InvalidArgument);
         }
         let start = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        let layout=layout_text(&self.path);
-        let bytes = if let Some(layout)=&layout {layout.as_bytes()}else if self.path == "/proc/sys/kernel/kptr_restrict" {
-            if crate::task::mytask().is_some_and(|task| task.execution_restrictions.read().kernel_addresses_hidden()) { b"2\n".as_slice() }
-            else { b"0\n".as_slice() }
-        } else { self.content.as_slice() };
+        let layout = layout_text(&self.path);
+        let bytes = if let Some(layout) = &layout {
+            layout.as_bytes()
+        } else if self.path == "/proc/sys/kernel/kptr_restrict" {
+            if crate::task::mytask()
+                .is_some_and(|task| task.execution_restrictions.read().kernel_addresses_hidden())
+            {
+                b"2\n".as_slice()
+            } else {
+                b"0\n".as_slice()
+            }
+        } else {
+            self.content.as_slice()
+        };
         if start >= bytes.len() {
             return Ok(0);
         }
@@ -844,17 +978,29 @@ mod tests {
 
     #[cfg(feature = "network")]
     impl NetworkInterface for NetworkStatsTestInterface {
-        fn name(&self) -> &str { self.name }
-        fn mac_address(&self) -> MacAddress { MacAddress::new([2, 0, 0, 0, 0, 1]) }
-        fn link_state(&self) -> u8 { scarlet_abi::network::LINK_UP }
-        fn ip_address(&self) -> Option<crate::network::ipv4::Ipv4Address> { None }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn mac_address(&self) -> MacAddress {
+            MacAddress::new([2, 0, 0, 0, 0, 1])
+        }
+        fn link_state(&self) -> u8 {
+            scarlet_abi::network::LINK_UP
+        }
+        fn ip_address(&self) -> Option<crate::network::ipv4::Ipv4Address> {
+            None
+        }
         fn set_ip_address(&self, _: crate::network::ipv4::Ipv4Address) {}
         fn clear_ip_address(&self) {}
         fn send(&self, _: DevicePacket) -> Result<(), &'static str> {
             Err("network statistics test interface")
         }
-        fn poll(&self) -> Result<Vec<DevicePacket>, &'static str> { Ok(Vec::new()) }
-        fn stats(&self) -> InterfaceStats { self.statistics.read().clone() }
+        fn poll(&self) -> Result<Vec<DevicePacket>, &'static str> {
+            Ok(Vec::new())
+        }
+        fn stats(&self) -> InterfaceStats {
+            self.statistics.read().clone()
+        }
     }
 
     fn file_contents(file: &dyn FileObject) -> Vec<u8> {
@@ -863,7 +1009,9 @@ mod tests {
         let mut buffer = [0; 16];
         loop {
             let read = file.read(&mut buffer).unwrap();
-            if read == 0 { return contents; }
+            if read == 0 {
+                return contents;
+            }
             contents.extend_from_slice(&buffer[..read]);
         }
     }
@@ -874,9 +1022,13 @@ mod tests {
         let mut buffer = [0; core::mem::size_of::<DirectoryEntry>()];
         loop {
             let read = file.read(&mut buffer).unwrap();
-            if read == 0 { return names; }
+            if read == 0 {
+                return names;
+            }
             assert_eq!(read, buffer.len());
-            names.push(String::from(DirectoryEntry::parse(&buffer).unwrap().name_str().unwrap()));
+            names.push(String::from(
+                DirectoryEntry::parse(&buffer).unwrap().name_str().unwrap(),
+            ));
         }
     }
 
@@ -901,27 +1053,44 @@ mod tests {
         let file = object.as_file().unwrap();
         let expected = super::super::config::GZIP;
         assert_eq!(file.metadata().unwrap().size, expected.len());
-        assert_eq!(path_metadata("/proc/config.gz").unwrap().size, expected.len());
+        assert_eq!(
+            path_metadata("/proc/config.gz").unwrap().size,
+            expected.len()
+        );
         let mut actual = alloc::vec::Vec::new();
         let mut chunk = [0; 7];
         loop {
             let n = file.read(&mut chunk).unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             actual.extend_from_slice(&chunk[..n]);
         }
         assert_eq!(actual, expected);
         assert_eq!(file.seek(SeekFrom::Start(0)).unwrap(), 0);
         assert_eq!(file.read(&mut chunk).unwrap(), chunk.len());
         assert_eq!(&chunk, &expected[..7]);
-        assert!(matches!(file.write(b"CONFIG_UNIMPLEMENTED=y\n"), Err(StreamError::PermissionDenied)));
-        assert_eq!(open_proc_text_file(&mut abi, &task, "/proc/config.gz", 1), Some(errno::to_result(errno::EACCES)));
-        assert_eq!(open_proc_text_file(&mut abi, &task, "/proc/config.gz", O_DIRECTORY), Some(errno::to_result(errno::ENOTDIR)));
+        assert!(matches!(
+            file.write(b"CONFIG_UNIMPLEMENTED=y\n"),
+            Err(StreamError::PermissionDenied)
+        ));
+        assert_eq!(
+            open_proc_text_file(&mut abi, &task, "/proc/config.gz", 1),
+            Some(errno::to_result(errno::EACCES))
+        );
+        assert_eq!(
+            open_proc_text_file(&mut abi, &task, "/proc/config.gz", O_DIRECTORY),
+            Some(errno::to_result(errno::ENOTDIR))
+        );
     }
 
     #[test_case]
     fn proc_version_matches_uname_release() {
         let version = super::text_content("/proc/version").unwrap();
-        assert!(version.starts_with(&alloc::format!("Linux version {} ", super::super::proc::LINUX_ABI_RELEASE)));
+        assert!(version.starts_with(&alloc::format!(
+            "Linux version {} ",
+            super::super::proc::LINUX_ABI_RELEASE
+        )));
         assert!(version.ends_with('\n'));
     }
 
@@ -987,14 +1156,21 @@ mod tests {
         member.set_thread_group_id(leader_id);
         member.set_state(TaskState::Blocked(BlockedType::Interruptible));
         let member_id = register_task(member);
-        assert_eq!(get_task_by_id(member_id).unwrap().get_thread_group_id(), leader_id);
+        assert_eq!(
+            get_task_by_id(member_id).unwrap().get_thread_group_id(),
+            leader_id
+        );
 
         let local_pid = leader.get_namespace_id();
         crate::task::set_mock_current_task(leader.clone());
         let self_status = super::text_content("/proc/self/status").unwrap();
-        let numeric_status = super::text_content(&alloc::format!("/proc/{local_pid}/status")).unwrap();
+        let numeric_status =
+            super::text_content(&alloc::format!("/proc/{local_pid}/status")).unwrap();
         let numeric_stat = super::text_content(&alloc::format!("/proc/{local_pid}/stat")).unwrap();
-        assert_eq!(numeric_stat, super::text_content("/proc/self/stat").unwrap());
+        assert_eq!(
+            numeric_stat,
+            super::text_content("/proc/self/stat").unwrap()
+        );
         assert_eq!(self_status, numeric_status);
         assert!(self_status.contains("Name:\tStatusLeader\n"));
         assert!(self_status.contains("Uid:\t1000\t1000\t1000\t1000\n"));
@@ -1007,7 +1183,7 @@ mod tests {
 
     #[test_case]
     fn numeric_maps_require_the_process_memory_address_space_authority() {
-        use super::{LinuxAbi,errno,O_CLOEXEC};
+        use super::{LinuxAbi, O_CLOEXEC, errno};
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
         use crate::sched::scheduler::{get_task_by_id, register_task, reset};
         use crate::task::{Task, TaskType};
@@ -1019,7 +1195,9 @@ mod tests {
         let target = Task::new("MapTarget".into(), 0, TaskType::User);
         let target_id = register_task(target);
         let target = get_task_by_id(target_id).unwrap();
-        target.allocate_stack_pages(USER_STACK_END - PAGE_SIZE, 1).unwrap();
+        target
+            .allocate_stack_pages(USER_STACK_END - PAGE_SIZE, 1)
+            .unwrap();
         let maps_path = alloc::format!("/proc/{}/maps", target.get_namespace_id());
 
         crate::task::set_mock_current_task(target.clone());
@@ -1041,20 +1219,28 @@ mod tests {
         reset();
     }
 
-    #[cfg(target_arch="aarch64")]
+    #[cfg(target_arch = "aarch64")]
     #[test_case]
     fn cpu_directory_exposes_real_sparse_cpu_ids_for_bionic_nprocs_conf() {
         use super::*;
-        use crate::sched::scheduler::{reset,register_online_cpu};
-        reset();register_online_cpu(0);register_online_cpu(2);
-        assert_eq!(cpu_list(),"0,2\n");
-        assert_eq!(cpu_directory_entry(CPU_DIRECTORY,5),Some((String::from("cpu0"),true)));
-        assert_eq!(cpu_directory_entry(CPU_DIRECTORY,6),Some((String::from("cpu2"),true)));
-        assert_eq!(cpu_directory_entry(CPU_DIRECTORY,7),None);
+        use crate::sched::scheduler::{register_online_cpu, reset};
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(2);
+        assert_eq!(cpu_list(), "0,2\n");
+        assert_eq!(
+            cpu_directory_entry(CPU_DIRECTORY, 5),
+            Some((String::from("cpu0"), true))
+        );
+        assert_eq!(
+            cpu_directory_entry(CPU_DIRECTORY, 6),
+            Some((String::from("cpu2"), true))
+        );
+        assert_eq!(cpu_directory_entry(CPU_DIRECTORY, 7), None);
         assert!(is_cpu_directory("/sys/devices/system/cpu/cpu2"));
         assert!(!is_cpu_directory("/sys/devices/system/cpu/cpu1"));
         assert!(!is_cpu_directory("/sys/devices/system/cpu/cpu02"));
-        assert_eq!(cpu_directory_entry("/sys/devices/system/cpu/cpu2",2),None);
+        assert_eq!(cpu_directory_entry("/sys/devices/system/cpu/cpu2", 2), None);
         reset();
     }
 
@@ -1063,10 +1249,15 @@ mod tests {
     fn network_directories_are_native_read_only_and_relative_openable() {
         let name = "sysfsdir0";
         let manager = NetworkManager::get_manager();
-        manager.register_interface(name, Arc::new(NetworkStatsTestInterface {
-            name,
-            statistics: Arc::new(IrqRwSpinLock::new(InterfaceStats::default())),
-        })).unwrap();
+        manager
+            .register_interface(
+                name,
+                Arc::new(NetworkStatsTestInterface {
+                    name,
+                    statistics: Arc::new(IrqRwSpinLock::new(InterfaceStats::default())),
+                }),
+            )
+            .unwrap();
         let task = crate::task::new_user_task("network-directory".into(), 0);
         let mut abi = LinuxAbi::default();
         let root_fd = open_directory(&task, &mut abi, NETWORK_DIRECTORY);
@@ -1074,36 +1265,72 @@ mod tests {
         let interface_fd = open_directory(&task, &mut abi, &interface_path);
         let statistics_path = format!("{interface_path}/{NETWORK_STATISTICS_DIRECTORY}");
         let statistics_fd = open_directory(&task, &mut abi, &statistics_path);
-        let root = task.handle_table.get(abi.get_handle(root_fd).unwrap()).unwrap();
-        let interface = task.handle_table.get(abi.get_handle(interface_fd).unwrap()).unwrap();
-        let statistics = task.handle_table.get(abi.get_handle(statistics_fd).unwrap()).unwrap();
+        let root = task
+            .handle_table
+            .get(abi.get_handle(root_fd).unwrap())
+            .unwrap();
+        let interface = task
+            .handle_table
+            .get(abi.get_handle(interface_fd).unwrap())
+            .unwrap();
+        let statistics = task
+            .handle_table
+            .get(abi.get_handle(statistics_fd).unwrap())
+            .unwrap();
         let root_file = root.as_file().unwrap();
         let interface_file = interface.as_file().unwrap();
         let statistics_file = statistics.as_file().unwrap();
 
         // These are the exact paths consumed by ABI fs::openat for dirfd walks.
         assert_eq!(directory_path(root_file), Some(NETWORK_DIRECTORY));
-        assert_eq!(directory_path(interface_file), Some(interface_path.as_str()));
-        assert_eq!(directory_path(statistics_file), Some(statistics_path.as_str()));
-        assert_eq!(directory_names(interface_file), alloc::vec![
-            String::from("."), String::from(".."), String::from("statistics"),
-        ]);
-        assert_eq!(directory_names(statistics_file), alloc::vec![
-            String::from("."), String::from(".."), String::from("rx_bytes"),
-            String::from("rx_packets"), String::from("tx_bytes"), String::from("tx_packets"),
-        ]);
+        assert_eq!(
+            directory_path(interface_file),
+            Some(interface_path.as_str())
+        );
+        assert_eq!(
+            directory_path(statistics_file),
+            Some(statistics_path.as_str())
+        );
+        assert_eq!(
+            directory_names(interface_file),
+            alloc::vec![
+                String::from("."),
+                String::from(".."),
+                String::from("statistics"),
+            ]
+        );
+        assert_eq!(
+            directory_names(statistics_file),
+            alloc::vec![
+                String::from("."),
+                String::from(".."),
+                String::from("rx_bytes"),
+                String::from("rx_packets"),
+                String::from("tx_bytes"),
+                String::from("tx_packets"),
+            ]
+        );
         let root_entries = directory_names(root_file);
         assert!(root_entries.contains(&String::from(name)));
-        assert!(matches!(root_file.write(b"x"), Err(StreamError::PermissionDenied)));
+        assert!(matches!(
+            root_file.write(b"x"),
+            Err(StreamError::PermissionDenied)
+        ));
 
         manager.unregister_interface(name);
         assert_eq!(directory_names(root_file), root_entries);
         assert!(path_metadata(&interface_path).is_none());
         assert!(path_metadata(&statistics_path).is_none());
         let current_fd = open_directory(&task, &mut abi, NETWORK_DIRECTORY);
-        let current = task.handle_table.get(abi.get_handle(current_fd).unwrap()).unwrap();
+        let current = task
+            .handle_table
+            .get(abi.get_handle(current_fd).unwrap())
+            .unwrap();
         assert!(!directory_names(current.as_file().unwrap()).contains(&String::from(name)));
-        assert_eq!(network_root_directory_entries(&[]), base_directory_entries());
+        assert_eq!(
+            network_root_directory_entries(&[]),
+            base_directory_entries()
+        );
     }
 
     #[cfg(feature = "network")]
@@ -1119,17 +1346,34 @@ mod tests {
             errors: 3,
         }));
         let manager = NetworkManager::get_manager();
-        manager.register_interface(name, Arc::new(NetworkStatsTestInterface {
-            name,
-            statistics: Arc::clone(&statistics),
-        })).unwrap();
+        manager
+            .register_interface(
+                name,
+                Arc::new(NetworkStatsTestInterface {
+                    name,
+                    statistics: Arc::clone(&statistics),
+                }),
+            )
+            .unwrap();
         let task = crate::task::new_user_task("network-statistics".into(), 0);
         let mut abi = LinuxAbi::default();
         let base = format!("{NETWORK_DIRECTORY}/{name}/{NETWORK_STATISTICS_DIRECTORY}");
-        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/rx_bytes")).as_slice(), b"1234\n".as_slice());
-        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/rx_packets")).as_slice(), b"23\n".as_slice());
-        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/tx_bytes")).as_slice(), b"4660\n".as_slice());
-        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/tx_packets")).as_slice(), b"17\n".as_slice());
+        assert_eq!(
+            read_synthetic_file(&task, &mut abi, &format!("{base}/rx_bytes")).as_slice(),
+            b"1234\n".as_slice()
+        );
+        assert_eq!(
+            read_synthetic_file(&task, &mut abi, &format!("{base}/rx_packets")).as_slice(),
+            b"23\n".as_slice()
+        );
+        assert_eq!(
+            read_synthetic_file(&task, &mut abi, &format!("{base}/tx_bytes")).as_slice(),
+            b"4660\n".as_slice()
+        );
+        assert_eq!(
+            read_synthetic_file(&task, &mut abi, &format!("{base}/tx_packets")).as_slice(),
+            b"17\n".as_slice()
+        );
 
         let rx_bytes = format!("{base}/rx_bytes");
         let fd = super::open_proc_text_file(&mut abi, &task, &rx_bytes, 0).unwrap();
@@ -1138,7 +1382,10 @@ mod tests {
         assert_eq!(file_contents(file).as_slice(), b"1234\n".as_slice());
         statistics.write().rx_bytes = 9876;
         assert_eq!(file_contents(file).as_slice(), b"1234\n".as_slice());
-        assert_eq!(read_synthetic_file(&task, &mut abi, &rx_bytes).as_slice(), b"9876\n".as_slice());
+        assert_eq!(
+            read_synthetic_file(&task, &mut abi, &rx_bytes).as_slice(),
+            b"9876\n".as_slice()
+        );
         assert_eq!(file.seek(SeekFrom::Start(0)).unwrap(), 0);
         let mut at = [0; 2];
         assert_eq!(file.read_at(1, &mut at).unwrap(), 2);
@@ -1150,11 +1397,20 @@ mod tests {
         let mut next = [0; 2];
         assert_eq!(file.read(&mut next).unwrap(), 2);
         assert_eq!(&next, b"23");
-        assert!(matches!(file.write(b"0\n"), Err(StreamError::PermissionDenied)));
-        assert_eq!(super::open_proc_text_file(&mut abi, &task, &rx_bytes, 1), Some(errno::to_result(errno::EACCES)));
+        assert!(matches!(
+            file.write(b"0\n"),
+            Err(StreamError::PermissionDenied)
+        ));
+        assert_eq!(
+            super::open_proc_text_file(&mut abi, &task, &rx_bytes, 1),
+            Some(errno::to_result(errno::EACCES))
+        );
         let unknown = format!("{base}/unknown");
         assert!(path_metadata(&unknown).is_none());
-        assert_eq!(super::open_proc_text_file(&mut abi, &task, &unknown, 0), None);
+        assert_eq!(
+            super::open_proc_text_file(&mut abi, &task, &unknown, 0),
+            None
+        );
         manager.unregister_interface(name);
         assert!(path_metadata(&rx_bytes).is_none());
     }
@@ -1164,31 +1420,44 @@ mod tests {
         use super::*;
         let task = Arc::new(crate::task::new_user_task("kptr-control".into(), 0));
         crate::task::set_mock_current_task(task.clone());
-        let file = ProcTextFile { position: IrqRwSpinLock::new(0), content: b"0\n".to_vec(),
-            path: String::from("/proc/sys/kernel/kptr_restrict"), directory: false,
-            directory_entries: None, access: 2 };
+        let file = ProcTextFile {
+            position: IrqRwSpinLock::new(0),
+            content: b"0\n".to_vec(),
+            path: String::from("/proc/sys/kernel/kptr_restrict"),
+            directory: false,
+            directory_entries: None,
+            access: 2,
+        };
         assert!(file.write(b"2").is_err()); // Cannot fabricate a global policy setting.
         crate::shield::information::constrain(&task, 1).unwrap();
         assert_eq!(file.write(b"2\n").unwrap(), 2);
-        assert!(file.write(b"0").is_err()); assert!(file.write(b"1").is_err());
+        assert!(file.write(b"0").is_err());
+        assert!(file.write(b"1").is_err());
         assert!(file.write(b"invalid").is_err());
-        let mut value = [0; 2]; assert_eq!(file.read(&mut value).unwrap(), 2); assert_eq!(&value, b"2\n");
+        let mut value = [0; 2];
+        assert_eq!(file.read(&mut value).unwrap(), 2);
+        assert_eq!(&value, b"2\n");
         crate::task::clear_mock_current_task();
     }
 
     #[test_case]
     fn proc_mounts_reports_only_selected_view_and_escapes_paths_with_real_restrictions() {
-        use alloc::sync::Arc;
         use crate::fs::{VfsManager, drivers::tmpfs::TmpFS};
+        use alloc::sync::Arc;
         let host = Arc::new(VfsManager::new());
         host.create_dir("/host-only").unwrap();
         host.mount(TmpFS::new(0), "/host-only", 8).unwrap();
         let private = VfsManager::view_rooted_at(&host, "/host-only").unwrap();
         private.create_dir("/space path\tback\\slash").unwrap();
-        private.mount(TmpFS::new(0), "/space path\tback\\slash", 14).unwrap();
+        private
+            .mount(TmpFS::new(0), "/space path\tback\\slash", 14)
+            .unwrap();
         let content = super::mounts_content(&private);
         assert!(content.contains("none / tmpfs rw,noexec 0 0\n"));
-        assert!(content.contains("/space\\040path\\011back\\134slash tmpfs rw,nosuid,nodev,noexec 0 0\n"));
+        assert!(
+            content
+                .contains("/space\\040path\\011back\\134slash tmpfs rw,nosuid,nodev,noexec 0 0\n")
+        );
         assert!(!content.contains("/host-only"));
         assert_eq!(content.lines().count(), 2);
         private.unmount("/space path\tback\\slash").unwrap();

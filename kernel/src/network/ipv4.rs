@@ -246,7 +246,8 @@ pub struct Ipv4Layer {
     /// Protocol handlers registered by protocol number
     protocols: IrqRwSpinLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
     /// Explicit per-link rules, removed with the link registration.
-    traffic_policies: IrqRwSpinLock<BTreeMap<String, alloc::sync::Arc<super::traffic_policy::Policy>>>,
+    traffic_policies:
+        IrqRwSpinLock<BTreeMap<String, alloc::sync::Arc<super::traffic_policy::Policy>>>,
     global_traffic_policy: IrqRwSpinLock<Option<alloc::sync::Arc<super::traffic_policy::Policy>>>,
     /// Statistics
     stats: IrqRwSpinLock<NetworkLayerStats>,
@@ -323,10 +324,18 @@ impl Ipv4Layer {
         *self.global_traffic_policy.write() = policy;
     }
 
-    pub(super) fn clear_traffic_meter(&self, meter: &alloc::sync::Arc<super::traffic_policy::Meter>) {
-        self.traffic_policies.write().retain(|_, policy| !policy.uses_meter(meter));
+    pub(super) fn clear_traffic_meter(
+        &self,
+        meter: &alloc::sync::Arc<super::traffic_policy::Meter>,
+    ) {
+        self.traffic_policies
+            .write()
+            .retain(|_, policy| !policy.uses_meter(meter));
         let mut global = self.global_traffic_policy.write();
-        if global.as_ref().is_some_and(|policy| policy.uses_meter(meter)) {
+        if global
+            .as_ref()
+            .is_some_and(|policy| policy.uses_meter(meter))
+        {
             *global = None;
         }
     }
@@ -335,7 +344,9 @@ impl Ipv4Layer {
         &self,
         meter: &alloc::sync::Arc<super::traffic_policy::Meter>,
     ) {
-        self.traffic_policies.write().retain(|_, policy| !policy.uses_meter(meter));
+        self.traffic_policies
+            .write()
+            .retain(|_, policy| !policy.uses_meter(meter));
     }
 
     /// Add an IPv4 address to an interface

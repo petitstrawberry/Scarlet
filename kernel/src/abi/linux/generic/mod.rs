@@ -1,36 +1,36 @@
+pub mod cgroup;
+pub mod credentials;
 mod device_tree;
 mod power_supply;
-pub mod credentials;
-pub mod cgroup;
 pub mod seccomp;
 #[macro_use]
 mod macros;
 pub mod errno;
 pub(crate) mod exec;
+mod fd_transfer;
 pub mod fs;
 pub mod futex;
-mod memfd;
-mod fd_transfer;
 mod log;
+mod memfd;
 pub(crate) use fd_transfer::DescriptorReceipt;
+mod bpf;
+mod config;
+mod inotify;
 pub mod mm;
 mod mode;
+mod mount_namespace;
 mod native_handle;
+mod oom;
 pub mod pipe;
 mod pressure;
 pub mod proc;
 mod proc_fd;
 mod proc_text;
-mod config;
-mod oom;
+mod process_memory;
 pub(crate) mod quota;
-mod mount_namespace;
 mod record_lock;
 pub mod signal;
 mod signalfd;
-mod inotify;
-mod process_memory;
-mod bpf;
 pub mod socket;
 pub mod time;
 pub mod utimens;
@@ -134,12 +134,15 @@ impl Default for LinuxFdTable {
 impl LinuxFdTable {
     fn retain_epoll(&mut self, handle: u32) {
         if fs::is_epoll_handle(handle) {
-            self.epolls.entry(handle).or_insert_with(|| Arc::new(fs::EpollLifetime::new(handle)));
+            self.epolls
+                .entry(handle)
+                .or_insert_with(|| Arc::new(fs::EpollLifetime::new(handle)));
         }
     }
     fn prune_epolls(&mut self) {
         let descriptors = &self.fd_to_handle;
-        self.epolls.retain(|handle,_| descriptors.contains(&Some(*handle)));
+        self.epolls
+            .retain(|handle, _| descriptors.contains(&Some(*handle)));
     }
 }
 
@@ -205,11 +208,18 @@ impl LinuxAbi {
         self.clone_signal_state_with_group(share_handlers, false);
     }
 
-    pub(crate) fn clone_signal_state_with_group(&mut self, share_handlers: bool, share_pending: bool) {
+    pub(crate) fn clone_signal_state_with_group(
+        &mut self,
+        share_handlers: bool,
+        share_pending: bool,
+    ) {
         // Each child owns its mask and thread-directed queue. Only threads
         // share process-directed pending records; CLONE_SIGHAND alone shares
         // the disposition table without joining that process queue.
-        let state = self.signal_state.lock().clone_for_child(share_handlers, share_pending);
+        let state = self
+            .signal_state
+            .lock()
+            .clone_for_child(share_handlers, share_pending);
         self.signal_state = Arc::new(IrqSpinLock::new(state));
         #[cfg(target_arch = "aarch64")]
         {
@@ -236,7 +246,7 @@ impl LinuxAbi {
         if source.is_none() {
             for handle in image.handle_table.active_handles() {
                 if (handle as usize) < MAX_FDS {
-                    table.generations[handle as usize]=1;
+                    table.generations[handle as usize] = 1;
                     table.fd_to_handle[handle as usize] = Some(handle);
                     if image
                         .handle_table
@@ -351,9 +361,12 @@ impl LinuxAbi {
 
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
         let mut table = self.fd_table.write();
-        let fd=*table.free_fds.last().ok_or("Too many open files")?;
-        let generation=table.generations[fd].checked_add(1).ok_or("Descriptor generation exhausted")?;
-        table.free_fds.pop();table.generations[fd]=generation;
+        let fd = *table.free_fds.last().ok_or("Too many open files")?;
+        let generation = table.generations[fd]
+            .checked_add(1)
+            .ok_or("Descriptor generation exhausted")?;
+        table.free_fds.pop();
+        table.generations[fd] = generation;
         table.fd_to_handle[fd] = Some(handle);
         table.retain_epoll(handle);
         Ok(fd)
@@ -367,11 +380,13 @@ impl LinuxAbi {
         if table.fd_to_handle[fd].is_some() {
             return Err("File descriptor already in use");
         }
-        let generation=table.generations[fd].checked_add(1).ok_or("Descriptor generation exhausted")?;
+        let generation = table.generations[fd]
+            .checked_add(1)
+            .ok_or("Descriptor generation exhausted")?;
         if let Some(pos) = table.free_fds.iter().position(|&x| x == fd) {
             table.free_fds.remove(pos);
         }
-        table.generations[fd]=generation;
+        table.generations[fd] = generation;
         table.fd_to_handle[fd] = Some(handle);
         table.retain_epoll(handle);
         Ok(())
@@ -416,7 +431,11 @@ impl LinuxAbi {
 
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         let mut table = self.fd_table.write();
-        for fd in 0..3 {table.generations[fd]=table.generations[fd].checked_add(1).expect("stdio descriptor generation exhausted");}
+        for fd in 0..3 {
+            table.generations[fd] = table.generations[fd]
+                .checked_add(1)
+                .expect("stdio descriptor generation exhausted");
+        }
         table.fd_to_handle[0] = Some(stdin_handle);
         table.fd_to_handle[1] = Some(stdout_handle);
         table.fd_to_handle[2] = Some(stderr_handle);
@@ -511,7 +530,9 @@ impl LinuxAbi {
     }
 
     pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
-        if signal::is_pending_wake(event) { return; }
+        if signal::is_pending_wake(event) {
+            return;
+        }
         if let Some(signal) = signal::handle_event_to_signal(event) {
             let mut signal_state = self.signal_state.lock();
             signal_state.add_pending(signal);

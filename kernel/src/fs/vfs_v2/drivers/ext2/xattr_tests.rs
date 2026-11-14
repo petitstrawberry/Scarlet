@@ -131,8 +131,7 @@ fn inline_fixture(records: &[Ext2XattrRecord]) -> Arc<MockBlockDevice> {
 
     if !records.is_empty() {
         let body_len = LARGE_INODE_SIZE - IBODY_OFFSET;
-        record[IBODY_OFFSET..IBODY_OFFSET + 4]
-            .copy_from_slice(&EXT2_XATTR_MAGIC.to_le_bytes());
+        record[IBODY_OFFSET..IBODY_OFFSET + 4].copy_from_slice(&EXT2_XATTR_MAGIC.to_le_bytes());
         let entries_start = IBODY_OFFSET + EXT2_XATTR_IBODY_HEADER_SIZE;
         let mut cursor = EXT2_XATTR_IBODY_HEADER_SIZE;
         let mut values_end = body_len - EXT2_XATTR_IBODY_HEADER_SIZE;
@@ -145,20 +144,14 @@ fn inline_fixture(records: &[Ext2XattrRecord]) -> Arc<MockBlockDevice> {
             values_end -= padded_value_len;
             value_offsets.push(values_end);
         }
-        for ((item, position), value_offset) in records
-            .iter()
-            .zip(positions)
-            .zip(value_offsets)
-        {
+        for ((item, position), value_offset) in records.iter().zip(positions).zip(value_offsets) {
             let entry = IBODY_OFFSET + position;
             let name_end = entry + EXT2_XATTR_ENTRY_SIZE + item.name.len();
             record[entry] = item.name.len() as u8;
             record[entry + 1] = item.name_index;
-            record[entry + 2..entry + 4]
-                .copy_from_slice(&(value_offset as u16).to_le_bytes());
+            record[entry + 2..entry + 4].copy_from_slice(&(value_offset as u16).to_le_bytes());
             record[entry + 4..entry + 8].copy_from_slice(&0_u32.to_le_bytes());
-            record[entry + 8..entry + 12]
-                .copy_from_slice(&(item.value.len() as u32).to_le_bytes());
+            record[entry + 8..entry + 12].copy_from_slice(&(item.value.len() as u32).to_le_bytes());
             record[entry + 12..entry + 16].copy_from_slice(&0_u32.to_le_bytes());
             record[entry + EXT2_XATTR_ENTRY_SIZE..name_end].copy_from_slice(&item.name);
             let value = entries_start + value_offset;
@@ -177,10 +170,7 @@ fn xattr_record(name_index: u8, name: &[u8], value: &[u8]) -> Ext2XattrRecord {
     }
 }
 
-fn install_external_xattrs(
-    fs: &Arc<Ext2FileSystem>,
-    records: &[Ext2XattrRecord],
-) -> u32 {
+fn install_external_xattrs(fs: &Arc<Ext2FileSystem>, records: &[Ext2XattrRecord]) -> u32 {
     fs.ensure_xattr_feature().unwrap();
     let encoded = fs.encode_xattr_block(records).unwrap();
     let block = fs.allocate_block_locked().unwrap() as u32;
@@ -194,7 +184,9 @@ fn install_external_xattrs(
 
 fn xattr_node(fs: &Arc<Ext2FileSystem>) -> Arc<Ext2Node> {
     let node = Arc::new(Ext2Node::new(TARGET_INODE, FileType::RegularFile, 1));
-    node.set_filesystem(Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>)));
+    node.set_filesystem(Arc::downgrade(
+        &(fs.clone() as Arc<dyn FileSystemOperations>),
+    ));
     node
 }
 
@@ -209,10 +201,10 @@ fn ext2_xattr_persists_across_remount_and_reuses_removed_block() {
             .unwrap();
         // On-disk ext2 assigns bit 3 to external attributes. Bit 2 denotes
         // a journal, and must stay clear on this non-journaled fixture.
-        let disk_superblock=read_block(&device,1);
-        let compat=u32::from_le_bytes(disk_superblock[92..96].try_into().unwrap());
-        assert_eq!(compat & 0x0008,0x0008);
-        assert_eq!(compat & 0x0004,0);
+        let disk_superblock = read_block(&device, 1);
+        let compat = u32::from_le_bytes(disk_superblock[92..96].try_into().unwrap());
+        assert_eq!(compat & 0x0008, 0x0008);
+        assert_eq!(compat & 0x0004, 0);
         assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"alpha");
         assert_eq!(
             node.set_xattr(b"user.serial", b"duplicate", SetMode::Create),
@@ -233,8 +225,7 @@ fn ext2_xattr_persists_across_remount_and_reuses_removed_block() {
         assert_eq!(on_disk[32], b"serial".len() as u8);
         assert_eq!(on_disk[33], EXT2_XATTR_INDEX_USER);
         assert_eq!(&on_disk[48..54], b"serial");
-        let value_offset =
-            u16::from_le_bytes(on_disk[34..36].try_into().unwrap()) as usize;
+        let value_offset = u16::from_le_bytes(on_disk[34..36].try_into().unwrap()) as usize;
         assert_eq!(&on_disk[value_offset..value_offset + 5], b"alpha");
         assert_eq!(&on_disk[56..60], &[0; 4]);
         assert_ne!(
@@ -242,7 +233,11 @@ fn ext2_xattr_persists_across_remount_and_reuses_removed_block() {
                 & EXT2_FEATURE_COMPAT_EXT_ATTR,
             0
         );
-        assert!(bitmap_has(&device, BLOCK_BITMAP_BLOCK, first_block as usize - 1));
+        assert!(bitmap_has(
+            &device,
+            BLOCK_BITMAP_BLOCK,
+            first_block as usize - 1
+        ));
     }
 
     let fs = Ext2FileSystem::new(device.clone()).unwrap();
@@ -316,14 +311,37 @@ fn ext2_xattr_shared_block_is_copied_and_inode_destroy_reclaims_owned_block() {
         .unwrap();
     let new_block = fs.read_inode(TARGET_INODE).unwrap().get_file_acl();
     assert_ne!(new_block, old_block);
-    assert_eq!(u32::from_le_bytes(read_block(&device, old_block as u64)[4..8].try_into().unwrap()), 1);
-    assert!(bitmap_has(&device, BLOCK_BITMAP_BLOCK, old_block as usize - 1));
-    assert!(bitmap_has(&device, BLOCK_BITMAP_BLOCK, new_block as usize - 1));
+    assert_eq!(
+        u32::from_le_bytes(
+            read_block(&device, old_block as u64)[4..8]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
+    assert!(bitmap_has(
+        &device,
+        BLOCK_BITMAP_BLOCK,
+        old_block as usize - 1
+    ));
+    assert!(bitmap_has(
+        &device,
+        BLOCK_BITMAP_BLOCK,
+        new_block as usize - 1
+    ));
 
     drop(node);
     fs.free_inode(TARGET_INODE).unwrap();
-    assert!(!bitmap_has(&device, BLOCK_BITMAP_BLOCK, new_block as usize - 1));
-    assert!(!bitmap_has(&device, INODE_BITMAP_BLOCK, (TARGET_INODE - 1) as usize));
+    assert!(!bitmap_has(
+        &device,
+        BLOCK_BITMAP_BLOCK,
+        new_block as usize - 1
+    ));
+    assert!(!bitmap_has(
+        &device,
+        INODE_BITMAP_BLOCK,
+        (TARGET_INODE - 1) as usize
+    ));
 
     set_inode_allocated(&device, TARGET_INODE);
     let mut inode = Ext2Inode::empty();
@@ -362,7 +380,11 @@ fn ext2_failed_created_inode_cleanup_reclaims_xattr_without_dir_underflow() {
 
     fs.discard_created_inode(TARGET_INODE).unwrap();
     assert!(!bitmap_has(&device, BLOCK_BITMAP_BLOCK, block as usize - 1));
-    assert!(!bitmap_has(&device, INODE_BITMAP_BLOCK, (TARGET_INODE - 1) as usize));
+    assert!(!bitmap_has(
+        &device,
+        INODE_BITMAP_BLOCK,
+        (TARGET_INODE - 1) as usize
+    ));
     assert_eq!(
         u16::from_le_bytes(read_block(&device, 2)[16..18].try_into().unwrap()),
         1
@@ -421,7 +443,11 @@ fn ext2_xattr_namespaces_bounds_and_corruption_are_explicit() {
     assert_eq!(node.list_xattrs(), Err(XattrError::Io));
     assert_eq!(node.get_xattr(b"user.serial"), Err(XattrError::Io));
     assert!(fs.free_inode(TARGET_INODE).is_err());
-    assert!(bitmap_has(&device, INODE_BITMAP_BLOCK, (TARGET_INODE - 1) as usize));
+    assert!(bitmap_has(
+        &device,
+        INODE_BITMAP_BLOCK,
+        (TARGET_INODE - 1) as usize
+    ));
     assert!(bitmap_has(&device, BLOCK_BITMAP_BLOCK, block as usize - 1));
 }
 
@@ -434,7 +460,8 @@ fn ext2_native_label_metadata_is_disk_backed_bounded_and_returns_eio_on_corrupti
         let fs = Ext2FileSystem::new(device.clone()).unwrap();
         let node = xattr_node(&fs);
         assert_eq!(node.read_label_metadata(&domain).unwrap(), None);
-        node.write_label_metadata(&domain, b"persistent-label").unwrap();
+        node.write_label_metadata(&domain, b"persistent-label")
+            .unwrap();
         node.set_xattr(b"user.visible", b"yes", SetMode::Create)
             .unwrap();
         assert_eq!(
@@ -450,24 +477,20 @@ fn ext2_native_label_metadata_is_disk_backed_bounded_and_returns_eio_on_corrupti
         );
         assert_eq!(node.remove_xattr(&key), Err(XattrError::PermissionDenied));
         assert_eq!(
-            node.write_label_metadata(&domain, &vec![0; 513]).unwrap_err().kind,
+            node.write_label_metadata(&domain, &vec![0; 513])
+                .unwrap_err()
+                .kind,
             FileSystemErrorKind::ValueOverflow
         );
         node.write_label_metadata(&domain, b"").unwrap();
-        assert_eq!(
-            node.read_label_metadata(&domain).unwrap(),
-            Some(Vec::new())
-        );
+        assert_eq!(node.read_label_metadata(&domain).unwrap(), Some(Vec::new()));
         assert!(node.raw_get_xattr(&key).unwrap().is_empty());
         assert_eq!(node.list_xattrs().unwrap(), vec![b"user.visible".to_vec()]);
     }
 
     let fs = Ext2FileSystem::new(device.clone()).unwrap();
     let node = xattr_node(&fs);
-    assert_eq!(
-        node.read_label_metadata(&domain).unwrap(),
-        Some(Vec::new())
-    );
+    assert_eq!(node.read_label_metadata(&domain).unwrap(), Some(Vec::new()));
     let block = fs.read_inode(TARGET_INODE).unwrap().get_file_acl();
     let mut corrupt = read_block(&device, block as u64);
     corrupt[0..4].fill(0);
@@ -512,11 +535,7 @@ fn ext2_inline_and_external_xattrs_roundtrip_without_losing_inode_metadata() {
             .unwrap()
             .unwrap()
             .records,
-        vec![xattr_record(
-            EXT2_XATTR_INDEX_USER,
-            b"inline",
-            &large_value
-        )]
+        vec![xattr_record(EXT2_XATTR_INDEX_USER, b"inline", &large_value)]
     );
 
     node.set_xattr(b"user.serial", b"1", SetMode::Replace)
@@ -564,7 +583,8 @@ fn ext2_inline_and_external_xattrs_roundtrip_without_losing_inode_metadata() {
     assert_eq!(node.get_xattr(b"user.extra").unwrap(), b"inline");
     assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"1");
     node.remove_xattr(b"user.inline").unwrap();
-    remounted.remove_ext2_xattr(TARGET_INODE, b"trusted.scarlet.shield.fixture")
+    remounted
+        .remove_ext2_xattr(TARGET_INODE, b"trusted.scarlet.shield.fixture")
         .unwrap();
     assert_eq!(
         remounted.read_inode(TARGET_INODE).unwrap().get_file_acl(),
@@ -577,8 +597,7 @@ fn ext2_inline_and_external_xattrs_roundtrip_without_losing_inode_metadata() {
     ));
     assert_eq!(node.get_xattr(b"user.extra").unwrap(), b"inline");
     assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"1");
-    node.set_xattr(b"user.x", b"i", SetMode::Create)
-        .unwrap();
+    node.set_xattr(b"user.x", b"i", SetMode::Create).unwrap();
     assert_eq!(
         remounted.read_inode(TARGET_INODE).unwrap().get_file_acl(),
         0
@@ -598,7 +617,10 @@ fn ext2_inline_and_external_xattrs_roundtrip_without_losing_inode_metadata() {
         EXTRA_ISIZE as u16
     );
     assert_eq!(
-        remounted.read_inode_xattr_body(TARGET_INODE).unwrap().body_offset,
+        remounted
+            .read_inode_xattr_body(TARGET_INODE)
+            .unwrap()
+            .body_offset,
         IBODY_OFFSET
     );
 }
@@ -607,10 +629,7 @@ fn ext2_inline_and_external_xattrs_roundtrip_without_losing_inode_metadata() {
 fn ext2_mixed_storage_duplicate_is_deduplicated_and_conflicts_are_rejected() {
     let device = inline_fixture(&[xattr_record(EXT2_XATTR_INDEX_USER, b"serial", b"0")]);
     let fs = Ext2FileSystem::new(device.clone()).unwrap();
-    install_external_xattrs(
-        &fs,
-        &[xattr_record(EXT2_XATTR_INDEX_USER, b"serial", b"0")],
-    );
+    install_external_xattrs(&fs, &[xattr_record(EXT2_XATTR_INDEX_USER, b"serial", b"0")]);
     let node = xattr_node(&fs);
     assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"0");
     assert_eq!(node.list_xattrs().unwrap(), vec![b"user.serial".to_vec()]);
@@ -644,8 +663,7 @@ fn ext2_mixed_storage_duplicate_is_deduplicated_and_conflicts_are_rejected() {
         vec![b"user.serial".to_vec(), b"user.other".to_vec()]
     );
 
-    let conflict_device =
-        inline_fixture(&[xattr_record(EXT2_XATTR_INDEX_USER, b"serial", b"0")]);
+    let conflict_device = inline_fixture(&[xattr_record(EXT2_XATTR_INDEX_USER, b"serial", b"0")]);
     let conflict_fs = Ext2FileSystem::new(conflict_device).unwrap();
     install_external_xattrs(
         &conflict_fs,
@@ -703,7 +721,8 @@ fn ext2_inode_body_accepts_unsorted_entries_without_changing_values() {
     let node = xattr_node(&fs);
     assert_eq!(node.get_xattr(b"user.inline").unwrap(), b"first");
     assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"second");
-    node.set_xattr(b"user.serial", b"updated", SetMode::Replace).unwrap();
+    node.set_xattr(b"user.serial", b"updated", SetMode::Replace)
+        .unwrap();
     assert_eq!(node.get_xattr(b"user.inline").unwrap(), b"first");
     assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"updated");
 }
@@ -722,9 +741,13 @@ fn ext2_new_inode_identity_does_not_inherit_old_inline_attributes() {
     let node = xattr_node(&fs);
     assert!(node.list_xattrs().unwrap().is_empty());
     assert_eq!(node.get_xattr(b"user.secret"), Err(XattrError::Missing));
-    assert!(target_inode_record(&device)[EXT2_GOOD_OLD_INODE_SIZE..]
-        .iter().all(|byte| *byte == 0));
-    node.set_xattr(b"user.new", b"new", SetMode::Create).unwrap();
+    assert!(
+        target_inode_record(&device)[EXT2_GOOD_OLD_INODE_SIZE..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    node.set_xattr(b"user.new", b"new", SetMode::Create)
+        .unwrap();
     assert_eq!(node.get_xattr(b"user.new").unwrap(), b"new");
 }
 
@@ -738,8 +761,12 @@ fn ext2_inode_body_accepts_a_four_byte_extra_field_area() {
     write_target_inode_record(&device, &record);
     let fs = Ext2FileSystem::new(device).unwrap();
     let node = xattr_node(&fs);
-    node.set_xattr(b"user.small", b"value", SetMode::Create).unwrap();
+    node.set_xattr(b"user.small", b"value", SetMode::Create)
+        .unwrap();
     assert_eq!(node.get_xattr(b"user.small").unwrap(), b"value");
     assert_eq!(fs.read_inode(TARGET_INODE).unwrap().get_file_acl(), 0);
-    assert_eq!(fs.read_inode_xattr_body(TARGET_INODE).unwrap().body_offset, 132);
+    assert_eq!(
+        fs.read_inode_xattr_body(TARGET_INODE).unwrap().body_offset,
+        132
+    );
 }

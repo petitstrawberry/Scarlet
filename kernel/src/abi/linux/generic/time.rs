@@ -462,18 +462,39 @@ struct ItimerSpec {
 }
 
 fn read_timer_spec(task: &crate::task::Task, address: usize) -> Result<ItimerSpec, usize> {
-    let mut bytes = [0;32];
-    crate::library::std::usercopy::copy_from_user(task,address,&mut bytes).map_err(|_| errno::EFAULT)?;
-    let number = |offset| i64::from_ne_bytes(bytes[offset..offset+8].try_into().unwrap());
-    Ok(ItimerSpec { it_interval: TimeSpec { tv_sec:number(0), tv_nsec:number(8) },
-                   it_value: TimeSpec { tv_sec:number(16), tv_nsec:number(24) } })
+    let mut bytes = [0; 32];
+    crate::library::std::usercopy::copy_from_user(task, address, &mut bytes)
+        .map_err(|_| errno::EFAULT)?;
+    let number = |offset| i64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    Ok(ItimerSpec {
+        it_interval: TimeSpec {
+            tv_sec: number(0),
+            tv_nsec: number(8),
+        },
+        it_value: TimeSpec {
+            tv_sec: number(16),
+            tv_nsec: number(24),
+        },
+    })
 }
-fn write_timer_spec(task: &crate::task::Task, address: usize, spec: &ItimerSpec) -> Result<(), usize> {
-    let mut bytes = [0;32];
-    for (index,value) in [spec.it_interval.tv_sec,spec.it_interval.tv_nsec,spec.it_value.tv_sec,spec.it_value.tv_nsec].iter().enumerate() {
-        bytes[index*8..index*8+8].copy_from_slice(&value.to_ne_bytes());
+fn write_timer_spec(
+    task: &crate::task::Task,
+    address: usize,
+    spec: &ItimerSpec,
+) -> Result<(), usize> {
+    let mut bytes = [0; 32];
+    for (index, value) in [
+        spec.it_interval.tv_sec,
+        spec.it_interval.tv_nsec,
+        spec.it_value.tv_sec,
+        spec.it_value.tv_nsec,
+    ]
+    .iter()
+    .enumerate()
+    {
+        bytes[index * 8..index * 8 + 8].copy_from_slice(&value.to_ne_bytes());
     }
-    crate::library::std::usercopy::copy_to_user(task,address,&bytes).map_err(|_| errno::EFAULT)
+    crate::library::std::usercopy::copy_to_user(task, address, &bytes).map_err(|_| errno::EFAULT)
 }
 
 fn write_clock_timespec(
@@ -516,10 +537,22 @@ pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
     trapframe.increment_pc_next(&task);
 
     let wakeup = matches!(clock_id, CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM);
-    if !matches!(clock_id, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM) {
+    if !matches!(
+        clock_id,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_BOOTTIME
+            | CLOCK_REALTIME_ALARM
+            | CLOCK_BOOTTIME_ALARM
+    ) {
         return errno::to_result(errno::EINVAL);
     }
-    if wakeup && !task.credentials.read().permits(crate::shield::identity::RESERVE_WAKE) {
+    if wakeup
+        && !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::RESERVE_WAKE)
+    {
         return errno::to_result(errno::EPERM);
     }
 
@@ -534,7 +567,9 @@ pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
             Ok(timer) => timer,
             Err(_) => return errno::to_result(errno::ENOMEM),
         }
-    } else { Timer::new(clock_id, nonblocking) };
+    } else {
+        Timer::new(clock_id, nonblocking)
+    };
     let timer = Arc::new(timer);
     let kernel_obj = KernelObject::from_timer(timer);
     let handle = match task.handle_table.insert(kernel_obj) {
@@ -595,11 +630,16 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         Some(timer) => timer,
         None => return errno::to_result(errno::EINVAL),
     };
-    if timer.is_wakeup() && !task.credentials.read().permits(crate::shield::identity::RESERVE_WAKE) {
+    if timer.is_wakeup()
+        && !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::RESERVE_WAKE)
+    {
         return errno::to_result(errno::EPERM);
     }
 
-    let new_spec = match read_timer_spec(&task,new_value_ptr) {
+    let new_spec = match read_timer_spec(&task, new_value_ptr) {
         Ok(spec) => spec,
         Err(error) => return errno::to_result(error),
     };
@@ -619,14 +659,15 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
             it_interval: ns_to_timespec(previous_interval_ns),
             it_value: ns_to_timespec(remaining_ns),
         };
-        if let Err(error) = write_timer_spec(&task,old_value_ptr,&snapshot) {
+        if let Err(error) = write_timer_spec(&task, old_value_ptr, &snapshot) {
             return errno::to_result(error);
         }
     }
 
     let absolute = (flags & TIMER_ABSTIME) != 0;
     if absolute && matches!(timer.clock_id(), CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
-        return timer.set_wall_time(first_ns, interval_ns, flags & TFD_TIMER_CANCEL_ON_SET != 0)
+        return timer
+            .set_wall_time(first_ns, interval_ns, flags & TFD_TIMER_CANCEL_ON_SET != 0)
             .map_or_else(|_| errno::to_result(errno::ENOMEM), |_| 0);
     }
 
@@ -668,7 +709,7 @@ pub fn sys_timerfd_gettime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         it_interval: ns_to_timespec(interval_ns),
         it_value: ns_to_timespec(remaining_ns),
     };
-    write_timer_spec(&task,curr_value_ptr,&snapshot).map_or_else(errno::to_result, |_| 0)
+    write_timer_spec(&task, curr_value_ptr, &snapshot).map_or_else(errno::to_result, |_| 0)
 }
 
 /// Linux `timer_create` implementation.
@@ -1140,7 +1181,10 @@ pub fn sys_clock_getres(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
     if res_ptr == 0 {
         return 0;
     }
-    let resolution = TimeSpec { tv_sec: 0, tv_nsec: 1_000_000 };
+    let resolution = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 1_000_000,
+    };
     write_clock_timespec(&task, res_ptr, &resolution).map_or_else(errno::to_result, |_| 0)
 }
 
@@ -1170,16 +1214,40 @@ mod tests {
 
     #[test_case]
     fn timerfd_specs_cross_user_pages_and_reject_an_unmapped_tail() {
-        use crate::environment::{PAGE_SIZE,USER_STACK_END};
-        use crate::task::{Task,TaskType};
-        let task=Task::new("timerfd-usercopy".into(),0,TaskType::User);
-        let base=USER_STACK_END-2*PAGE_SIZE;task.allocate_stack_pages(base,2).unwrap();
-        let spec=ItimerSpec { it_interval:TimeSpec {tv_sec:2,tv_nsec:3},it_value:TimeSpec {tv_sec:4,tv_nsec:5} };
-        write_timer_spec(&task,base+PAGE_SIZE-16,&spec).unwrap();
-        let read=read_timer_spec(&task,base+PAGE_SIZE-16).unwrap();
-        assert_eq!((read.it_interval.tv_sec,read.it_interval.tv_nsec,read.it_value.tv_sec,read.it_value.tv_nsec),(2,3,4,5));
-        assert!(matches!(read_timer_spec(&task,USER_STACK_END-16),Err(errno::EFAULT)));
-        assert_eq!(write_timer_spec(&task,USER_STACK_END-16,&spec),Err(errno::EFAULT));
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::task::{Task, TaskType};
+        let task = Task::new("timerfd-usercopy".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        let spec = ItimerSpec {
+            it_interval: TimeSpec {
+                tv_sec: 2,
+                tv_nsec: 3,
+            },
+            it_value: TimeSpec {
+                tv_sec: 4,
+                tv_nsec: 5,
+            },
+        };
+        write_timer_spec(&task, base + PAGE_SIZE - 16, &spec).unwrap();
+        let read = read_timer_spec(&task, base + PAGE_SIZE - 16).unwrap();
+        assert_eq!(
+            (
+                read.it_interval.tv_sec,
+                read.it_interval.tv_nsec,
+                read.it_value.tv_sec,
+                read.it_value.tv_nsec
+            ),
+            (2, 3, 4, 5)
+        );
+        assert!(matches!(
+            read_timer_spec(&task, USER_STACK_END - 16),
+            Err(errno::EFAULT)
+        ));
+        assert_eq!(
+            write_timer_spec(&task, USER_STACK_END - 16, &spec),
+            Err(errno::EFAULT)
+        );
     }
 
     #[test_case]
@@ -1285,9 +1353,13 @@ mod tests {
     fn posix_timer_gettime_preserves_fork_cow_and_settime_failure_preserves_timer() {
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
         use crate::library::std::usercopy::{copy_from_user, copy_to_user};
-        use crate::task::{CloneFlags, Task, TaskType, clear_mock_current_task, set_mock_current_task};
+        use crate::task::{
+            CloneFlags, Task, TaskType, clear_mock_current_task, set_mock_current_task,
+        };
         let parent = Task::new("posix-timer-cow".into(), 0, TaskType::User);
-        parent.vm_manager.set_asid(crate::arch::vm::alloc_virtual_address_space());
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
         let base = USER_STACK_END - 2 * PAGE_SIZE;
         parent.allocate_stack_pages(base, 2).unwrap();
         let address = base + PAGE_SIZE - 16;
@@ -1297,8 +1369,19 @@ mod tests {
         let child = Arc::new(child);
         set_mock_current_task(child.clone());
         let mut abi = LinuxAbi::default();
-        let id = abi.create_posix_timer(|id| Arc::new(PosixTimer::new(id,
-            CLOCK_MONOTONIC, SIGEV_NONE, 0, 0, child.get_id(), abi.signal_state.clone()))).unwrap();
+        let id = abi
+            .create_posix_timer(|id| {
+                Arc::new(PosixTimer::new(
+                    id,
+                    CLOCK_MONOTONIC,
+                    SIGEV_NONE,
+                    0,
+                    0,
+                    child.get_id(),
+                    abi.signal_state.clone(),
+                ))
+            })
+            .unwrap();
         let mut frame = Trapframe::new();
         frame.set_arg(0, id as usize);
         frame.set_arg(1, address);
@@ -1310,15 +1393,29 @@ mod tests {
         assert_eq!(&output[40..], &[0xa5; 8]);
         copy_from_user(&parent, address - 8, &mut output).unwrap();
         assert_eq!(output, [0xa5; 48]);
-        write_timer_spec(&child, address, &ItimerSpec {
-            it_interval: TimeSpec { tv_sec: 60, tv_nsec: 0 },
-            it_value: TimeSpec { tv_sec: 3600, tv_nsec: 0 },
-        }).unwrap();
+        write_timer_spec(
+            &child,
+            address,
+            &ItimerSpec {
+                it_interval: TimeSpec {
+                    tv_sec: 60,
+                    tv_nsec: 0,
+                },
+                it_value: TimeSpec {
+                    tv_sec: 3600,
+                    tv_nsec: 0,
+                },
+            },
+        )
+        .unwrap();
         frame.set_arg(0, id as usize);
         frame.set_arg(1, 0);
         frame.set_arg(2, address);
         frame.set_arg(3, USER_STACK_END - 16);
-        assert_eq!(sys_timer_settime(&mut abi, &mut frame), errno::to_result(errno::EFAULT));
+        assert_eq!(
+            sys_timer_settime(&mut abi, &mut frame),
+            errno::to_result(errno::EFAULT)
+        );
         assert_eq!(abi.get_posix_timer(id).unwrap().snapshot(), (0, 0));
         clear_mock_current_task();
     }
@@ -1409,13 +1506,22 @@ mod tests {
         parent.allocate_stack_pages(base, 2).unwrap();
         copy_to_user(&parent, base + PAGE_SIZE - 8, &[0xa5; 24]).unwrap();
         let child = parent.clone_task(CloneFlags::default()).unwrap();
-        let value = TimeSpec { tv_sec: 123, tv_nsec: 456 };
+        let value = TimeSpec {
+            tv_sec: 123,
+            tv_nsec: 456,
+        };
         write_clock_timespec(&child, base + PAGE_SIZE - 8, &value).unwrap();
 
         let mut child_bytes = [0; 24];
         copy_from_user(&child, base + PAGE_SIZE - 8, &mut child_bytes).unwrap();
-        assert_eq!(i64::from_ne_bytes(child_bytes[..8].try_into().unwrap()), 123);
-        assert_eq!(i64::from_ne_bytes(child_bytes[8..16].try_into().unwrap()), 456);
+        assert_eq!(
+            i64::from_ne_bytes(child_bytes[..8].try_into().unwrap()),
+            123
+        );
+        assert_eq!(
+            i64::from_ne_bytes(child_bytes[8..16].try_into().unwrap()),
+            456
+        );
         assert_eq!(&child_bytes[16..], &[0xa5; 8]);
         let mut parent_bytes = [0; 24];
         copy_from_user(&parent, base + PAGE_SIZE - 8, &mut parent_bytes).unwrap();
@@ -1481,5 +1587,4 @@ mod tests {
         assert_eq!(CLOCK_PROCESS_CPUTIME_ID, 2);
         assert_eq!(CLOCK_THREAD_CPUTIME_ID, 3);
     }
-
 }

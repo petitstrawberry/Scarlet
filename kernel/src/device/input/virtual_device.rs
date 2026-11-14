@@ -208,8 +208,11 @@ impl MemoryMappingOps for InputEndpoint {
     }
 }
 impl Selectable for InputEndpoint {
-    fn subscribe_readiness(&self, _interest: ReadyInterest, waiter: &Arc<Waker>)
-        -> Option<Vec<crate::sync::ReadinessRegistration>> {
+    fn subscribe_readiness(
+        &self,
+        _interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::ReadinessRegistration>> {
         // Injection and either endpoint's close notify this shared source.
         Some(alloc::vec![self.channel.waker.subscribe_readiness(waiter)])
     }
@@ -402,9 +405,20 @@ mod tests {
         assert!(InputEndpoint::pair(2, 640, 480).is_err());
         let (send, receive) = InputEndpoint::pair(2, 0, 0).unwrap();
         assert_eq!(receive.control(SCTL_INPUT_GET_KIND, 0), Ok(2));
-        assert_eq!(receive.control(SCTL_INPUT_GET_CAPABILITIES, 0), Ok((INPUT_CAP_KEY | INPUT_CAP_REL) as i32));
-        let records = [(2, 0, -17), (2, 1, 29), (2, 8, -1), (2, 6, 2),
-                       (1, 0x110, 1), (1, 0x111, 1), (1, 0x112, 1), (0, 0, 0)];
+        assert_eq!(
+            receive.control(SCTL_INPUT_GET_CAPABILITIES, 0),
+            Ok((INPUT_CAP_KEY | INPUT_CAP_REL) as i32)
+        );
+        let records = [
+            (2, 0, -17),
+            (2, 1, 29),
+            (2, 8, -1),
+            (2, 6, 2),
+            (1, 0x110, 1),
+            (1, 0x111, 1),
+            (1, 0x112, 1),
+            (0, 0, 0),
+        ];
         let bytes = frame(&records);
         assert_eq!(send.write(&bytes).unwrap(), bytes.len());
         let mut out = vec![0; bytes.len()];
@@ -412,12 +426,27 @@ mod tests {
         for (original, actual) in bytes.chunks_exact(16).zip(out.chunks_exact(16)) {
             assert_eq!(&original[8..], &actual[8..]);
         }
-        for invalid in [(1, 30, 1), (1, 0x14a, 1), (1, 0x110, 2), (2, 2, 1), (3, 0, 1)] {
-            assert!(matches!(send.write(&frame(&[(1, 0x110, 0), invalid, (0, 0, 0)])), Err(StreamError::InvalidArgument)));
-            assert_eq!(receive.control(SCTL_INPUT_GET_EVENT_VALUE, (1 << 16) | 0x110), Ok(1));
+        for invalid in [
+            (1, 30, 1),
+            (1, 0x14a, 1),
+            (1, 0x110, 2),
+            (2, 2, 1),
+            (3, 0, 1),
+        ] {
+            assert!(matches!(
+                send.write(&frame(&[(1, 0x110, 0), invalid, (0, 0, 0)])),
+                Err(StreamError::InvalidArgument)
+            ));
+            assert_eq!(
+                receive.control(SCTL_INPUT_GET_EVENT_VALUE, (1 << 16) | 0x110),
+                Ok(1)
+            );
             assert!(!receive.current_ready(ReadyInterest::read()).read);
         }
-        assert!(matches!(receive.write(&bytes), Err(StreamError::PermissionDenied)));
+        assert!(matches!(
+            receive.write(&bytes),
+            Err(StreamError::PermissionDenied)
+        ));
     }
 
     #[test_case]

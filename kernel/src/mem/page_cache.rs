@@ -540,13 +540,8 @@ impl PageCacheManager {
                         let entry: &PageCacheEntry = $entry;
                         scanned += 1;
                         *cursor = Some(key);
-                        let mapped = object_locks
-                            .get(&key.0)
-                            .is_some_and(|&count| count > 0);
-                        if !entry.retired
-                            && !entry.is_dirty()
-                            && entry.pin_count() == 0
-                            && !mapped
+                        let mapped = object_locks.get(&key.0).is_some_and(|&count| count > 0);
+                        if !entry.retired && !entry.is_dirty() && entry.pin_count() == 0 && !mapped
                         {
                             keys[candidates] = Some(key);
                             candidates += 1;
@@ -959,18 +954,12 @@ mod tests {
         let file = CacheId::new(1);
         let mapped_file = CacheId::new(2);
 
-        cache
-            .get_or_create_pinned(file, 0, |_| Ok(()))
-            .unwrap();
+        cache.get_or_create_pinned(file, 0, |_| Ok(())).unwrap();
         cache.unpin(file, 0);
 
-        cache
-            .get_or_create_pinned(file, 1, |_| Ok(()))
-            .unwrap();
+        cache.get_or_create_pinned(file, 1, |_| Ok(())).unwrap();
 
-        cache
-            .get_or_create_pinned(file, 2, |_| Ok(()))
-            .unwrap();
+        cache.get_or_create_pinned(file, 2, |_| Ok(())).unwrap();
         cache.mark_dirty(file, 2);
         cache.unpin(file, 2);
 
@@ -1074,7 +1063,13 @@ mod tests {
         cache.retire_object(id);
 
         assert_eq!(cache.reclaim_clean_pages(1), 0);
-        assert!(cache.entries.read().get(&(id, 0)).is_some_and(|entry| entry.retired));
+        assert!(
+            cache
+                .entries
+                .read()
+                .get(&(id, 0))
+                .is_some_and(|entry| entry.retired)
+        );
 
         cache.unpin(id, 0);
         assert!(cache.entries.read().get(&(id, 0)).is_none());

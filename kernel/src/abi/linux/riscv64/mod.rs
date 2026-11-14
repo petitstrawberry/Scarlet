@@ -49,8 +49,14 @@ impl AbiModule for LinuxRiscv64Abi {
         Box::new(self.clone())
     }
 
-    fn execution_domain(&self) -> &'static str { "linux-riscv64" }
-    fn handle_execution_denial(&mut self, denial: crate::shield::execution::Denial, frame: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
+    fn execution_domain(&self) -> &'static str {
+        "linux-riscv64"
+    }
+    fn handle_execution_denial(
+        &mut self,
+        denial: crate::shield::execution::Denial,
+        frame: &mut crate::arch::Trapframe,
+    ) -> Result<usize, &'static str> {
         Ok(generic::seccomp::handle_denial(&mut self.0, denial, frame))
     }
 
@@ -112,7 +118,9 @@ impl AbiModule for LinuxRiscv64Abi {
         }
         let thread = _flags.is_set(crate::task::CloneFlagsDef::Thread);
         self.0.clone_signal_state_with_group(
-            self.0.thread_state.pending_clone_share_sighand || thread, thread);
+            self.0.thread_state.pending_clone_share_sighand || thread,
+            thread,
+        );
         self.0.bind_task_signals(_child_task);
 
         let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
@@ -346,9 +354,13 @@ impl AbiModule for LinuxRiscv64Abi {
                     }
                     Err(e) => {
                         crate::println!("Failed to load Linux ELF binary: {:?}", e);
-                        if e.message == "interpreter execution disabled on mount" || e.message == "execution disabled on mount" {
+                        if e.message == "interpreter execution disabled on mount"
+                            || e.message == "execution disabled on mount"
+                        {
                             Err("execution disabled on mount")
-                        } else { Err("Failed to load Linux ELF binary") }
+                        } else {
+                            Err("Failed to load Linux ELF binary")
+                        }
                     }
                 }
             }

@@ -30,7 +30,11 @@ pub struct FilePublication<'a> {
 /// Mount-event relationships, configured independently from Environment.
 #[repr(usize)]
 #[derive(Clone, Copy, Debug)]
-pub enum MountPropagation { Private = 0, Shared = 1, Downstream = 2 }
+pub enum MountPropagation {
+    Private = 0,
+    Shared = 1,
+    Downstream = 2,
+}
 
 fn cstring(value: &str) -> HandleResult<Vec<u8>> {
     str_to_cstr_bytes(value).map_err(|_| HandleError::InvalidParameter)
@@ -60,26 +64,37 @@ impl MountNamespace {
     /// mount management authority and retains a close-on-exec capability.
     pub fn capture_descendant(pid: u32) -> HandleResult<Self> {
         // SAFETY: the kernel validates visibility, live ancestry and authority.
-        handle(unsafe { syscall1(Syscall::MountNamespaceCaptureDescendant, pid as usize) }).map(Self)
+        handle(unsafe { syscall1(Syscall::MountNamespaceCaptureDescendant, pid as usize) })
+            .map(Self)
     }
     pub fn from_handle(handle: Handle) -> HandleResult<Self> {
-        if handle.object_info().object_type != crate::handle::introspection::KernelObjectType::MountNamespace {
+        if handle.object_info().object_type
+            != crate::handle::introspection::KernelObjectType::MountNamespace
+        {
             return Err(HandleError::InvalidParameter);
         }
         Ok(Self(handle))
     }
-    pub fn as_handle(&self) -> &Handle { &self.0 }
+    pub fn as_handle(&self) -> &Handle {
+        &self.0
+    }
     /// Re-resolve cwd in the selected destination View. Requires native mount
     /// authority and a filesystem context not shared with another live task.
     pub fn join(&self) -> HandleResult<()> {
         // SAFETY: the kernel validates the borrowed capability and current Environment.
-        result(unsafe { syscall1(Syscall::MountNamespaceJoin, self.0.as_raw() as usize) }).map(|_| ())
+        result(unsafe { syscall1(Syscall::MountNamespaceJoin, self.0.as_raw() as usize) })
+            .map(|_| ())
     }
     pub fn identity(&self) -> HandleResult<u64> {
         let mut id = 0u64;
         // SAFETY: fixed eight-byte output remains writable throughout the call.
-        result(unsafe { syscall2(Syscall::MountNamespaceIdentity, self.0.as_raw() as usize,
-            &mut id as *mut u64 as usize) })?;
+        result(unsafe {
+            syscall2(
+                Syscall::MountNamespaceIdentity,
+                self.0.as_raw() as usize,
+                &mut id as *mut u64 as usize,
+            )
+        })?;
         Ok(u64::from_le(id))
     }
 }
@@ -203,30 +218,70 @@ impl VfsView {
         .map(|_| ())
     }
     /// Mount with immutable VFS_MOUNT_* restrictions. Unknown bits are rejected.
-    pub fn mount_restricted(&self, target: &str, fstype: &str, options: &str, restrictions: u32) -> HandleResult<()> {
+    pub fn mount_restricted(
+        &self,
+        target: &str,
+        fstype: &str,
+        options: &str,
+        restrictions: u32,
+    ) -> HandleResult<()> {
         let target = cstring(target)?;
         let fstype = cstring(fstype)?;
         let options = cstring(options)?;
         // SAFETY: capability and strings remain live throughout the call.
-        result(unsafe { syscall5(Syscall::VfsViewMountRestricted, self.raw(),
-            target.as_ptr() as usize, fstype.as_ptr() as usize, options.as_ptr() as usize,
-            restrictions as usize) }).map(|_| ())
+        result(unsafe {
+            syscall5(
+                Syscall::VfsViewMountRestricted,
+                self.raw(),
+                target.as_ptr() as usize,
+                fstype.as_ptr() as usize,
+                options.as_ptr() as usize,
+                restrictions as usize,
+            )
+        })
+        .map(|_| ())
     }
 
     /// Configure native mount-event flow. Fresh independent Views start private.
-    pub fn set_propagation(&self, target: &str, mode: MountPropagation, recursive: bool) -> HandleResult<()> {
+    pub fn set_propagation(
+        &self,
+        target: &str,
+        mode: MountPropagation,
+        recursive: bool,
+    ) -> HandleResult<()> {
         let target = cstring(target)?;
         // SAFETY: the capability and pathname stay borrowed throughout the call.
-        result(unsafe { syscall4(Syscall::VfsViewSetPropagation, self.raw(), target.as_ptr() as usize,
-            mode as usize, usize::from(recursive)) }).map(|_| ())
+        result(unsafe {
+            syscall4(
+                Syscall::VfsViewSetPropagation,
+                self.raw(),
+                target.as_ptr() as usize,
+                mode as usize,
+                usize::from(recursive),
+            )
+        })
+        .map(|_| ())
     }
     /// Bind with a snapshot of all submounts; future events follow source propagation.
-    pub fn bind_recursive(&self, target: &str, source: &Self, source_path: &str) -> HandleResult<()> {
+    pub fn bind_recursive(
+        &self,
+        target: &str,
+        source: &Self,
+        source_path: &str,
+    ) -> HandleResult<()> {
         let target = cstring(target)?;
         let path = cstring(source_path)?;
         // SAFETY: both capabilities and pathnames stay live throughout the call.
-        result(unsafe { syscall4(Syscall::VfsViewBindRecursive, self.raw(), target.as_ptr() as usize,
-            source.raw(), path.as_ptr() as usize) }).map(|_| ())
+        result(unsafe {
+            syscall4(
+                Syscall::VfsViewBindRecursive,
+                self.raw(),
+                target.as_ptr() as usize,
+                source.raw(),
+                path.as_ptr() as usize,
+            )
+        })
+        .map(|_| ())
     }
     /// Non-recursive bind. Shared submounts must be bound explicitly.
     pub fn bind(&self, target: &str, source: &Self, source_path: &str) -> HandleResult<()> {
@@ -249,16 +304,35 @@ impl VfsView {
     /// state. Each entry's access is intersected with its source handle authority.
     /// Publication is atomic, and the mount can be removed with `unmount`.
     pub fn publish_files(&self, target: &str, files: &[FilePublication<'_>]) -> HandleResult<()> {
-        if files.is_empty() || files.len() > 64 { return Err(HandleError::InvalidParameter); }
+        if files.is_empty() || files.len() > 64 {
+            return Err(HandleError::InvalidParameter);
+        }
         let target = cstring(target)?;
-        let names: Vec<_> = files.iter().map(|file| cstring(file.name)).collect::<HandleResult<_>>()?;
-        let records: Vec<_> = files.iter().zip(&names).map(|(file, name)| scarlet_abi::RawFilePublication {
-            name: name.as_ptr() as u64, handle: file.file.as_raw() as u32, access: file.access,
-        }).collect();
+        let names: Vec<_> = files
+            .iter()
+            .map(|file| cstring(file.name))
+            .collect::<HandleResult<_>>()?;
+        let records: Vec<_> = files
+            .iter()
+            .zip(&names)
+            .map(|(file, name)| scarlet_abi::RawFilePublication {
+                name: name.as_ptr() as u64,
+                handle: file.file.as_raw() as u32,
+                access: file.access,
+            })
+            .collect();
         // SAFETY: all source handles, C strings and initialized records remain
         // borrowed for the complete synchronous call; no ownership is transferred.
-        result(unsafe { syscall4(Syscall::VfsViewPublishFiles, self.raw(), target.as_ptr() as usize,
-            records.as_ptr() as usize, records.len()) }).map(|_| ())
+        result(unsafe {
+            syscall4(
+                Syscall::VfsViewPublishFiles,
+                self.raw(),
+                target.as_ptr() as usize,
+                records.as_ptr() as usize,
+                records.len(),
+            )
+        })
+        .map(|_| ())
     }
     pub fn unmount(&self, path: &str) -> HandleResult<()> {
         let path = cstring(path)?;

@@ -4884,8 +4884,8 @@ impl Compositor {
         if !has_transparency {
             let sample_x: Vec<u32> = (x0..x1)
                 .map(|sx| {
-                    ((i64::from(sx - win_x0) * i64::from(source_width))
-                        / i64::from(visual_width)) as u32
+                    ((i64::from(sx - win_x0) * i64::from(source_width)) / i64::from(visual_width))
+                        as u32
                 })
                 .collect();
             for sy in y0..y1 {
@@ -4927,8 +4927,8 @@ impl Compositor {
             // Slow path for transparent windows: per-pixel alpha blending
             let sample_x: Vec<u32> = (x0..x1)
                 .map(|sx| {
-                    ((i64::from(sx - win_x0) * i64::from(source_width))
-                        / i64::from(visual_width)) as u32
+                    ((i64::from(sx - win_x0) * i64::from(source_width)) / i64::from(visual_width))
+                        as u32
                 })
                 .collect();
             for sy in y0..y1 {

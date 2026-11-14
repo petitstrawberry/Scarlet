@@ -31,10 +31,10 @@ use alloc::{
 };
 use core::any::Any;
 
-pub(super) mod filesystem;
 mod arena;
 mod buffers;
 mod death;
+pub(super) mod filesystem;
 mod objects;
 use arena::Arena;
 use death::{BC_CLEAR_DEATH_NOTIFICATION, BC_DEAD_BINDER_DONE, BC_REQUEST_DEATH_NOTIFICATION};
@@ -50,8 +50,8 @@ const SET_MAX_THREADS: u32 = 0x40046205;
 const THREAD_EXIT: u32 = 0x40046208;
 const BC_TRANSACTION: u32 = 0x40406300;
 const BC_REPLY: u32 = 0x40406301;
-const BC_TRANSACTION_SG:u32=0x40486311;
-const BC_REPLY_SG:u32=0x40486312;
+const BC_TRANSACTION_SG: u32 = 0x40486311;
+const BC_REPLY_SG: u32 = 0x40486312;
 const BC_FREE_BUFFER: u32 = 0x40086303;
 const BC_REGISTER_LOOPER: u32 = 0x630b;
 const BC_ENTER_LOOPER: u32 = 0x630c;
@@ -125,7 +125,7 @@ struct Context {
 struct Domain {
     // Retain the environment so pointer identity cannot be reused while open.
     environment: Arc<Environment>,
-    device:u8,
+    device: u8,
     context: IrqSpinLock<Option<Context>>,
     objects: objects::Registry,
 }
@@ -174,7 +174,9 @@ impl Delivery {
         // The wire representation includes all data, offsets and HIDL buffers.
         // Leave room for the authenticated sender context on incoming calls.
         self.message.as_ref().map_or(8, |message| {
-            message.bytes.len().saturating_add(if self.replying { 0 } else {
+            message.bytes.len().saturating_add(if self.replying {
+                0
+            } else {
                 crate::shield::MAX_LABEL_BYTES + 8
             })
         })
@@ -190,20 +192,38 @@ enum Transaction {
 }
 impl Thread {
     fn outgoing(&self) -> Option<&RpcCall> {
-        match self.stack.last() {Some(Transaction::Outgoing(call)) => Some(call), _ => None}
+        match self.stack.last() {
+            Some(Transaction::Outgoing(call)) => Some(call),
+            _ => None,
+        }
     }
     fn incoming(&self) -> Option<&Incoming> {
-        match self.stack.last() {Some(Transaction::Incoming(request)) => Some(request), _ => None}
+        match self.stack.last() {
+            Some(Transaction::Incoming(request)) => Some(request),
+            _ => None,
+        }
     }
     fn can_receive(&self, endpoint: &RpcEndpoint) -> bool {
-        if self.pending_receive.is_some() {true}
-        else if let Some(call) = self.outgoing() {call.reentrant_ready(endpoint)}
-        else {self.accepts_process_work() && endpoint.ready()}
+        if self.pending_receive.is_some() {
+            true
+        } else if let Some(call) = self.outgoing() {
+            call.reentrant_ready(endpoint)
+        } else {
+            self.accepts_process_work() && endpoint.ready()
+        }
     }
-    fn receive(&mut self, endpoint: &RpcEndpoint) -> Result<Option<RpcRequest>,crate::ipc::rpc::RpcError> {
-        if let Some(request)=self.pending_receive.take() {return Ok(Some(request));}
-        if let Some(call) = self.outgoing() {call.receive_reentrant(endpoint)}
-        else {endpoint.receive()}
+    fn receive(
+        &mut self,
+        endpoint: &RpcEndpoint,
+    ) -> Result<Option<RpcRequest>, crate::ipc::rpc::RpcError> {
+        if let Some(request) = self.pending_receive.take() {
+            return Ok(Some(request));
+        }
+        if let Some(call) = self.outgoing() {
+            call.receive_reentrant(endpoint)
+        } else {
+            endpoint.receive()
+        }
     }
 
     /// Process-wide Binder work is eligible only when this thread has no
@@ -250,15 +270,25 @@ impl State {
         !self.closed
             && self.spawn.is_none()
             && self.threads.get(&tid).is_some_and(|thread| thread.looper)
-            && self.threads.values().filter(|thread| thread.registered).count() < self.max_threads
+            && self
+                .threads
+                .values()
+                .filter(|thread| thread.registered)
+                .count()
+                < self.max_threads
             && self.threads.len() < MAX_THREADS
-            && !self.threads.iter().any(|(&other, thread)| {
-                other != tid && thread.waiting_for_process
-            })
+            && !self
+                .threads
+                .iter()
+                .any(|(&other, thread)| other != tid && thread.waiting_for_process)
     }
 
     fn thread(&self, tid: usize) -> Option<&Thread> {
-        if self.closed { None } else { self.threads.get(&tid) }
+        if self.closed {
+            None
+        } else {
+            self.threads.get(&tid)
+        }
     }
 
     fn thread_mut(&mut self, tid: usize) -> Result<&mut Thread, usize> {
@@ -280,12 +310,21 @@ pub(crate) struct BinderFile {
 }
 
 pub(super) fn new_file(task: &Task, device: u8) -> Result<Arc<BinderFile>, usize> {
-    if device > 2 { return Err(errno::EINVAL); }
-    let environment = task.execution_environment.read().clone().ok_or(errno::ENODEV)?;
+    if device > 2 {
+        return Err(errno::EINVAL);
+    }
+    let environment = task
+        .execution_environment
+        .read()
+        .clone()
+        .ok_or(errno::ENODEV)?;
     Ok(Arc::new(BinderFile {
-        owner: task.get_thread_group_id(), subject: task.security_subject.read().clone(),
-        domain: domain(environment, device), endpoint: RpcEndpoint::new(),
-        send_gate: IrqSpinLock::new(()), auto_fds: IrqSpinLock::new(BTreeMap::new()),
+        owner: task.get_thread_group_id(),
+        subject: task.security_subject.read().clone(),
+        domain: domain(environment, device),
+        endpoint: RpcEndpoint::new(),
+        send_gate: IrqSpinLock::new(()),
+        auto_fds: IrqSpinLock::new(BTreeMap::new()),
         objects: IrqSpinLock::new(Objects::default()),
         state: IrqSpinLock::new(State {
             closed: false,
@@ -302,8 +341,14 @@ pub(super) fn new_file(task: &Task, device: u8) -> Result<Arc<BinderFile>, usize
 pub(super) fn from_object(object: &KernelObject) -> Option<&BinderFile> {
     let mut file = object.as_file()?;
     loop {
-        if let Some(binder) = file.as_any().downcast_ref::<BinderFile>() { return Some(binder); }
-        file = file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()?.inner().as_ref();
+        if let Some(binder) = file.as_any().downcast_ref::<BinderFile>() {
+            return Some(binder);
+        }
+        file = file
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()?
+            .inner()
+            .as_ref();
     }
 }
 
@@ -361,7 +406,9 @@ impl BinderFile {
                         Err(errno::EINVAL)
                     } else {
                         let mut state = self.state.lock();
-                        if state.closed { return Err(errno::EPIPE); }
+                        if state.closed {
+                            return Err(errno::EPIPE);
+                        }
                         state.max_threads = n as usize;
                         drop(state);
                         self.endpoint.waker().wake_all();
@@ -378,9 +425,12 @@ impl BinderFile {
                         if u32_at(&object, 4) & !0x1100 != 0 {
                             return Err(errno::EOPNOTSUPP);
                         }
-                        ((u64_at(&object, 8), u64_at(&object, 16)),u32_at(&object,4))
+                        (
+                            (u64_at(&object, 8), u64_at(&object, 16)),
+                            u32_at(&object, 4),
+                        )
                     } else {
-                        ((0, 0),0)
+                        ((0, 0), 0)
                     };
                     let mut context = self.domain.context.lock();
                     if context
@@ -391,9 +441,12 @@ impl BinderFile {
                         return Err(errno::EBUSY);
                     }
                     {
-                        let mut state=self.state.lock();
-                        if state.closed { return Err(errno::EPIPE); }
-                        state.node=node.0;state.node_flags=node.1;
+                        let mut state = self.state.lock();
+                        if state.closed {
+                            return Err(errno::EPIPE);
+                        }
+                        state.node = node.0;
+                        state.node_flags = node.1;
                     }
                     *context = Some(Context {
                         endpoint: Arc::downgrade(&self.endpoint),
@@ -413,7 +466,11 @@ impl BinderFile {
         result.map_or_else(errno::to_result, |_| 0)
     }
     fn command(&self, task: &Task, abi: &LinuxAbi, command: u32, data: &[u8]) -> Result<(), usize> {
-        let command=match command {BC_TRANSACTION_SG=>BC_TRANSACTION,BC_REPLY_SG=>BC_REPLY,other=>other};
+        let command = match command {
+            BC_TRANSACTION_SG => BC_TRANSACTION,
+            BC_REPLY_SG => BC_REPLY,
+            other => other,
+        };
         let tid = task.get_id();
         if self.state.lock().closed {
             return Err(errno::EPIPE);
@@ -446,8 +503,7 @@ impl BinderFile {
             BC_ENTER_LOOPER | BC_REGISTER_LOOPER | BC_EXIT_LOOPER => {
                 let mut state = self.state.lock();
                 if command == BC_REGISTER_LOOPER {
-                    if state.thread_mut(tid)?.looper
-                        || state.spawn != Some(SpawnRequest::Requested)
+                    if state.thread_mut(tid)?.looper || state.spawn != Some(SpawnRequest::Requested)
                     {
                         return Err(errno::EINVAL);
                     }
@@ -488,7 +544,9 @@ impl BinderFile {
                 // hwbinder's default INHERIT_RT flag is inert between Fair
                 // tasks. Do not turn a native reservation into an unimplemented
                 // inherited FIFO/RR transaction.
-                if self.domain.device==1 && task.deadline_enabled() {return Err(errno::EOPNOTSUPP);}
+                if self.domain.device == 1 && task.deadline_enabled() {
+                    return Err(errno::EOPNOTSUPP);
+                }
                 let flags = u32_at(data, 20);
                 if flags
                     & !(FLAG_COLLECT_NOTED_APP_OPS
@@ -517,14 +575,28 @@ impl BinderFile {
                     None
                 };
                 let capability = target.as_ref().map(|lease| lease.node.object.clone());
-                if task.deadline_enabled() && target.as_ref().is_some_and(|target|target.node.inherits_rt()) {return Err(errno::EOPNOTSUPP);}
+                if task.deadline_enabled()
+                    && target
+                        .as_ref()
+                        .is_some_and(|target| target.node.inherits_rt())
+                {
+                    return Err(errno::EOPNOTSUPP);
+                }
                 if !prepared.capabilities.is_empty() {
-                    let accepts=if command==BC_TRANSACTION {
-                        target.as_ref().is_some_and(|target|target.node.accepts_fds())
+                    let accepts = if command == BC_TRANSACTION {
+                        target
+                            .as_ref()
+                            .is_some_and(|target| target.node.accepts_fds())
                     } else {
-                        self.state.lock().thread(tid).is_some_and(|thread|thread.incoming().is_some_and(|incoming| incoming.accepts_fds))
+                        self.state.lock().thread(tid).is_some_and(|thread| {
+                            thread
+                                .incoming()
+                                .is_some_and(|incoming| incoming.accepts_fds)
+                        })
                     };
-                    if !accepts {return Err(errno::EPERM);}
+                    if !accepts {
+                        return Err(errno::EPERM);
+                    }
                 }
                 if target.as_ref().is_some_and(|target| {
                     !same_policy(self.subject.as_ref(), target.node.subject.as_ref())
@@ -547,17 +619,21 @@ impl BinderFile {
                     let mut state = self.state.lock();
                     let thread = state.thread_mut(tid)?;
                     if !oneway {
-                        if thread.outgoing().is_some() {return Err(errno::EINVAL);}
-                        if thread.stack.len() >= crate::ipc::rpc::MAX_CALL_DEPTH {return Err(errno::E2BIG);}
+                        if thread.outgoing().is_some() {
+                            return Err(errno::EINVAL);
+                        }
+                        if thread.stack.len() >= crate::ipc::rpc::MAX_CALL_DEPTH {
+                            return Err(errno::E2BIG);
+                        }
                     }
                     if thread.completed.len() >= crate::ipc::rpc::MAX_IN_FLIGHT {
                         return Err(errno::EAGAIN);
                     }
                     if oneway {
                         let sent = if let Some(capability) = capability {
-                            capability.send_oneway_from(task,message)
+                            capability.send_oneway_from(task, message)
                         } else if let Some(context) = context {
-                            context.send_oneway_from(task,message)
+                            context.send_oneway_from(task, message)
                         } else {
                             Err(crate::ipc::rpc::RpcError::PeerClosed)
                         };
@@ -576,18 +652,23 @@ impl BinderFile {
                             // observe transport backpressure. Complete the
                             // command instead of aborting the stock looper;
                             // the application-facing notification is dropped.
-                            Err(crate::ipc::rpc::RpcError::Busy) => thread
-                                .completed
-                                .push_back(Completed { command: BR_COMPLETE, acquisitions: Vec::new() }),
+                            Err(crate::ipc::rpc::RpcError::Busy) => {
+                                thread.completed.push_back(Completed {
+                                    command: BR_COMPLETE,
+                                    acquisitions: Vec::new(),
+                                })
+                            }
                             Err(_) => return Err(errno::EAGAIN),
                         }
                         return Ok(());
                     }
-                    let parent = thread.incoming().and_then(|incoming| incoming.request.context());
+                    let parent = thread
+                        .incoming()
+                        .and_then(|incoming| incoming.request.context());
                     let call = if let Some(capability) = capability {
-                        capability.send_scoped_from(task,message, &self.endpoint, parent.as_ref())
+                        capability.send_scoped_from(task, message, &self.endpoint, parent.as_ref())
                     } else if let Some(context) = context {
-                        context.send_scoped_from(task,message, &self.endpoint, parent.as_ref())
+                        context.send_scoped_from(task, message, &self.endpoint, parent.as_ref())
                     } else {
                         Err(crate::ipc::rpc::RpcError::PeerClosed)
                     };
@@ -608,9 +689,12 @@ impl BinderFile {
                         }
                         Err(crate::ipc::rpc::RpcError::TooLarge) => return Err(errno::E2BIG),
                         Err(crate::ipc::rpc::RpcError::Cancelled) => return Err(errno::ECANCELED),
-                        Err(crate::ipc::rpc::RpcError::Busy) => thread
-                            .completed
-                            .push_back(Completed { command: BR_FAILED_REPLY, acquisitions: Vec::new() }),
+                        Err(crate::ipc::rpc::RpcError::Busy) => {
+                            thread.completed.push_back(Completed {
+                                command: BR_FAILED_REPLY,
+                                acquisitions: Vec::new(),
+                            })
+                        }
                         Err(_) => return Err(errno::EAGAIN),
                     }
                 } else {
@@ -620,7 +704,9 @@ impl BinderFile {
                         if thread.completed.len() >= crate::ipc::rpc::MAX_IN_FLIGHT {
                             return Err(errno::EAGAIN);
                         }
-                        if thread.incoming().is_none() {return Err(errno::EINVAL);}
+                        if thread.incoming().is_none() {
+                            return Err(errno::EINVAL);
+                        }
                         match thread.stack.pop().unwrap() {
                             Transaction::Incoming(incoming) => incoming.request,
                             _ => unreachable!(),
@@ -629,9 +715,9 @@ impl BinderFile {
                     let _ = request.reply(message);
                     let mut state = self.state.lock();
                     state.thread_mut(tid)?.completed.push_back(Completed {
-                            command: BR_COMPLETE,
-                            acquisitions,
-                        });
+                        command: BR_COMPLETE,
+                        acquisitions,
+                    });
                 }
             }
             _ => return Err(errno::EOPNOTSUPP),
@@ -670,8 +756,12 @@ impl BinderFile {
         if state.can_spawn(tid) && self.endpoint.ready() {
             return true;
         }
-        if thread.pending_delivery.as_ref().and_then(|delivery| delivery.incoming.as_ref())
-            .is_some_and(RpcRequest::cancelled) {
+        if thread
+            .pending_delivery
+            .as_ref()
+            .and_then(|delivery| delivery.incoming.as_ref())
+            .is_some_and(RpcRequest::cancelled)
+        {
             return true;
         }
         let objects = self.objects.lock();
@@ -688,14 +778,19 @@ impl BinderFile {
         if let Some(completed) = thread.completed.front() {
             return completed.ready();
         }
-        let has_delivery =
-            thread.pending_delivery.is_some() || thread.outgoing().is_some_and(RpcCall::ready) || thread.can_receive(&self.endpoint);
+        let has_delivery = thread.pending_delivery.is_some()
+            || thread.outgoing().is_some_and(RpcCall::ready)
+            || thread.can_receive(&self.endpoint);
         !objects.pending_local_acquisitions()
             && has_delivery
-            && state
-                .arena
-                .as_ref()
-                .is_none_or(|arena| arena.has_space(thread.pending_delivery.as_ref().map_or(8, Delivery::allocation_size)))
+            && state.arena.as_ref().is_none_or(|arena| {
+                arena.has_space(
+                    thread
+                        .pending_delivery
+                        .as_ref()
+                        .map_or(8, Delivery::allocation_size),
+                )
+            })
     }
     fn waiter(&self, tid: usize) -> Arc<Waker> {
         // Incoming calls, object-reference work and outgoing completions all
@@ -729,7 +824,7 @@ impl BinderFile {
         objects.free_buffer(address);
         let request = objects.oneway.remove(&address);
         drop(objects);
-        let descriptors=self.auto_fds.lock().remove(&address);
+        let descriptors = self.auto_fds.lock().remove(&address);
         drop(descriptors);
         // Release native serialization and budget only after userspace has
         // returned the receive buffer; other loopers can then dispatch it.
@@ -738,27 +833,43 @@ impl BinderFile {
     }
 
     fn read_record(&self, task: &Task, output: usize, capacity: usize) -> Result<usize, usize> {
-        self.read_record_for_abi(task,None,output,capacity)
+        self.read_record_for_abi(task, None, output, capacity)
     }
-    fn read_record_for_abi(&self,task:&Task,abi:Option<&LinuxAbi>,output:usize,capacity:usize)->Result<usize,usize> {
+    fn read_record_for_abi(
+        &self,
+        task: &Task,
+        abi: Option<&LinuxAbi>,
+        output: usize,
+        capacity: usize,
+    ) -> Result<usize, usize> {
         let mut state = self.state.lock();
         if state.closed {
             return Err(errno::EPIPE);
         }
-        if self.domain.device==1 && task.deadline_enabled() {return Err(errno::EOPNOTSUPP);}
+        if self.domain.device == 1 && task.deadline_enabled() {
+            return Err(errno::EOPNOTSUPP);
+        }
         let tid = task.get_id();
         let thread = state.thread(tid).ok_or(errno::EPIPE)?;
-        let cancel_receive = thread.pending_receive.as_ref().is_some_and(RpcRequest::cancelled);
-        let cancel_delivery = thread.pending_delivery.as_ref()
-            .and_then(|delivery| delivery.incoming.as_ref()).is_some_and(RpcRequest::cancelled);
+        let cancel_receive = thread
+            .pending_receive
+            .as_ref()
+            .is_some_and(RpcRequest::cancelled);
+        let cancel_delivery = thread
+            .pending_delivery
+            .as_ref()
+            .and_then(|delivery| delivery.incoming.as_ref())
+            .is_some_and(RpcRequest::cancelled);
         if cancel_receive {
-            let cancelled=state.thread_mut(tid)?.pending_receive.take();
-            drop(state);drop(cancelled);
-            return self.read_record_for_abi(task,abi,output,capacity);
+            let cancelled = state.thread_mut(tid)?.pending_receive.take();
+            drop(state);
+            drop(cancelled);
+            return self.read_record_for_abi(task, abi, output, capacity);
         }
         if cancel_delivery {
             let cancelled = state.thread_mut(tid)?.pending_delivery.take();
-            drop(state); drop(cancelled);
+            drop(state);
+            drop(cancelled);
             return self.read_record_for_abi(task, abi, output, capacity);
         }
         let thread = state.thread(tid).ok_or(errno::EPIPE)?;
@@ -775,7 +886,9 @@ impl BinderFile {
             return Ok(4);
         }
         if state.can_spawn(tid) && self.endpoint.ready() {
-            if capacity < 4 { return Err(errno::ENOSPC); }
+            if capacity < 4 {
+                return Err(errno::ENOSPC);
+            }
             // Reserve one request before dropping the lock for faultable
             // usercopy. A failed copy must not permanently consume pool space.
             state.spawn = Some(SpawnRequest::Writing(tid));
@@ -789,7 +902,9 @@ impl BinderFile {
             drop(state);
             self.endpoint.waker().wake_all();
             copied?;
-            if closed { return Err(errno::EPIPE); }
+            if closed {
+                return Err(errno::EPIPE);
+            }
             return Ok(4);
         }
         let process_work = thread.accepts_process_work();
@@ -827,7 +942,10 @@ impl BinderFile {
         if self.objects.lock().pending_acquisition(tid) {
             return Ok(0);
         }
-        if let Some(completed) = state.thread(tid).and_then(|thread| thread.completed.front()) {
+        if let Some(completed) = state
+            .thread(tid)
+            .and_then(|thread| thread.completed.front())
+        {
             // Another thread may have begun this node's weak acquisition
             // before this sender exported it strongly. Both exporters retain
             // their userspace references until all needed holds are confirmed.
@@ -852,7 +970,8 @@ impl BinderFile {
             return Ok(0);
         }
         let thread = state.thread(tid).ok_or(errno::EPIPE)?;
-        let replying = thread.pending_receive.is_none() && thread.outgoing().is_some_and(RpcCall::ready);
+        let replying =
+            thread.pending_receive.is_none() && thread.outgoing().is_some_and(RpcCall::ready);
         let receiving = thread.can_receive(&self.endpoint);
         if thread.pending_delivery.is_none() && !replying && !receiving {
             return Ok(0);
@@ -868,12 +987,21 @@ impl BinderFile {
                 Transaction::Outgoing(call) => call.take_reply().unwrap(),
                 _ => unreachable!(),
             };
-            Delivery { message, incoming: None, replying: true }
+            Delivery {
+                message,
+                incoming: None,
+                replying: true,
+            }
         } else {
             match state.thread_mut(tid)?.receive(&self.endpoint) {
                 Ok(Some(mut request)) => {
-                    let message = core::mem::replace(&mut request.message, objects::message_empty());
-                    Delivery { message: Ok(message), incoming: Some(request), replying: false }
+                    let message =
+                        core::mem::replace(&mut request.message, objects::message_empty());
+                    Delivery {
+                        message: Ok(message),
+                        incoming: Some(request),
+                        replying: false,
+                    }
                 }
                 _ => return Ok(0),
             }
@@ -886,7 +1014,11 @@ impl BinderFile {
             }
             Err(error) => return Err(error),
         };
-        let Delivery { message, mut incoming, replying } = delivery;
+        let Delivery {
+            message,
+            mut incoming,
+            replying,
+        } = delivery;
         let mut node = state.node;
         let mut context_requested = state.node_flags & 0x1000 != 0;
         drop(state);
@@ -910,25 +1042,46 @@ impl BinderFile {
             if context_requested && capacity < 76 {
                 // Keep the delivered native request, route and its immutable
                 // sender snapshot intact until the caller supplies room.
-                let mut request=incoming.take().unwrap();request.message=message;
-                self.state.lock().thread_mut(tid)?.pending_receive=Some(request);
+                let mut request = incoming.take().unwrap();
+                request.message = message;
+                self.state.lock().thread_mut(tid)?.pending_receive = Some(request);
                 return Err(errno::ENOSPC);
             }
-            let sender=incoming.as_ref().and_then(RpcRequest::sender);
-            let context=if context_requested {
-                let subject=sender.and_then(|sender|sender.subject()).ok_or(errno::EACCES)?;
-                if !same_policy(self.subject.as_ref(),Some(subject)) {return Err(errno::EACCES);}
+            let sender = incoming.as_ref().and_then(RpcRequest::sender);
+            let context = if context_requested {
+                let subject = sender
+                    .and_then(|sender| sender.subject())
+                    .ok_or(errno::EACCES)?;
+                if !same_policy(self.subject.as_ref(), Some(subject)) {
+                    return Err(errno::EACCES);
+                }
                 Some(subject.name())
-            } else {None};
-            if let Some(request)=incoming.as_ref() {
-                enter_request_priority(request,task)?;
+            } else {
+                None
+            };
+            if let Some(request) = incoming.as_ref() {
+                enter_request_priority(request, task)?;
             }
-            let mut installed=abi.map(|abi|buffers::Installed::new(task,abi));
-            let (length, offsets_length, context_address) = self.decode_received_context(&message, address, &arena,installed.as_mut(),context)?;
-            let record_size=if context_address.is_some() {76}else{68};
+            let mut installed = abi.map(|abi| buffers::Installed::new(task, abi));
+            let (length, offsets_length, context_address) = self.decode_received_context(
+                &message,
+                address,
+                &arena,
+                installed.as_mut(),
+                context,
+            )?;
+            let record_size = if context_address.is_some() { 76 } else { 68 };
             let mut record = [0u8; 76];
-            record[..4]
-                .copy_from_slice(&(if replying { BR_REPLY } else if context_address.is_some() {BR_TRANSACTION_SEC_CTX} else { BR_TRANSACTION }).to_le_bytes());
+            record[..4].copy_from_slice(
+                &(if replying {
+                    BR_REPLY
+                } else if context_address.is_some() {
+                    BR_TRANSACTION_SEC_CTX
+                } else {
+                    BR_TRANSACTION
+                })
+                .to_le_bytes(),
+            );
             let tx = &mut record[4..];
             if !replying {
                 put64(tx, 0, node.0);
@@ -937,21 +1090,29 @@ impl BinderFile {
             tx[16..20].copy_from_slice(&message.opcode.to_le_bytes());
             tx[20..32].copy_from_slice(&message.bytes[..12]);
             let sender_pid = if !replying && u32_at(&message.bytes, 0) & 1 == 0 {
-                sender.and_then(|sender| task.get_namespace().resolve_local_id(sender.process_id()))
-                    .and_then(|id| i32::try_from(id).ok()).unwrap_or(0)
-            } else {0};
+                sender
+                    .and_then(|sender| task.get_namespace().resolve_local_id(sender.process_id()))
+                    .and_then(|id| i32::try_from(id).ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             tx[24..28].copy_from_slice(&sender_pid.to_le_bytes());
-            if let Some(sender)=sender {tx[28..32].copy_from_slice(&sender.principal().0.to_le_bytes());}
+            if let Some(sender) = sender {
+                tx[28..32].copy_from_slice(&sender.principal().0.to_le_bytes());
+            }
             put64(tx, 32, length);
             put64(tx, 40, offsets_length);
             put64(tx, 48, address);
             put64(tx, 56, address + ((length + 7) & !7));
-            if let Some(context_address)=context_address {put64(tx,64,context_address);}
+            if let Some(context_address) = context_address {
+                put64(tx, 64, context_address);
+            }
             write(task, output, &record[..record_size])?;
-            if let Some(installed)=installed {
-                let automatic=installed.commit();
+            if let Some(installed) = installed {
+                let automatic = installed.commit();
                 if !automatic.is_empty() {
-                    self.retain_auto_fds(address,automatic)?;
+                    self.retain_auto_fds(address, automatic)?;
                 }
             }
             if let Some(request) = incoming.take() {
@@ -962,15 +1123,17 @@ impl BinderFile {
                         return Err(error);
                     }
                 } else {
-                    let mut state=self.state.lock();let thread=state.thread_mut(tid)?;
+                    let mut state = self.state.lock();
+                    let thread = state.thread_mut(tid)?;
                     thread.stack.push(Transaction::Incoming(Incoming {
-                        accepts_fds:u32_at(&message.bytes,0)&0x10!=0, request,
+                        accepts_fds: u32_at(&message.bytes, 0) & 0x10 != 0,
+                        request,
                     }));
                 }
             }
             Ok(record_size)
         })();
-        if !matches!(result,Ok(68|76)) {
+        if !matches!(result, Ok(68 | 76)) {
             let _ = self.release_buffer(&arena, address);
         }
         result
@@ -1009,7 +1172,7 @@ impl BinderFile {
                 let command = u32_at(&read::<4>(task, source + consumed)?, 0);
                 let size = match command {
                     BC_TRANSACTION | BC_REPLY => 64,
-                    BC_TRANSACTION_SG|BC_REPLY_SG=>72,
+                    BC_TRANSACTION_SG | BC_REPLY_SG => 72,
                     BC_FREE_BUFFER => 8,
                     BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => 12,
                     BC_DEAD_BINDER_DONE => 8,
@@ -1031,7 +1194,7 @@ impl BinderFile {
                 return Ok(());
             }
             loop {
-                let n = self.read_record_for_abi(task,Some(abi), output, read_size)?;
+                let n = self.read_record_for_abi(task, Some(abi), output, read_size)?;
                 if n != 0 {
                     put64(&mut bwr, 32, n);
                     return Ok(());
@@ -1045,7 +1208,8 @@ impl BinderFile {
                     let thread = state.thread_mut(task.get_id())?;
                     thread.waiting_for_process = thread.accepts_process_work();
                 }
-                let waited = waker.wait_result_until_owned(task.get_id(), tf, || self.ready(task.get_id()));
+                let waited =
+                    waker.wait_result_until_owned(task.get_id(), tf, || self.ready(task.get_id()));
                 {
                     let mut state = self.state.lock();
                     state.thread_mut(task.get_id())?.waiting_for_process = false;
@@ -1071,9 +1235,7 @@ pub(super) fn process_exit(task: &Task) {
         .active_handles()
         .into_iter()
         .filter_map(|handle| task.handle_table.get(handle))
-        .filter(|object| {
-            from_object(object).is_some_and(|file| file.owner == owner)
-        })
+        .filter(|object| from_object(object).is_some_and(|file| file.owner == owner))
         .collect();
     for object in files {
         if let Some(file) = from_object(&object) {
@@ -1208,7 +1370,9 @@ impl Selectable for BinderFile {
     ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
         Some(if interest.read {
             alloc::vec![self.endpoint.waker().subscribe_readiness(waiter)]
-        } else { Vec::new() })
+        } else {
+            Vec::new()
+        })
     }
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         ReadySet {
@@ -1324,31 +1488,77 @@ mod tests {
         drop(call);
         assert_eq!(receiver.fixed_priority.effective(), 3);
     }
-    fn context_fixture() -> (Task,Task,BinderFile,Arc<crate::shield::Policy>,usize) {
-        let env=Environment::new();let server=task(&env,301);let client=task(&env,302);
-        let policy=crate::shield::Policy::new(vec![(1,"u:r:rpc_server:s0".into()),(2,"u:r:rpc_client:s0".into()),(3,"u:r:rpc_later:s0".into())],vec![]).unwrap();
-        *server.security_subject.write()=Some(policy.subject(1).unwrap());
-        *client.security_subject.write()=Some(policy.subject(2).unwrap());
-        client.credentials.write().set_principals(crate::shield::identity::Identities::all(crate::shield::identity::Principal(10042))).unwrap();
-        let endpoint=file(&server,&env,1);let base=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
-        server.allocate_stack_pages(base,1).unwrap();let mut object=[0u8;24];
+    fn context_fixture() -> (Task, Task, BinderFile, Arc<crate::shield::Policy>, usize) {
+        let env = Environment::new();
+        let server = task(&env, 301);
+        let client = task(&env, 302);
+        let policy = crate::shield::Policy::new(
+            vec![
+                (1, "u:r:rpc_server:s0".into()),
+                (2, "u:r:rpc_client:s0".into()),
+                (3, "u:r:rpc_later:s0".into()),
+            ],
+            vec![],
+        )
+        .unwrap();
+        *server.security_subject.write() = Some(policy.subject(1).unwrap());
+        *client.security_subject.write() = Some(policy.subject(2).unwrap());
+        client
+            .credentials
+            .write()
+            .set_principals(crate::shield::identity::Identities::all(
+                crate::shield::identity::Principal(10042),
+            ))
+            .unwrap();
+        let endpoint = file(&server, &env, 1);
+        let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        server.allocate_stack_pages(base, 1).unwrap();
+        let mut object = [0u8; 24];
         // Stock ProcessState supplies only flags; the header is zero.
         object[4..8].copy_from_slice(&0x1000u32.to_le_bytes());
-        write(&server,base,&object).unwrap();
-        assert_eq!(endpoint.ioctl(&server,&LinuxAbi::default(),&mut Trapframe::new(),SET_CONTEXT_EXT,base,false),0);
-        endpoint.ensure_thread(server.get_id()).unwrap();endpoint.state.lock().threads.get_mut(&server.get_id()).unwrap().looper=true;
-        assert!(endpoint.mmap(&server,0,256*1024,1,2,0)<usize::MAX-4096);
-        (server,client,endpoint,policy,base+512)
+        write(&server, base, &object).unwrap();
+        assert_eq!(
+            endpoint.ioctl(
+                &server,
+                &LinuxAbi::default(),
+                &mut Trapframe::new(),
+                SET_CONTEXT_EXT,
+                base,
+                false
+            ),
+            0
+        );
+        endpoint.ensure_thread(server.get_id()).unwrap();
+        endpoint
+            .state
+            .lock()
+            .threads
+            .get_mut(&server.get_id())
+            .unwrap()
+            .looper = true;
+        assert!(endpoint.mmap(&server, 0, 256 * 1024, 1, 2, 0) < usize::MAX - 4096);
+        (server, client, endpoint, policy, base + 512)
     }
     fn context_message() -> RpcMessage {
-        let mut message=objects::message_empty();message.bytes=vec![0;objects::HEADER];
+        let mut message = objects::message_empty();
+        message.bytes = vec![0; objects::HEADER];
         // An untrusted serialized euid cannot replace the native snapshot.
-        message.bytes[8..12].copy_from_slice(&0u32.to_le_bytes());message
+        message.bytes[8..12].copy_from_slice(&0u32.to_le_bytes());
+        message
     }
     fn pool_limit(file: &BinderFile, task: &Task, output: usize, limit: u32) {
         write(task, output, &limit.to_le_bytes()).unwrap();
-        assert_eq!(file.ioctl(task, &LinuxAbi::default(), &mut Trapframe::new(),
-            SET_MAX_THREADS, output, false), 0);
+        assert_eq!(
+            file.ioctl(
+                task,
+                &LinuxAbi::default(),
+                &mut Trapframe::new(),
+                SET_MAX_THREADS,
+                output,
+                false
+            ),
+            0
+        );
     }
 
     #[test_case]
@@ -1356,37 +1566,59 @@ mod tests {
         let (server, client, file, _, output) = context_fixture();
         let abi = LinuxAbi::default();
         let peer = RpcEndpoint::new();
-        let _call = file.endpoint.send_scoped_from(&client, context_message(), &peer, None).unwrap();
+        let _call = file
+            .endpoint
+            .send_scoped_from(&client, context_message(), &peer, None)
+            .unwrap();
         assert!(!file.state.lock().can_spawn(server.get_id()));
         pool_limit(&file, &server, output, 1);
         assert_eq!(file.read_record(&server, output, 3), Err(errno::ENOSPC));
         assert_eq!(file.read_record(&server, 0, 4), Err(errno::EFAULT));
         assert!(file.state.lock().can_spawn(server.get_id()));
         assert_eq!(file.read_record(&server, output, 4), Ok(4));
-        assert_eq!(u32_at(&read::<4>(&server, output).unwrap(), 0), BR_SPAWN_LOOPER);
+        assert_eq!(
+            u32_at(&read::<4>(&server, output).unwrap(), 0),
+            BR_SPAWN_LOOPER
+        );
         assert!(!file.state.lock().can_spawn(server.get_id()));
 
         let worker = task(&file.domain.environment, 303);
         file.ensure_thread(worker.get_id()).unwrap();
-        file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]).unwrap();
-        assert_eq!(file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]), Err(errno::EINVAL));
+        file.command(&worker, &abi, BC_REGISTER_LOOPER, &[])
+            .unwrap();
+        assert_eq!(
+            file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]),
+            Err(errno::EINVAL)
+        );
         assert!(!file.state.lock().can_spawn(server.get_id()));
         pool_limit(&file, &server, output, 2);
-        file.state.lock().thread_mut(worker.get_id()).unwrap().waiting_for_process = true;
+        file.state
+            .lock()
+            .thread_mut(worker.get_id())
+            .unwrap()
+            .waiting_for_process = true;
         assert!(!file.state.lock().can_spawn(server.get_id()));
         // An already waiting receiver can dispatch queued work without growth.
         assert!(file.ready(worker.get_id()));
-        file.state.lock().thread_mut(worker.get_id()).unwrap().waiting_for_process = false;
+        file.state
+            .lock()
+            .thread_mut(worker.get_id())
+            .unwrap()
+            .waiting_for_process = false;
         pool_limit(&file, &server, output, 1);
         file.command(&worker, &abi, BC_EXIT_LOOPER, &[]).unwrap();
         assert!(file.state.lock().can_spawn(server.get_id()));
         assert_eq!(file.read_record(&server, output, 4), Ok(4));
-        file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]).unwrap();
+        file.command(&worker, &abi, BC_REGISTER_LOOPER, &[])
+            .unwrap();
         file.thread_exit(worker.get_id());
         assert!(file.state.lock().can_spawn(server.get_id()));
         pool_limit(&file, &server, output, 0);
         assert!(!file.state.lock().can_spawn(server.get_id()));
-        assert_eq!(file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]), Err(errno::EPIPE));
+        assert_eq!(
+            file.command(&worker, &abi, BC_REGISTER_LOOPER, &[]),
+            Err(errno::EPIPE)
+        );
     }
 
     #[test_case]
@@ -1407,10 +1639,26 @@ mod tests {
         // These calls have different roots: neither may be delivered through
         // the other's synchronous callback stack. This is the SF/permission
         // service cycle when each process has only its original pool looper.
-        let a_call = b.endpoint.send_scoped(context_message(), &a.endpoint, None).unwrap();
-        let b_call = a.endpoint.send_scoped(context_message(), &b.endpoint, None).unwrap();
-        a.state.lock().thread_mut(401).unwrap().stack.push(Transaction::Outgoing(a_call));
-        b.state.lock().thread_mut(402).unwrap().stack.push(Transaction::Outgoing(b_call));
+        let a_call = b
+            .endpoint
+            .send_scoped(context_message(), &a.endpoint, None)
+            .unwrap();
+        let b_call = a
+            .endpoint
+            .send_scoped(context_message(), &b.endpoint, None)
+            .unwrap();
+        a.state
+            .lock()
+            .thread_mut(401)
+            .unwrap()
+            .stack
+            .push(Transaction::Outgoing(a_call));
+        b.state
+            .lock()
+            .thread_mut(402)
+            .unwrap()
+            .stack
+            .push(Transaction::Outgoing(b_call));
         for (file, task) in [(&a, &first), (&b, &second)] {
             assert!(!file.state.lock().threads[&task.get_id()].can_receive(&file.endpoint));
             assert!(!file.ready(task.get_id()));
@@ -1418,7 +1666,10 @@ mod tests {
             pool_limit(file, task, output, 1);
             assert!(file.ready(task.get_id()));
             assert_eq!(file.read_record(task, output, 68), Ok(4));
-            assert_eq!(u32_at(&read::<4>(task, output).unwrap(), 0), BR_SPAWN_LOOPER);
+            assert_eq!(
+                u32_at(&read::<4>(task, output).unwrap(), 0),
+                BR_SPAWN_LOOPER
+            );
         }
         first.set_id(403);
         second.set_id(404);
@@ -1450,17 +1701,30 @@ mod tests {
         let arena = endpoint.state.lock().arena.clone().unwrap();
         let occupied = arena.reserve(256 * 1024).unwrap();
         let caller = RpcEndpoint::new();
-        let call = endpoint.endpoint.send_scoped_from(&client, context_message(), &caller, None).unwrap();
+        let call = endpoint
+            .endpoint
+            .send_scoped_from(&client, context_message(), &caller, None)
+            .unwrap();
         assert_eq!(endpoint.read_record(&server, output, 76), Ok(0));
-        assert!(endpoint.state.lock().threads[&server.get_id()].pending_delivery.is_some());
+        assert!(
+            endpoint.state.lock().threads[&server.get_id()]
+                .pending_delivery
+                .is_some()
+        );
         assert!(!endpoint.ready(server.get_id()));
         assert!(!call.ready());
         arena.free(occupied).unwrap();
         assert!(endpoint.ready(server.get_id()));
         assert_eq!(endpoint.read_record(&server, output, 76), Ok(76));
-        assert!(endpoint.state.lock().threads[&server.get_id()].pending_delivery.is_none());
+        assert!(
+            endpoint.state.lock().threads[&server.get_id()]
+                .pending_delivery
+                .is_none()
+        );
         let record = read::<76>(&server, output).unwrap();
-        endpoint.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+        endpoint
+            .release_buffer(&arena, u64_at(&record, 52))
+            .unwrap();
     }
     #[test_case]
     fn binder_reply_backpressure_retains_completed_reply() {
@@ -1468,10 +1732,22 @@ mod tests {
         let arena = endpoint.state.lock().arena.clone().unwrap();
         let occupied = arena.reserve(256 * 1024).unwrap();
         let peer = RpcEndpoint::new();
-        let call = peer.send_scoped(context_message(), &endpoint.endpoint, None).unwrap();
-        peer.receive().unwrap().unwrap().reply(context_message()).unwrap();
-        endpoint.state.lock().threads.get_mut(&server.get_id()).unwrap()
-            .stack.push(Transaction::Outgoing(call));
+        let call = peer
+            .send_scoped(context_message(), &endpoint.endpoint, None)
+            .unwrap();
+        peer.receive()
+            .unwrap()
+            .unwrap()
+            .reply(context_message())
+            .unwrap();
+        endpoint
+            .state
+            .lock()
+            .threads
+            .get_mut(&server.get_id())
+            .unwrap()
+            .stack
+            .push(Transaction::Outgoing(call));
         assert_eq!(endpoint.read_record(&server, output, 68), Ok(0));
         assert!(!endpoint.ready(server.get_id()));
         arena.free(occupied).unwrap();
@@ -1479,126 +1755,261 @@ mod tests {
         assert_eq!(endpoint.read_record(&server, output, 68), Ok(68));
         let record = read::<68>(&server, output).unwrap();
         assert_eq!(u32_at(&record, 0), BR_REPLY);
-        endpoint.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+        endpoint
+            .release_buffer(&arena, u64_at(&record, 52))
+            .unwrap();
     }
     #[test_case]
     fn binder_sender_pid_uses_receiver_namespace_and_never_serialized_identity() {
-        let (server,client,endpoint,_policy,output)=context_fixture();
-        let namespace=crate::task::namespace::TaskNamespace::new_root("binder-receiver".into());
+        let (server, client, endpoint, _policy, output) = context_fixture();
+        let namespace = crate::task::namespace::TaskNamespace::new_root("binder-receiver".into());
         server.set_namespace(namespace.clone());
-        let unrelated=namespace.allocate_task_id_for(909);
-        let local=namespace.allocate_task_id_for(client.get_thread_group_id());
-        assert_ne!(local,client.get_namespace_id());
-        let caller=RpcEndpoint::new();
-        for visible in [true,false] {
-            if !visible {namespace.unregister_mapping_for_global(client.get_thread_group_id());}
-            let mut message=context_message();
+        let unrelated = namespace.allocate_task_id_for(909);
+        let local = namespace.allocate_task_id_for(client.get_thread_group_id());
+        assert_ne!(local, client.get_namespace_id());
+        let caller = RpcEndpoint::new();
+        for visible in [true, false] {
+            if !visible {
+                namespace.unregister_mapping_for_global(client.get_thread_group_id());
+            }
+            let mut message = context_message();
             message.bytes[4..8].copy_from_slice(&(unrelated as u32).to_le_bytes());
-            let call=endpoint.endpoint.send_scoped_from(&client,message,&caller,None).unwrap();
-            assert_eq!(endpoint.read_record(&server,output,76),Ok(76));
-            let record=read::<76>(&server,output).unwrap();
-            assert_eq!(u32_at(&record,28),if visible {local as u32}else{0});
-            assert_eq!(u32_at(&record,0),BR_TRANSACTION_SEC_CTX);
-            let pointer=u64_at(&record,68);
-            assert_eq!(read::<18>(&server,pointer).unwrap(),*b"u:r:rpc_client:s0\0");
-            endpoint.command(&server,&LinuxAbi::default(),BC_REPLY,&[0;64]).unwrap();
+            let call = endpoint
+                .endpoint
+                .send_scoped_from(&client, message, &caller, None)
+                .unwrap();
+            assert_eq!(endpoint.read_record(&server, output, 76), Ok(76));
+            let record = read::<76>(&server, output).unwrap();
+            assert_eq!(u32_at(&record, 28), if visible { local as u32 } else { 0 });
+            assert_eq!(u32_at(&record, 0), BR_TRANSACTION_SEC_CTX);
+            let pointer = u64_at(&record, 68);
+            assert_eq!(
+                read::<18>(&server, pointer).unwrap(),
+                *b"u:r:rpc_client:s0\0"
+            );
+            endpoint
+                .command(&server, &LinuxAbi::default(), BC_REPLY, &[0; 64])
+                .unwrap();
             assert!(call.take_reply().unwrap().is_ok());
-            endpoint.release_buffer(&endpoint.state.lock().arena.clone().unwrap(),u64_at(&record,52)).unwrap();
-            assert_eq!(endpoint.read_record(&server,output,76),Ok(4));
-            assert_eq!(u32_at(&read::<4>(&server,output).unwrap(),0),BR_COMPLETE);
+            endpoint
+                .release_buffer(
+                    &endpoint.state.lock().arena.clone().unwrap(),
+                    u64_at(&record, 52),
+                )
+                .unwrap();
+            assert_eq!(endpoint.read_record(&server, output, 76), Ok(4));
+            assert_eq!(u32_at(&read::<4>(&server, output).unwrap(), 0), BR_COMPLETE);
         }
     }
     #[test_case]
     fn binder_context_records_use_native_sender_snapshot_and_read_only_lifetime() {
-        let (server,client,endpoint,policy,output)=context_fixture();let caller=RpcEndpoint::new();
-        let call=endpoint.endpoint.send_scoped_from(&client,context_message(),&caller,None).unwrap();
-        *client.security_subject.write()=Some(policy.subject(3).unwrap());
-        assert_eq!(endpoint.read_record(&server,output,68),Err(errno::ENOSPC));
-        assert!(!call.ready());assert!(endpoint.ready(server.get_id()));
-        assert_eq!(endpoint.read_record(&server,output,76),Ok(76));let record=read::<76>(&server,output).unwrap();
-        assert_eq!(u32_at(&record,0),BR_TRANSACTION_SEC_CTX);assert_eq!(u32_at(&record,32),10042);
-        let pointer=u64_at(&record,68);let buffer=u64_at(&record,52);
-        assert_eq!(read::<18>(&server,pointer).unwrap(),*b"u:r:rpc_client:s0\0");
-        assert!(copy_to_user(&server,pointer,b"forged").is_err());
-        endpoint.command(&server,&LinuxAbi::default(),BC_REPLY,&[0;64]).unwrap();
-        assert!(call.take_reply().unwrap().is_ok());endpoint.release_buffer(&endpoint.state.lock().arena.clone().unwrap(),buffer).unwrap();
-        assert_eq!(read::<18>(&server,pointer).unwrap(),[0;18]);
+        let (server, client, endpoint, policy, output) = context_fixture();
+        let caller = RpcEndpoint::new();
+        let call = endpoint
+            .endpoint
+            .send_scoped_from(&client, context_message(), &caller, None)
+            .unwrap();
+        *client.security_subject.write() = Some(policy.subject(3).unwrap());
+        assert_eq!(
+            endpoint.read_record(&server, output, 68),
+            Err(errno::ENOSPC)
+        );
+        assert!(!call.ready());
+        assert!(endpoint.ready(server.get_id()));
+        assert_eq!(endpoint.read_record(&server, output, 76), Ok(76));
+        let record = read::<76>(&server, output).unwrap();
+        assert_eq!(u32_at(&record, 0), BR_TRANSACTION_SEC_CTX);
+        assert_eq!(u32_at(&record, 32), 10042);
+        let pointer = u64_at(&record, 68);
+        let buffer = u64_at(&record, 52);
+        assert_eq!(
+            read::<18>(&server, pointer).unwrap(),
+            *b"u:r:rpc_client:s0\0"
+        );
+        assert!(copy_to_user(&server, pointer, b"forged").is_err());
+        endpoint
+            .command(&server, &LinuxAbi::default(), BC_REPLY, &[0; 64])
+            .unwrap();
+        assert!(call.take_reply().unwrap().is_ok());
+        endpoint
+            .release_buffer(&endpoint.state.lock().arena.clone().unwrap(), buffer)
+            .unwrap();
+        assert_eq!(read::<18>(&server, pointer).unwrap(), [0; 18]);
     }
     #[test_case]
     fn binder_context_retry_cancellation_and_failed_usercopy_release_requests() {
-        let (server,client,endpoint,_policy,output)=context_fixture();let caller=RpcEndpoint::new();
-        let call=endpoint.endpoint.send_scoped_from(&client,context_message(),&caller,None).unwrap();
-        assert_eq!(endpoint.read_record(&server,output,68),Err(errno::ENOSPC));drop(call);
-        assert_eq!(endpoint.read_record(&server,output,76),Ok(0));
-        assert!(endpoint.state.lock().threads[&server.get_id()].pending_receive.is_none());
-        let call=endpoint.endpoint.send_scoped_from(&client,context_message(),&caller,None).unwrap();
-        assert_eq!(endpoint.read_record(&server,0,76),Err(errno::EFAULT));
-        assert_eq!(call.take_reply().unwrap().err(),Some(crate::ipc::rpc::RpcError::PeerClosed));
-        let arena=endpoint.state.lock().arena.clone().unwrap();let address=arena.reserve(8).unwrap();arena.free(address).unwrap();
+        let (server, client, endpoint, _policy, output) = context_fixture();
+        let caller = RpcEndpoint::new();
+        let call = endpoint
+            .endpoint
+            .send_scoped_from(&client, context_message(), &caller, None)
+            .unwrap();
+        assert_eq!(
+            endpoint.read_record(&server, output, 68),
+            Err(errno::ENOSPC)
+        );
+        drop(call);
+        assert_eq!(endpoint.read_record(&server, output, 76), Ok(0));
+        assert!(
+            endpoint.state.lock().threads[&server.get_id()]
+                .pending_receive
+                .is_none()
+        );
+        let call = endpoint
+            .endpoint
+            .send_scoped_from(&client, context_message(), &caller, None)
+            .unwrap();
+        assert_eq!(endpoint.read_record(&server, 0, 76), Err(errno::EFAULT));
+        assert_eq!(
+            call.take_reply().unwrap().err(),
+            Some(crate::ipc::rpc::RpcError::PeerClosed)
+        );
+        let arena = endpoint.state.lock().arena.clone().unwrap();
+        let address = arena.reserve(8).unwrap();
+        arena.free(address).unwrap();
     }
     #[test_case]
     fn binder_context_delivery_rejects_absent_and_foreign_native_labels() {
-        let (server,client,endpoint,_policy,output)=context_fixture();let caller=RpcEndpoint::new();
-        for foreign in [false,true] {
-            *client.security_subject.write()=if foreign {Some(crate::shield::Policy::new(vec![(1,"u:r:rpc_client:s0".into())],vec![]).unwrap().subject(1).unwrap())}else{None};
-            let call=endpoint.endpoint.send_scoped_from(&client,context_message(),&caller,None).unwrap();
-            assert_eq!(endpoint.read_record(&server,output,76),Err(errno::EACCES));
-            assert_eq!(call.take_reply().unwrap().err(),Some(crate::ipc::rpc::RpcError::PeerClosed));
+        let (server, client, endpoint, _policy, output) = context_fixture();
+        let caller = RpcEndpoint::new();
+        for foreign in [false, true] {
+            *client.security_subject.write() = if foreign {
+                Some(
+                    crate::shield::Policy::new(vec![(1, "u:r:rpc_client:s0".into())], vec![])
+                        .unwrap()
+                        .subject(1)
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let call = endpoint
+                .endpoint
+                .send_scoped_from(&client, context_message(), &caller, None)
+                .unwrap();
+            assert_eq!(
+                endpoint.read_record(&server, output, 76),
+                Err(errno::EACCES)
+            );
+            assert_eq!(
+                call.take_reply().unwrap().err(),
+                Some(crate::ipc::rpc::RpcError::PeerClosed)
+            );
         }
     }
     #[test_case]
     fn binder_nested_calls_restore_reply_targets_and_fd_policy_after_reentry() {
-        let environment=Environment::new();let sender=task(&environment,1);let receiver=task(&environment,2);let manager_task=task(&environment,3);
-        let a=file(&sender,&environment,0);let b=file(&receiver,&environment,0);let manager=file(&manager_task,&environment,0);
-        let abi=LinuxAbi::default();
-        assert_eq!(manager.ioctl(&manager_task,&abi,&mut Trapframe::new(),SET_CONTEXT,0,false),0);
+        let environment = Environment::new();
+        let sender = task(&environment, 1);
+        let receiver = task(&environment, 2);
+        let manager_task = task(&environment, 3);
+        let a = file(&sender, &environment, 0);
+        let b = file(&receiver, &environment, 0);
+        let manager = file(&manager_task, &environment, 0);
+        let abi = LinuxAbi::default();
+        assert_eq!(
+            manager.ioctl(
+                &manager_task,
+                &abi,
+                &mut Trapframe::new(),
+                SET_CONTEXT,
+                0,
+                false
+            ),
+            0
+        );
         b.ensure_thread(2).unwrap();
-        assert!(b.mmap(&receiver,0,256*1024,1,2,0)<usize::MAX-4096);
-        let output=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
-        receiver.allocate_stack_pages(output,1).unwrap();
-        let outer=b.endpoint.send_scoped(objects::message_empty(),&a.endpoint,None).unwrap();
-        b.state.lock().threads.get_mut(&2).unwrap().stack.push(Transaction::Incoming(Incoming {
-            request:b.endpoint.receive().unwrap().unwrap(),accepts_fds:true,
-        }));
-        let mut transaction=[0u8;64];transaction[16..20].copy_from_slice(&41u32.to_le_bytes());
-        b.command(&receiver,&abi,BC_TRANSACTION,&transaction).unwrap();
-        assert_eq!(b.state.lock().threads[&2].stack.len(),2);
-        assert_eq!(b.read_record(&receiver,output,68),Ok(4));
-        let at_manager=manager.endpoint.receive().unwrap().unwrap();
-        let mut callback_message=at_manager.message.clone();callback_message.opcode=42;
-        let callback=b.endpoint.send_scoped(callback_message,&manager.endpoint,at_manager.context().as_ref()).unwrap();
+        assert!(b.mmap(&receiver, 0, 256 * 1024, 1, 2, 0) < usize::MAX - 4096);
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        receiver.allocate_stack_pages(output, 1).unwrap();
+        let outer = b
+            .endpoint
+            .send_scoped(objects::message_empty(), &a.endpoint, None)
+            .unwrap();
+        b.state
+            .lock()
+            .threads
+            .get_mut(&2)
+            .unwrap()
+            .stack
+            .push(Transaction::Incoming(Incoming {
+                request: b.endpoint.receive().unwrap().unwrap(),
+                accepts_fds: true,
+            }));
+        let mut transaction = [0u8; 64];
+        transaction[16..20].copy_from_slice(&41u32.to_le_bytes());
+        b.command(&receiver, &abi, BC_TRANSACTION, &transaction)
+            .unwrap();
+        assert_eq!(b.state.lock().threads[&2].stack.len(), 2);
+        assert_eq!(b.read_record(&receiver, output, 68), Ok(4));
+        let at_manager = manager.endpoint.receive().unwrap().unwrap();
+        let mut callback_message = at_manager.message.clone();
+        callback_message.opcode = 42;
+        let callback = b
+            .endpoint
+            .send_scoped(
+                callback_message,
+                &manager.endpoint,
+                at_manager.context().as_ref(),
+            )
+            .unwrap();
         // The waiting caller is not a registered looper. Its callback is routed
         // to its outstanding call rather than requiring another pool thread.
         assert!(!b.state.lock().threads[&2].looper);
-        assert!(b.ready(2));assert_eq!(b.read_record(&receiver,output,68),Ok(68));
-        assert_eq!(u32_at(&read::<68>(&receiver,output).unwrap(),0),BR_TRANSACTION);
+        assert!(b.ready(2));
+        assert_eq!(b.read_record(&receiver, output, 68), Ok(68));
+        assert_eq!(
+            u32_at(&read::<68>(&receiver, output).unwrap(), 0),
+            BR_TRANSACTION
+        );
         assert!(!b.state.lock().threads[&2].incoming().unwrap().accepts_fds);
-        b.command(&receiver,&abi,BC_REPLY,&transaction).unwrap();
+        b.command(&receiver, &abi, BC_REPLY, &transaction).unwrap();
         assert!(callback.take_reply().unwrap().is_ok());
-        assert_eq!(b.read_record(&receiver,output,68),Ok(4));
-        let response=at_manager.message.clone();at_manager.reply(response).unwrap();
-        assert_eq!(b.read_record(&receiver,output,68),Ok(68));
-        assert_eq!(u32_at(&read::<68>(&receiver,output).unwrap(),0),BR_REPLY);
+        assert_eq!(b.read_record(&receiver, output, 68), Ok(4));
+        let response = at_manager.message.clone();
+        at_manager.reply(response).unwrap();
+        assert_eq!(b.read_record(&receiver, output, 68), Ok(68));
+        assert_eq!(u32_at(&read::<68>(&receiver, output).unwrap(), 0), BR_REPLY);
         assert!(b.state.lock().threads[&2].incoming().unwrap().accepts_fds);
-        b.command(&receiver,&abi,BC_REPLY,&transaction).unwrap();
+        b.command(&receiver, &abi, BC_REPLY, &transaction).unwrap();
         assert!(outer.take_reply().unwrap().is_ok());
         assert!(b.state.lock().threads[&2].stack.is_empty());
     }
 
     #[test_case]
     fn binder_task_exit_cancels_transactions_through_vfs_wrappers() {
-        use crate::fs::vfs_v2::{core::VfsFileObject,drivers::tmpfs::TmpFS,manager::VfsManager};
-        let environment=Environment::new();let task=task(&environment,1);let server=RpcEndpoint::new();
-        let binder=Arc::new(file(&task,&environment,0));binder.ensure_thread(1).unwrap();
-        let call=server.send_scoped(objects::message_empty(),&binder.endpoint,None).unwrap();
-        let request=server.receive().unwrap().unwrap();
-        binder.state.lock().threads.get_mut(&1).unwrap().stack.push(Transaction::Outgoing(call));
-        let view=VfsManager::new_with_root(TmpFS::new(0));
-        let (entry,mount)=view.resolve_path("/").unwrap();
-        let wrapped=Arc::new(VfsFileObject::new(binder.clone(),entry,mount,"/dev/binder".into()));
-        task.handle_table.insert(KernelObject::File(wrapped)).unwrap();
+        use crate::fs::vfs_v2::{core::VfsFileObject, drivers::tmpfs::TmpFS, manager::VfsManager};
+        let environment = Environment::new();
+        let task = task(&environment, 1);
+        let server = RpcEndpoint::new();
+        let binder = Arc::new(file(&task, &environment, 0));
+        binder.ensure_thread(1).unwrap();
+        let call = server
+            .send_scoped(objects::message_empty(), &binder.endpoint, None)
+            .unwrap();
+        let request = server.receive().unwrap().unwrap();
+        binder
+            .state
+            .lock()
+            .threads
+            .get_mut(&1)
+            .unwrap()
+            .stack
+            .push(Transaction::Outgoing(call));
+        let view = VfsManager::new_with_root(TmpFS::new(0));
+        let (entry, mount) = view.resolve_path("/").unwrap();
+        let wrapped = Arc::new(VfsFileObject::new(
+            binder.clone(),
+            entry,
+            mount,
+            "/dev/binder".into(),
+        ));
+        task.handle_table
+            .insert(KernelObject::File(wrapped))
+            .unwrap();
         task_exit(&task);
-        assert!(request.cancelled());assert!(binder.state.lock().threads.is_empty());
+        assert!(request.cancelled());
+        assert!(binder.state.lock().threads.is_empty());
     }
 
     #[test_case]
@@ -1668,9 +2079,17 @@ mod tests {
         receiver.allocate_stack_pages(output, 1).unwrap();
         // An oneway callback is allowed while this thread handles a sync call.
         let call = client.endpoint.send(objects::message_empty()).unwrap();
-        client.state.lock().threads.get_mut(&1).unwrap().stack.push(Transaction::Incoming(Incoming {
-            request:client.endpoint.receive().unwrap().unwrap(), accepts_fds:false,
-        }));
+        client
+            .state
+            .lock()
+            .threads
+            .get_mut(&1)
+            .unwrap()
+            .stack
+            .push(Transaction::Incoming(Incoming {
+                request: client.endpoint.receive().unwrap().unwrap(),
+                accepts_fds: false,
+            }));
         let mut data = [0u8; 64];
         data[20..24].copy_from_slice(&1u32.to_le_bytes());
         client
@@ -1762,7 +2181,7 @@ mod tests {
         assert_eq!(server.read_record(&receiver, output, 68), Ok(68));
         let record = read::<68>(&receiver, output).unwrap();
         assert_eq!(u32_at(&record, 0), BR_TRANSACTION);
-        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS|0x10);
+        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS | 0x10);
         assert_eq!(u32_at(&record, 28), 1);
         server.command(&receiver, &abi, BC_REPLY, &data).unwrap();
         assert_eq!(client.read_record(&sender, output, 68), Ok(4));
@@ -1770,7 +2189,7 @@ mod tests {
         assert_eq!(client.read_record(&sender, output, 68), Ok(68));
         let record = read::<68>(&sender, output).unwrap();
         assert_eq!(u32_at(&record, 0), BR_REPLY);
-        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS|0x10);
+        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS | 0x10);
     }
     #[test_case]
     fn binder_context_death_checks_wire_cookie_and_preserves_failed_usercopy() {
@@ -1813,13 +2232,18 @@ mod tests {
         let server = file(&receiver, &environment, 0);
         let abi = LinuxAbi::default();
         assert_eq!(
-            server.ioctl(&receiver, &abi, &mut Trapframe::new(), SET_CONTEXT, 0, false),
+            server.ioctl(
+                &receiver,
+                &abi,
+                &mut Trapframe::new(),
+                SET_CONTEXT,
+                0,
+                false
+            ),
             0
         );
         client.ensure_thread(sender.get_id()).unwrap();
-        client
-            .command(&sender, &abi, BC_ENTER_LOOPER, &[])
-            .unwrap();
+        client.command(&sender, &abi, BC_ENTER_LOOPER, &[]).unwrap();
         client
             .command(&sender, &abi, BC_INCREFS, &0u32.to_le_bytes())
             .unwrap();
@@ -1841,10 +2265,7 @@ mod tests {
         assert!(client.ready(sender.get_id()));
         // A failed completion usercopy consumes neither the completion nor the
         // queued death and must not select the latter out of order.
-        assert_eq!(
-            client.read_record(&sender, 0, 4),
-            Err(errno::EFAULT)
-        );
+        assert_eq!(client.read_record(&sender, 0, 4), Err(errno::EFAULT));
         assert!(client.ready(sender.get_id()));
         let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
         sender.allocate_stack_pages(output, 1).unwrap();

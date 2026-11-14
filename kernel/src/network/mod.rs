@@ -34,8 +34,8 @@ pub mod config;
 pub mod ethernet;
 pub mod ethernet_interface;
 pub mod icmp;
-pub mod ipv4;
 pub mod ip;
+pub mod ipv4;
 pub mod ipv6;
 pub mod link;
 pub mod local;
@@ -889,25 +889,34 @@ impl NetworkManager {
     pub(crate) fn retain_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
         let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
         let mut references = self.socket_handle_references.write();
-        let entry = references.entry(socket_ptr).or_insert_with(|| SocketReferences {
-            count: 0,
-            identity: self.next_socket_id.fetch_add(1, Ordering::Relaxed) as u64,
-            owner: crate::task::mytask().map(|task| task.credentials.read().identity())
-                .unwrap_or(crate::shield::identity::ActiveIdentity {
-                    principal: crate::shield::identity::Principal(u32::MAX),
-                    group: crate::shield::identity::Group(u32::MAX),
-                }),
-        });
-        entry.count = entry.count
+        let entry = references
+            .entry(socket_ptr)
+            .or_insert_with(|| SocketReferences {
+                count: 0,
+                identity: self.next_socket_id.fetch_add(1, Ordering::Relaxed) as u64,
+                owner: crate::task::mytask()
+                    .map(|task| task.credentials.read().identity())
+                    .unwrap_or(crate::shield::identity::ActiveIdentity {
+                        principal: crate::shield::identity::Principal(u32::MAX),
+                        group: crate::shield::identity::Group(u32::MAX),
+                    }),
+            });
+        entry.count = entry
+            .count
             .checked_add(1)
             .expect("socket handle reference count overflow");
     }
 
     /// Stable native identity and creator, shared by dup/fork/IPC owners.
-    pub(crate) fn socket_handle_identity(&self, socket: &Arc<dyn SocketObject>)
-        -> Option<(u64, crate::shield::identity::ActiveIdentity)> {
+    pub(crate) fn socket_handle_identity(
+        &self,
+        socket: &Arc<dyn SocketObject>,
+    ) -> Option<(u64, crate::shield::identity::ActiveIdentity)> {
         let key = Arc::as_ptr(socket) as *const () as usize;
-        self.socket_handle_references.read().get(&key).map(|entry| (entry.identity, entry.owner))
+        self.socket_handle_references
+            .read()
+            .get(&key)
+            .map(|entry| (entry.identity, entry.owner))
     }
 
     /// Release one logical owning reference and close the final socket owner.
@@ -1152,10 +1161,19 @@ mod tests {
             manager.set_interface_traffic_meter("missing", Some("globalAlert")),
             Err("Link removed")
         );
-        manager.set_global_traffic_meter(Some("globalAlert")).unwrap();
+        manager
+            .set_global_traffic_meter(Some("globalAlert"))
+            .unwrap();
         assert!(ip.admit_traffic("any", traffic::Direction::Receive, 6));
         assert!(!ip.admit_traffic("any", traffic::Direction::Transmit, 5));
-        assert_eq!(manager.traffic_meter("globalAlert").unwrap().snapshot().remaining, 0);
+        assert_eq!(
+            manager
+                .traffic_meter("globalAlert")
+                .unwrap()
+                .snapshot()
+                .remaining,
+            0
+        );
         manager.set_global_traffic_meter(None).unwrap();
         assert!(ip.admit_traffic("any", traffic::Direction::Transmit, 5));
         manager.remove_traffic_meter("globalAlert").unwrap();

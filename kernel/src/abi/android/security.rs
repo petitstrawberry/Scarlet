@@ -37,12 +37,24 @@ use core::any::Any;
 
 pub const SERVICE_MANAGER: u32 = 1;
 pub const PROPERTY_SERVICE: u32 = 2;
-const HW_SERVICE_MANAGER:u32=4;
+const HW_SERVICE_MANAGER: u32 = 4;
 const KEYSTORE_MANAGER: u32 = 5;
 const KEYSTORE_PERMISSIONS: [&str; 16] = [
-    "add_auth", "clear_ns", "get_state", "list", "lock", "reset", "unlock",
-    "change_user", "change_password", "clear_uid", "get_auth_token",
-    "early_boot_ended", "report_off_body", "pull_metrics", "delete_all_keys",
+    "add_auth",
+    "clear_ns",
+    "get_state",
+    "list",
+    "lock",
+    "reset",
+    "unlock",
+    "change_user",
+    "change_password",
+    "clear_uid",
+    "get_auth_token",
+    "early_boot_ended",
+    "report_off_body",
+    "pull_metrics",
+    "delete_all_keys",
     "get_attestation_key",
 ];
 pub const PROPERTY_SET: u64 = 1;
@@ -150,7 +162,10 @@ impl VfsNode for Node {
                 _ => 0,
             },
             matches!(self.content, Content::Directory),
-            matches!(self.content, Content::Access | Content::Context | Content::Create),
+            matches!(
+                self.content,
+                Content::Access | Content::Context | Content::Create
+            ),
         ))
     }
     fn as_any(&self) -> &dyn Any {
@@ -179,7 +194,8 @@ impl SecurityFs {
         if policy.labels().any(|(_, name)| !valid_context_name(&name)) {
             return Err(fs_error(FileSystemErrorKind::InvalidData));
         }
-        let status=super::policy_status::PolicyStatus::new(&policy).map_err(|_|fs_error(FileSystemErrorKind::NoSpace))?;
+        let status = super::policy_status::PolicyStatus::new(&policy)
+            .map_err(|_| fs_error(FileSystemErrorKind::NoSpace))?;
         Ok(Arc::new_cyclic(|weak| {
             let entries = [
                 ("", Content::Directory),
@@ -196,21 +212,39 @@ impl SecurityFs {
                 ("class/process/perms", Content::Directory),
                 ("class", Content::Directory),
                 ("class/property_service", Content::Directory),
-                ("class/property_service/index", Content::Text(b"2\n".to_vec())),
+                (
+                    "class/property_service/index",
+                    Content::Text(b"2\n".to_vec()),
+                ),
                 ("class/property_service/perms", Content::Directory),
-                ("class/property_service/perms/set", Content::Text(b"1\n".to_vec())),
+                (
+                    "class/property_service/perms/set",
+                    Content::Text(b"1\n".to_vec()),
+                ),
                 ("class/service_manager", Content::Directory),
                 (
                     "class/service_manager/index",
                     Content::Text(b"1\n".to_vec()),
                 ),
                 ("class/service_manager/perms", Content::Directory),
-                ("class/hwservice_manager",Content::Directory),
-                ("class/hwservice_manager/index",Content::Text(b"4\n".to_vec())),
-                ("class/hwservice_manager/perms",Content::Directory),
-                ("class/hwservice_manager/perms/add",Content::Text(b"1\n".to_vec())),
-                ("class/hwservice_manager/perms/find",Content::Text(b"2\n".to_vec())),
-                ("class/hwservice_manager/perms/list",Content::Text(b"3\n".to_vec())),
+                ("class/hwservice_manager", Content::Directory),
+                (
+                    "class/hwservice_manager/index",
+                    Content::Text(b"4\n".to_vec()),
+                ),
+                ("class/hwservice_manager/perms", Content::Directory),
+                (
+                    "class/hwservice_manager/perms/add",
+                    Content::Text(b"1\n".to_vec()),
+                ),
+                (
+                    "class/hwservice_manager/perms/find",
+                    Content::Text(b"2\n".to_vec()),
+                ),
+                (
+                    "class/hwservice_manager/perms/list",
+                    Content::Text(b"3\n".to_vec()),
+                ),
                 (
                     "class/service_manager/perms/add",
                     Content::Text(b"1\n".to_vec()),
@@ -224,14 +258,21 @@ impl SecurityFs {
                     Content::Text(b"3\n".to_vec()),
                 ),
             ];
-            let mut entries: Vec<(String, Content)> = entries.into_iter()
-                .map(|(path, content)| (path.into(), content)).collect();
+            let mut entries: Vec<(String, Content)> = entries
+                .into_iter()
+                .map(|(path, content)| (path.into(), content))
+                .collect();
             entries.push(("class/keystore2".into(), Content::Directory));
-            entries.push(("class/keystore2/index".into(), Content::Text(b"5\n".to_vec())));
+            entries.push((
+                "class/keystore2/index".into(),
+                Content::Text(b"5\n".to_vec()),
+            ));
             entries.push(("class/keystore2/perms".into(), Content::Directory));
             for (index, name) in KEYSTORE_PERMISSIONS.iter().enumerate() {
-                entries.push((format!("class/keystore2/perms/{name}"),
-                    Content::Text(format!("{}\n", index + 1).into_bytes())));
+                entries.push((
+                    format!("class/keystore2/perms/{name}"),
+                    Content::Text(format!("{}\n", index + 1).into_bytes()),
+                ));
             }
             if let Some(version) = policy_version {
                 entries.push((
@@ -288,7 +329,10 @@ impl SecurityFs {
         if !subject.is_some_and(|s| Arc::ptr_eq(s.policy(), &self.policy)) {
             return Err(fs_error(FileSystemErrorKind::PermissionDenied));
         }
-        let writable = matches!(node.content, Content::Access | Content::Context | Content::Create);
+        let writable = matches!(
+            node.content,
+            Content::Access | Content::Context | Content::Create
+        );
         if flags & 3 == 3 || (flags & 3 != 0 && !writable) || flags & (0x200 | 0x400) != 0 {
             return Err(fs_error(FileSystemErrorKind::PermissionDenied));
         }
@@ -427,13 +471,27 @@ pub(super) fn resource_context(task: &Task, node: &dyn VfsNode) -> Option<Vec<u8
     Some(format!("{}\0", name).into_bytes())
 }
 fn create_context(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
-    let text = core::str::from_utf8(input).map_err(|_| StreamError::InvalidArgument)?.trim_end_matches('\0');
+    let text = core::str::from_utf8(input)
+        .map_err(|_| StreamError::InvalidArgument)?
+        .trim_end_matches('\0');
     let fields: Vec<_> = text.split_ascii_whitespace().collect();
-    if !(3..=4).contains(&fields.len()) || fields[2] != "3" { return Err(StreamError::InvalidArgument); }
-    let source = policy.label_id(fields[0]).ok_or(StreamError::InvalidArgument)?;
-    let resource = policy.label_id(fields[1]).ok_or(StreamError::InvalidArgument)?;
-    let target = policy.preview_exec(source, resource).map_err(|_| StreamError::PermissionDenied)?;
-    Ok(format!("{}\0", policy.label(target).ok_or(StreamError::InvalidArgument)?).into_bytes())
+    if !(3..=4).contains(&fields.len()) || fields[2] != "3" {
+        return Err(StreamError::InvalidArgument);
+    }
+    let source = policy
+        .label_id(fields[0])
+        .ok_or(StreamError::InvalidArgument)?;
+    let resource = policy
+        .label_id(fields[1])
+        .ok_or(StreamError::InvalidArgument)?;
+    let target = policy
+        .preview_exec(source, resource)
+        .map_err(|_| StreamError::PermissionDenied)?;
+    Ok(format!(
+        "{}\0",
+        policy.label(target).ok_or(StreamError::InvalidArgument)?
+    )
+    .into_bytes())
 }
 fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     let text = core::str::from_utf8(input).map_err(|_| StreamError::InvalidArgument)?;
@@ -455,29 +513,60 @@ fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     // Unknown classes/bits always deny. A decision carries all known grants,
     // matching the immutable AVC cache semantics of libselinux.
     let mask = match class {
-        SERVICE_MANAGER|HW_SERVICE_MANAGER => SERVICE_PERMISSIONS,
+        SERVICE_MANAGER | HW_SERVICE_MANAGER => SERVICE_PERMISSIONS,
         PROPERTY_SERVICE => PROPERTY_SET as u32,
         KEYSTORE_MANAGER => (1 << KEYSTORE_PERMISSIONS.len()) - 1,
         _ => 0,
     };
-    let native_class=if class==HW_SERVICE_MANAGER {SERVICE_MANAGER}else{class};
-    let (allowed,generation)=policy.decision(source,target,native_class);
-    let allowed=allowed as u32 & mask;let sequence=generation as u32;
+    let native_class = if class == HW_SERVICE_MANAGER {
+        SERVICE_MANAGER
+    } else {
+        class
+    };
+    let (allowed, generation) = policy.decision(source, target, native_class);
+    let allowed = allowed as u32 & mask;
+    let sequence = generation as u32;
     Ok(format!("{allowed:x} ffffffff 0 ffffffff {sequence} 0").into_bytes())
 }
 impl StreamOps for SecurityFile {
     fn write_empty(&self) -> Result<usize, StreamError> {
-        if !self.writable { return Err(StreamError::PermissionDenied); }
-        if matches!(self.content, Content::Current(_)) { return Err(StreamError::InvalidArgument); }
-        if let Content::Exec(owner) | Content::FsCreate(owner) | Content::SockCreate(owner) = &self.content {
-            if !self.writable { return Err(StreamError::PermissionDenied); }
+        if !self.writable {
+            return Err(StreamError::PermissionDenied);
+        }
+        if matches!(self.content, Content::Current(_)) {
+            return Err(StreamError::InvalidArgument);
+        }
+        if let Content::Exec(owner) | Content::FsCreate(owner) | Content::SockCreate(owner) =
+            &self.content
+        {
+            if !self.writable {
+                return Err(StreamError::PermissionDenied);
+            }
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
-            if !core::ptr::eq(&*caller, &*owner) { return Err(StreamError::PermissionDenied); }
+            if !core::ptr::eq(&*caller, &*owner) {
+                return Err(StreamError::PermissionDenied);
+            }
             let mut state = self.state.lock();
-            if state.written || state.position != 0 { return Err(StreamError::InvalidArgument); }
-            if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
-            if matches!(self.content,Content::FsCreate(_)) {crate::shield::file::select_creation_label(&caller,None)}else if matches!(self.content,Content::SockCreate(_)) {crate::shield::socket::select(&caller,None)}else {crate::shield::exec_transition::cancel(&caller)}.map_err(|_|StreamError::PermissionDenied)?;
+            if state.written || state.position != 0 {
+                return Err(StreamError::InvalidArgument);
+            }
+            if !caller
+                .security_subject
+                .read()
+                .as_ref()
+                .is_some_and(|subject| Arc::ptr_eq(subject.policy(), &self.policy))
+            {
+                return Err(StreamError::PermissionDenied);
+            }
+            if matches!(self.content, Content::FsCreate(_)) {
+                crate::shield::file::select_creation_label(&caller, None)
+            } else if matches!(self.content, Content::SockCreate(_)) {
+                crate::shield::socket::select(&caller, None)
+            } else {
+                crate::shield::exec_transition::cancel(&caller)
+            }
+            .map_err(|_| StreamError::PermissionDenied)?;
             state.written = true;
         }
         Ok(0)
@@ -515,9 +604,11 @@ impl StreamOps for SecurityFile {
             state.position += 1;
             return Ok(size);
         }
-        if matches!(self.content,Content::Status) {
-            let status=self.status.as_ref().ok_or(StreamError::InvalidArgument)?;
-            for (index,value) in status.values().iter().enumerate() {state.bytes[index*4..index*4+4].copy_from_slice(&value.to_le_bytes());}
+        if matches!(self.content, Content::Status) {
+            let status = self.status.as_ref().ok_or(StreamError::InvalidArgument)?;
+            for (index, value) in status.values().iter().enumerate() {
+                state.bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+            }
         }
         let n = buffer
             .len()
@@ -535,7 +626,11 @@ impl StreamOps for SecurityFile {
         if buffer.is_empty() || buffer.len() > 4095 {
             return Err(StreamError::InvalidArgument);
         }
-        if let Content::Current(owner) | Content::Exec(owner) | Content::FsCreate(owner) | Content::SockCreate(owner) = &self.content {
+        if let Content::Current(owner)
+        | Content::Exec(owner)
+        | Content::FsCreate(owner)
+        | Content::SockCreate(owner) = &self.content
+        {
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
             if !core::ptr::eq(&*caller, &*owner) {
@@ -543,37 +638,63 @@ impl StreamOps for SecurityFile {
             }
             let text = core::str::from_utf8(buffer).map_err(|_| StreamError::InvalidArgument)?;
             let text = text.strip_suffix('\0').unwrap_or(text);
-            if !valid_context_name(text) {return Err(StreamError::InvalidArgument);}
-            let target = self
-                .policy
-                .label_id(text)
-                .ok_or_else(|| {
-                    crate::println!("[android label] unknown process context requested: {}", text);
-                    StreamError::InvalidArgument
-                })?;
+            if !valid_context_name(text) {
+                return Err(StreamError::InvalidArgument);
+            }
+            let target = self.policy.label_id(text).ok_or_else(|| {
+                crate::println!(
+                    "[android label] unknown process context requested: {}",
+                    text
+                );
+                StreamError::InvalidArgument
+            })?;
             let mut state = self.state.lock();
             if state.written || state.position != 0 {
                 return Err(StreamError::InvalidArgument);
             }
-            if matches!(&self.content,Content::FsCreate(_)) {
-                if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
-                crate::shield::file::select_creation_label(&caller,Some(target))
-            } else if matches!(&self.content,Content::SockCreate(_)) {
-                if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
-                crate::shield::socket::select(&caller,Some(target))
+            if matches!(&self.content, Content::FsCreate(_)) {
+                if !caller
+                    .security_subject
+                    .read()
+                    .as_ref()
+                    .is_some_and(|subject| Arc::ptr_eq(subject.policy(), &self.policy))
+                {
+                    return Err(StreamError::PermissionDenied);
+                }
+                crate::shield::file::select_creation_label(&caller, Some(target))
+            } else if matches!(&self.content, Content::SockCreate(_)) {
+                if !caller
+                    .security_subject
+                    .read()
+                    .as_ref()
+                    .is_some_and(|subject| Arc::ptr_eq(subject.policy(), &self.policy))
+                {
+                    return Err(StreamError::PermissionDenied);
+                }
+                crate::shield::socket::select(&caller, Some(target))
             } else if matches!(&self.content, Content::Exec(_)) {
                 crate::shield::exec_transition::reserve(&caller, &self.policy, target)
             } else {
                 crate::shield::syscall::transition(&caller, &self.policy, target)
-            }.map_err(|reason| {
+            }
+            .map_err(|reason| {
                 let operation = match &self.content {
                     Content::FsCreate(_) => "file-create",
                     Content::SockCreate(_) => "socket-create",
                     Content::Exec(_) => "exec",
                     _ => "current",
                 };
-                crate::println!("[android label] context denied: operation={} source={:?} target={} reason={}",
-                    operation, caller.security_subject.read().as_ref().map(|subject| subject.label()), text, reason);
+                crate::println!(
+                    "[android label] context denied: operation={} source={:?} target={} reason={}",
+                    operation,
+                    caller
+                        .security_subject
+                        .read()
+                        .as_ref()
+                        .map(|subject| subject.label()),
+                    text,
+                    reason
+                );
                 StreamError::PermissionDenied
             })?;
             state.written = true;
@@ -586,13 +707,16 @@ impl StreamOps for SecurityFile {
                 let text = core::str::from_utf8(buffer)
                     .map_err(|_| StreamError::InvalidArgument)?
                     .trim_end_matches('\0');
-                if !valid_context_name(text) {return Err(StreamError::InvalidArgument);}
-                self.policy
-                    .label_id(text)
-                    .ok_or_else(|| {
-                        crate::println!("[android label] unknown context validation requested: {}", text);
-                        StreamError::InvalidArgument
-                    })?;
+                if !valid_context_name(text) {
+                    return Err(StreamError::InvalidArgument);
+                }
+                self.policy.label_id(text).ok_or_else(|| {
+                    crate::println!(
+                        "[android label] unknown context validation requested: {}",
+                        text
+                    );
+                    StreamError::InvalidArgument
+                })?;
                 let mut response = text.as_bytes().to_vec();
                 response.push(0);
                 response
@@ -666,9 +790,8 @@ impl FileObject for SecurityFile {
 
 struct Driver;
 fn parse_mount_options(options: &str) -> Result<(usize, Option<u32>), FileSystemError> {
-    let decimal = |value: &str| {
-        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-    };
+    let decimal =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
     let mut policy = None;
     let mut policy_version = None;
     for option in options.split(',') {
@@ -754,11 +877,16 @@ pub(super) fn mmap(object: &KernelObject, mapping: &FileMapping) -> Option<usize
 
 pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
     let proc_path = path.strip_prefix("/proc/")?;
-    let (pid, attr) = if let Some(pid)=proc_path.strip_suffix("/attr/current") {(pid,0)}
-        else if let Some(pid)=proc_path.strip_suffix("/attr/exec") {(pid,1)}
-        else if let Some(pid)=proc_path.strip_suffix("/attr/fscreate") {(pid,2)}
-        else {(proc_path.strip_suffix("/attr/sockcreate")?,3)};
-    let exec=attr==1;
+    let (pid, attr) = if let Some(pid) = proc_path.strip_suffix("/attr/current") {
+        (pid, 0)
+    } else if let Some(pid) = proc_path.strip_suffix("/attr/exec") {
+        (pid, 1)
+    } else if let Some(pid) = proc_path.strip_suffix("/attr/fscreate") {
+        (pid, 2)
+    } else {
+        (proc_path.strip_suffix("/attr/sockcreate")?, 3)
+    };
+    let exec = attr == 1;
     let result = (|| -> Result<usize, usize> {
         if flags & 3 == 3 || flags & !(0x80000 | 0x800 | 0x20000 | 3) != 0 {
             return Err(errno::EACCES);
@@ -793,26 +921,71 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
         if !Arc::ptr_eq(caller.policy(), subject.policy()) {
             return Err(errno::EACCES);
         }
-        let bytes = if attr==3 {
-            target.as_deref().unwrap_or(task).socket_creation_label.read().as_ref().map(|selected|format!("{}\0",selected.target().name()).into_bytes()).unwrap_or_default()
-        }else if attr==2 {
-            target.as_deref().unwrap_or(task).creation_label.read().as_ref().filter(|selected|Arc::ptr_eq(&selected.policy,subject.policy()))
-                .map(|selected|format!("{}\0",subject.policy().label(selected.target).as_deref().unwrap_or("")).into_bytes()).unwrap_or_default()
-        }else if exec {
-            target.as_deref().unwrap_or(task).pending_exec_transition.read().as_ref()
-                .map(|pending| format!("{}\0", pending.target().name()).into_bytes()).unwrap_or_default()
-        } else { format!("{}\0", subject.name()).into_bytes() };
+        let bytes = if attr == 3 {
+            target
+                .as_deref()
+                .unwrap_or(task)
+                .socket_creation_label
+                .read()
+                .as_ref()
+                .map(|selected| format!("{}\0", selected.target().name()).into_bytes())
+                .unwrap_or_default()
+        } else if attr == 2 {
+            target
+                .as_deref()
+                .unwrap_or(task)
+                .creation_label
+                .read()
+                .as_ref()
+                .filter(|selected| Arc::ptr_eq(&selected.policy, subject.policy()))
+                .map(|selected| {
+                    format!(
+                        "{}\0",
+                        subject
+                            .policy()
+                            .label(selected.target)
+                            .as_deref()
+                            .unwrap_or("")
+                    )
+                    .into_bytes()
+                })
+                .unwrap_or_default()
+        } else if exec {
+            target
+                .as_deref()
+                .unwrap_or(task)
+                .pending_exec_transition
+                .read()
+                .as_ref()
+                .map(|pending| format!("{}\0", pending.target().name()).into_bytes())
+                .unwrap_or_default()
+        } else {
+            format!("{}\0", subject.name()).into_bytes()
+        };
         let content = if writable {
-            if !core::ptr::eq(target.as_deref().unwrap_or(task), task) || (attr==0 && !caller.can_transition()) {
+            if !core::ptr::eq(target.as_deref().unwrap_or(task), task)
+                || (attr == 0 && !caller.can_transition())
+            {
                 return Err(errno::EACCES);
             }
             let current = crate::task::mytask().ok_or(errno::ESRCH)?;
             if !core::ptr::eq(&*current, task) {
                 return Err(errno::EACCES);
             }
-            let owner = crate::sched::scheduler::get_task_by_id(current.get_id()).ok_or(errno::ESRCH)?;
-            if !core::ptr::eq(owner.as_ref(), task) { return Err(errno::ESRCH); }
-            if attr==3 {Content::SockCreate(Arc::downgrade(&owner))}else if attr==2 {Content::FsCreate(Arc::downgrade(&owner))}else if exec { Content::Exec(Arc::downgrade(&owner)) } else { Content::Current(Arc::downgrade(&owner)) }
+            let owner =
+                crate::sched::scheduler::get_task_by_id(current.get_id()).ok_or(errno::ESRCH)?;
+            if !core::ptr::eq(owner.as_ref(), task) {
+                return Err(errno::ESRCH);
+            }
+            if attr == 3 {
+                Content::SockCreate(Arc::downgrade(&owner))
+            } else if attr == 2 {
+                Content::FsCreate(Arc::downgrade(&owner))
+            } else if exec {
+                Content::Exec(Arc::downgrade(&owner))
+            } else {
+                Content::Current(Arc::downgrade(&owner))
+            }
         } else {
             Content::Text(bytes.clone())
         };
@@ -855,20 +1028,40 @@ mod tests {
     use crate::shield::Rule;
     #[test_case]
     fn keystore_queries_use_explicit_policy_and_mask_unknown_operations() {
-        let policy = Policy::new(vec![
-            (1, "u:r:system_server:s0".into()), (2, "u:r:keystore:s0".into()),
-            (3, "u:r:denied:s0".into()),
-        ], vec![Rule { source: 1, target: 2, class: KEYSTORE_MANAGER,
-            permissions: (1 << 2) | (1 << 31) }]).unwrap();
+        let policy = Policy::new(
+            vec![
+                (1, "u:r:system_server:s0".into()),
+                (2, "u:r:keystore:s0".into()),
+                (3, "u:r:denied:s0".into()),
+            ],
+            vec![Rule {
+                source: 1,
+                target: 2,
+                class: KEYSTORE_MANAGER,
+                permissions: (1 << 2) | (1 << 31),
+            }],
+        )
+        .unwrap();
         let fs = SecurityFs::new(policy.clone()).unwrap();
-        assert!(matches!(&fs.nodes["class/keystore2/perms/get_state"].content,
-            Content::Text(bytes) if bytes == b"3\n"));
-        assert!(decision(&policy, b"u:r:system_server:s0 u:r:keystore:s0 5 4").unwrap()
-            .starts_with(b"4 "));
-        assert!(decision(&policy, b"u:r:denied:s0 u:r:keystore:s0 5 4").unwrap()
-            .starts_with(b"0 "));
-        assert!(decision(&policy, b"u:r:system_server:s0 u:r:keystore:s0 99 4").unwrap()
-            .starts_with(b"0 "));
+        assert!(
+            matches!(&fs.nodes["class/keystore2/perms/get_state"].content,
+            Content::Text(bytes) if bytes == b"3\n")
+        );
+        assert!(
+            decision(&policy, b"u:r:system_server:s0 u:r:keystore:s0 5 4")
+                .unwrap()
+                .starts_with(b"4 ")
+        );
+        assert!(
+            decision(&policy, b"u:r:denied:s0 u:r:keystore:s0 5 4")
+                .unwrap()
+                .starts_with(b"0 ")
+        );
+        assert!(
+            decision(&policy, b"u:r:system_server:s0 u:r:keystore:s0 99 4")
+                .unwrap()
+                .starts_with(b"0 ")
+        );
     }
     fn policy() -> Arc<Policy> {
         Policy::new(
@@ -967,34 +1160,81 @@ mod tests {
     }
     #[test_case]
     fn android_hwservice_permissions_translate_to_native_service_authorization() {
-        let p=policy();
-        assert_eq!(decision(&p,b"u:r:caller:s0 u:object_r:service:s0 4 7").unwrap(),b"3 ffffffff 0 ffffffff 1 0");
-        assert_eq!(decision(&p,b"u:r:denied:s0 u:object_r:service:s0 4 1").unwrap(),b"0 ffffffff 0 ffffffff 1 0");
-        let fs=SecurityFs::new(p).unwrap();
-        assert!(matches!(&fs.nodes["class/hwservice_manager/index"].content,Content::Text(bytes) if bytes==b"4\n"));
+        let p = policy();
+        assert_eq!(
+            decision(&p, b"u:r:caller:s0 u:object_r:service:s0 4 7").unwrap(),
+            b"3 ffffffff 0 ffffffff 1 0"
+        );
+        assert_eq!(
+            decision(&p, b"u:r:denied:s0 u:object_r:service:s0 4 1").unwrap(),
+            b"0 ffffffff 0 ffffffff 1 0"
+        );
+        let fs = SecurityFs::new(p).unwrap();
+        assert!(
+            matches!(&fs.nodes["class/hwservice_manager/index"].content,Content::Text(bytes) if bytes==b"4\n")
+        );
     }
     #[test_case]
     fn android_create_context_previews_only_registered_resource_exec_rules() {
-        use crate::shield::{ExecTransitionRule,identity::Principal};
-        let policy = Policy::with_exec_transitions(vec![
-            (1,"u:r:init:s0".into()),(2,"u:object_r:daemon_exec:s0".into()),(3,"u:r:daemon:s0".into()),
-        ],vec![],vec![],vec![ExecTransitionRule {source:1,resource:2,target:3,principal:Principal(1000)}]).unwrap();
-        assert_eq!(create_context(&policy,b"u:r:init:s0 u:object_r:daemon_exec:s0 3").unwrap(),b"u:r:daemon:s0\0");
-        assert!(create_context(&policy,b"u:r:daemon:s0 u:object_r:daemon_exec:s0 3").is_err());
-        assert!(create_context(&policy,b"u:r:init:s0 u:object_r:daemon_exec:s0 2").is_err());
+        use crate::shield::{ExecTransitionRule, identity::Principal};
+        let policy = Policy::with_exec_transitions(
+            vec![
+                (1, "u:r:init:s0".into()),
+                (2, "u:object_r:daemon_exec:s0".into()),
+                (3, "u:r:daemon:s0".into()),
+            ],
+            vec![],
+            vec![],
+            vec![ExecTransitionRule {
+                source: 1,
+                resource: 2,
+                target: 3,
+                principal: Principal(1000),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            create_context(&policy, b"u:r:init:s0 u:object_r:daemon_exec:s0 3").unwrap(),
+            b"u:r:daemon:s0\0"
+        );
+        assert!(create_context(&policy, b"u:r:daemon:s0 u:object_r:daemon_exec:s0 3").is_err());
+        assert!(create_context(&policy, b"u:r:init:s0 u:object_r:daemon_exec:s0 2").is_err());
     }
     #[test_case]
     fn android_property_grants_are_distinct_from_service_grants_and_unknown_bits_deny() {
-        let p = Policy::new(vec![
-            (1, "u:r:init:s0".into()), (2, "u:r:app:s0".into()),
-            (3, "u:object_r:boot_prop:s0".into()),
-        ], vec![Rule {source:1,target:3,class:PROPERTY_SERVICE,permissions:PROPERTY_SET | 0x80}]).unwrap();
-        assert_eq!(decision(&p, b"u:r:init:s0 u:object_r:boot_prop:s0 2 ff").unwrap(), b"1 ffffffff 0 ffffffff 1 0");
-        assert_eq!(decision(&p, b"u:r:app:s0 u:object_r:boot_prop:s0 2 1").unwrap(), b"0 ffffffff 0 ffffffff 1 0");
-        assert_eq!(decision(&p, b"u:r:init:s0 u:object_r:boot_prop:s0 1 1").unwrap(), b"0 ffffffff 0 ffffffff 1 0");
+        let p = Policy::new(
+            vec![
+                (1, "u:r:init:s0".into()),
+                (2, "u:r:app:s0".into()),
+                (3, "u:object_r:boot_prop:s0".into()),
+            ],
+            vec![Rule {
+                source: 1,
+                target: 3,
+                class: PROPERTY_SERVICE,
+                permissions: PROPERTY_SET | 0x80,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            decision(&p, b"u:r:init:s0 u:object_r:boot_prop:s0 2 ff").unwrap(),
+            b"1 ffffffff 0 ffffffff 1 0"
+        );
+        assert_eq!(
+            decision(&p, b"u:r:app:s0 u:object_r:boot_prop:s0 2 1").unwrap(),
+            b"0 ffffffff 0 ffffffff 1 0"
+        );
+        assert_eq!(
+            decision(&p, b"u:r:init:s0 u:object_r:boot_prop:s0 1 1").unwrap(),
+            b"0 ffffffff 0 ffffffff 1 0"
+        );
         let fs = SecurityFs::new(p).unwrap();
-        assert!(matches!(&fs.nodes["class/property_service/index"].content, Content::Text(data) if data == b"2\n"));
-        assert!(matches!(&fs.nodes["class/property_service/perms/set"].content, Content::Text(data) if data == b"1\n"));
+        assert!(
+            matches!(&fs.nodes["class/property_service/index"].content, Content::Text(data) if data == b"2\n")
+        );
+        assert!(
+            matches!(&fs.nodes["class/property_service/perms/set"].content, Content::Text(data) if data == b"1\n")
+        );
     }
     #[test_case]
     fn android_shield_fs_binds_a_policy_and_keeps_access_transactions_per_open() {
@@ -1034,17 +1274,55 @@ mod tests {
     #[test_case]
     fn policy_extension_updates_existing_status_files_and_access_sequence_numbers() {
         use crate::shield::update::PolicyUpdate;
-        let policy=policy();let subject=policy.subject(1).unwrap();
-        let fs=SecurityFs::new(policy.clone()).unwrap();
-        let status=fs.open_for(&(fs.nodes["status"].clone() as Arc<dyn VfsNode>),0,Some(&subject)).unwrap();
-        let old=decision(&policy,b"u:r:caller:s0 u:object_r:service:s0 1 1").unwrap();
-        policy.extend(1,PolicyUpdate {rules:vec![Rule {source:1,target:2,class:SERVICE_MANAGER,permissions:4}],..Default::default()}).unwrap();
-        assert_eq!(old,b"3 ffffffff 0 ffffffff 1 0");
-        assert_eq!(decision(&policy,b"u:r:caller:s0 u:object_r:service:s0 1 1").unwrap(),b"7 ffffffff 0 ffffffff 2 0");
-        let mut bytes=[0u8;20];assert_eq!(status.read(&mut bytes).unwrap(),20);
-        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()),2);
-        policy.extend(2,PolicyUpdate {labels:vec![(4,"native label".into())],..Default::default()}).unwrap();
-        let context=fs.open_for(&(fs.nodes["context"].clone() as Arc<dyn VfsNode>),2,Some(&subject)).unwrap();
+        let policy = policy();
+        let subject = policy.subject(1).unwrap();
+        let fs = SecurityFs::new(policy.clone()).unwrap();
+        let status = fs
+            .open_for(
+                &(fs.nodes["status"].clone() as Arc<dyn VfsNode>),
+                0,
+                Some(&subject),
+            )
+            .unwrap();
+        let old = decision(&policy, b"u:r:caller:s0 u:object_r:service:s0 1 1").unwrap();
+        policy
+            .extend(
+                1,
+                PolicyUpdate {
+                    rules: vec![Rule {
+                        source: 1,
+                        target: 2,
+                        class: SERVICE_MANAGER,
+                        permissions: 4,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(old, b"3 ffffffff 0 ffffffff 1 0");
+        assert_eq!(
+            decision(&policy, b"u:r:caller:s0 u:object_r:service:s0 1 1").unwrap(),
+            b"7 ffffffff 0 ffffffff 2 0"
+        );
+        let mut bytes = [0u8; 20];
+        assert_eq!(status.read(&mut bytes).unwrap(), 20);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 2);
+        policy
+            .extend(
+                2,
+                PolicyUpdate {
+                    labels: vec![(4, "native label".into())],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let context = fs
+            .open_for(
+                &(fs.nodes["context"].clone() as Arc<dyn VfsNode>),
+                2,
+                Some(&subject),
+            )
+            .unwrap();
         assert!(context.write(b"native label").is_err());
     }
     #[test_case]
@@ -1138,9 +1416,18 @@ mod tests {
         let mut abi = LinuxAbi::default();
         set_mock_current_task(task.clone());
         let file = SecurityFile {
-            content: Content::Current(Arc::downgrade(&task)), policy:p.clone(), status:None,
-            metadata:metadata(1,0,false,true), entries:Vec::new(), readable:false, writable:true,
-            state:IrqSpinLock::new(FileState {bytes:Vec::new(),position:0,written:false}),
+            content: Content::Current(Arc::downgrade(&task)),
+            policy: p.clone(),
+            status: None,
+            metadata: metadata(1, 0, false, true),
+            entries: Vec::new(),
+            readable: false,
+            writable: true,
+            state: IrqSpinLock::new(FileState {
+                bytes: Vec::new(),
+                position: 0,
+                written: false,
+            }),
         };
         let text = b"u:r:app:s0:c1,c256,c512,c768\0";
         assert!(file.write(text).is_err()); // Open does not freeze credentials.
@@ -1184,23 +1471,51 @@ mod tests {
         clear_mock_current_task();
     }
     #[test_case]
-    fn android_setexeccon_reserves_without_relabeling_and_zero_write_clears_with_live_owner_check() {
+    fn android_setexeccon_reserves_without_relabeling_and_zero_write_clears_with_live_owner_check()
+    {
         use crate::shield::{TransitionRule, identity::Principal};
-        use crate::task::{TaskType, set_mock_current_task, clear_mock_current_task};
-        let policy = Policy::with_transitions(vec![(1, "u:r:init:s0".into()), (2, "u:r:vendor_init:s0".into())],
-            vec![], vec![TransitionRule { source: 1, target: 2, principal: Principal(0) }]).unwrap();
+        use crate::task::{TaskType, clear_mock_current_task, set_mock_current_task};
+        let policy = Policy::with_transitions(
+            vec![(1, "u:r:init:s0".into()), (2, "u:r:vendor_init:s0".into())],
+            vec![],
+            vec![TransitionRule {
+                source: 1,
+                target: 2,
+                principal: Principal(0),
+            }],
+        )
+        .unwrap();
         let task = Arc::new(Task::new("exec-transition".into(), 0, TaskType::User));
         *task.security_subject.write() = Some(policy.subject(1).unwrap());
         set_mock_current_task(task.clone());
-        let make_file = || Arc::new(SecurityFile {
-            content: Content::Exec(Arc::downgrade(&task)), policy: policy.clone(), status: None,
-            metadata: metadata(1, 0, false, true), entries: Vec::new(), readable: false, writable: true,
-            state: IrqSpinLock::new(FileState { bytes: Vec::new(), position: 0, written: false }),
-        });
+        let make_file = || {
+            Arc::new(SecurityFile {
+                content: Content::Exec(Arc::downgrade(&task)),
+                policy: policy.clone(),
+                status: None,
+                metadata: metadata(1, 0, false, true),
+                entries: Vec::new(),
+                readable: false,
+                writable: true,
+                state: IrqSpinLock::new(FileState {
+                    bytes: Vec::new(),
+                    position: 0,
+                    written: false,
+                }),
+            })
+        };
         let file = make_file();
         file.write(b"u:r:vendor_init:s0\0").unwrap();
         assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 1);
-        assert_eq!(task.pending_exec_transition.read().as_ref().unwrap().target().label(), 2);
+        assert_eq!(
+            task.pending_exec_transition
+                .read()
+                .as_ref()
+                .unwrap()
+                .target()
+                .label(),
+            2
+        );
         let child = Arc::new(task.clone_task(crate::task::CloneFlags::default()).unwrap());
         set_mock_current_task(child.clone());
         assert!(make_file().write_empty().is_err());
@@ -1208,14 +1523,18 @@ mod tests {
         set_mock_current_task(task.clone());
         let clear = make_file();
         let handle = task.handle_table.insert(KernelObject::File(clear)).unwrap();
-        let mut abi = LinuxAbi::default(); let fd = abi.allocate_fd(handle).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
         abi.set_file_status_flags(fd, 2).unwrap();
-        let mut frame = crate::arch::Trapframe::new(); frame.set_arg(0, fd);
+        let mut frame = crate::arch::Trapframe::new();
+        frame.set_arg(0, fd);
         // libselinux uses write(fd, NULL, 0) to cancel, so no user buffer exists.
-        assert_eq!(crate::abi::linux::generic::fs::sys_write(&mut abi, &mut frame), 0);
+        assert_eq!(
+            crate::abi::linux::generic::fs::sys_write(&mut abi, &mut frame),
+            0
+        );
         assert!(task.pending_exec_transition.read().is_none());
         assert!(child.pending_exec_transition.read().is_some());
         clear_mock_current_task();
     }
-
 }

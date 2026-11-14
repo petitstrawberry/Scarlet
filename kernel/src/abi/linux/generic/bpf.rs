@@ -1,8 +1,8 @@
 //! BPF program loading, object pinning and packet attachment are not provided.
 //! Android's hosted network provider uses native traffic facilities in
 //! userspace; this ABI must not manufacture pinned programs or detached maps.
-use crate::{arch::Trapframe, task::mytask};
 use super::{LinuxAbi, errno};
+use crate::{arch::Trapframe, task::mytask};
 
 fn unsupported(command: usize, size: usize) -> usize {
     if command > 49 || !(4..=4096).contains(&size) {
@@ -13,7 +13,9 @@ fn unsupported(command: usize, size: usize) -> usize {
 }
 
 pub fn sys_bpf(_abi: &mut LinuxAbi, tf: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else { return errno::to_result(errno::ESRCH); };
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::ESRCH);
+    };
     let result = unsupported(tf.get_arg(0), tf.get_arg(2));
     tf.increment_pc_next(&task);
     result
@@ -27,7 +29,10 @@ mod tests {
     fn unprovided_bpf_operations_never_report_success() {
         // Includes map creation/update, program load, object pin/get and attach.
         for command in 0..=49 {
-            assert_eq!(unsupported(command, 144), errno::to_result(errno::EOPNOTSUPP));
+            assert_eq!(
+                unsupported(command, 144),
+                errno::to_result(errno::EOPNOTSUPP)
+            );
         }
     }
 

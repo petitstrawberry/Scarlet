@@ -543,9 +543,16 @@ impl Drop for Ticket {
 }
 
 impl crate::object::capability::Selectable for Server {
-    fn subscribe_readiness(&self, interest: crate::object::capability::ReadyInterest,
-        waiter: &Arc<Waker>) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
-        Some(if interest.read { alloc::vec![self.connection.available.subscribe_readiness(waiter)] } else { Vec::new() })
+    fn subscribe_readiness(
+        &self,
+        interest: crate::object::capability::ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        Some(if interest.read {
+            alloc::vec![self.connection.available.subscribe_readiness(waiter)]
+        } else {
+            Vec::new()
+        })
     }
     fn current_ready(
         &self,

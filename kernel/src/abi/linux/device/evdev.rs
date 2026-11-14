@@ -301,7 +301,12 @@ mod tests {
     fn evdev_mouse_reports_cursor_axes_buttons_and_wheels_without_touch() {
         let (_, receive) = InputEndpoint::pair(2, 0, 0).unwrap();
         let object = wrap(KernelObject::from_file_object(receive));
-        let device = object.as_file().unwrap().as_any().downcast_ref::<Evdev>().unwrap();
+        let device = object
+            .as_file()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Evdev>()
+            .unwrap();
         let (types, _) = device.read_ioctl(0x20, 8).unwrap();
         assert_eq!(types[0], 0b111); // SYN, KEY, REL; no ABS.
         let (relative, _) = device.read_ioctl(0x22, 8).unwrap();
@@ -311,7 +316,10 @@ mod tests {
         assert_eq!(keys[0x110 / 8] & 7, 7);
         assert_eq!(keys[0x14a / 8] & (1 << (0x14a % 8)), 0);
         assert_eq!(device.read_ioctl(9, 1).unwrap(), (vec![1], 1));
-        assert_eq!(device.read_ioctl(6, 64).unwrap().0, b"Scarlet virtual mouse\0");
+        assert_eq!(
+            device.read_ioctl(6, 64).unwrap().0,
+            b"Scarlet virtual mouse\0"
+        );
         assert_eq!(device.read_ioctl(0x40, 24), Err(errno::EINVAL));
     }
 

@@ -234,9 +234,8 @@ fn decode_field(bytes: &[u8]) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RawKernelInfo, RawTaskCapacityLimitsV1, RawTaskCapacitySnapshotV1,
-        decode_field, decode_kernel_info, decode_task_capacity_snapshot,
-        encode_task_capacity_limits,
+        RawKernelInfo, RawTaskCapacityLimitsV1, RawTaskCapacitySnapshotV1, decode_field,
+        decode_kernel_info, decode_task_capacity_snapshot, encode_task_capacity_limits,
     };
 
     #[test]
@@ -264,16 +263,13 @@ mod tests {
         assert_eq!(snapshot.active_kernel_tasks, 22);
         assert_eq!(snapshot.used_stack_slots, 26);
 
-        assert!(decode_task_capacity_snapshot(&RawTaskCapacitySnapshotV1 {
-            version: 2,
-            ..raw
-        })
-        .is_err());
-        assert!(decode_task_capacity_snapshot(&RawTaskCapacitySnapshotV1 {
-            size: 72,
-            ..raw
-        })
-        .is_err());
+        assert!(
+            decode_task_capacity_snapshot(&RawTaskCapacitySnapshotV1 { version: 2, ..raw })
+                .is_err()
+        );
+        assert!(
+            decode_task_capacity_snapshot(&RawTaskCapacitySnapshotV1 { size: 72, ..raw }).is_err()
+        );
     }
 
     #[test]

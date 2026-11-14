@@ -840,12 +840,27 @@ fn noexec_checks_main_elf_and_dynamic_interpreter_before_executable_mapping() {
     let main = fixture_with_interpreter("/noexec/ld");
     for (path, bytes) in [("/main", &main), ("/noexec/ld", &interpreter)] {
         fs.create_file(path, FileType::RegularFile).unwrap();
-        fs.open(path, O_RDWR).unwrap().as_stream().unwrap().write(bytes).unwrap();
+        fs.open(path, O_RDWR)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .write(bytes)
+            .unwrap();
     }
     let task = new_user_task("noexec-elf".into(), 0);
     task.set_vfs(fs.clone());
     let file = fs.open("/noexec/ld", 0).unwrap();
-    assert_eq!(analyze_and_load_elf(file.as_file().unwrap(), &task).unwrap_err().message, "execution disabled on mount");
+    assert_eq!(
+        analyze_and_load_elf(file.as_file().unwrap(), &task)
+            .unwrap_err()
+            .message,
+        "execution disabled on mount"
+    );
     let main = fs.open("/main", 0).unwrap();
-    assert_eq!(analyze_and_load_elf(main.as_file().unwrap(), &task).unwrap_err().message, "interpreter execution disabled on mount");
+    assert_eq!(
+        analyze_and_load_elf(main.as_file().unwrap(), &task)
+            .unwrap_err()
+            .message,
+        "interpreter execution disabled on mount"
+    );
 }

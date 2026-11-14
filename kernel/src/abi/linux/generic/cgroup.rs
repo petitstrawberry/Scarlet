@@ -623,7 +623,10 @@ impl StreamOps for File {
         {
             return Err(StreamError::PermissionDenied);
         }
-        if fs.cpuset && self.node.group.parent().is_some() && self.node.group.configured_cpus().is_none() {
+        if fs.cpuset
+            && self.node.group.parent().is_some()
+            && self.node.group.configured_cpus().is_none()
+        {
             return Err(StreamError::InvalidArgument);
         }
         if fs.cpuset && self.node.kind == 6 && (target.get_id() != target.get_thread_group_id()) {

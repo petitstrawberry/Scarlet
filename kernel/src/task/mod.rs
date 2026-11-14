@@ -12,8 +12,8 @@ pub mod syscall;
 extern crate alloc;
 
 mod accounting;
-mod scheduling;
 pub mod fixed_priority;
+mod scheduling;
 use accounting::{CpuAccounting, CpuHog, SchedUtil};
 use scheduling::{ExecutionClock, FairRequest, PlacementHistory, SchedulingQuantum};
 
@@ -43,8 +43,7 @@ use crate::{
     ipc::{EventContent, event::ProcessControlType},
     mem::page::ContiguousPages,
     object::{
-        capability::memory_mapping::syscall::reclaim_private_removed_mappings,
-        handle::HandleTable,
+        capability::memory_mapping::syscall::reclaim_private_removed_mappings, handle::HandleTable,
     },
     sched::scheduler::{
         cleanup_zombie, complete_non_current_task_exit, current_task, finalize_zombie,
@@ -910,12 +909,12 @@ pub struct Task {
     pub(crate) socket_creation_label: IrqRwSpinLock<Option<crate::shield::socket::CreationLabel>>,
     pub(crate) creation_label: IrqRwSpinLock<Option<crate::shield::file::CreationLabel>>,
     pub(crate) security_subject: IrqRwSpinLock<Option<crate::shield::Subject>>,
-    pub(crate) pending_exec_transition: IrqRwSpinLock<Option<crate::shield::exec_transition::PendingExecTransition>>,
+    pub(crate) pending_exec_transition:
+        IrqRwSpinLock<Option<crate::shield::exec_transition::PendingExecTransition>>,
     pub(crate) credentials: IrqRwSpinLock<crate::shield::identity::Credentials>,
     /// Process-shared memory-reclaim protection. Threads share this handle;
     /// fork and exec install independent snapshots.
-    pub(crate) reclaim_preference:
-        Arc<IrqRwSpinLock<reclaim_preference::ReclaimPreference>>,
+    pub(crate) reclaim_preference: Arc<IrqRwSpinLock<reclaim_preference::ReclaimPreference>>,
     pub(crate) execution_restrictions: IrqRwSpinLock<crate::shield::execution::Restrictions>,
     /// Keep the dispatched ABI alive until its syscall handler has returned.
     retired_exec_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
@@ -1185,7 +1184,9 @@ impl Task {
             reclaim_preference: Arc::new(IrqRwSpinLock::new(
                 reclaim_preference::ReclaimPreference::default(),
             )),
-            execution_restrictions: IrqRwSpinLock::new(crate::shield::execution::Restrictions::default()),
+            execution_restrictions: IrqRwSpinLock::new(
+                crate::shield::execution::Restrictions::default(),
+            ),
             retired_exec_abi: TaskLocal::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
             software_timer_count: AtomicUsize::new(0),
@@ -1968,7 +1969,9 @@ impl Task {
     /// * `state` - The new task state
     ///
     pub fn set_state(&self, state: TaskState) {
-        if matches!(state,TaskState::Zombie | TaskState::Terminated) { self.resource_membership.retire(); }
+        if matches!(state, TaskState::Zombie | TaskState::Terminated) {
+            self.resource_membership.retire();
+        }
         self.state.store(state, Ordering::SeqCst);
     }
 
@@ -2201,7 +2204,8 @@ impl Task {
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
-        self.vm_manager.add_owned_memory_map(mmap.clone(), page_alloc)?;
+        self.vm_manager
+            .add_owned_memory_map(mmap.clone(), page_alloc)?;
 
         Ok(mmap)
     }
@@ -2451,8 +2455,12 @@ impl Task {
             return true;
         }
 
-        if let Some(reaper) = child.lifecycle_scope().and_then(|scope| scope.reaper_for(child))
-            && reaper.id != self.id && reaper.try_adopt_child(child, None) {
+        if let Some(reaper) = child
+            .lifecycle_scope()
+            .and_then(|scope| scope.reaper_for(child))
+            && reaper.id != self.id
+            && reaper.try_adopt_child(child, None)
+        {
             return true;
         }
 
@@ -2528,9 +2536,18 @@ impl Task {
                 continue;
             }
 
-            let scoped_reaper = child.lifecycle_scope().and_then(|scope| scope.reaper_for(&child));
-            let leader = reaper.as_ref().filter(|r| self.thread_group_id != self.id && r.id == self.thread_group_id).cloned();
-            let host_init = if self.id != INIT_TASK_ID { get_task_by_id(INIT_TASK_ID) } else { None };
+            let scoped_reaper = child
+                .lifecycle_scope()
+                .and_then(|scope| scope.reaper_for(&child));
+            let leader = reaper
+                .as_ref()
+                .filter(|r| self.thread_group_id != self.id && r.id == self.thread_group_id)
+                .cloned();
+            let host_init = if self.id != INIT_TASK_ID {
+                get_task_by_id(INIT_TASK_ID)
+            } else {
+                None
+            };
             let mut new_parent_id = None;
             // A leader racing exit may reject adoption; still try the explicit
             // scope reaper before the legacy host fallback.
@@ -2606,7 +2623,8 @@ impl Task {
     /// The default is [`ExitStatusPolicy::Retain`]. ABI clone paths which create
     /// non-waitable threads must select discard before publishing the child.
     pub(crate) fn set_exit_status_policy(&self, policy: ExitStatusPolicy) {
-        self.exit_status_policy.store(policy as u8, Ordering::SeqCst);
+        self.exit_status_policy
+            .store(policy as u8, Ordering::SeqCst);
     }
 
     /// Return the exit-status retention policy for this task.
@@ -2894,7 +2912,11 @@ impl Task {
             let memmaps = self.vm_manager.fork_snapshot()?;
             after_snapshot();
             for mmap in memmaps {
-                if mmap.owner.as_ref().is_some_and(|owner| !owner.inherit_on_fork()) {
+                if mmap
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| !owner.inherit_on_fork())
+                {
                     continue;
                 }
                 let num_pages =
@@ -3125,7 +3147,9 @@ impl Task {
         if !flags.is_set(CloneFlagsDef::Vm) {
             let parent_brk = self.brk.load(Ordering::SeqCst);
             child.brk.store(parent_brk, Ordering::SeqCst);
-            child.vm_manager.inherit_process_entry_stack(&self.vm_manager);
+            child
+                .vm_manager
+                .inherit_process_entry_stack(&self.vm_manager);
         }
 
         // POSIX job-control identity.  A fork/clone inherits SID, PGID, and
@@ -3185,7 +3209,13 @@ impl Task {
         *child.execution_environment.write() = self.execution_environment.read().clone();
         *child.mount_namespace.write() = self.mount_namespace.read().clone();
         *child.process_scope.write() = self.process_scope.read().clone();
-        child.resource_membership = if flags.is_set(CloneFlagsDef::Thread) { self.resource_membership.thread_with_affinity(child.requested_cpu_affinity_mask())? } else { self.resource_membership.fork_with_affinity(child.requested_cpu_affinity_mask())? };
+        child.resource_membership = if flags.is_set(CloneFlagsDef::Thread) {
+            self.resource_membership
+                .thread_with_affinity(child.requested_cpu_affinity_mask())?
+        } else {
+            self.resource_membership
+                .fork_with_affinity(child.requested_cpu_affinity_mask())?
+        };
         *child.creation_label.write() = self.creation_label.read().clone();
         *child.socket_creation_label.write() = self.socket_creation_label.read().clone();
         *child.security_subject.write() = self.security_subject.read().clone();
@@ -3391,14 +3421,12 @@ impl Task {
         let has_parent = self
             .get_parent_id()
             .is_some_and(|parent_id| get_task_by_id(parent_id).is_some());
-        let state = if waitable
-            && self.exit_status_policy() == ExitStatusPolicy::Retain
-            && has_parent
-        {
-            TaskState::Zombie
-        } else {
-            TaskState::Terminated
-        };
+        let state =
+            if waitable && self.exit_status_policy() == ExitStatusPolicy::Retain && has_parent {
+                TaskState::Zombie
+            } else {
+                TaskState::Terminated
+            };
         self.set_state(state);
         complete_non_current_task_exit(self.id);
     }
@@ -4304,7 +4332,13 @@ mod tests {
             self.mappings.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn on_mapping_inherited(&self, _vaddr: usize, _paddr: u64, _length: usize, _vm_start: usize) {
+        fn on_mapping_inherited(
+            &self,
+            _vaddr: usize,
+            _paddr: u64,
+            _length: usize,
+            _vm_start: usize,
+        ) {
             self.mappings.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -4547,7 +4581,12 @@ mod tests {
         }
         parent.free_pages(base + PAGE_SIZE, 1);
         let child = parent.clone_task(CloneFlags::default()).unwrap();
-        assert!(child.vm_manager.search_memory_map(base + PAGE_SIZE).is_none());
+        assert!(
+            child
+                .vm_manager
+                .search_memory_map(base + PAGE_SIZE)
+                .is_none()
+        );
         let mut value = [0];
         for page in [0, 2] {
             copy_from_user(&child, base + page * PAGE_SIZE, &mut value).unwrap();
@@ -4578,9 +4617,10 @@ mod tests {
             map.permissions &= !0x2;
         });
         let child = parent.clone_task(CloneFlags::default()).unwrap();
-        child.vm_manager.protect_memory_map_range(
-            super::MemoryArea::new(base, base + PAGE_SIZE - 1), 3,
-        ).unwrap();
+        child
+            .vm_manager
+            .protect_memory_map_range(super::MemoryArea::new(base, base + PAGE_SIZE - 1), 3)
+            .unwrap();
         copy_to_user(&child, base, &[0xa5]).unwrap();
         let mut value = [0];
         copy_from_user(&parent, base, &mut value).unwrap();
@@ -4612,15 +4652,30 @@ mod tests {
         }
         // This seam models a CLONE_VM sibling unmapping after the fork has
         // sampled its VMAs, without relying on scheduler timing.
-        let child = parent.clone_task_with_vm_snapshot_hook(CloneFlags::default(), || {
-            parent.free_pages(base + removed_page * PAGE_SIZE, 1);
-        }).unwrap();
-        assert!(parent.vm_manager.search_memory_map(base + removed_page * PAGE_SIZE).is_none());
-        let tail = parent.vm_manager.search_memory_map(base + 2 * PAGE_SIZE).unwrap();
-        assert!(tail.owner.is_some() || parent.page_allocations.read().iter().any(|allocation| {
-            allocation.as_paddr() <= tail.pmarea.start
-                && tail.pmarea.end < allocation.as_paddr() + (allocation.len() * PAGE_SIZE) as u64
-        }), "surviving parent mapping lost its physical owner");
+        let child = parent
+            .clone_task_with_vm_snapshot_hook(CloneFlags::default(), || {
+                parent.free_pages(base + removed_page * PAGE_SIZE, 1);
+            })
+            .unwrap();
+        assert!(
+            parent
+                .vm_manager
+                .search_memory_map(base + removed_page * PAGE_SIZE)
+                .is_none()
+        );
+        let tail = parent
+            .vm_manager
+            .search_memory_map(base + 2 * PAGE_SIZE)
+            .unwrap();
+        assert!(
+            tail.owner.is_some()
+                || parent.page_allocations.read().iter().any(|allocation| {
+                    allocation.as_paddr() <= tail.pmarea.start
+                        && tail.pmarea.end
+                            < allocation.as_paddr() + (allocation.len() * PAGE_SIZE) as u64
+                }),
+            "surviving parent mapping lost its physical owner"
+        );
         parent.vm_manager.with_memmaps(|maps| {
             let mut end = None;
             for map in maps.values() {
@@ -4629,11 +4684,17 @@ mod tests {
             }
         });
         for page in 0..3 {
-            let address = child.vm_manager.translate_to_kva(base + page * PAGE_SIZE).unwrap();
+            let address = child
+                .vm_manager
+                .translate_to_kva(base + page * PAGE_SIZE)
+                .unwrap();
             assert_eq!(unsafe { *(address as *const u8) }, 0xa0 + page as u8);
         }
         drop(child);
-        let address = parent.vm_manager.translate_to_kva(base + 2 * PAGE_SIZE).unwrap();
+        let address = parent
+            .vm_manager
+            .translate_to_kva(base + 2 * PAGE_SIZE)
+            .unwrap();
         assert_eq!(unsafe { *(address as *const u8) }, 0xa2);
     }
 
@@ -5359,10 +5420,7 @@ mod tests {
         let wait_owner = get_thread_group_wait_owner(&leader, thread_child_id).unwrap();
         assert_eq!(wait_owner.get_id(), worker_id);
         assert!(!get_waitable_process_children(&leader).contains(&thread_child_id));
-        assert_eq!(
-            thread_child.exit_status_policy(),
-            ExitStatusPolicy::Retain
-        );
+        assert_eq!(thread_child.exit_status_policy(), ExitStatusPolicy::Retain);
 
         thread_child.exit(17);
         assert_eq!(thread_child.get_state(), TaskState::Zombie);
@@ -6234,11 +6292,18 @@ mod tests {
         assert!(outer.adopt_registered_child(&inner));
         let outer_namespace = outer.get_namespace();
         let supervisor_pid = outer_namespace.resolve_local_id(inner_id).unwrap();
-        let child_namespace = super::namespace::TaskNamespace::new_child(outer_namespace.clone(), "android".into());
+        let child_namespace =
+            super::namespace::TaskNamespace::new_child(outer_namespace.clone(), "android".into());
         inner.set_namespace(child_namespace.clone());
         assert_eq!(inner.get_namespace_id(), 1);
-        assert_eq!(outer_namespace.resolve_local_id(inner_id), Some(supervisor_pid));
-        assert_eq!(outer_namespace.resolve_global_id(supervisor_pid), Some(inner_id));
+        assert_eq!(
+            outer_namespace.resolve_local_id(inner_id),
+            Some(supervisor_pid)
+        );
+        assert_eq!(
+            outer_namespace.resolve_global_id(supervisor_pid),
+            Some(inner_id)
+        );
         assert_eq!(child_namespace.resolve_local_id(outer_id), None);
         inner.set_namespace(child_namespace.clone());
         assert_eq!(inner.get_namespace_id(), 1);
