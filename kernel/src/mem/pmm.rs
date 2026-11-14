@@ -6,8 +6,8 @@
 //! allocation/free helpers do not track Rust borrows or outstanding DMA accesses.
 
 use crate::sync::IrqSpinLock;
+use crate::sync::counter::SaturatingCounter;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::environment::PAGE_SIZE;
 use crate::println;
@@ -725,26 +725,24 @@ impl PmmInner {
 
 static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 
-// Allocation failures are cold-path diagnostics. Keeping these atomics separate
+// Allocation failures are cold-path diagnostics. Keeping these counters separate
 // from the PMM lock leaves ordinary allocation behavior and scalability intact.
-static ALLOCATION_FAILURES: AtomicU64 = AtomicU64::new(0);
-static ALLOCATION_FAILED_PAGES: AtomicU64 = AtomicU64::new(0);
+static ALLOCATION_FAILURES: SaturatingCounter = SaturatingCounter::new(0);
+static ALLOCATION_FAILED_PAGES: SaturatingCounter = SaturatingCounter::new(0);
 
 /// Account for a rejected allocation request. The page total is the number of
 /// pages requested by failed calls, not a claim about the pages actually held
 /// before an individual-page allocation was rolled back.
 fn note_allocation_failure(pages: usize) {
-    ALLOCATION_FAILURES.fetch_add(1, Ordering::Relaxed);
+    ALLOCATION_FAILURES.add(1);
     let pages = u64::try_from(pages).unwrap_or(u64::MAX);
-    let _ = ALLOCATION_FAILED_PAGES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(pages))
-    });
+    ALLOCATION_FAILED_PAGES.add(pages);
 }
 
 pub(crate) fn allocation_failure_totals() -> (u64, u64) {
     (
-        ALLOCATION_FAILURES.load(Ordering::Relaxed),
-        ALLOCATION_FAILED_PAGES.load(Ordering::Relaxed),
+        ALLOCATION_FAILURES.snapshot(),
+        ALLOCATION_FAILED_PAGES.snapshot(),
     )
 }
 

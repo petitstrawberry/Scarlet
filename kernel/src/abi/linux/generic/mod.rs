@@ -32,6 +32,8 @@ mod record_lock;
 pub mod signal;
 mod signalfd;
 pub mod socket;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod time;
 pub mod utimens;
 mod xattr;

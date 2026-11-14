@@ -212,6 +212,7 @@ mod socket {
     #[derive(Debug, PartialEq)]
     pub enum SocketError {
         InvalidPacket,
+        PermissionDenied,
         Other(String),
     }
 }

@@ -2206,7 +2206,7 @@ mod tests {
             .command(&task, &abi, BC_INCREFS, &0u32.to_le_bytes())
             .unwrap();
         let mut data = [0; 12];
-        put64(&mut data, 4, 0x1234_5678_8765_4321);
+        put64(&mut data, 4, 0x1234_5678_8765_4321u64 as usize);
         client
             .command(&task, &abi, BC_REQUEST_DEATH_NOTIFICATION, &data)
             .unwrap();
@@ -2248,7 +2248,7 @@ mod tests {
             .command(&sender, &abi, BC_INCREFS, &0u32.to_le_bytes())
             .unwrap();
         let mut death = [0; 12];
-        put64(&mut death, 4, 0x1234_5678_8765_4321);
+        put64(&mut death, 4, 0x1234_5678_8765_4321u64 as usize);
         client
             .command(&sender, &abi, BC_REQUEST_DEATH_NOTIFICATION, &death)
             .unwrap();

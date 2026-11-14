@@ -1,4 +1,0 @@
-{
-  global: _ZN7android3bpf*;
-  local: *;
-};

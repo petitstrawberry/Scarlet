@@ -1382,7 +1382,7 @@ mod tests {
                 ))
             })
             .unwrap();
-        let mut frame = Trapframe::new();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&child);
         frame.set_arg(0, id as usize);
         frame.set_arg(1, address);
         assert_eq!(sys_timer_gettime(&mut abi, &mut frame), 0);
