@@ -1,6 +1,27 @@
 //! Mutually exclusive shell foregrounds. Retained GPU images never cross depths.
 use sws_protocol::workspace::{OVERVIEW_DRAWER_APP_ID, ShellPresentation};
 
+/// Retain ready-to-reveal shell pixels while another workspace depth is shown.
+/// Explicitly hidden/minimized surfaces and ordinary applications stay suspended.
+pub(super) fn prepares_while_workspace_hidden(
+    app_id: Option<&[u8]>,
+    is_shell_background: bool,
+    visible: bool,
+    minimized: bool,
+) -> bool {
+    is_shell_background
+        && visible
+        && !minimized
+        && matches!(
+            app_id,
+            Some(
+                b"org.scarlet-os.desktop.shell.home"
+                    | b"org.scarlet-os.desktop.shell.home-backdrop"
+                    | b"org.scarlet-os.desktop.shell.overview-drawer"
+            )
+        )
+}
+
 pub(super) fn fixed_depth_visibility(
     app_id: Option<&[u8]>,
     presentation: ShellPresentation,
@@ -55,6 +76,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "scarlet")]
     fn handle_surface_has_no_catalog_pixels_or_hit_area_over_cards() {
         let mut handle = crate::window::Window::new(7, 0, 1128, 1920, 72);
         handle.window_type = crate::window::WindowType::ShellBackground;

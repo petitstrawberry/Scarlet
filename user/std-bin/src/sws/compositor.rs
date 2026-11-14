@@ -4438,7 +4438,7 @@ impl Compositor {
                         .window_manager
                         .get_windows()
                         .iter()
-                        .find(|w| w.title.as_deref() == Some(b"Home") && w.is_presented())
+                        .find(|w| w.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home") && w.is_presented())
                 {
                     super::home_trace::record(
                         6,
@@ -7801,9 +7801,9 @@ impl Compositor {
             self.grant_pending_frame_callbacks();
         }
         if !presented {
-            // A never-submitted surface needs one bootstrap callback before it
-            // can produce its first frame. Already-rendered surfaces remain
-            // pending until a later presentation advances `event_counter`.
+            // Bootstrap and hidden shell preparation do not require an output
+            // present. Ordinary submitted surfaces remain pending until a
+            // later presentation advances `event_counter`.
             self.grant_pending_frame_callbacks();
         }
 
@@ -10203,12 +10203,13 @@ impl Compositor {
                     && !window.minimized,
                 self.event_counter,
                 callback.requested_after_present,
+                window.prepares_while_workspace_hidden(),
             );
             if !ready {
                 waiting.push(callback);
                 continue;
             }
-            if window.title.as_deref() == Some(b"Home") {
+            if window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home") {
                 super::home_trace::record(
                     7,
                     format_args!(
@@ -11549,6 +11550,13 @@ impl Compositor {
             self.pending_card_close = None;
         }
         if presentation != self.last_shell_presentation {
+            super::home_trace::record(
+                8,
+                format_args!(
+                    "sws-presentation previous={:?} current={:?}",
+                    self.last_shell_presentation, presentation,
+                ),
+            );
             self.drawer_motion = None;
             self.drawer_open_pending = self.animations_enabled()
                 && !self.console_shell_present()
@@ -12414,7 +12422,7 @@ impl Compositor {
                 let trace_home = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.title.as_deref() == Some(b"Home"));
+                    .is_some_and(|window| window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home"));
                 if trace_home {
                     super::home_trace::record(
                         3,
@@ -12506,7 +12514,7 @@ impl Compositor {
                 let trace_home = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.title.as_deref() == Some(b"Home"));
+                    .is_some_and(|window| window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home"));
                 if trace_home {
                     super::home_trace::record(
                         4,
@@ -12524,10 +12532,12 @@ impl Compositor {
                     super::home_trace::record(
                         4,
                         format_args!(
-                            "sws-commit-end identity={:?} serial={} accepted={}",
+                            "sws-commit-end identity={:?} serial={} accepted={} hidden_preparation={}",
                             identity,
                             commit_serial,
                             result.is_ok(),
+                            self.window_manager.get_window(window_id)
+                                .is_some_and(|window| window.prepares_while_workspace_hidden()),
                         ),
                     );
                 }
@@ -12575,6 +12585,13 @@ impl Compositor {
                             window_id,
                             Some((damage.extent, (compositor_epoch, generation))),
                         );
+                        if let Some(window) = self.window_manager.get_window(window_id)
+                            && let Some(gpu) = self.gpu_compositor.as_mut()
+                        {
+                            for release in gpu.take_prepared_shell_releases(window) {
+                                send_sgfx_buffer_released(release);
+                            }
+                        }
                     }
                     Err(error) => {
                         println!(

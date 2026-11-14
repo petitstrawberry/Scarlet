@@ -1,7 +1,9 @@
 # Native graphics packages own their builds; the SDK owns retrieval and output.
+# Keep the SGFX revision aligned with user/lib/scarlet-vulkan/bundle.toml:
+# the SDK shares one source checkout per Git URL during image assembly.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "cb34b7562820802dd42b707d8db8f8e2c610a6e9" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "6bfecaabfa39505f936edf2bff844f87b5101990" }
 subdir = "platforms/scarlet"
 
 [[layers]]

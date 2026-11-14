@@ -63,13 +63,13 @@ fn settings_section(content: impl View + Clone, title: &str, title_size: f32) ->
         .background(Color::rgb(247, 248, 250))
 }
 fn settings_page(content: impl View + Clone) -> impl View + Clone {
-    ScrollView::new(content.padding(24.0))
+    ScrollView::new(content)
         .vertical()
         .frame(f32::INFINITY, f32::INFINITY)
 }
 
 fn long_settings_page(content: impl View + Clone, height: f32) -> impl View + Clone {
-    ScrollView::new(content.padding(24.0))
+    ScrollView::new(content)
         .vertical()
         .content_size(0.0, height)
         .frame(f32::INFINITY, f32::INFINITY)
@@ -97,7 +97,7 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
         .collect::<Vec<_>>();
     presets.push(String::from("Custom"));
     let color = app.current_color();
-    let height = 920.0
+    let height = 872.0
         + extra_note_height(app.background_image_label.get())
         + extra_note_height(app.background_status.get());
     long_settings_page(vstack! {
@@ -122,17 +122,17 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
             }.spacing(8.0),
             settings_note("An image replaces the generated background. Clear it to use your color and pattern."),
         }.spacing(10.0).alignment(Alignment::Leading), "Wallpaper", 14.0),
-        settings_note(app.background_status.get()),
+        settings_note(app.background_status.get()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
         cursor_section(app.clone()),
-        Button::new("Save again").on_click(move || app.save_config()),
+        Button::new("Save again").on_click(move || app.save_config()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
     }.spacing(18.0).alignment(Alignment::Leading), height)
 }
 pub(super) fn about_page() -> impl View + Clone {
     let (distribution, version, kernel, target) = system_description();
     settings_page(
         vstack! {
-            Text::new(distribution).font_size(16.0),
-            settings_note("System information reported by the operating system"),
+            Text::new(distribution).font_size(16.0).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
+            settings_note("System information reported by the operating system").padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
             settings_section(vstack! {
                 settings_row(settings_note(version), "OS version"),
                 settings_row(settings_note(kernel), "Kernel"),
@@ -210,7 +210,7 @@ pub(super) fn input_page(app: SettingsApp) -> impl View + Clone {
         settings_row(Select::new(input_method_labels(&methods),app.selected_ime_index.clone()).width(330.0).placeholder("No input methods registered").on_change(move |index|select_app.select_input_method(index)), "Input method"),
         settings_note(format!("Active: {} · {} registered methods",selected,methods.len())),
         settings_note(app.input_status.get()),
-    }.spacing(12.0).alignment(Alignment::Leading), "Typing", 14.0).frame_height(height), height + 48.0)
+    }.spacing(12.0).alignment(Alignment::Leading), "Typing", 14.0).frame_height(height), height)
 }
 fn status_item_label(item: StatusItemId) -> &'static str {
     match item {
@@ -255,7 +255,7 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
     let clock = app.clone();
     let region = app.clone();
     let timezone = app.clone();
-    let height = 780.0
+    let height = 732.0
         + extra_note_height(app.timezone_status.get())
         + extra_note_height(app.status_preferences_status.get());
     long_settings_page(vstack! {
@@ -276,8 +276,8 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
             settings_row(Select::new(vec![String::from("24-hour"),String::from("12-hour")],app.clock_format_index.clone()).width(300.0).on_change(move |index|clock.set_status_clock_format(if index==1 {ClockFormat::TwelveHour}else{ClockFormat::TwentyFourHour})),"Clock format"),
             settings_note("The clock stays visible at the far right of the status bar."),
         }.spacing(12.0).alignment(Alignment::Leading),"Clock", 14.0),
-        settings_note(app.status_preferences_status.get()),
-        hstack! { Button::new("Refresh").on_click(move||refresh.refresh_status_preferences()), Button::new("Reset to defaults").on_click(move||reset.reset_status_preferences()), }.spacing(8.0),
+        settings_note(app.status_preferences_status.get()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
+        hstack! { Button::new("Refresh").on_click(move||refresh.refresh_status_preferences()), Button::new("Reset to defaults").on_click(move||reset.reset_status_preferences()), }.spacing(8.0).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
     }.spacing(18.0).alignment(Alignment::Leading), height)
 }
 
@@ -288,67 +288,25 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
     let audio_app = original.clone();
     let input_app = original.clone();
     let status_app = original.clone();
-    let navigation_title = original.navigation_title.clone();
     let navigation = navigation! {
-        NavigationLink::new("Appearance", move || {
-            appearance_page(app.clone())
-        })
-        .on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Appearance"))
-        }),
-        NavigationLink::new("Display", move || display_page(display_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Display"))
-        }),
-        NavigationLink::new("Audio", move || audio_page(audio_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Audio"))
-        }),
-        NavigationLink::new("Network", move || network_page(network_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Network"))
-        }),
-        NavigationLink::new("Input", move || input_page(input_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Input"))
-        }),
-        NavigationLink::new("Shell & Status", move || {
-            status_page(status_app.clone())
-        }).on_select({
-            let title = navigation_title.clone();
-            let app = original.clone();
-            move || {
-                app.refresh_status_preferences();
-                title.set(String::from("Shell & Status"));
-            }
-        }),
-        NavigationLink::new("About", about_page).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("About This System"))
-        }),
+        NavigationLink::new("Appearance", move || appearance_page(app.clone())),
+        NavigationLink::new("Display", move || display_page(display_app.clone())),
+        NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
+        NavigationLink::new("Network", move || network_page(network_app.clone())),
+        NavigationLink::new("Input", move || input_page(input_app.clone())),
+        NavigationLink::new("Shell & Status", move || status_page(status_app.clone()))
+            .on_select(move || original.refresh_status_preferences()),
+        NavigationLink::new("About", about_page)
+            .custom_header(scarlet_ui::NavigationHeader::title("About This System")),
     };
     if std::env::args().any(|arg| arg == "--network")
         && !NETWORK_ENTRY_SELECTED.swap(true, AtomicOrdering::AcqRel)
     {
         navigation.selected_index_state().set(3);
-        navigation_title.set(String::from("Network"));
     }
     navigation
-        .header(move || {
-            HeaderBar::new(
-                hstack! {
-                    Text::from_state(navigation_title.clone()).font_size(20.0),
-                    Spacer::new(),
-                }
-                .alignment(Alignment::Center)
-                .padding_insets(scarlet_ui::geometry::EdgeInsets::new(
-                    24.0, 10.0, 24.0, 10.0,
-                )),
-            )
-            .height(48.0)
-        })
-        .sidebar_width(160.0)
+        .navigation_header()
+        .sidebar_width(144.0)
         .frame(f32::INFINITY, f32::INFINITY)
 }
 
@@ -384,7 +342,7 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
     } else {
         "•".repeat(app.wifi_password.get().chars().count().min(40))
     };
-    let height = 1200.0
+    let height = 1152.0
         + extra_note_height(detail.clone())
         + extra_note_height(app.wifi_status.get())
         + extra_note_height(app.network_status.get())
@@ -430,7 +388,7 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
             settings_note("WPA2-Personal networks are supported. Disconnect before scanning. A successfully connected network is saved for automatic reconnection."),
         }.spacing(14.0).alignment(Alignment::Leading),"Wi-Fi",16.0),
     }.spacing(18.0).alignment(Alignment::Leading);
-    ScrollView::new(content.padding(24.0))
+    ScrollView::new(content)
         .vertical()
         .content_size(0.0, height)
         .scrollbar_visibility(scarlet_ui::ScrollbarVisibility::Always)

@@ -6,6 +6,7 @@
 //! calling application.
 
 mod archive;
+mod browser_pane;
 mod details;
 mod icons;
 mod listing;
@@ -37,9 +38,9 @@ use scarlet_desktop_config::{
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, Image,
-    ImageFit, KeyCode, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
-    navigation, open_window, vstack,
+    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, Icon, Image, ImageFit,
+    KeyCode, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized, navigation,
+    open_window, vstack,
 };
 use scarlet_ui_macros::View;
 use zune_jpeg::JpegDecoder;
@@ -54,15 +55,26 @@ const APP_ID: &str = DESKTOP_FILES_APP_ID;
 const PICKER_WINDOW_KEY: &str = "picker";
 const ROOT_PATH: &str = "/";
 const GRID_COLUMNS: usize = 5;
-const GRID_ROW_HEIGHT: f32 = 146.0;
 const FILE_CELL_WIDTH: f32 = 146.0;
+const FILE_CELL_PADDING: f32 = 8.0;
+const FILE_CELL_SPACING: f32 = 4.0;
 const THUMBNAIL_WIDTH: usize = 96;
 const THUMBNAIL_HEIGHT: usize = 78;
 const FILE_PREVIEW_WIDTH: f32 = THUMBNAIL_WIDTH as f32;
 const FILE_PREVIEW_HEIGHT: f32 = THUMBNAIL_HEIGHT as f32;
 const FILE_NAME_FONT_SIZE: f32 = 13.0;
-const FILE_NAME_HEIGHT: f32 = 32.0;
-const FILE_NAME_MAX_WIDTH: f32 = 132.0;
+const FILE_DETAIL_FONT_SIZE: f32 = 11.0;
+const FILE_NAME_MAX_WIDTH: f32 = FILE_CELL_WIDTH - 2.0 * FILE_CELL_PADDING;
+
+fn file_grid_row_height() -> f32 {
+    // Reserve two actual font lines, plus the preview, metadata and padding.
+    // The legacy 32px name frame clipped Scarlet's taller two-line metrics.
+    FILE_PREVIEW_HEIGHT
+        + 2.0 * measure_text_sized("Mg", FILE_NAME_FONT_SIZE).1 as f32
+        + measure_text_sized("Mg", FILE_DETAIL_FONT_SIZE).1 as f32
+        + 2.0 * FILE_CELL_SPACING
+        + 2.0 * FILE_CELL_PADDING
+}
 const JPEG_THUMBNAIL_SOURCE_MAX_PIXELS: usize = 16 * 1024 * 1024;
 const JPEG_THUMBNAIL_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_WORKER_IDLE_DELAY: Duration = Duration::from_millis(25);
@@ -1472,6 +1484,7 @@ impl FilerApp {
         entry: FileEntry,
         selected_index: Option<usize>,
         picker: bool,
+        row_height: f32,
     ) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
         let background = if selected_index == Some(index) {
@@ -1501,22 +1514,33 @@ impl FilerApp {
         } else {
             format_size(entry.size)
         };
-        let file_name = Text::new(file_name_label(&entry.name))
-            .font_size(FILE_NAME_FONT_SIZE)
-            .alignment(Alignment::Center)
-            .frame(f32::INFINITY, FILE_NAME_HEIGHT);
+        let label = file_name_label(&entry.name);
+        let mut lines = label.lines();
+        let first = Text::new(lines.next().unwrap_or_default().to_owned())
+            .font_size(FILE_NAME_FONT_SIZE);
+        // Center each line individually; centering a multiline Text only
+        // centers its bounding box, leaving the shorter line left-aligned.
+        let file_name = if let Some(second) = lines.next() {
+            Either::A(vstack! {
+                first,
+                Text::new(second.to_owned()).font_size(FILE_NAME_FONT_SIZE),
+            }.alignment(Alignment::Center))
+        } else {
+            Either::B(first)
+        };
         let app = self.clone();
 
         vstack! {
             preview,
             file_name,
             Text::new(detail)
-                .font_size(11.0)
+                .font_size(FILE_DETAIL_FONT_SIZE)
                 .color(palette.text_secondary()),
         }
         .alignment(Alignment::Center)
-        .frame(f32::INFINITY, GRID_ROW_HEIGHT)
-        .padding(8.0)
+        .spacing(FILE_CELL_SPACING)
+        .padding(FILE_CELL_PADDING)
+        .frame_width(FILE_CELL_WIDTH)
         .background(background)
         .hover_color(if selected_index == Some(index) {
             background
@@ -1525,6 +1549,8 @@ impl FilerApp {
         })
         .clip_radius(8.0)
         .border_rounded(border, 2.0, 8.0)
+        .alignment(Alignment::Top)
+        .frame(f32::INFINITY, row_height)
         .on_click(move || {
             if picker {
                 app.activate_picker_entry(index);
@@ -1542,6 +1568,7 @@ impl FilerApp {
         };
         let text_width = (width_state.get() - 36.0).max(300.0);
         let grid_app = self.clone();
+        let row_height = file_grid_row_height();
         let entries = if picker {
             self.picker_entries.clone()
         } else {
@@ -1562,8 +1589,10 @@ impl FilerApp {
             entries,
             selected,
             GRID_COLUMNS,
-            GRID_ROW_HEIGHT,
-            move |index, entry, selected| grid_app.file_cell(index, entry, selected, picker),
+            row_height,
+            move |index, entry, selected| {
+                grid_app.file_cell(index, entry, selected, picker, row_height)
+            },
         )
         .spacing(10.0)
         .minimum_cell_width(FILE_CELL_WIDTH)
@@ -1593,7 +1622,8 @@ impl FilerApp {
                     .font_size(12.0).color(ColorPalette::default().text_secondary()),
                 Button::new("Clear Filter").on_click(move || clear_filter.search.set(String::new())),
                 Spacer::new(),
-            }.spacing(12.0).frame(f32::INFINITY, f32::INFINITY))
+            }.spacing(12.0).frame(f32::INFINITY, f32::INFINITY)
+                .safe_area_padding(scarlet_ui::geometry::SafeAreaEdges::ALL))
         } else {
             Either::B(grid)
         };
@@ -1690,14 +1720,10 @@ impl FilerApp {
                 }).font_size(11.0).color(ColorPalette::default().text_secondary()),
                 Text::new(if !move_supported() { "Move and rename are not available on this system yet." } else { "" })
                     .font_size(11.0).color(ColorPalette::default().text_secondary()),
-            }.alignment(Alignment::Leading).spacing(6.0).padding(8.0))
+            }.alignment(Alignment::Leading).spacing(6.0)
+                .padding_insets(EdgeInsets::symmetric(8.0, 16.0)))
         };
 
-        let tools = if picker {
-            Either::A(vstack! {})
-        } else {
-            Either::B(self.browser_tools())
-        };
         let prompt = if picker {
             Either::A(vstack! {})
         } else {
@@ -1705,19 +1731,24 @@ impl FilerApp {
         };
         let key_app = self.clone();
 
-        vstack! {
-            filter_hint,
-            tools,
-            prompt,
-            grid,
-            footer,
-        }
+        Surface::new(
+            browser_pane::BrowserPane {
+                grid,
+                top: Surface::new(
+                    vstack! { filter_hint, prompt }.alignment(Alignment::Leading),
+                    SurfaceRole::Canvas,
+                ),
+                footer,
+            },
+            SurfaceRole::Canvas,
+        )
         .on_key(move |event| key_app.handle_key(event, picker))
-        .alignment(Alignment::Leading)
-        .padding(10.0)
         .frame(f32::INFINITY, f32::INFINITY)
         .on_geometry_change(
-            |geometry| geometry.size().width,
+            |geometry| {
+                let insets = geometry.safe_area_insets();
+                (geometry.size().width - insets.left - insets.right).max(0.0)
+            },
             move |width| width_state.set(width),
         )
     }
@@ -1733,11 +1764,20 @@ impl FilerApp {
                 .autofocus(self.search_focus.get() > 0)
                 .on_cancel(move || { cancel_search_app.search.set(String::new()); cancel_search_app.search_focus.set(0); })
                 .key(format!("files-search-{}", self.search_focus.get()))
-                .frame(f32::INFINITY, 34.0),
+                .frame(f32::INFINITY, 32.0),
             Button::new("New Folder…").font_size(13.0).enabled(ready).on_click(move || new_app.create_folder()),
             Button::new("Copy").font_size(13.0).enabled(ready && self.selected_entry().is_some()).on_click(move || copy_app.copy_selected(false)),
             Button::new("Paste").font_size(13.0).enabled(ready && self.clipboard.get().is_some_and(|item| !item.cut || move_supported())).on_click(move || paste_app.paste()),
         }.spacing(8.0)
+    }
+
+    fn browser_header(&self) -> impl View + Clone + use<> {
+        vstack! {
+            self.navigation_controls(false),
+            self.browser_tools(),
+        }
+        .spacing(8.0)
+        .alignment(Alignment::Leading)
     }
 
     fn prompt_view(&self) -> impl View + Clone + use<> {
@@ -1806,13 +1846,17 @@ impl FilerApp {
     }
 
     fn picker_page(&self) -> impl View + Clone + use<> {
-        vstack! {
-            self.header_for(true),
-            self.browser_page(true),
+        let content = self.clone();
+        let toolbar = self.clone();
+        navigation! {
+            NavigationLink::new("Open File", move || content.browser_page(true)),
         }
+        .presentation(scarlet_ui::NavigationPresentation::Sidebar)
+        .sidebar_width(0.0)
+        .toolbar(move || toolbar.navigation_controls(true))
     }
 
-    fn header_for(&self, picker: bool) -> impl View + Clone + use<> {
+    fn navigation_controls(&self, picker: bool) -> impl View + Clone + use<> {
         let back_app = self.clone();
         let forward_app = self.clone();
         let up_app = self.clone();
@@ -1847,38 +1891,34 @@ impl FilerApp {
                 focus_generation,
             ))
             .frame(f32::INFINITY, 32.0);
-        HeaderBar::new(
-            hstack! {
-                Button::icon_only(Icon::ChevronLeft)
-                    .header_style()
-                    .on_click(move || back_app.navigate_history(false, picker)),
-                Button::icon_only(Icon::ChevronRight)
-                    .header_style()
-                    .on_click(move || forward_app.navigate_history(true, picker)),
-                Button::icon_only(Icon::ArrowUp)
-                    .header_style()
-                    .on_click(move || {
-                        if picker {
-                            up_app.navigate_picker_up();
-                        } else {
-                            up_app.navigate_up();
-                        }
-                    }),
-                current_path,
-                Button::icon_only(Icon::Refresh)
-                    .header_style()
-                    .on_click(move || {
-                        if picker {
-                            refresh_app.refresh_picker();
-                        } else {
-                            refresh_app.refresh();
-                        }
-                    }),
-            }
-            .alignment(Alignment::Center)
-            .padding(8.0),
-        )
-        .height(48.0)
+        hstack! {
+            Button::icon_only(Icon::ChevronLeft)
+                .header_style()
+                .on_click(move || back_app.navigate_history(false, picker)),
+            Button::icon_only(Icon::ChevronRight)
+                .header_style()
+                .on_click(move || forward_app.navigate_history(true, picker)),
+            Button::icon_only(Icon::ArrowUp)
+                .header_style()
+                .on_click(move || {
+                    if picker {
+                        up_app.navigate_picker_up();
+                    } else {
+                        up_app.navigate_up();
+                    }
+                }),
+            current_path,
+            Button::icon_only(Icon::Refresh)
+                .header_style()
+                .on_click(move || {
+                    if picker {
+                        refresh_app.refresh_picker();
+                    } else {
+                        refresh_app.refresh();
+                    }
+                }),
+        }
+        .alignment(Alignment::Center)
     }
 }
 
@@ -1952,9 +1992,11 @@ impl Application for FilerApp {
                         move || app.navigate_to(downloads_path.clone())
                     }),
             }
-            .header(move || header.header_for(false))
+            .toolbar(move || header.browser_header())
+            // Two 32px rows, an 8px gap, and the toolbar's 8px vertical insets.
+            .header_height(88.0)
             .shows_icons(true)
-            .sidebar_width(170.0),
+            .sidebar_width(154.0),
         )
         .app_id(APP_ID)
         .menu_bar(self.browser_menu_bar())
@@ -2250,7 +2292,7 @@ mod layout_tests {
         let root = Window::new(
             "Files",
             NavigationView::new((NavigationLink::new("Files", move || page_app.files_page()),))
-                .sidebar_width(170.0),
+                .sidebar_width(154.0),
         )
         .size(Size::new(960.0, 640.0));
 
@@ -2295,7 +2337,7 @@ mod layout_tests {
                 NavigationLink::new("First", || Text::new("First")),
                 NavigationLink::new("Files", move || page_app.files_page()),
             ))
-            .sidebar_width(170.0),
+            .sidebar_width(154.0),
         )
         .size(Size::new(960.0, 640.0));
 
@@ -2308,8 +2350,8 @@ mod layout_tests {
         assert!(
             pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
-                x: 10,
-                y: 85,
+                x: 28,
+                y: 106,
                 click_count: 1,
             }))
         );
@@ -2377,6 +2419,35 @@ mod layout_tests {
                 "folder column {column} should be painted in app scene"
             );
         }
+
+        fn render_bounds(
+            element: &dyn scarlet_ui::Element,
+            parent: scarlet_ui::Point,
+            matches: fn(&dyn scarlet_ui::ElementRenderObject) -> bool,
+        ) -> Option<scarlet_ui::Rect> {
+            let position = element.position();
+            let origin = scarlet_ui::Point::new(parent.x + position.x, parent.y + position.y);
+            if element.render_object().is_some_and(matches) {
+                return Some(scarlet_ui::Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| render_bounds(child.as_ref(), origin, matches))
+        }
+        let root = pipeline.element_tree().root().unwrap();
+        let header = render_bounds(root, scarlet_ui::Point::ZERO, |r| {
+            r.as_any().is::<scarlet_ui::views::HeaderBarRenderObject>()
+        }).unwrap();
+        let viewport = render_bounds(root, scarlet_ui::Point::ZERO, |r| {
+            r.accepts_touch_scroll()
+        }).unwrap();
+        assert!(
+            viewport.top() < header.top(),
+            "the grid must paint behind the navigation header"
+        );
+        assert_eq!(viewport.left(), header.left());
+        assert_eq!(viewport.size.width, header.size.width);
     }
 
     #[test]

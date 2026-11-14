@@ -57,6 +57,11 @@ nix develop --command cargo scarlet image \
 The SDK owns source checkouts under the project's `.scarlet/cache/git`, Cargo
 outputs under `.scarlet/cache/target/<canonical-source-path-sha256-prefix>`, and
 Cargo's registry/Git dependency cache under `.scarlet/cache/cargo-home`.
+Keep the SGFX source revisions in `bundles/sgfx-native/bundle.toml` and
+`user/lib/scarlet-vulkan/bundle.toml` aligned. The SDK currently shares one
+checkout per Git URL, so resolving a different ICD revision can switch the
+driver's source directory before it is built. Verify the staged library and
+image contents when updating the runtime; a manifest pin alone is insufficient.
 Image contents are assembled under `.scarlet/staging/<image-name>`, then written
 to the image output paths declared in `scarlet.toml`. These are generated data,
 not source editing locations. Build recipes and source changes remain in their

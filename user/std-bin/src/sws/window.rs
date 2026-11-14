@@ -944,6 +944,18 @@ impl Window {
         self.visible && self.workspace_visible && !self.minimized
     }
 
+    /// Prepare fixed-depth shell surfaces without exposing them to composition
+    /// or input. Catalog/layout updates must not wait for the first Home reveal.
+    pub fn prepares_while_workspace_hidden(&self) -> bool {
+        !self.workspace_visible
+            && super::shell_presentation::prepares_while_workspace_hidden(
+                self.app_id.as_deref(),
+                self.window_type == WindowType::ShellBackground,
+                self.visible,
+                self.minimized,
+            )
+    }
+
     /// Return whether the surface participates in composition and hit testing.
     ///
     /// Logical visibility and retained-buffer freshness must both permit it.
@@ -1159,7 +1171,7 @@ impl Window {
         if self.tablet_managed {
             flags |= sws_protocol::window_state::TABLET_MANAGED;
         }
-        if !self.is_logically_presented() {
+        if !self.is_logically_presented() && !self.prepares_while_workspace_hidden() {
             flags |= sws_protocol::window_state::SUSPENDED;
         }
         flags
@@ -3169,6 +3181,7 @@ mod tests {
             false,
             1,
             0,
+            window.prepares_while_workspace_hidden(),
         ));
         assert!(window.complete_native_policy_frame((800, 600), Some((1, 8))));
         assert!(!window.retains_native_transition_frame());
@@ -3260,6 +3273,7 @@ mod tests {
             false,
             1,
             0,
+            window.prepares_while_workspace_hidden(),
         ));
         window.set_tablet_managed(false);
         assert!(
@@ -3529,6 +3543,7 @@ mod tests {
             false,
             0,
             0,
+            window.prepares_while_workspace_hidden(),
         ));
 
         // The compositor applies these transitions for both CPU damage commits

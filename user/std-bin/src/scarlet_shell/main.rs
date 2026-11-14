@@ -10,11 +10,13 @@ mod background;
 mod console;
 mod control_center;
 mod drawer;
+mod home_catalog;
 mod home_style;
 #[path = "../home_trace.rs"]
 mod home_trace;
 mod network_status;
 mod options;
+mod popup_menu;
 mod power;
 #[path = "../power_request.rs"]
 mod power_request;
@@ -50,12 +52,10 @@ use scarlet_os::time;
 use scarlet_os::{network, process, scheduler};
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::{Color, ColorPalette};
-use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
 use scarlet_ui::geometry::Size;
 use scarlet_ui::graphics;
 use scarlet_ui::platform::WindowPlacement;
 use scarlet_ui::prelude::*;
-use scarlet_ui::views::menu::MenuRenderObject;
 use scarlet_ui::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
 use scarlet_ui::{GridView, IconView, StateId, hstack, vstack};
 use scarlet_ui::{
@@ -80,9 +80,11 @@ use control_center::{
     ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot, NetworkInterfaceSnapshot,
     NetworkInterfaceState, NetworkSnapshot, SystemSnapshot, boxed, build_control_center_view,
 };
+use home_catalog::{ApplicationEntry, HomeApplication};
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
 use network_status::{ConnectionState, NetworkKind, NetworkStatus};
 use options::{Options, ShellMode};
+use popup_menu::PopupMenuRenderer;
 use power::{PowerIcon, PowerStatus};
 use status::{StatusPresentation, StatusProvider, StatusProviderSnapshot};
 
@@ -161,14 +163,6 @@ struct ShellWindow {
     visible: bool,
     focused: bool,
     minimized: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct HomeApplication {
-    app_id: String,
-    name: String,
-    icon: String,
-    artwork: app_artwork::AppArtwork,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +534,7 @@ struct PhysicalWorkarea {
 impl ShellLayout {
     const LAPTOP_STATUS_BAR_HEIGHT: u32 = 32;
     const TABLET_STATUS_BAR_HEIGHT: u32 = 40;
+    const MENU_POPUP_GAP: u32 = 4;
 
     /// Build a layout from the compositor state, treating an unknown state as
     /// the laptop/desktop default.
@@ -568,9 +563,9 @@ impl ShellLayout {
         self.status_bar_height() as i32
     }
 
-    /// Return the physical popup anchor directly below the StatusBar.
+    /// Leave the same logical gap below the StatusBar as the Web menu host.
     fn physical_popup_y(self, scale_milli: u32) -> i32 {
-        scale_u32(self.popup_y() as u32, scale_milli) as i32
+        scale_u32(self.popup_y() as u32 + Self::MENU_POPUP_GAP, scale_milli) as i32
     }
 
     /// Return a physical workarea after reserving the scaled StatusBar height.
@@ -2082,16 +2077,13 @@ fn build_menu_items(
                     let next_state = submenu_path.clone();
                     let mut next_path = current_path.clone();
                     next_path.push(index);
-                    // MenuRenderObject does not draw Submenu's chevron itself.
-                    // Keep any supplied shortcut and use its trailing column.
-                    let indicator = match &item.shortcut {
-                        Some(shortcut) => format!("{}  ›", shortcut),
-                        None => String::from("›"),
-                    };
+                    // Shared menu paint owns the submenu chevron and its gutter.
+                    if let Some(ref shortcut) = item.shortcut {
+                        content = content.shortcut(shortcut.clone());
+                    }
                     items.push(
                         content
                             .action(MenuAction::Submenu)
-                            .shortcut(indicator)
                             .callback(move || next_state.set(next_path.clone())),
                     );
                     continue;
@@ -2250,61 +2242,6 @@ fn build_overview_items(
     items
 }
 
-struct PopupMenuRenderer {
-    render_object: MenuRenderObject,
-    size: Size,
-    scale_milli: u32,
-}
-
-impl PopupMenuRenderer {
-    fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32, scale_milli: u32) -> Self {
-        graphics::set_current_scale_milli(scale_milli);
-        let mut render_object = MenuRenderObject::new(items, item_height, width);
-        let constraints = LayoutConstraints {
-            min_width: width,
-            max_width: width,
-            min_height: 0.0,
-            max_height: f32::INFINITY,
-        };
-        let size = render_object.layout(constraints);
-        render_object.render();
-        Self {
-            render_object,
-            size,
-            scale_milli,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.size
-    }
-
-    fn handle_move(&mut self, x: f32, y: f32) -> bool {
-        let hovered = self.render_object.hit_test(x, y);
-        if hovered != self.render_object.hovered() {
-            self.render_object.set_hovered(hovered);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn handle_click(&self, x: f32, y: f32) {
-        if let Some(index) = self.render_object.hit_test(x, y) {
-            self.render_object.invoke_item(index);
-        }
-    }
-
-    fn render(&mut self) {
-        graphics::set_current_scale_milli(self.scale_milli);
-        self.render_object.render();
-    }
-
-    fn buffer(&self) -> Option<&Buffer> {
-        self.render_object.get_buffer()
-    }
-}
-
 enum ShellPopupRenderer {
     Menu(PopupMenuRenderer),
 }
@@ -2316,12 +2253,16 @@ impl ShellPopupRenderer {
         }
     }
 
-    fn handle_move(&mut self, x: i32, y: i32, pressed: bool) -> Option<ControlCenterAction> {
+    fn menu(&self) -> &PopupMenuRenderer {
         match self {
-            Self::Menu(renderer) => {
-                let _ = renderer.handle_move(x as f32, y as f32);
-                None
-            }
+            Self::Menu(renderer) => renderer,
+        }
+    }
+
+    /// Returns whether the hover state changed and a repaint is needed.
+    fn handle_move(&mut self, x: i32, y: i32, pressed: bool) -> bool {
+        match self {
+            Self::Menu(renderer) => renderer.handle_move(x as f32, y as f32),
         }
     }
 
@@ -2346,11 +2287,9 @@ impl ShellPopupRenderer {
         }
     }
 
-    fn handle_exit(&mut self) {
+    fn handle_exit(&mut self) -> bool {
         match self {
-            Self::Menu(renderer) => {
-                let _ = renderer.handle_move(-1.0, -1.0);
-            }
+            Self::Menu(renderer) => renderer.handle_move(-1.0, -1.0),
         }
     }
 
@@ -2392,7 +2331,7 @@ fn launch_home_application(source_window_id: u32, application: &HomeApplication)
         .is_ok()
 }
 
-fn load_home_applications(artwork_cache: &mut app_artwork::ArtworkCache) -> Vec<HomeApplication> {
+fn load_home_entries() -> Option<Vec<ApplicationEntry>> {
     let query = |method| {
         SbusConnection::connect().and_then(|mut connection| {
             connection.call_method_timeout(
@@ -2410,7 +2349,7 @@ fn load_home_applications(artwork_cache: &mut app_artwork::ArtworkCache) -> Vec<
             Ok(arguments) => (arguments, 5),
             Err(_) => match query(DESKTOP_STEMD_LIST_APPLICATIONS_METHOD) {
                 Ok(arguments) => (arguments, 3),
-                Err(_) => return Vec::new(),
+                Err(_) => return None,
             },
         };
 
@@ -2435,17 +2374,13 @@ fn load_home_applications(artwork_cache: &mut app_artwork::ArtworkCache) -> Vec<
             Some(SbusArgument::String(value)) => value.as_str(),
             _ => "",
         };
-        let artwork = artwork_cache.load(
-            app_id,
-            icon,
-            artwork_value(3),
-            app_artwork::BackgroundBlur::parse(artwork_value(4)),
-        );
-        applications.push(HomeApplication {
+        applications.push(ApplicationEntry {
             app_id: app_id.clone(),
             name: name.clone(),
             icon: home_style::catalog_icon(app_id, icon).to_owned(),
-            artwork,
+            icon_path: icon.clone(),
+            background: artwork_value(3).to_owned(),
+            blur: app_artwork::BackgroundBlur::parse(artwork_value(4)),
         });
     }
     applications.sort_by(|left, right| {
@@ -2454,23 +2389,18 @@ fn load_home_applications(artwork_cache: &mut app_artwork::ArtworkCache) -> Vec<
             .cmp(&right.name.to_lowercase())
             .then_with(|| left.app_id.cmp(&right.app_id))
     });
-    artwork_cache.retain(
-        &applications
-            .iter()
-            .map(|app| app.app_id.clone())
-            .collect::<Vec<_>>(),
-    );
-    applications
+    Some(applications)
 }
 
 fn refresh_home_catalog(applications: State<Vec<HomeApplication>>) {
     let mut previous = Vec::new();
     let mut artwork_cache = app_artwork::ArtworkCache::default();
     loop {
-        let next = load_home_applications(&mut artwork_cache);
-        if next != previous {
-            applications.set(next.clone());
-            previous = next;
+        // A transient service failure must not clear already usable entries.
+        if let Some(entries) = load_home_entries() {
+            home_catalog::refresh(&entries, &mut artwork_cache, &mut previous, |next| {
+                applications.set(next);
+            });
         }
         std::thread::sleep(HOME_CATALOG_REFRESH_INTERVAL);
     }
@@ -2560,8 +2490,25 @@ fn maintain_home_filter(
         let current_query = query.get();
         if current_applications != previous_applications || current_query != previous_query {
             let next = filter_home_applications(&current_applications, &current_query);
-            selected.set((!next.is_empty()).then_some(0));
-            hovered.set(None);
+            let previous_filtered = filtered.get();
+            let query_changed = current_query != previous_query;
+            set_state_if_changed(
+                &selected,
+                home_catalog::refreshed_selection(
+                    &previous_filtered,
+                    &next,
+                    selected.get(),
+                    query_changed,
+                ),
+            );
+            if query_changed
+                || !previous_filtered
+                    .iter()
+                    .map(|app| &app.app_id)
+                    .eq(next.iter().map(|app| &app.app_id))
+            {
+                hovered.set(None);
+            }
             filtered.set(next);
             previous_applications = current_applications;
             previous_query = current_query;
@@ -3378,6 +3325,18 @@ impl ShellApp {
 }
 
 impl Application for ShellApp {
+    fn on_frame_presented(&mut self, ctx: &WindowContext) {
+        if ctx.scene_key.as_str() == HOME_SCENE_KEY {
+            home_trace::record(
+                2,
+                format_args!(
+                    "shell-home-frame-submitted apps={}",
+                    self.home_filtered_applications.get().len(),
+                ),
+            );
+        }
+    }
+
     fn scene_listenables(
         &self,
         key: &scarlet_ui::scene::SceneWindowKey,
@@ -3966,22 +3925,6 @@ impl Application for ShellApp {
         // Screen size will be obtained by sws_client in main()
         std::thread::spawn(background::run);
         self.start_background_tasks();
-        let home_applications = self.home_applications.clone();
-        std::thread::spawn(move || refresh_home_catalog(home_applications));
-        let filter_applications = self.home_applications.clone();
-        let filter_query = self.home_query.clone();
-        let filtered_applications = self.home_filtered_applications.clone();
-        let filtered_selection = self.home_selected.clone();
-        let filtered_hover = self.home_hovered.clone();
-        std::thread::spawn(move || {
-            maintain_home_filter(
-                filter_applications,
-                filter_query,
-                filtered_applications,
-                filtered_selection,
-                filtered_hover,
-            )
-        });
         let workspace_state = self.workspace_state.clone();
         let workspace_commands = self.workspace_commands.clone();
         let audio_status = self.status_snapshot.clone();
@@ -4006,6 +3949,19 @@ impl Application for ShellApp {
 }
 
 impl ShellApp {
+    fn start_home_catalog(&self) {
+        let applications = self.home_applications.clone();
+        std::thread::spawn(move || refresh_home_catalog(applications));
+        let applications = self.home_applications.clone();
+        let query = self.home_query.clone();
+        let filtered = self.home_filtered_applications.clone();
+        let selected = self.home_selected.clone();
+        let hovered = self.home_hovered.clone();
+        std::thread::spawn(move || {
+            maintain_home_filter(applications, query, filtered, selected, hovered)
+        });
+    }
+
     fn apply_focus_metadata(
         &mut self,
         window_id: u32,
@@ -4319,8 +4275,9 @@ impl ShellApp {
                                         submenu_path.clone(),
                                     )
                                 };
+                                let max_menu_width = (screen_width_popup.get() - 16.0).max(160.0);
                                 let menu_width = if overview_open {
-                                    (screen_width_popup.get() - 16.0).clamp(220.0, 420.0)
+                                    max_menu_width.clamp(220.0, 420.0)
                                 } else {
                                     220.0
                                 };
@@ -4328,15 +4285,15 @@ impl ShellApp {
                                     items,
                                     geometry.row_height,
                                     menu_width,
+                                    max_menu_width,
                                     scale_milli,
                                 ))
                             };
                             let size = renderer.size();
                             let width = size.width as u32;
-                            let height = size.height as u32;
-                            let physical_width = scale_u32(width, scale_milli);
-                            let physical_height = scale_u32(height, scale_milli);
-                            popup_renderer = Some(renderer);
+                            let (physical_width, physical_height) = renderer.menu().physical_size();
+                            let geometry = renderer.menu().window_geometry();
+                            let regions = renderer.menu().surface_regions();
                             needs_render = true;
 
                             let screen_width = screen_width_popup.get().max(1.0);
@@ -4365,6 +4322,12 @@ impl ShellApp {
                                         layout.physical_popup_y(scale_milli),
                                     ) {
                                         Ok(id) => {
+                                            // Transparent shadow padding surrounds the visible
+                                            // rounded menu. Only its body accepts input and
+                                            // requests compositor backdrop diffusion.
+                                            let _ = conn.set_window_has_alpha_content(id, true);
+                                            let _ = conn.set_window_geometry(id, geometry);
+                                            let _ = conn.set_surface_regions(id, true, &regions);
                                             popup_surface_id = Some(id);
                                             popup_focus_observed = false;
                                             popup_surface_id_popup.set(Some(id));
@@ -4394,6 +4357,7 @@ impl ShellApp {
                                     }
                                 }
                             };
+                            popup_renderer = Some(renderer);
                         }
                     } else {
                         if let Some(surface_id) = popup_surface_id.take() {
@@ -4489,16 +4453,18 @@ impl ShellApp {
                                 (sws::event::event_type::EV_SYN, _) => {
                                     if pending_move {
                                         if let Some(renderer) = popup_renderer.as_mut() {
-                                            if pointer_x < 0 || pointer_y < 0 {
-                                                renderer.handle_exit();
+                                            // Repaint only when the hovered row
+                                            // changes; a full CPU repaint per
+                                            // pointer sample made menus lag.
+                                            needs_render |= if pointer_x < 0 || pointer_y < 0 {
+                                                renderer.handle_exit()
                                             } else {
-                                                let _ = renderer.handle_move(
+                                                renderer.handle_move(
                                                     pointer_x,
                                                     pointer_y,
                                                     pointer_pressed,
-                                                );
-                                            }
-                                            needs_render = true;
+                                                )
+                                            };
                                         }
                                         pending_move = false;
                                     }
@@ -4526,8 +4492,7 @@ impl ShellApp {
                                         if popup_touch_id == Some(change.id) =>
                                     {
                                         if let Some(renderer) = popup_renderer.as_mut() {
-                                            let _ = renderer.handle_move(x, y, true);
-                                            needs_render = true;
+                                            needs_render |= renderer.handle_move(x, y, true);
                                         }
                                     }
                                     sws_protocol::touch::Phase::Up
@@ -4753,6 +4718,10 @@ fn main() {
     // Update screen_width state with actual screen size
     app.screen_width.update(|w| *w = screen_width);
     app.screen_height.update(|h| *h = screen_height);
+
+    // Discover entries and decode artwork while the UI initializes its renderer
+    // and hidden Home surface, before the first request to open the launcher.
+    app.start_home_catalog();
 
     match app.run() {
         Ok(_) => {

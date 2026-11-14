@@ -110,7 +110,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "df0a3de27146b5098f35f7b7f5dcae61646bfafa" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -328,7 +328,7 @@ to = "/bin/remote-desktop"
 # Cadence owns its app recipe and preserves the PIC build and final ELF audit.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/cadence", rev = "877f521a1f814914abd7cf36976eae30aa288d33" }
+source = { git = "https://github.com/petitstrawberry/cadence", rev = "17ae3962f7d33cc324fed0365d1b63ea6ac01330" }
 subdir = "platforms/scarlet"
 
 [[layers]]
@@ -387,8 +387,8 @@ source = "../../user/std-bin"
 bin = "applications"
 to = "/bin/applications"
 
-# Kureha Code owns its native app recipe and resources.
+# Kureha Code distributes prebuilt app archives with a checksum-pinned bundle.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "ccba3380066c96474db240ac17417707ccbc1704" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "94b6bc2909ca1e6e25074d7d326a55c8de685a28" }
 bundle = "platforms/scarlet/bundle.toml"
