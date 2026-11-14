@@ -34,9 +34,7 @@ extern crate alloc;
 use super::accounting::{Activity, CpuClock};
 use crate::sync::counter::SaturatingCounter;
 use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
-use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -1064,54 +1062,73 @@ static CPU_CLOCKS: Once<[CpuClock; MAX_NUM_CPUS]> = Once::new();
 // visible as a current, deferred-previous, or ready ID. Idle-context queue work
 // runs in IRQ callbacks, before the interrupt's scheduler safe point. Reclaim
 // must not be entered from inside a scheduler mutation or the heap allocator.
+// Keep the complete 64-bit protocol state coherent even without native u64
+// atomics. The lock covers only scalar bookkeeping, never queue operations,
+// task lookup or callbacks; inactive scheduler paths do not acquire it.
 struct MemoryPressureTracking {
-    revision: AtomicU64,
-    writers: AtomicUsize,
-    activation: AtomicU64,
-    acknowledged: [AtomicU64; MAX_NUM_CPUS],
+    state: IrqSpinLock<MemoryPressureTrackingState>,
+}
+
+struct MemoryPressureTrackingState {
+    revision: u64,
+    writers: usize,
+    activation: u64,
+    acknowledged: [u64; MAX_NUM_CPUS],
 }
 
 impl MemoryPressureTracking {
     const fn new() -> Self {
         Self {
-            revision: AtomicU64::new(0),
-            writers: AtomicUsize::new(0),
-            activation: AtomicU64::new(0),
-            acknowledged: [const { AtomicU64::new(0) }; MAX_NUM_CPUS],
+            state: IrqSpinLock::new(MemoryPressureTrackingState {
+                revision: 0,
+                writers: 0,
+                activation: 0,
+                acknowledged: [0; MAX_NUM_CPUS],
+            }),
         }
     }
 
     fn advance_revision(&self) -> u64 {
-        self.revision
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
-                revision.checked_add(1)
-            })
-            .map_or(u64::MAX, |revision| revision + 1)
+        let mut state = self.state.lock();
+        state.revision = state.revision.saturating_add(1);
+        state.revision
     }
 
     fn begin(&self) {
-        self.writers.fetch_add(1, Ordering::SeqCst);
-        self.advance_revision();
+        let mut state = self.state.lock();
+        state.writers += 1;
+        state.revision = state.revision.saturating_add(1);
     }
 
     fn finish(&self) -> bool {
-        self.advance_revision();
-        self.writers.fetch_sub(1, Ordering::SeqCst) == 1
+        let mut state = self.state.lock();
+        state.revision = state.revision.saturating_add(1);
+        state.writers -= 1;
+        state.writers == 0
     }
 
     fn valid(&self, revision: u64) -> bool {
-        revision != u64::MAX
-            && self.writers.load(Ordering::SeqCst) == 0
-            && self.revision.load(Ordering::SeqCst) == revision
+        let state = self.state.lock();
+        revision != u64::MAX && state.writers == 0 && state.revision == revision
+    }
+
+    fn activate(&self) {
+        let mut state = self.state.lock();
+        state.activation = state.activation.saturating_add(1);
+    }
+
+    fn acknowledge(&self, cpu: usize) {
+        let mut state = self.state.lock();
+        state.acknowledged[cpu] = state.activation;
     }
 
     fn all_acknowledged(&self, online: u64) -> bool {
-        let activation = self.activation.load(Ordering::SeqCst);
-        activation != 0
-            && activation != u64::MAX
+        let state = self.state.lock();
+        state.activation != 0
+            && state.activation != u64::MAX
             && online != 0
             && online_cpu_ids_from_mask(online)
-                .all(|cpu| self.acknowledged[cpu].load(Ordering::SeqCst) == activation)
+                .all(|cpu| state.acknowledged[cpu] == state.activation)
     }
 }
 
@@ -1129,19 +1146,13 @@ mod memory_pressure_tests {
     #[test_case]
     fn inactive_scheduler_hooks_do_not_write_shared_tracking_state() {
         assert!(!crate::mem::pressure::reclaim_active_fast());
-        let revision = MEMORY_PRESSURE_TRACKING.revision.load(Ordering::SeqCst);
-        let writers = MEMORY_PRESSURE_TRACKING.writers.load(Ordering::SeqCst);
+        let revision = MEMORY_PRESSURE_TRACKING.state.lock().revision;
+        let writers = MEMORY_PRESSURE_TRACKING.state.lock().writers;
         let publication = MEMORY_PRESSURE_PUBLISHER.load(Ordering::SeqCst);
         drop(SchedulerPressureChange::begin());
         drop(MemoryPressureSafePoint);
-        assert_eq!(
-            MEMORY_PRESSURE_TRACKING.revision.load(Ordering::SeqCst),
-            revision
-        );
-        assert_eq!(
-            MEMORY_PRESSURE_TRACKING.writers.load(Ordering::SeqCst),
-            writers
-        );
+        assert_eq!(MEMORY_PRESSURE_TRACKING.state.lock().revision, revision);
+        assert_eq!(MEMORY_PRESSURE_TRACKING.state.lock().writers, writers);
         assert_eq!(
             MEMORY_PRESSURE_PUBLISHER.load(Ordering::SeqCst),
             publication
@@ -1179,24 +1190,45 @@ mod memory_pressure_tests {
         let tracking = MemoryPressureTracking::new();
         let online = 1 | (1 << (MAX_NUM_CPUS - 1));
         assert!(!tracking.all_acknowledged(online));
-        tracking.activation.store(1, Ordering::SeqCst);
-        tracking.acknowledged[0].store(1, Ordering::SeqCst);
+        tracking.activate();
+        tracking.acknowledge(0);
         if MAX_NUM_CPUS > 1 {
             assert!(!tracking.all_acknowledged(online));
         }
-        tracking.acknowledged[MAX_NUM_CPUS - 1].store(1, Ordering::SeqCst);
+        tracking.acknowledge(MAX_NUM_CPUS - 1);
         assert!(tracking.all_acknowledged(online));
         // An inactive pick can straddle activation. Earlier acknowledgments
         // must not let its empty-queue / old-current gap count as full.
-        tracking.activation.store(2, Ordering::SeqCst);
+        tracking.activate();
         assert!(!tracking.all_acknowledged(online));
         assert!(!tracking.all_acknowledged(0));
     }
 
     #[test_case]
+    fn full_tracking_preserves_generations_above_32_bits() {
+        let tracking = MemoryPressureTracking::new();
+        {
+            let mut state = tracking.state.lock();
+            state.revision = u32::MAX as u64;
+            state.activation = u32::MAX as u64;
+        }
+        let revision = tracking.advance_revision();
+        assert_eq!(revision, 1u64 << 32);
+        assert!(tracking.valid(revision));
+        tracking.activate();
+        tracking.acknowledge(0);
+        assert!(tracking.all_acknowledged(1));
+        tracking.activate();
+        assert!(!tracking.all_acknowledged(1));
+        tracking.begin();
+        assert!(!tracking.valid(revision));
+        assert!(tracking.finish());
+    }
+
+    #[test_case]
     fn full_revision_exhaustion_fails_closed() {
         let tracking = MemoryPressureTracking::new();
-        tracking.revision.store(u64::MAX - 1, Ordering::SeqCst);
+        tracking.state.lock().revision = u64::MAX - 1;
         assert_eq!(tracking.advance_revision(), u64::MAX);
         assert!(!tracking.valid(u64::MAX));
         assert_eq!(tracking.advance_revision(), u64::MAX);
@@ -1209,8 +1241,8 @@ mod memory_pressure_tests {
         let cpu = get_cpu().get_cpuid();
         register_online_cpu(cpu);
         let tracking = MemoryPressureTracking::new();
-        tracking.activation.store(1, Ordering::SeqCst);
-        tracking.acknowledged[cpu].store(1, Ordering::SeqCst);
+        tracking.activate();
+        tracking.acknowledge(cpu);
         // Deliberately absent from TaskPool: sampling must never look it up.
         let stalled_id = 41;
         let other_id = 42;
@@ -1258,7 +1290,7 @@ mod memory_pressure_tests {
 }
 
 /// Validate a sampled scheduler revision under the pressure accounting lock.
-/// No scheduler lock or task-pool lookup is needed by the consumer.
+/// Only the scalar tracking lock is needed, never a queue or task-pool lock.
 pub(crate) fn memory_pressure_snapshot_valid(revision: u64) -> bool {
     MEMORY_PRESSURE_TRACKING.valid(revision)
 }
@@ -1306,12 +1338,7 @@ pub(crate) fn memory_pressure_state_change_begin() -> MemoryPressureStateChange 
     let activating = !crate::mem::pressure::reclaim_active_fast();
     if activating {
         // A new activation never inherits an earlier CPU acknowledgment.
-        MEMORY_PRESSURE_TRACKING
-            .activation
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |activation| {
-                activation.checked_add(1)
-            })
-            .ok();
+        MEMORY_PRESSURE_TRACKING.activate();
     }
     MemoryPressureStateChange {
         _irq: irq,
@@ -1343,8 +1370,7 @@ impl Drop for MemoryPressureStateChange {
 
 fn acknowledge_memory_pressure_activation() {
     let cpu = get_cpu().get_cpuid();
-    let activation = MEMORY_PRESSURE_TRACKING.activation.load(Ordering::SeqCst);
-    MEMORY_PRESSURE_TRACKING.acknowledged[cpu].store(activation, Ordering::SeqCst);
+    MEMORY_PRESSURE_TRACKING.acknowledge(cpu);
 }
 
 // Created at the outer pick_next boundary, before its IRQ/queue guards. Even

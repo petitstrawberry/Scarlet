@@ -2168,7 +2168,7 @@ mod tests {
 
         set_mock_current_task(thread.clone());
         let mut abi = LinuxAbi::default();
-        let mut frame = Trapframe::new();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&thread);
         assert_eq!(sys_getppid(&mut abi, &mut frame), parent.get_namespace_id());
         assert_ne!(sys_getppid(&mut abi, &mut frame), thread.get_namespace_id());
         clear_mock_current_task();
@@ -2181,15 +2181,17 @@ mod tests {
 
     #[test_case]
     fn resource_queries_use_entry_reservation_and_validate_output() {
-        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
+        // Linux mprotect accepts the lower user range; the RV64 native stack
+        // uses a separate high-VA layout.
         let task = crate::task::new_user_task("resource-query".into(), 0);
         task.vm_manager
             .set_asid(crate::arch::vm::alloc_virtual_address_space());
         assert_eq!(resource_limit(&task, 3), Err(errno::EOPNOTSUPP));
-        let base = USER_STACK_END - 4 * PAGE_SIZE;
+        let base = USER_LOWER_CANONICAL_END - 4 * PAGE_SIZE;
         task.allocate_stack_pages(base, 4).unwrap();
         task.vm_manager
-            .record_process_entry_stack(USER_STACK_END - 128)
+            .record_process_entry_stack(USER_LOWER_CANONICAL_END - 128)
             .unwrap();
         assert_eq!(resource_limit(&task, 3), Ok((4 * PAGE_SIZE) as u64));
         assert_eq!(resource_limit(&task, 7), Ok(super::super::MAX_FDS as u64));

@@ -58,7 +58,7 @@ def ncm_suites(c):
 def packet_code(sources, candidate):
     s = sources['protocol_stack.rs']
     start = s.index('// Protocol-neutral inline metadata.') if candidate else s.index('#[derive(Debug, Clone, Default)]\npub struct LayerContext')
-    result = 'use alloc::{collections::BTreeMap,string::String,vec::Vec};\n' + s[start:s.index('/// Configuration for socket creation', start)]
+    result = 'use alloc::{collections::BTreeMap,string::String,vec::Vec,sync::Arc};\n' + s[start:s.index('/// Configuration for socket creation', start)]
     result += '\nconst TCP_HEADER_SIZE:usize=20;\n'
     for file, ty, methods in [('tcp.rs', 'TcpHeader', ['calculate_checksum_with_options', 'to_bytes']), ('ipv4.rs', 'Ipv4Header', ['new', 'calculate_checksum', 'to_bytes'])]:
         source = sources[file]
@@ -70,11 +70,18 @@ def packet_code(sources, candidate):
         result += '}\n'
     return result + block(sources['ipv4.rs'], 'fn checksum_from_bytes(')
 
+def traffic_code(c):
+    # Exercise real reservation ownership alongside the extracted packet code.
+    traffic = (c / 'kernel/src/network/traffic.rs').read_text().replace('//!', '//')
+    traffic = traffic.replace('#[test_case]', '#[test]')
+    return (HARNESS / 'traffic-host.rs').read_text().replace('/* PRODUCTION_TRAFFIC */', traffic)
+
 def other_suites(c):
     names = ['tcp.rs', 'ipv4.rs', 'protocol_stack.rs']
     current = {n: (c / 'kernel/src/network' / n).read_text() for n in names}
     baseline = {n: subprocess.check_output(['git', 'show', '6fa4a4ac2c4a1b05034057b16f614736a44344b2:kernel/src/network/' + n], cwd=c, text=True) for n in names}
     packet = (HARNESS / 'network-packet-allocation-host-tests.rs').read_text()
+    packet += '\n' + traffic_code(c)
     packet = packet.replace('/* BASELINE */', 'mod baseline {\n' + packet_code(baseline, False) + '\n}')
     packet = packet.replace('/* CANDIDATE */', 'mod candidate {\n' + packet_code(current, True) + '\n}')
     owned = (c / 'kernel/src/network/packet.rs').read_text()
@@ -103,6 +110,7 @@ def arp_suite(c):
     types += '\ntype ArpCacheKey=(String,u32);type ArpPendingKey=(String,u32);'
     methods = '\n'.join(block(arp, marker) for marker in ('pub fn lookup_on_interface(', 'pub fn add_entry_on_interface(', 'fn resolve_pending(', 'pub fn clear_interface(', 'pub fn pending_packet_count(', 'pub fn queue_owned_packet_on_interface(', 'fn get_timestamp('))
     harness = (HARNESS / 'arp-resolution-host-tests.rs').read_text().replace('/* PRODUCTION_PACKET */', packet).replace('/* PRODUCTION_ARP_TYPES */',types).replace('/* PRODUCTION_ARP_METHODS */',methods)
+    harness += '\n' + traffic_code(c)
     return [('arp', harness, None, 'arp-resolution-host-tests.rs', '')]
 
 def main():
@@ -117,7 +125,7 @@ def main():
     version = subprocess.check_output([rustc, '-vV'], text=True)
     host = re.search('^host: (.+)$', version, re.M)[1]
     paths = ['kernel/src/drivers/usb/cdc_ncm.rs', 'kernel/src/drivers/usb/xhci/mod.rs', 'kernel/src/drivers/usb/xhci/ring.rs'] + ['kernel/src/network/' + n for n in ['tcp.rs', 'ipv4.rs', 'protocol_stack.rs']]
-    paths.extend(['kernel/src/network/packet.rs', 'kernel/src/device/network/mod.rs', 'kernel/src/network/arp.rs'])
+    paths.extend(['kernel/src/network/packet.rs', 'kernel/src/device/network/mod.rs', 'kernel/src/network/arp.rs', 'kernel/src/network/traffic.rs'])
     before = {n: sha(ROOT / n) for n in paths}
     receipt = {'compiler_version': version, 'source_sha256': before, 'runs': [], 'physical_tested': False}
     with tempfile.TemporaryDirectory(prefix='network-regression-') as temp:
@@ -131,9 +139,13 @@ def main():
             binary = Path(temp) / name
             compiled = subprocess.run([rustc, '--edition=2024', '--target', host, '-C', 'opt-level=2', '--test', str(path), '-o', str(binary)], capture_output=True, text=True)
             (output / (name + '-compile.log')).write_text(compiled.stdout + compiled.stderr)
+            if compiled.returncode:
+                print(compiled.stdout + compiled.stderr, flush=True)
             compiled.check_returncode()
             tested = subprocess.run([str(binary), '--test-threads=1', '--nocapture'], capture_output=True, text=True, timeout=30)
             (output / (name + '-tests.log')).write_text(tested.stdout + tested.stderr)
+            if tested.returncode:
+                print(tested.stdout + tested.stderr, flush=True)
             tested.check_returncode()
             result = tested.stdout.split('test result: ')[-1].strip()
             print(name + ': ' + result)

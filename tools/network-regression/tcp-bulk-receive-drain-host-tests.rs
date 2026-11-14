@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 thread_local! {
+    static NOW: Cell<u64> = const { Cell::new(0) };
     static HELD: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static REGISTER: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
@@ -16,6 +17,7 @@ thread_local! {
 fn event(value: impl Into<String>) { EVENTS.with(|events| events.borrow_mut().push(value.into())); }
 fn events() -> Vec<String> { EVENTS.with(|events| events.borrow().clone()) }
 fn reset() {
+    NOW.with(|now| now.set(0));
     assert!(HELD.with(|held| held.borrow().is_empty()));
     EVENTS.with(|events| events.borrow_mut().clear());
     REGISTER.with(|hook| *hook.borrow_mut() = None);
@@ -50,9 +52,12 @@ impl<T> Drop for Guard<'_, T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TcpState { Established, FinWait1, FinWait2, CloseWait, Closing, LastAck, TimeWait, Closed, Listen, SynSent, SynReceived }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SocketError { WouldBlock, NotConnected, Interrupted }
+enum SocketError { WouldBlock, NotConnected, Interrupted, TimedOut }
 #[derive(Clone, Copy)]
 enum WaitResult { Woken, TimedOut, Interrupted }
+mod timer {
+    pub fn get_time_ns() -> u64 { crate::NOW.with(|now| now.get()) }
+}
 mod arch { #[derive(Default)] pub struct Trapframe { pub waits: usize } }
 mod sync {
     pub use crate::Waker;
@@ -82,7 +87,7 @@ impl Waker {
     fn wait_with_timeout_result(&self, task: usize, trapframe: &mut arch::Trapframe,
                                 timeout: Option<u64>) -> WaitResult {
         assert!(HELD.with(|held| held.borrow().is_empty()));
-        assert_eq!(task, 37); assert_eq!(timeout, Some(123)); trapframe.waits += 1;
+        assert_eq!(task, 37); assert_eq!(timeout, Some(123u64.saturating_sub(timer::get_time_ns()))); trapframe.waits += 1;
         event("wait");
         let (result, hook) = WAIT.with(|queue| queue.borrow_mut().pop_front().expect("unplanned wait"));
         hook(); result
@@ -244,7 +249,7 @@ fn empty_nonblocking_mode_blocking_method_does_not_drain_or_register() {
 }
 #[test]
 fn interrupted_and_timeout_waits_preserve_buffer_output_and_profile() {
-    for (wait,error) in [(WaitResult::Interrupted,SocketError::Interrupted),(WaitResult::TimedOut,SocketError::WouldBlock)] {
+    for (wait,error) in [(WaitResult::Interrupted,SocketError::Interrupted),(WaitResult::TimedOut,SocketError::TimedOut)] {
         reset(); let socket=TcpSocket::new(VecDeque::new(),TcpState::Established,true,true); let mut output=[0xa5;4];
         WAIT.with(|queue| queue.borrow_mut().push_back((wait,Box::new(||{}))));
         assert_eq!(invoke(&socket,&mut output,true),(Err(error),1)); assert_eq!(output,[0xa5;4]);
@@ -301,4 +306,17 @@ fn exhaustive_short_deque_offsets_and_read_lengths_match_fifo_reference() {
             check_data(data,length,method,false);
         } }
     } } }
+}
+
+#[test]
+fn spurious_wakes_preserve_the_original_receive_deadline() {
+    reset();
+    let socket = TcpSocket::new(VecDeque::new(), TcpState::Established, true, false);
+    WAIT.with(|queue| queue.borrow_mut().extend([
+        (WaitResult::Woken, Box::new(|| NOW.with(|now| now.set(80))) as Box<dyn FnOnce()>),
+        (WaitResult::Woken, Box::new(|| NOW.with(|now| now.set(123))) as Box<dyn FnOnce()>),
+    ]));
+    let mut output = [0xa5; 4];
+    assert_eq!(invoke(&socket, &mut output, true), (Err(SocketError::TimedOut), 2));
+    assert_eq!(output, [0xa5; 4]);
 }

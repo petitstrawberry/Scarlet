@@ -686,7 +686,7 @@ fn shared_mount_accepts_null_filesystem_type_and_creates_native_peer_group() {
     let path = 0x20000000;
     task.allocate_stack_pages(path, 1).unwrap();
     crate::library::std::usercopy::copy_to_user(&task, path, b"/\0").unwrap();
-    let mut frame = Trapframe::new();
+    let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
     frame.set_arg(1, path);
     frame.set_arg(3, 0x104000); // MS_SHARED | MS_REC; type/source/data are NULL.
     crate::task::set_mock_current_task(task);

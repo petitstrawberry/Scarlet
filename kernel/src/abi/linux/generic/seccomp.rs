@@ -17,6 +17,11 @@ const DOMAIN: &str = "linux-riscv64";
 pub const AUDIT_ARCH: u32 = 0xc00000b7;
 #[cfg(target_arch = "riscv64")]
 pub const AUDIT_ARCH: u32 = 0xc00000f3;
+// The generic adapter is also compiled by RV32 kernel tests.
+#[cfg(target_arch = "riscv32")]
+const DOMAIN: &str = "linux-riscv32";
+#[cfg(target_arch = "riscv32")]
+pub const AUDIT_ARCH: u32 = 0x400000f3;
 const MAX_INSNS: usize = 4096;
 const DATA_SIZE: u32 = 64;
 const ALLOW: u32 = 0x7fff0000;
@@ -76,12 +81,13 @@ impl Filter {
                     }
                 }
                 0x05 => {
-                    successors[0] = next.checked_add(insn.value as usize);
+                    successors[0] =
+                        Some(next.checked_add(insn.value as usize).ok_or(errno::EINVAL)?);
                 }
                 0x15 | 0x1d | 0x25 | 0x2d | 0x35 | 0x3d | 0x45 | 0x4d => {
                     successors = [
-                        next.checked_add(insn.yes as usize),
-                        next.checked_add(insn.no as usize),
+                        Some(next.checked_add(insn.yes as usize).ok_or(errno::EINVAL)?),
+                        Some(next.checked_add(insn.no as usize).ok_or(errno::EINVAL)?),
                     ];
                 }
                 0x06 | 0x16 => {}

@@ -1184,7 +1184,7 @@ mod tests {
     #[test_case]
     fn numeric_maps_require_the_process_memory_address_space_authority() {
         use super::{LinuxAbi, O_CLOEXEC, errno};
-        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
         use crate::sched::scheduler::{get_task_by_id, register_task, reset};
         use crate::task::{Task, TaskType};
 
@@ -1196,14 +1196,16 @@ mod tests {
         let target_id = register_task(target);
         let target = get_task_by_id(target_id).unwrap();
         target
-            .allocate_stack_pages(USER_STACK_END - PAGE_SIZE, 1)
+            .allocate_stack_pages(USER_LOWER_CANONICAL_END - PAGE_SIZE, 1)
             .unwrap();
         let maps_path = alloc::format!("/proc/{}/maps", target.get_namespace_id());
 
         crate::task::set_mock_current_task(target.clone());
         let maps = super::text_content(&maps_path).unwrap();
-        let start = USER_STACK_END - PAGE_SIZE;
-        assert!(maps.contains(&alloc::format!("{start:08x}-{USER_STACK_END:08x} rw-p")));
+        let start = USER_LOWER_CANONICAL_END - PAGE_SIZE;
+        assert!(maps.contains(&alloc::format!(
+            "{start:08x}-{USER_LOWER_CANONICAL_END:08x} rw-p"
+        )));
 
         crate::task::set_mock_current_task(caller.clone());
         assert!(super::text_content(&maps_path).is_none());
@@ -1466,11 +1468,11 @@ mod tests {
 
     #[test_case]
     fn stat_field_28_uses_initial_stack_pointer_and_preserves_comm_delimiters() {
-        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
         let task = crate::task::new_user_task("a (b) c".into(), 0);
-        task.allocate_stack_pages(USER_STACK_END - 2 * PAGE_SIZE, 2)
+        task.allocate_stack_pages(USER_LOWER_CANONICAL_END - 2 * PAGE_SIZE, 2)
             .unwrap();
-        let sp = USER_STACK_END - 256;
+        let sp = USER_LOWER_CANONICAL_END - 256;
         task.vm_manager.record_process_entry_stack(sp).unwrap();
         let stat = super::task_stat(&task, false);
         assert!(stat.contains(" (a (b) c) R "));
