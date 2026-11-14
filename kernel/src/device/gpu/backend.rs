@@ -862,6 +862,13 @@ pub trait GpuBackendCpuAccessGuard {}
 
 /// Backend execution context retained by a [`crate::device::gpu::GpuContext`].
 pub trait GpuBackendContext: Send + Sync {
+    /// Sample one device GPU clock, in nanoseconds, after retiring preceding
+    /// context work. Keep the device powered and exclude reset until sampled.
+    /// `None` means unsupported; never substitute CPU or host wall time.
+    fn timestamp_ns(&self) -> Result<Option<u64>, GpuBackendSubmitError> {
+        Ok(None)
+    }
+
     /// Query the effective execution dialect selected for this context.
     ///
     /// # Returns

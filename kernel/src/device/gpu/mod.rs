@@ -16,6 +16,7 @@ mod execution;
 mod object;
 mod resource;
 mod submission;
+pub use scarlet_abi::gpu_timestamp::GPU_EXECUTION_SUPPORT_TIMESTAMPS;
 
 pub use crate::device::graphics::{
     GpuDisplayBackingOwner, GpuDisplayResource, GpuLinearDisplayBacking,

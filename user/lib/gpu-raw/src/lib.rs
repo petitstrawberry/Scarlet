@@ -12,6 +12,8 @@ pub const GPU_IMAGE_FORMAT_NV12: u32 = 3;
 
 mod completion;
 mod submission;
+mod timestamp;
+pub use scarlet_abi::gpu_timestamp::{GpuContextTimestamp, GPU_EXECUTION_SUPPORT_TIMESTAMPS};
 pub use completion::{
     GPU_COMPLETION_COMPLETE, GPU_COMPLETION_FAILED, GPU_COMPLETION_FAILURE_ABANDONED,
     GPU_COMPLETION_FAILURE_DEVICE_LOST, GPU_COMPLETION_FAILURE_EXECUTION,
@@ -51,6 +53,7 @@ impl File {
 
 /// GPU control command constants.
 pub mod commands {
+    pub use scarlet_abi::gpu_timestamp::GPU_CONTEXT_TIMESTAMP;
     /// Upload bytes into a buffer attached to an execution context.
     pub const GPU_CONTEXT_UPLOAD_BUFFER: u32 = 0x4774;
     /// Upload an uncompressed color image in its immutable native format.

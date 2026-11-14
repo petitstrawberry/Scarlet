@@ -1,6 +1,7 @@
 //! Kernel-owned GPU execution context and queue capabilities.
 
 mod asynchronous;
+mod timestamp;
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -792,6 +793,9 @@ impl GpuContext {
 impl ControlOps for GpuContext {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            scarlet_abi::gpu_timestamp::GPU_CONTEXT_TIMESTAMP => {
+                timestamp::handle(self.backend_context.as_ref(), arg)
+            }
             GPU_CONTEXT_QUERY => self.handle_query_info(arg),
             GPU_CREATE_QUEUE => self.handle_create_queue(arg),
             GPU_CONTEXT_ATTACH_IMAGE => self.handle_attach_image(arg),
