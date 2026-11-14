@@ -798,6 +798,26 @@ impl GpuBackendLinearDisplayInfo {
 }
 /// Backend image retained by a [`crate::device::gpu::GpuImage`].
 pub trait GpuBackendImage: Send + Sync {
+    /// Opt into native readback through bounded physical spans for a non-linear
+    /// layout. The generic layer retains this image/backing and holds the
+    /// context's CPU-access reservation through invalidation and user copies.
+    fn supports_native_readback_spans(&self) -> bool {
+        false
+    }
+
+    /// Translate a logical row prefix to `(backing byte offset, texel count)`.
+    /// Return a nonempty contiguous run no wider than `width`. The generic
+    /// layer checks each span against the immutable backing before reading it.
+    /// This method must not submit GPU work or mutate the source image.
+    fn native_readback_span(
+        &self,
+        _x: u32,
+        _y: u32,
+        _width: u32,
+    ) -> Result<(u64, u32), &'static str> {
+        Err("GPU image does not support native readback spans")
+    }
+
     /// Query immutable backend-neutral image information.
     ///
     /// # Returns

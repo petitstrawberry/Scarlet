@@ -757,12 +757,7 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while reading back")?;
-        let validate = if native {
-            super::resource::image_readback_native_layout
-        } else {
-            super::resource::image_readback_layout
-        };
-        let layout = match validate(&request, image.query_info(), image.layout()) {
+        let layout = match image.validate_readback(&request, native) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;

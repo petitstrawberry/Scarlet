@@ -78,6 +78,39 @@ impl RecordingBackend {
 
 struct RecordingImage(GpuBackendImageInfo);
 
+struct SpanImage {
+    info: GpuBackendImageInfo,
+    backend: Arc<RecordingBackend>,
+    invalid_span: bool,
+}
+
+impl GpuBackendImage for SpanImage {
+    fn query_info(&self) -> GpuBackendImageInfo {
+        self.info
+    }
+    fn backend_cookie(&self) -> u64 {
+        1
+    }
+    fn display_resource(&self) -> Option<GpuDisplayResource> {
+        None
+    }
+    fn supports_native_readback_spans(&self) -> bool {
+        true
+    }
+    fn native_readback_span(&self, x: u32, y: u32, width: u32) -> Result<(u64, u32), &'static str> {
+        assert!(self.backend.reserved.load(Ordering::Acquire));
+        assert!(x < 2 && y < 2 && width > 0);
+        Ok((
+            if self.invalid_span {
+                u64::MAX
+            } else {
+                u64::from(y * 8 + (1 - x) * 4)
+            },
+            1,
+        ))
+    }
+}
+
 impl GpuBackendImage for RecordingImage {
     fn query_info(&self) -> GpuBackendImageInfo {
         self.0
@@ -212,6 +245,33 @@ fn fixture(
         .expect("test user memory allocation succeeds");
     copy_to_user(&task, address, &[0x22; 16]).expect("test upload source is initialized");
     (backend, image, task, address)
+}
+
+#[test_case]
+fn native_spans_hold_owner_and_reservation_through_user_copy_and_errors() {
+    for invalid_span in [false, true] {
+        let (backend, mut image, task, address) = fixture(false, false, false);
+        image.backend_image = Arc::new(SpanImage {
+            info: image.query_info(),
+            backend: backend.clone(),
+            invalid_span,
+        });
+        image.layout.modifier = 0x1234;
+        let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        assert!(image.validate_readback(&request, false).is_err());
+        let layout = image.validate_readback(&request, true).unwrap();
+        let result = image.readback_for_task(&task, address, layout, backend.as_ref());
+        assert_eq!(result.is_err(), invalid_span);
+        assert!(!backend.reserved.load(Ordering::Acquire));
+        let mut output = [0; 16];
+        copy_from_user(&task, address, &mut output).unwrap();
+        assert_eq!(output, [if invalid_span { 0x22 } else { 0x33 }; 16]);
+        assert_eq!(backend.pixels(), [0x99; 16]);
+        assert_eq!(
+            *backend.events.lock(),
+            [Event::Retired, Event::Readback, Event::Released]
+        );
+    }
 }
 
 #[test_case]
