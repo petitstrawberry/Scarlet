@@ -1516,15 +1516,18 @@ impl FilerApp {
         };
         let label = file_name_label(&entry.name);
         let mut lines = label.lines();
-        let first = Text::new(lines.next().unwrap_or_default().to_owned())
-            .font_size(FILE_NAME_FONT_SIZE);
+        let first =
+            Text::new(lines.next().unwrap_or_default().to_owned()).font_size(FILE_NAME_FONT_SIZE);
         // Center each line individually; centering a multiline Text only
         // centers its bounding box, leaving the shorter line left-aligned.
         let file_name = if let Some(second) = lines.next() {
-            Either::A(vstack! {
-                first,
-                Text::new(second.to_owned()).font_size(FILE_NAME_FONT_SIZE),
-            }.alignment(Alignment::Center))
+            Either::A(
+                vstack! {
+                    first,
+                    Text::new(second.to_owned()).font_size(FILE_NAME_FONT_SIZE),
+                }
+                .alignment(Alignment::Center),
+            )
         } else {
             Either::B(first)
         };
@@ -2438,10 +2441,10 @@ mod layout_tests {
         let root = pipeline.element_tree().root().unwrap();
         let header = render_bounds(root, scarlet_ui::Point::ZERO, |r| {
             r.as_any().is::<scarlet_ui::views::HeaderBarRenderObject>()
-        }).unwrap();
-        let viewport = render_bounds(root, scarlet_ui::Point::ZERO, |r| {
-            r.accepts_touch_scroll()
-        }).unwrap();
+        })
+        .unwrap();
+        let viewport =
+            render_bounds(root, scarlet_ui::Point::ZERO, |r| r.accepts_touch_scroll()).unwrap();
         assert!(
             viewport.top() < header.top(),
             "the grid must paint behind the navigation header"

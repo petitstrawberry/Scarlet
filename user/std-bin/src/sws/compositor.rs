@@ -4434,11 +4434,10 @@ impl Compositor {
         match result {
             Ok(releases) => {
                 if super::home_trace::enabled()
-                    && let Some(home) = self
-                        .window_manager
-                        .get_windows()
-                        .iter()
-                        .find(|w| w.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home") && w.is_presented())
+                    && let Some(home) = self.window_manager.get_windows().iter().find(|w| {
+                        w.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                            && w.is_presented()
+                    })
                 {
                     super::home_trace::record(
                         6,
@@ -12422,7 +12421,9 @@ impl Compositor {
                 let trace_home = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home"));
+                    .is_some_and(|window| {
+                        window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                    });
                 if trace_home {
                     super::home_trace::record(
                         3,
@@ -12514,7 +12515,9 @@ impl Compositor {
                 let trace_home = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home"));
+                    .is_some_and(|window| {
+                        window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                    });
                 if trace_home {
                     super::home_trace::record(
                         4,
@@ -12536,7 +12539,8 @@ impl Compositor {
                             identity,
                             commit_serial,
                             result.is_ok(),
-                            self.window_manager.get_window(window_id)
+                            self.window_manager
+                                .get_window(window_id)
                                 .is_some_and(|window| window.prepares_while_workspace_hidden()),
                         ),
                     );
