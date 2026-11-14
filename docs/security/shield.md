@@ -85,11 +85,7 @@ MAC or attach policy semantics to `security.selinux` xattrs. Native Shield
 credentials separately hold principal/group identities and change authority;
 Linux and Android translate these to UID/GID and supported capability operations.
 Inherited Shield execution constraints enforce Linux seccomp filters before ABI
-dispatch, including attempts to escape through native syscalls. The initial fixture tests unmodified libselinux. The subsequent
-[service integration](../../tools/android-compat/README.md#stock-servicemanager-integration)
-uses distinct process labels and the unmodified stock servicemanager to verify
-allowed registration/lookup and denied add/find/list requests.
-
+dispatch, including attempts to escape through native syscalls.
 
 ## Reserved exec transitions
 

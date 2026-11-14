@@ -337,18 +337,7 @@ kernel passes the separate minimal crosvm guest regression.
 
 ## Display integration
 
-### APK lifecycle, input and capture probe
-
-The [Android compatibility fixtures](../../tools/android-compat/README.md)
-include a dependency-free test APK and a separate direct-Bionic execution path.
-Pass `--smoke-apk /path/to/scarlet-compat.apk` to `prepare-cuttlefish.py` to add
-a read-only third guest disk without renumbering system/userdata. After Android
-sets `sys.boot_completed=1`, the hook installs and launches that APK, checks a
-per-run lifecycle event, injects a tap, verifies receipt, and exports a PNG.
-Run with `--success-marker SCARLET_ANDROID_APK_OK`, then validate the log with
-`tools/android-compat/evidence.py --apk --output <new-directory> <serial.log>`.
-The host validator requires boot, Activity, input and complete PNG evidence;
-an APK marker by itself does not establish successful capture or SWS display.
+### Diagnostic logs
 
 `prepare-cuttlefish.py --kernel-log` (also supported by `prepare-os.py`) keeps
 a native parent forwarding `/dev/kmsg` while crosvm runs. This diagnoses host

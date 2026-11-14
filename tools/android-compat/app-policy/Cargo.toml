@@ -1,9 +1,0 @@
-[package]
-name = "scarlet-android-app-policy"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
-
-[workspace]
