@@ -1,7 +1,9 @@
 # Scheduler Placement and Fairness
 
 This document describes Scarlet's capacity-aware placement policy and its
-tickless EEVDF fair runtime scheduler.
+tickless EEVDF fair runtime scheduler. Fair scheduling is one policy class;
+native FIFO, deadline admission, resource-group placement and task capacity
+have separate contracts described below.
 
 ## Goals
 
@@ -123,6 +125,36 @@ smallest virtual deadline. Deadline ties use virtual runtime and then task ID,
 making selection deterministic. If no entity is eligible, selection advances to
 the entity at the smallest virtual runtime so every runnable task continues to
 make progress.
+
+## FIFO, resource groups and capacity
+
+Native `SchedulerPolicy::Fifo` accepts priorities 1 through 255. A FIFO yield
+rotates among runnable peers at the same priority; ordinary scheduling
+boundaries do not themselves rotate equal-priority FIFO tasks. Fair nice values
+and placement preferences are retained as fallback controls rather than
+reinterpreted as FIFO priorities. The fair entitlement formulas above do not
+promise a time share against continuously runnable higher-priority FIFO work.
+See the [native scheduler wrapper](../../user/lib/scarlet-os/src/scheduler.rs)
+and [policy validation](../../kernel/src/task/syscall.rs).
+
+[Priority leases](../../kernel/src/task/fixed_priority.rs) allow bounded,
+independently revocable donations, including scoped RPC service work. Effective
+priority is the maximum of base priority and active donations; dropping one
+lease preserves other donors. The [scheduler](../../kernel/src/sched/scheduler.rs)
+updates runnable placement when effective priority changes.
+
+[Resource groups](../../kernel/src/task/resource_group.rs) add hierarchical CPU
+constraints independently of process lifetime scopes. A process can belong to
+multiple independent hierarchies; allowed CPUs are intersected with task
+affinity and online CPUs. Membership changes include all process threads and
+validate admitted deadline CPU placement. An empty effective placement is an
+error, not permission to escape the group.
+
+[Task capacity](../../kernel/src/sched/task_capacity.rs) bounds live tasks and
+kernel-stack consumption using physical RAM and virtual stack geometry. Reaping
+returns capacity while task IDs remain monotonic. See
+[native runtime services](../kernel/runtime-services.md) for the lifecycle and
+memory-pressure boundaries.
 
 ## Preemption Integration
 
