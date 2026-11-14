@@ -1,9 +1,0 @@
-{
-  "argv": [
-    "/system/bin/scarlet-program-probe"
-  ],
-  "env": [
-    "ANDROID_LOG_TAGS=*:v",
-    "LD_PRELOAD=/system/lib64/libprobe-stderr-logger.so"
-  ]
-}

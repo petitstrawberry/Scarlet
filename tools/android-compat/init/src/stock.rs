@@ -155,7 +155,7 @@ pub fn prepare(
     // host diagnostic instead of trusting the generator's zero exit status.
     // This is verification data only: the target still generates its own file.
     const EXPECTED: &str =
-        include_str!("../../checkpoints/2026-10-28-cloud/stock-art/generated-art-ld.config.txt");
+        include_str!("../../config/art-ld.config.txt");
     if data[..count] != *EXPECTED.as_bytes() {
         return Err("stock ART linker configuration differs from reference");
     }

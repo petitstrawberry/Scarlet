@@ -1,9 +1,0 @@
-{
-  "argv": [
-    "/system/bin/scarlet-program-probe",
-    "realtime"
-  ],
-  "env": [
-    "ANDROID_LOG_TAGS=*:v"
-  ]
-}

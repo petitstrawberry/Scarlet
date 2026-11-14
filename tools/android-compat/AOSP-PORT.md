@@ -26,7 +26,7 @@ scheme. The saved SystemUI and Launcher3 APK hashes match the original SDK
 partition APK hashes. The rendered application observation remains valid, but
 that run does not prove ordinary warm boot or user unlock completed.
 
-Evidence: [inventory.json](checkpoints/2026-11-03-aosp-port-audit/inventory.json).
+Evidence: [inventory.json](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-11-03-aosp-port-audit/inventory.json).
 The inventory covers declarations and saved manifest paths, not Binder call
 reachability, every possible imported path, or complete syscall compatibility.
 

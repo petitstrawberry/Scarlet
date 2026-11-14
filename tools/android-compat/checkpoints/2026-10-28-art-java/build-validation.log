@@ -1,2 +1,0 @@
-49 | const GICC_RPR: usize = 0x0014; // Running Priority Register
-    Finished `release` profile [optimized] target(s) in 49.46s

@@ -31,7 +31,7 @@ from framework_inputs import verify_framework_inputs, verify_framework_probe, fr
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parent
 ROOT = SOURCE.parents[1]
-STOCK_CONFIG = SOURCE / "checkpoints/2026-10-28-cloud/stock-art/generated-art-ld.config.txt"
+STOCK_CONFIG = SOURCE / "config/art-ld.config.txt"
 spec = importlib.util.spec_from_file_location("android_smoke", ROOT / "projects/aarch64-limine-crosvm/tools/fixture.py")
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)

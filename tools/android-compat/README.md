@@ -26,7 +26,17 @@ labels from those real UID assignments to the live Shield policy. Stock Health
 in this fixture. BatteryService is now blocked by hwservicemanager's request for
 authenticated caller-label delivery when exporting itself to Java.
 App data initialization, remaining service startup and an actual Activity frame
-remain ahead. See the [Health checkpoint](checkpoints/2026-10-30-health/verification.json).
+remain ahead. See the [Health checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-30-health/verification.json).
+
+## Validation artifacts
+
+Do not commit validation checkpoints, logs, screenshots, or generated run
+snapshots. Keep new run output under `.build/android-compat/` or in external
+artifacts. Historical evidence links below point to the commit before those
+artifacts were removed from the source tree.
+
+`config/art-ld.config.txt` is a runtime input shared by the direct runner and
+its init executable, retained byte-for-byte from the historical ART fixture.
 
 ## Direct Bionic execution
 
@@ -214,7 +224,7 @@ versioned library names). The resulting tree contains 267 hashed files and
 253 ELF dependency records, about 120 MiB. A second startup then aborted with
 `Failed to get system namespace for loading libandroid.so`; no Java marker
 was printed and the command exited 1. Both logs are retained in
-[the Cloud checkpoint](checkpoints/2026-10-28-cloud/verification.json).
+[the Cloud checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-28-cloud/verification.json).
 
 The image's unmodified static `linkerconfig` was also inspected and executed
 as a host diagnostic. With the fixture's absent property/APEX activation state,
@@ -286,7 +296,7 @@ Cloud verification on 2026-10-28 reached `HOST_LINUX_PASS` with QEMU `10.0.13`:
 property initialization, stock linkerconfig and ART each exited zero, and Java
 printed all three expected lines. The added inputs contain 72 hashed files and
 12 bounded library aliases. The logs, commands, source identities and hashes
-are retained in [the stock ART checkpoint](checkpoints/2026-10-28-cloud/stock-art/verification.json).
+are retained in [the stock ART checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-28-cloud/stock-art/verification.json).
 The host test suite passes 25 tests, including rejection of partial linkerconfig
 output despite exit zero. Expected imageless-boot and missing tracefs/DEX
 metadata diagnostics remain visible in the ART log.
@@ -321,7 +331,7 @@ Neither successful run uses a diagnostic preload or a guest Linux kernel.
 This is a core-only, image-less `-Xint` Java checkpoint; Android framework,
 Activity/APK execution and graphics are still unverified.
 
-The earlier [local checkpoint](checkpoints/2026-10-28-local/verification.json)
+The earlier [local checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-28-local/verification.json)
 stalled after library constructors. Bionic's main-thread stack query needed
 `getrlimit(RLIMIT_STACK)` and `/proc/self/stat` field 28. Native entry-stack
 metadata resolved that path, exposing Bionic atexit-array growth, then ART's
@@ -333,7 +343,7 @@ classified as incomplete, not a successful Java completion.
 The current kernel passes all 1,607 AArch64 tests and a RISC-V release check;
 host checks pass 26 tests. Both HVF and TCG pass all eighteen expanded Bionic
 cases. Logs, launch/input hashes, the diagnostic logger source and validation
-excerpts are retained in [the ART/Java checkpoint](checkpoints/2026-10-28-art-java/verification.json).
+excerpts are retained in [the ART/Java checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-28-art-java/verification.json).
 Cloud's earlier Nix download restriction does not apply to this local validation.
 
 ### ABI composition and native RPC boundary
@@ -439,13 +449,13 @@ Unsupported transaction features return errors. Stock libbinder serves a custom
 authorization, notifications and service death are now tested below.
 The separate minimal ART/Java fixture passes; direct APK execution remains unverified.
 
-The [object checkpoint](checkpoints/2026-10-29-binder-objects/verification.json)
+The [object checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-binder-objects/verification.json)
 records the three-process NDK UAPI probes in both static and dynamic Bionic,
 the full 1,623-test kernel suite on HVF, and stock image-less ART `-Xint` Java
 execution on the same release kernel. The host requires ordered object-transfer
 and reference-release markers; the earlier byte-only probe cannot satisfy it.
 
-The [service checkpoint](checkpoints/2026-10-28-binder-services/verification.json)
+The [service checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-28-binder-services/verification.json)
 records the poll regression probes and native object transfer/lifetime tests.
 The earlier unmodified SDK `servicemanager` diagnostic exited with status 127;
 a separate diagnostic run redirecting Android logs to stderr identifies
@@ -462,7 +472,7 @@ service PASS merely because a daemon stays alive or exits zero.
 
 ### Stock libbinder service probe
 
-The [libbinder checkpoint](checkpoints/2026-10-29-stock-libbinder/verification.json)
+The [libbinder checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-stock-libbinder/verification.json)
 runs unmodified SDK `libbinder.so`, `libutils.so`, `liblog.so` and platform
 `libc++.so` on HVF. A custom C++ probe creates a context object in one process,
 then publishes `BBinder` services to a separate client through real `Parcel`
@@ -478,7 +488,7 @@ reference is dropped. The server verifies the actual `BBinder` destructor and
 The client also resolves `ProcessState::self` with `dladdr` to check that the
 loaded implementation is `/system/lib64/libbinder.so`.
 
-The [death-notification checkpoint](checkpoints/2026-10-29-binder-death/verification.json)
+The [death-notification checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-binder-death/verification.json)
 extends this probe with real `linkToDeath`/`unlinkToDeath` calls. After cancelling
 one subscription and registering another, the server exits with a live service.
 Only the active recipient receives a callback, exactly once; processing
@@ -641,7 +651,7 @@ labels independently of Environment/View/Namespace. The fixture explicitly
 creates a policy in userspace and mounts the Android query adapter; ordinary
 Android environments do not automatically acquire a policy.
 
-The [Shield checkpoint](checkpoints/2026-10-29-shield/verification.json) exercises
+The [Shield checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-shield/verification.json) exercises
 unmodified Android 13 `libselinux.so`: real allowed and denied `service_manager`
 queries, unknown-label/class/permission rejection, refusal of permissive and
 process-label writes, an immutable mapped status page, and label inheritance
@@ -671,7 +681,7 @@ peer. A small explicit service-context file maps the test service names into
 that immutable policy. Environment/View/Namespace still have their existing
 roles; no Android process manager is embedded in the ABI module.
 
-The [service checkpoint](checkpoints/2026-10-29-services/verification.json)
+The [service checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-services/verification.json)
 requires the real IServiceManager path to register a service, look it up from
 another process, call it, and list it. A differently labeled process is denied
 add/find/list. Stock registration notifications exercise a one-way callback
@@ -702,7 +712,7 @@ python3 tools/android-compat/run-direct.py --kernel path/to/scarlet.elf \
 
 ### Stock app_process framework/JNI checkpoint
 
-The [2026-10-29 framework checkpoint](checkpoints/2026-10-29-framework/verification.json)
+The [2026-10-29 framework checkpoint](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-framework/verification.json)
 passes on HVF with stock `app_process64`, `AndroidRuntime`/`RuntimeInit`, platform
 and APEX boot JARs, and the tethering JNI library used by `TrafficStats`.
 `ScarletFrameworkHello` checks native process identity, a Bundle/Parcel round
@@ -754,7 +764,7 @@ tests and the RISC-V release library check.
 
 ### Java Binder services checkpoint
 
-`checkpoints/2026-10-29-java-binder/verification.json` extends the framework
+[historical verification record](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-java-binder/verification.json) extends the framework
 checkpoint to three separate Java processes and stock servicemanager. The
 publisher registers a Java Binder, the client calls it through JNI, and Shield
 rejects the denied peer's lookup and registration. Four ordered one-way calls
@@ -782,7 +792,7 @@ passes 1,645 kernel tests and the C++ service lifecycle regression, alongside
 
 ### APK archive and payload checkpoint
 
-`checkpoints/2026-10-29-apk-runtime/verification.json` records stock Android 13
+[historical verification record](https://github.com/petitstrawberry/Scarlet/blob/86ba4d1ebc1eed07af57455e34899fa36c3c4237/tools/android-compat/checkpoints/2026-10-29-apk-runtime/verification.json) records stock Android 13
 APK basic parsing, full signature verification, resources and DEX loading on
 Scarlet. The signed fixture uses APK Signature Scheme v3. Both the guest verifier
 and host `apksigner` accept it and reject a copy with one changed signed asset
