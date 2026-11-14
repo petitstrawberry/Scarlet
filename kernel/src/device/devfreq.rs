@@ -227,8 +227,13 @@ fn register_policy(
             down_samples: 0,
             ondemand: SimpleOndemandConfig::default(),
         }),
-        worker_started: AtomicBool::new(false),
+        worker_started: AtomicBool::new(true),
     }));
+    // Telemetry is useful under every governor. Previously the sampler only
+    // started after selecting simple_ondemand, leaving manual/performance
+    // policies permanently "unavailable" even when hardware counters exist.
+    drop(policies);
+    start_worker(index);
     Ok(())
 }
 
