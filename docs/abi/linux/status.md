@@ -68,7 +68,7 @@ The following system calls are currently handled by the Linux ABI module.
 ### File System & I/O
 | Syscall | Status | Notes |
 |---------|--------|-------|
-| `openat` | ⚠️ Partial | Maps flags to internal VFS. **Permissions/Modes are ignored.** |
+| `openat` | ⚠️ Partial | Maps supported flags to VFS and retains creation mode after umask. Full POSIX DAC and `O_TMPFILE` remain unsupported. |
 | `close` | ✅ Supported | |
 | `read`, `write` | ✅ Supported | |
 | `readv`, `writev` | ✅ Supported | Vectored I/O. |
@@ -77,7 +77,7 @@ The following system calls are currently handled by the Linux ABI module.
 | `dup`, `dup3` | ✅ Supported | |
 | `pipe2` | ✅ Supported | Supports `O_CLOEXEC` and `O_NONBLOCK`. |
 | `ioctl` | ✅ Supported | Dispatches command to underlying device driver. |
-| `fcntl` | ⚠️ Partial | `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` (O_NONBLOCK only). `F_DUPFD` and locking are missing. |
+| `fcntl` | ⚠️ Partial | Descriptor flags/duplication, `F_SETFL` (`O_NONBLOCK` only), memfd seals and supported byte-range locks. Sleeping lock acquisition under contention remains unsupported. |
 | `getcwd` | ✅ Supported | |
 | `chdir` | ✅ Supported | |
 | `mkdirat` | ⚠️ Partial | Only `AT_FDCWD` supported. |
@@ -85,26 +85,28 @@ The following system calls are currently handled by the Linux ABI module.
 | `getdents64` | ✅ Supported | |
 | `readlinkat` | ✅ Supported | |
 | `newfstatat`, `newfstat` | ✅ Supported | |
-| `umask` | 🚧 Stub | Returns provided mask, does not affect creation. |
-| `fchmod` | 🚧 Stub | Always succeeds. |
-| `faccessat` | 🚧 Stub | Always succeeds. |
+| `umask` | ✅ Supported | Retains the process mask and returns the previous value; creation adapters apply it. |
+| `fchmod`, `fchmodat` | ⚠️ Partial | Retain exact Unix mode bits for VFS-backed nodes in the Linux view; not full POSIX DAC enforcement. |
+| `faccessat`, `faccessat2` | ⚠️ Partial | Validate supported flags and inspect metadata/read-only state; not complete Unix credential-based access evaluation. |
 | `fsync` | ✅ Supported | Delegates to the file object's sync operation; durability depends on the backing filesystem. |
-| `linkat` | ❌ Unsupported | Returns `ENOSYS`; does not create a link. |
+| `linkat` | ⚠️ Partial | Creates inode-preserving links relative to directory FDs; linking anonymous/unlinked FDs with `AT_EMPTY_PATH` remains unsupported. |
 | `renameat2` | ⚠️ Partial | Supports directory FDs and atomic `RENAME_NOREPLACE`. Exchange/whiteout return `ENOSYS`. |
-| `epoll_create1` | 🚧 Stub | Returns dummy file descriptor. |
-| `epoll_ctl`, `epoll_wait` | 🚧 Stub | Minimal/No-op implementation. |
+| `epoll_create1` | ✅ Supported | Allocates an ABI epoll descriptor and validates creation flags. |
+| `epoll_ctl`, `epoll_wait` | ⚠️ Partial | Readiness registration and blocking waits are implemented; not all Linux epoll modes and signal-mask semantics are supported. |
 | `pselect6`, `ppoll` | ✅ Supported | `sigmask` ignored. `pselect6` limited to 64 FDs. |
 | `ftruncate` | ✅ Supported | |
 | `fallocate` | ✅ Supported | |
 | `flock` | ✅ Supported | |
-| `inotify_init1` | ✅ Supported | |
+| `inotify_init1`, `inotify_add_watch`, `inotify_rm_watch` | ⚠️ Partial | Bounded native directory-mutation watches, move events and overflow; not arbitrary file-access/modify watches. |
 | `eventfd2` | ✅ Supported | |
 | `timerfd_create` | ✅ Supported | |
 | `timerfd_settime`, `timerfd_gettime` | ✅ Supported | |
 | `statx` | ✅ Supported | |
 | `getrandom` | ✅ Supported | |
-| `memfd_create` | ✅ Supported | |
-| `mount` | ✅ Supported | |
+| `memfd_create` | ⚠️ Partial | Anonymous shared backing and supported sealing operations, including future-write restrictions; unsupported creation flags are rejected. |
+| `getxattr`, `setxattr`, `listxattr`, `removexattr` and `l*`/`f*` variants | ⚠️ Partial | Bounded VFS attributes; support depends on the filesystem. Reserved native Shield metadata is not exposed as a public xattr. |
+| `mount`, `umount2` | ⚠️ Partial | View-local mount restrictions, supported bind/propagation operations and lazy detach; not every Linux mount type or flag. |
+| `setns` (mount namespaces) | ⚠️ Partial | Retained native namespace capabilities with authority and View compatibility checks. See [mount namespaces](../../kernel/mount-namespaces.md). |
 
 ### Process Management
 | Syscall | Status | Notes |
@@ -112,7 +114,7 @@ The following system calls are currently handled by the Linux ABI module.
 | `execve` | ✅ Supported | ELF loading, argument/env passing. |
 | `clone` | ✅ Supported | Threading flags (`CLONE_THREAD`, `CLONE_VM`, etc.) and TLS supported. |
 | `exit`, `exit_group` | ✅ Supported | |
-| `wait4` | ⚠️ Partial | Basic waiting supported; `WNOHANG` and other options ignored. |
+| `wait4` | ⚠️ Partial | Process-child exit collection, Linux status encoding and `WNOHANG`; resource-usage output remains incomplete. |
 | `getpid`, `getppid`, `gettid` | ✅ Supported | |
 | `uname` | ✅ Supported | Reports "Linux 6.1.0-scarlet...". |
 | `brk` | ✅ Supported | Heap management. |
@@ -142,7 +144,7 @@ The following system calls are currently handled by the Linux ABI module.
 | `mmap` | ✅ Supported | `MAP_ANONYMOUS`, `MAP_FIXED`, `MAP_SHARED`/`PRIVATE`, file-backed. |
 | `munmap` | ✅ Supported | |
 | `mprotect` | ✅ Supported | |
-| `mremap` | ✅ Supported | |
+| `mremap` | ⚠️ Partial | Private anonymous growth and supported private-range relocation; `MREMAP_DONTUNMAP` and unsupported mapping/flag combinations are rejected. |
 | `msync` | ✅ Supported | |
 | `mlock`, `munlock` | ✅ Supported | |
 | `mlockall`, `munlockall` | ✅ Supported | |
@@ -154,14 +156,15 @@ The following system calls are currently handled by the Linux ABI module.
 user virtual-memory ranges and permissions, including the native ELF
 interpreter. This lets Box64 protect native mappings during Wine address
 reservation. File offsets, device/inode identifiers and backing paths are not
-reported; numeric `/proc/<pid>/maps` is not implemented.
+reported. Numeric `/proc/<pid>/maps` is supported only when the caller shares
+the target address space; PID visibility alone does not authorize inspection.
 
 ### Time & Timers
 | Syscall | Status | Notes |
 |---------|--------|-------|
 | `clock_gettime` | ✅ Supported | |
 | `nanosleep` | ✅ Supported | |
-| `timer_create` | ✅ Supported | |
+| `timer_create` | ⚠️ Partial | Supports `SIGEV_SIGNAL`, `SIGEV_NONE` and validated `SIGEV_THREAD_ID`; kernel-side `SIGEV_THREAD` is unsupported. |
 | `timer_settime`, `timer_gettime` | ✅ Supported | |
 | `timer_delete` | ✅ Supported | |
 | `clock_getres` | 🚧 Stub | Returns 1ms resolution. |
@@ -169,9 +172,11 @@ reported; numeric `/proc/<pid>/maps` is not implemented.
 ### Signals & IPC
 | Syscall | Status | Notes |
 |---------|--------|-------|
-| `rt_sigaction` | 🚧 Stub | Ignores action; sets handler to Ignore/Default only. |
-| `rt_sigprocmask` | 🚧 Stub | Always succeeds; ignores mask updates. |
-| `futex` | ⚠️ Partial | `FUTEX_WAIT`, `FUTEX_WAKE` implemented. |
+| `rt_sigaction` | ⚠️ Partial | Retains handlers and action flags; custom delivery requires an architecture signal-frame implementation. AArch64 has handler frames and `rt_sigreturn`. |
+| `rt_sigprocmask` | ✅ Supported | Updates thread masks while preserving unmaskable signals. |
+| `sigaltstack`, `rt_sigtimedwait`, `rt_sigqueueinfo` | ⚠️ Partial | Alternate-stack state, pending-signal waits and queued process signals; architecture and target restrictions still apply. |
+| `futex` | ⚠️ Partial | WAIT/WAKE, bitset variants and REQUEUE/CMP_REQUEUE with cancellation cleanup. PI futexes remain unsupported. |
+| `seccomp` | ⚠️ Partial | Supported filters translate to inherited native execution constraints; TSYNC/listener flags are rejected. |
 
 ### Networking (Sockets)
 Socket syscalls have real implementations backed by the kernel network stack.
@@ -199,12 +204,28 @@ Socket syscalls have real implementations backed by the kernel network stack.
 
 ## File System Implementation Notes
 
-While basic file operations work, the current implementation has significant deviations from standard Linux behavior:
+Filesystem compatibility is built on native VFS authority and metadata, not a
+complete copy of Linux permission semantics:
 
-- **Permissions & Ownership**: The VFS does not enforce file permissions (rwx) or ownership. All files appear as owned by root (UID 0/GID 0), and access checks (e.g., opening a read-only file for writing) may not be strictly enforced by the underlying filesystem drivers.
-- **Creation Mode**: The `mode` argument in `openat` and `mkdirat` is currently ignored. Files are created with default internal attributes.
-- **Path Resolution**: Symbolic link resolution is supported, but some complex path lookup behaviors (like `AT_EMPTY_PATH`) may be missing.
-- **Filesystem Features**: Advanced features like extended attributes (`xattr`), access control lists (`ACL`), and quotas are not implemented.
+- **Ownership**: Native principal/group ownership is retained and translated to
+  Linux UID/GID. Ext2 persists full-width identities; files are not universally
+  reported as root-owned.
+- **Modes**: Creation and chmod adapters retain exact Unix modes for Linux stat
+  results, and umask affects creation. This metadata does not imply complete
+  POSIX DAC, ACL or set-ID semantics.
+- **Authority**: View capabilities, read-only/no-exec/no-privilege-gain mount
+  restrictions, and supported Shield creation/relabel/exec checks are enforced.
+  See [mount restrictions](../../kernel/mount-restrictions.md) and
+  [Shield](../../security/shield.md).
+- **Attributes**: TmpFS and Ext2 support bounded extended attributes. Ext2 also
+  persists native Shield labels in a protected symbolic metadata domain.
+  Preserving ACL bytes is distinct from enforcing POSIX ACLs; filesystem quota
+  enforcement is not established by the network quota adapter.
+
+Implementation references: [filesystem syscalls](../../../kernel/src/abi/linux/generic/fs.rs),
+[mode metadata](../../../kernel/src/abi/linux/generic/mode.rs),
+[xattr translation](../../../kernel/src/abi/linux/generic/xattr.rs), and
+[Ext2](../../../kernel/src/fs/vfs_v2/drivers/ext2/mod.rs).
 
 ## What Works Today
 
@@ -219,13 +240,25 @@ Refer to [userspace-artifacts.md](userspace-artifacts.md) for the exact build st
 
 ## Known Limitations
 
-- **Networking**: Real socket syscalls backed by the kernel network stack; coverage of socket options and edge cases is still expanding.
-- **Signals**: Signal delivery logic is basic; complex signal handling (stacks, nesting) is WIP.
-- **User/Group**: Single-user (root) environment assumed.
-- **Permissions**: File permissions, ownership, and access modes (e.g. read-only enforcement) are currently ignored.
-- **Filesystem**: Linux `linkat` and `renameat2` exchange/whiteout operations return `ENOSYS`. Native VFS hard-link support is separate.
-- **Epoll**: Stubs only; event-driven I/O applications may not function correctly.
-- **Device Support**: `ioctl` commands are device-dependent. Basic TTY support is available.
+- **Networking**: Socket options and edge cases remain partial. Native IPv6
+  address/header/static-routing support does not supply full IPv6 sockets or
+  neighbor discovery. Unsupported BPF operations are rejected.
+- **Signals**: Custom handlers require architecture-specific signal frames;
+  AArch64 support is not a promise of the same coverage on every ABI target.
+- **Credentials**: UID/GID and supported capability changes use native Shield
+  identities and delegated authority, not a complete Linux privilege model.
+- **Filesystem**: Unix mode metadata is not full DAC/ACL enforcement. Anonymous
+  FD hard linking and rename exchange/whiteout remain unsupported.
+- **Readiness**: Epoll is implemented, but full Linux flag and signal-mask parity
+  is not claimed. Device readiness and ioctls remain device-dependent.
+- **Resource control**: Cgroup/cpuset, memory pressure and reclaim preferences
+  translate native facilities; they do not implement every cgroup controller,
+  Linux stall source or Linux OOM selection policy.
+
+See [native runtime services](../../kernel/runtime-services.md) for the common
+mechanisms behind these adapters. The capability and limitation updates above
+were checked against source on 2026-11-14; historical runtime results elsewhere
+on this page retain their original scope.
 
 ## Roadmap Highlights
 

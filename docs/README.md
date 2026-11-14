@@ -64,6 +64,15 @@ this is not a claim that every historical document or device was revalidated.
 
 ## Kernel and Device Subsystems
 
+- [Native runtime services](kernel/runtime-services.md) - shared RPC, Shield,
+  process/resource membership, VM/VFS, pressure, network and input facilities
+  used by native services and compatibility adapters.
+- [Shield](security/shield.md) - policy authority, bounded updates, credentials,
+  file labels and execution constraints.
+- [Process scopes](task/process-scopes.md) - explicit reapers and lifetime control.
+- [Mount namespaces](kernel/mount-namespaces.md),
+  [propagation](kernel/mount-propagation.md), and
+  [restrictions](kernel/mount-restrictions.md) - retained filesystem views.
 - [VFS and filesystem source map](kernel/README.md#source-map) - shared
   filesystem and mount-namespace implementation.
 - [PCI/PCIe](device/pci.md) - ECAM discovery and PCI device model.

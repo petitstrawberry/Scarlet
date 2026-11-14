@@ -99,6 +99,15 @@ with `microvm-init`. Root-device policy and service startup are userspace work,
 not the kernel bootloader. See [Limine boot](../boot/limine.md) and
 [userspace startup](../userspace/README.md#startup-and-services).
 
+## Shared runtime services
+
+[Native runtime services](runtime-services.md) maps the common mechanisms used
+by native applications and the Linux/Android adapters: bounded RPC, Shield,
+process scopes, resource groups, FIFO scheduling, task admission, persistent
+metadata, memory pressure and capability-separated input. These mechanisms are
+part of the kernel, independently of the separately distributed Android
+userspace. Follow that guide for implementation links and limits.
+
 ## Memory, ownership, and drivers
 
 The HHDM maps selected physical regions, not every possible physical address.

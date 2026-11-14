@@ -13,12 +13,18 @@ kernel/src/network/
 ├── protocol_stack.rs   – NetworkLayer trait, ProtocolStackManager
 ├── tcp.rs              – Full TCP (handshake, flow control, retransmission)
 ├── udp.rs              – UDP datagram layer
+├── ip.rs               – Common IPv4/IPv6 address values
+├── ipv6.rs             – IPv6 base headers and static routing
 ├── ipv4.rs             – IPv4 layer
 ├── icmp.rs             – ICMP layer
 ├── arp.rs              – ARP cache
 ├── ethernet.rs         – Ethernet II frame layer
 ├── ethernet_interface.rs – Interface management
-├── local.rs            – Local/Unix domain sockets
+├── local.rs            – Local stream/sequenced-packet sockets
+├── local_datagram.rs   – Bounded local datagram records and transfers
+├── link.rs             – Link identity, incarnation and statistics
+├── traffic.rs          – Packet accounting and reservations
+├── traffic_policy.rs   – Named packet meters and policy
 ├── config.rs           – Interface configuration (IP, gateway)
 └── syscall.rs          – Socket syscall dispatch
 
@@ -97,7 +103,8 @@ manager.set_subnet_mask(interface_name, Ipv4Address::new(255, 255, 255, 0));
 manager.set_gateway(Ipv4Address::new(10, 0, 2, 2));
 ```
 
-Configuration is typically applied at boot via init scripts or DHCP (future).
+Configuration and DHCP lifecycle are managed through the native interfaces
+described in [network management](management.md).
 
 ## Protocol Support Summary
 
@@ -110,4 +117,35 @@ Configuration is typically applied at boot via init scripts or DHCP (future).
 | TCP | Implemented (full handshake, flow control, retransmission) |
 | UDP | Implemented |
 | Local/Unix sockets | Implemented |
-| IPv6 | Not implemented |
+| IPv6 | Address, base-header and static-routing foundation; full sockets and neighbor discovery are not implemented. |
+
+## IPv6 boundaries
+
+[ip.rs](../../kernel/src/network/ip.rs) retains native 128-bit addresses;
+IPv4-mapped addresses do not implicitly turn an IPv6 socket into an IPv4 socket.
+[ipv6.rs](../../kernel/src/network/ipv6.rs) validates base headers, selects static
+routes and dispatches supported payloads. Non-local transmission requires an
+explicit destination Ethernet address until neighbor discovery is integrated.
+Extension-header processing and fragment reassembly remain unsupported.
+Linux socket creation rejects unsupported IPv6 rather than fabricating an IPv4
+socket. The IPv4 diagram above describes the established socket path.
+
+## Accounting and local IPC
+
+[Link statistics](../../kernel/src/network/link.rs) validate interface identity
+and incarnation, not just a reusable interface name. Native requests and
+responses are defined in [scarlet-abi](../../user/lib/scarlet-abi/src/network.rs).
+Linux read-only sysfs network views translate those native counters.
+
+[Traffic budgets](../../kernel/src/network/traffic.rs) retain reservations for
+queued packets and return credit on cancelled or failed sends. Named
+[packet meters](../../kernel/src/network/traffic_policy.rs) provide bounded
+accounting and notifications, including the Linux quota adapter. They do not
+provide Linux BPF execution: unsupported BPF operations are rejected.
+
+[Local datagrams](../../kernel/src/network/local_datagram.rs) carry bounded
+records and retained sender/descriptor state. Linux handles SCM_RIGHTS and
+credential wire translation in its ABI layer. Sequenced-packet accept preserves
+the socket type; blocking socket operations use deadlines so a wake does not
+restart the full timeout. These are common networking mechanisms, not
+Android-only services.
