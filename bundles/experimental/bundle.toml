@@ -1,5 +1,6 @@
 # Scarlet Experimental Bundle
 # Experimental features and applications for testing and development.
+# Android remains opt-in through bundles/android while its runtime matures.
 
 [[layers]]
 kind = "copy"
@@ -78,10 +79,6 @@ source = "../../user/websocket-demo"
 package = "scarlet-websocket-demo"
 bin = "ws-client"
 to = "/bin/ws-client"
-
-[[layers]]
-kind = "bundle"
-path = "../android/bundle.toml"
 
 [[layers]]
 kind = "cargo"
