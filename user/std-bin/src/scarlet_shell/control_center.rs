@@ -295,6 +295,12 @@ pub fn build_control_center_view(
     let title_size = 14.0;
     let detail_size = 12.0;
     let target_height = metrics.target_height as f32;
+    // HStack measures intrinsic child widths; its outer frame alone does not
+    // constrain a Slider. Reserve the same label column for both rows so a
+    // percentage gaining a digit cannot move or shrink the slider track.
+    let control_row_width = content_width - 12.0;
+    let control_label_width = 84.0;
+    let control_slider_width = control_row_width - control_label_width - metrics.gap as f32;
 
     let mute_action = action.clone();
     let mute = Button::new(if snapshot.audio.muted == Some(true) {
@@ -304,6 +310,7 @@ pub fn build_control_center_view(
     })
     .header_style()
     .font_size(detail_size)
+    .padding(0.0)
     .on_click(move || mute_action.set(Some(ControlCenterAction::ToggleMute)));
 
     let slider_action = action.clone();
@@ -317,10 +324,17 @@ pub fn build_control_center_view(
         });
 
     let mut audio_rows: Vec<Box<dyn View>> = vec![boxed(
-        HStack::new(DynamicViews::new(vec![boxed(mute), boxed(slider)]))
-            .spacing(metrics.gap as f32)
-            .alignment(Alignment::Center)
-            .frame(content_width - 12.0, target_height),
+        HStack::new(DynamicViews::new(vec![
+            boxed(
+                HStack::new(DynamicViews::new(vec![boxed(mute), boxed(Spacer::new())]))
+                    .spacing(0.0)
+                    .frame_width(control_label_width),
+            ),
+            boxed(slider.frame_width(control_slider_width)),
+        ]))
+        .spacing(metrics.gap as f32)
+        .alignment(Alignment::Center)
+        .frame(control_row_width, target_height),
     )];
     if snapshot.audio.outputs.is_empty() {
         audio_rows.push(boxed(
@@ -358,7 +372,19 @@ pub fn build_control_center_view(
         let brightness_action = action.clone();
         boxed(
             HStack::new(DynamicViews::new(vec![
-                boxed(Text::new(alloc::format!("Brightness {}%", percent)).font_size(detail_size)),
+                boxed(
+                    VStack::new(DynamicViews::new(vec![
+                        boxed(Text::new("Brightness").font_size(detail_size)),
+                        boxed(
+                            Text::new(alloc::format!("{}%", percent))
+                                .font_size(10.0)
+                                .color(palette.text_secondary()),
+                        ),
+                    ]))
+                    .spacing(0.0)
+                    .alignment(Alignment::Leading)
+                    .frame_width(control_label_width),
+                ),
                 boxed(
                     Slider::new(brightness)
                         .min(0.0)
@@ -367,12 +393,13 @@ pub fn build_control_center_view(
                             brightness_action.set(Some(ControlCenterAction::SetBrightness(
                                 value.clamp(0.0, 100.0).round() as u8,
                             )));
-                        }),
+                        })
+                        .frame_width(control_slider_width),
                 ),
             ]))
             .spacing(metrics.gap as f32)
             .alignment(Alignment::Center)
-            .frame(content_width - 12.0, target_height),
+            .frame(control_row_width, target_height),
         )
     } else {
         boxed(
@@ -683,6 +710,129 @@ mod tests {
                         Some(ControlCenterAction::SetBrightness(expected))
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn controls_keep_natural_centers_and_stable_tracks_across_percentages() {
+        use scarlet_ui::element::LayoutConstraints;
+        use scarlet_ui::geometry::{Point, Rect};
+        use scarlet_ui::views::{ButtonRenderObject, TextRenderObject};
+
+        fn collect(element: &dyn Element, origin: Point, out: &mut Vec<(String, Rect)>) {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            let bounds = Rect {
+                origin,
+                size: element.bounds().size,
+            };
+            let name = if let Some(text) = element
+                .as_any()
+                .downcast_ref::<RenderElement<Text, TextRenderObject>>()
+            {
+                Some(String::from(text.view().content()))
+            } else if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<SliderRenderObject>())
+            {
+                Some(String::from("slider"))
+            } else if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<ButtonRenderObject>())
+            {
+                Some(String::from("button"))
+            } else {
+                None
+            };
+            if let Some(name) = name {
+                out.push((name, bounds));
+            }
+            for child in element.children() {
+                collect(child.as_ref(), origin, out);
+            }
+        }
+
+        for presentation in [
+            ControlCenterPresentation::LaptopPopover,
+            ControlCenterPresentation::TabletSheet,
+        ] {
+            let mut previous_tracks = None;
+            for percent in [0, 9, 10, 80, 99, 100] {
+                let snapshot = ControlCenterSnapshot {
+                    power: Default::default(),
+                    audio: AudioSnapshot::unavailable(),
+                    brightness_percent: Some(percent),
+                    network: NetworkSnapshot {
+                        available: false,
+                        interfaces: Vec::new(),
+                    },
+                    system: SystemSnapshot {
+                        cpu_percent: None,
+                        task_count: None,
+                    },
+                    input_environment: InputEnvironmentSnapshot {
+                        available: false,
+                        tablet_mode: None,
+                        touch_present: None,
+                        keyboard_present: None,
+                        pointer_present: None,
+                    },
+                };
+                let mut element = build_control_center_view(
+                    presentation,
+                    snapshot,
+                    State::new(scarlet_ui::state::generate_state_id(), 25.0),
+                    State::new(scarlet_ui::state::generate_state_id(), percent as f32),
+                    State::new(scarlet_ui::state::generate_state_id(), None),
+                    State::new(scarlet_ui::state::generate_state_id(), None),
+                )
+                .create_element();
+                let size = element.layout(LayoutConstraints::unconstrained());
+                let mut rects = Vec::new();
+                collect(element.as_ref(), Point::ZERO, &mut rects);
+                let tracks: Vec<_> = rects
+                    .iter()
+                    .filter(|(name, _)| name == "slider")
+                    .map(|(_, rect)| *rect)
+                    .collect();
+                assert_eq!(tracks.len(), 2);
+                if let Some(previous) = previous_tracks {
+                    assert_eq!(tracks, previous);
+                }
+                previous_tracks = Some(tracks.clone());
+                assert_eq!(tracks[0].origin.x, tracks[1].origin.x);
+                assert_eq!(tracks[0].size.width, tracks[1].size.width);
+                for track in &tracks {
+                    assert!(
+                        track.origin.x >= 0.0 && track.origin.x + track.size.width <= size.width
+                    );
+                }
+                let label = rects
+                    .iter()
+                    .find(|(name, _)| name == "Brightness")
+                    .unwrap()
+                    .1;
+                let value = rects
+                    .iter()
+                    .find(|(name, _)| name == &alloc::format!("{}%", percent))
+                    .unwrap()
+                    .1;
+                assert_eq!(label.origin.x, value.origin.x);
+                assert!(value.origin.y >= label.origin.y + label.size.height);
+                let label_center = (label.origin.y + value.origin.y + value.size.height) / 2.0;
+                assert_eq!(
+                    label_center,
+                    tracks[0].origin.y + tracks[0].size.height / 2.0
+                );
+                let mute = rects.iter().find(|(name, _)| name == "button").unwrap().1;
+                assert_eq!(mute.origin.x, label.origin.x);
+                assert_eq!(
+                    mute.origin.y + mute.size.height / 2.0,
+                    tracks[1].origin.y + tracks[1].size.height / 2.0
+                );
             }
         }
     }

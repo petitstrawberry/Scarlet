@@ -39,7 +39,7 @@ fn wait_for_sws_ready() -> bool {
     false
 }
 
-fn spawn_component(name: &str, args: &[&str]) -> i32 {
+fn spawn_component(name: &str, args: &[&str], profile_ui: bool) -> i32 {
     match fork() {
         0 => {
             let candidates = ["/bin"];
@@ -55,17 +55,20 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
                 argv.push(argv0);
                 argv.extend_from_slice(args);
 
-                // Keep the normal empty child environment. Forward only this
-                // explicit diagnostic flag to the shell, including respawns.
-                let diagnostic_env: &[&str] = if name == "scarlet-shell"
-                    && std::env::var("SCARLET_HOME_TRACE").as_deref() == Some("1")
-                {
-                    &["SCARLET_HOME_TRACE=1"]
-                } else {
-                    &[]
-                };
+                // Only the supervised shell receives requested diagnostics.
+                // This same launch path is used for its initial start and respawns.
+                let mut diagnostic_env = std::vec::Vec::new();
+                if name == "scarlet-shell" {
+                    if std::env::var("SCARLET_HOME_TRACE").as_deref() == Some("1") {
+                        diagnostic_env.push("SCARLET_HOME_TRACE=1");
+                    }
+                    if profile_ui {
+                        diagnostic_env.push("SCARLET_UI_PROFILE=1");
+                        diagnostic_env.push("SCARLET_UI_FRAME_LOG=1");
+                    }
+                }
                 // If exec succeeds, it never returns.
-                let rc = execve(argv0, &argv, diagnostic_env);
+                let rc = execve(argv0, &argv, &diagnostic_env);
                 if rc == 0 {
                     break;
                 }
@@ -85,34 +88,43 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     let args = std::env::args_vec();
-    let shell_args: &[&str] = match args.get(1).map(|arg| arg.as_str()) {
-        None => &[],
-        Some("--shell-mode") if args.len() == 3 => match args[2].as_str() {
-            "desktop" => &["--mode", "desktop"],
-            "console" => &["--mode", "console"],
+    let mut shell_args: &[&str] = &[];
+    let mut profile_ui = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--shell-mode" if shell_args.is_empty() => {
+                index += 1;
+                shell_args = match args.get(index).map(|arg| arg.as_str()) {
+                    Some("desktop") => &["--mode", "desktop"],
+                    Some("console") => &["--mode", "console"],
+                    _ => {
+                        println!("scarlet-desktop: --shell-mode must be desktop or console");
+                        return 2;
+                    }
+                };
+            }
+            "--profile-ui" if !profile_ui => profile_ui = true,
+            "--help" | "-h" => {
+                println!("Usage: scarlet-desktop [--shell-mode desktop|console] [--profile-ui]");
+                return 0;
+            }
             _ => {
-                println!("scarlet-desktop: --shell-mode must be desktop or console");
+                println!("Usage: scarlet-desktop [--shell-mode desktop|console] [--profile-ui]");
                 return 2;
             }
-        },
-        Some("--help" | "-h") => {
-            println!("Usage: scarlet-desktop [--shell-mode desktop|console]");
-            return 0;
         }
-        _ => {
-            println!("Usage: scarlet-desktop [--shell-mode desktop|console]");
-            return 2;
-        }
-    };
+        index += 1;
+    }
     println!("[scarlet-desktop] Starting desktop session");
     wait_for_sws_ready();
 
-    let mut settingsd_pid = spawn_component("desktop-settings", &[]);
+    let mut settingsd_pid = spawn_component("desktop-settings", &[], false);
     if settingsd_pid > 0 {
         println!("[scarlet-desktop] settingsd pid={}", settingsd_pid);
     }
 
-    let mut shell_pid = spawn_component("scarlet-shell", shell_args);
+    let mut shell_pid = spawn_component("scarlet-shell", shell_args, profile_ui);
     if shell_pid > 0 {
         println!("[scarlet-desktop] shell pid={}", shell_pid);
     }
@@ -132,7 +144,7 @@ pub extern "C" fn main() -> i32 {
             println!("[scarlet-desktop] shell exited; respawning");
             thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
             wait_for_sws_ready();
-            shell_pid = spawn_component("scarlet-shell", shell_args);
+            shell_pid = spawn_component("scarlet-shell", shell_args, profile_ui);
             if shell_pid > 0 {
                 println!("[scarlet-desktop] shell respawned pid={}", shell_pid);
             }
@@ -142,7 +154,7 @@ pub extern "C" fn main() -> i32 {
         if pid == settingsd_pid {
             println!("[scarlet-desktop] settingsd exited; respawning");
             thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
-            settingsd_pid = spawn_component("desktop-settings", &[]);
+            settingsd_pid = spawn_component("desktop-settings", &[], false);
             if settingsd_pid > 0 {
                 println!(
                     "[scarlet-desktop] settingsd respawned pid={}",

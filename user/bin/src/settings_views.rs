@@ -51,7 +51,7 @@ fn settings_note(value: impl Into<String>) -> impl View + Clone {
         .color(Color::rgb(88, 94, 104))
 }
 fn settings_row(content: impl View + Clone, label: &str) -> impl View + Clone {
-    hstack! { Text::new(label).font_size(13.0).frame_width(112.0), content, Spacer::new() }
+    hstack! { Text::new(label).font_size(13.0).frame_width(112.0).content_alignment(Alignment::Leading), content, Spacer::new() }
         .spacing(12.0)
 }
 fn settings_section(content: impl View + Clone, title: &str, title_size: f32) -> impl View + Clone {
@@ -110,9 +110,9 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
                 }
             }), "Color preset"),
             Rectangle::new().fill(Color::rgb(color[0], color[1], color[2])).corner_radius(6.0).frame(f32::INFINITY, 64.0),
-            settings_row(hstack! { Slider::new(app.red_value.clone()).min(0.0).max(255.0).on_change(move |_| red_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[0])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Red"),
-            settings_row(hstack! { Slider::new(app.green_value.clone()).min(0.0).max(255.0).on_change(move |_| green_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[1])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Green"),
-            settings_row(hstack! { Slider::new(app.blue_value.clone()).min(0.0).max(255.0).on_change(move |_| blue_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[2])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Blue"),
+            settings_row(hstack! { Slider::new(app.red_value.clone()).min(0.0).max(255.0).on_change(move |_| red_app.sync_background_preset()).frame_width(270.0), Text::new(format!("{}", color[0])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Red"),
+            settings_row(hstack! { Slider::new(app.green_value.clone()).min(0.0).max(255.0).on_change(move |_| green_app.sync_background_preset()).frame_width(270.0), Text::new(format!("{}", color[1])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Green"),
+            settings_row(hstack! { Slider::new(app.blue_value.clone()).min(0.0).max(255.0).on_change(move |_| blue_app.sync_background_preset()).frame_width(270.0), Text::new(format!("{}", color[2])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Blue"),
         }.spacing(12.0).alignment(Alignment::Leading), "Desktop background", 16.0),
         settings_section(vstack! {
             settings_note(app.background_image_label.get()),
@@ -149,7 +149,7 @@ pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
     settings_page(vstack! {
         settings_section(vstack! {
             settings_row(hstack! {
-                Slider::new(app.display_brightness_percent.clone()).min(0.0).max(100.0).on_changed(move |value| brightness_app.set_display_brightness_percent(f32_to_percent(value))).frame(270.0, 24.0),
+                Slider::new(app.display_brightness_percent.clone()).min(0.0).max(100.0).on_changed(move |value| brightness_app.set_display_brightness_percent(f32_to_percent(value))).frame_width(270.0),
                 Text::new(format!("{}%", f32_to_percent(app.display_brightness_percent.get()))).font_size(12.0).frame_width(48.0),
             }.spacing(12.0), "Brightness"),
             settings_note(app.display_brightness_status.get()),
@@ -191,7 +191,7 @@ pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
         }.spacing(12.0).alignment(Alignment::Leading), "Sound output", 14.0),
         settings_section(vstack! {
             settings_row(hstack! {
-                Slider::new(app.audio_volume_percent.clone()).enabled(available).min(0.0).max(100.0).on_changed(move |value|volume_app.set_audio_volume_percent(f32_to_percent(value))).frame(270.0,24.0),
+                Slider::new(app.audio_volume_percent.clone()).enabled(available).min(0.0).max(100.0).on_changed(move |value|volume_app.set_audio_volume_percent(f32_to_percent(value))).frame_width(270.0),
                 Text::new(format!("{}%",f32_to_percent(app.audio_volume_percent.get()))).font_size(12.0).frame_width(48.0),
             }.spacing(12.0), "Volume"),
             settings_row(Toggle::new(app.audio_muted.clone()).enabled(available).on_change(move |muted|mute_app.set_audio_muted(muted)), "Mute"),
@@ -393,4 +393,60 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
         .content_size(0.0, height)
         .scrollbar_visibility(scarlet_ui::ScrollbarVisibility::Always)
         .frame(f32::INFINITY, f32::INFINITY)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use scarlet_ui::element::{Element, LayoutConstraints};
+    use scarlet_ui::geometry::{Point, Rect};
+
+    fn rects<T: 'static>(element: &dyn Element, origin: Point, out: &mut Vec<Rect>) {
+        let origin = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        if element
+            .render_object()
+            .is_some_and(|r| r.as_any().is::<T>())
+        {
+            out.push(Rect::new(origin, element.bounds().size));
+        }
+        for child in element.children() {
+            rects::<T>(child.as_ref(), origin, out);
+        }
+    }
+
+    #[test]
+    fn settings_row_aligns_label_slider_and_changing_percentage() {
+        let mut previous_track = None;
+        for percent in [0, 9, 10, 80, 99, 100] {
+            let value = State::new(scarlet_ui::state::generate_state_id(), percent as f32);
+            let mut row = settings_row(
+                hstack! {
+                    Slider::new(value).min(0.0).max(100.0).frame_width(270.0),
+                    Text::new(format!("{percent}%")).font_size(12.0).frame_width(48.0),
+                }
+                .spacing(12.0),
+                "Brightness",
+            )
+            .create_element();
+            let size = row.layout(LayoutConstraints::loose(600.0, 100.0));
+            let mut labels = Vec::new();
+            rects::<scarlet_ui::views::TextRenderObject>(row.as_ref(), Point::ZERO, &mut labels);
+            let mut tracks = Vec::new();
+            rects::<scarlet_ui::views::SliderRenderObject>(row.as_ref(), Point::ZERO, &mut tracks);
+            assert_eq!(labels.len(), 2);
+            assert_eq!(tracks.len(), 1);
+            assert_eq!(labels[0].origin.x, 0.0);
+            for rect in labels.iter().chain(&tracks) {
+                assert_eq!(rect.origin.y + rect.size.height / 2.0, size.height / 2.0);
+                assert!(rect.right() <= size.width);
+            }
+            if let Some(previous) = previous_track {
+                assert_eq!(tracks[0], previous);
+            }
+            previous_track = Some(tracks[0]);
+        }
+    }
 }
