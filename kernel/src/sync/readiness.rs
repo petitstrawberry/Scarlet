@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sync::IrqSpinLock;
 use crate::sync::waker::Waker;
@@ -28,26 +28,27 @@ impl ReadinessRegistration {
     /// subscription. The counter is monotonically increasing in practice and
     /// starts at zero when the subscription is created.
     pub fn generation(&self) -> u64 {
-        self.listener.generation.load(Ordering::Acquire)
+        *self.listener.generation.lock()
     }
 }
 
 struct ReadinessListener {
-    generation: AtomicU64,
+    generation: IrqSpinLock<u64>,
     target: Weak<Waker>,
 }
 
 impl ReadinessListener {
     fn new(target: Weak<Waker>) -> Self {
         Self {
-            generation: AtomicU64::new(0),
+            generation: IrqSpinLock::new(0),
             target,
         }
     }
 
     fn notify(&self) -> Option<Arc<Waker>> {
         let target = self.target.upgrade()?;
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        let mut generation = self.generation.lock();
+        *generation = generation.wrapping_add(1);
         Some(target)
     }
 }

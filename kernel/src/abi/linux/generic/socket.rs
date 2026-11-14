@@ -3090,7 +3090,7 @@ mod tests {
         set_current_task_for_test(cpu, Some(id));
         remove_from_ready_queues(id);
         let mut abi = LinuxAbi::default();
-        let mut frame = Trapframe::new();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
         frame.set_arg(0, AF_INET6 as usize);
         frame.set_arg(1, SOCK_STREAM as usize);
         frame.set_arg(2, 0);

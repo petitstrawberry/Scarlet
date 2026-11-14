@@ -2728,7 +2728,6 @@ fn ext2_fd_chmod_chown_preserve_grown_directory_and_regular_file_sizes() {
         LinuxAbi,
         fs::{sys_fchmod, sys_fchown},
     };
-    use crate::arch::Trapframe;
     use crate::fs::vfs_v2::core::VfsFileObject;
     use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
 
@@ -2771,13 +2770,13 @@ fn ext2_fd_chmod_chown_preserve_grown_directory_and_regular_file_sizes() {
     file.sync().unwrap();
     drop(file);
 
+    let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
     for (fd, handle, node) in descriptors {
         let before = fs.read_inode(node.id() as u32).unwrap();
         assert!(before.get_size() > 0);
         if node.is_directory().unwrap() {
             assert!(before.get_size() > 1024);
         }
-        let mut frame = Trapframe::new();
         frame.set_arg(0, fd);
         frame.set_arg(1, 0o700);
         assert_eq!(sys_fchmod(&mut abi, &mut frame), 0);
@@ -2894,8 +2893,8 @@ fn ext2_unsupported_rename_exchange_syscall_preserves_both_entries() {
         TaskType::User,
     ));
     task.set_vfs(Arc::new(crate::fs::VfsManager::new_with_root(fs.clone())));
+    let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
     set_mock_current_task(task);
-    let mut frame = crate::arch::Trapframe::new();
     frame.set_arg(4, 2); // RENAME_EXCHANGE is rejected before pathname access.
     assert_eq!(
         sys_renameat2(&mut LinuxAbi::default(), &mut frame),

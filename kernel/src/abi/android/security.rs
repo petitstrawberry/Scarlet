@@ -1526,7 +1526,7 @@ mod tests {
         let mut abi = LinuxAbi::default();
         let fd = abi.allocate_fd(handle).unwrap();
         abi.set_file_status_flags(fd, 2).unwrap();
-        let mut frame = crate::arch::Trapframe::new();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
         frame.set_arg(0, fd);
         // libselinux uses write(fd, NULL, 0) to cancel, so no user buffer exists.
         assert_eq!(

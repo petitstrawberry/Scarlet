@@ -35,6 +35,7 @@ mod socket {
     #[derive(Debug)]
     pub enum SocketError {
         InvalidPacket,
+        PermissionDenied,
         Other(String),
     }
 }

@@ -6,7 +6,6 @@
 use crate::sync::IrqSpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 mod wall_clock;
 use wall_clock::WallClock;
@@ -61,11 +60,11 @@ static WALL_CLOCK: IrqSpinLock<WallClock> = IrqSpinLock::new(WallClock::new());
 pub trait ClockChangeListener: Send + Sync {
     fn clock_changed(self: Arc<Self>, revision: u64);
 }
-static CLOCK_REVISION: AtomicU64 = AtomicU64::new(0);
+static CLOCK_REVISION: IrqSpinLock<u64> = IrqSpinLock::new(0);
 static CLOCK_LISTENERS: IrqSpinLock<Vec<Weak<dyn ClockChangeListener>>> =
     IrqSpinLock::new(Vec::new());
 pub fn clock_revision() -> u64 {
-    CLOCK_REVISION.load(Ordering::Acquire)
+    *CLOCK_REVISION.lock()
 }
 pub fn observe_clock_changes(listener: &Arc<dyn ClockChangeListener>) -> Result<(), &'static str> {
     let mut listeners = CLOCK_LISTENERS.lock();
@@ -105,7 +104,9 @@ pub fn set_system_time_at(unix_ns: u64, monotonic_ns: u64) -> Result<(), &'stati
     let revision = {
         let mut clock = WALL_CLOCK.lock();
         clock.set(unix_ns, monotonic_ns, current_time_ns())?;
-        CLOCK_REVISION.fetch_add(1, Ordering::AcqRel) + 1
+        let mut revision = CLOCK_REVISION.lock();
+        *revision = revision.checked_add(1).expect("clock revision exhausted");
+        *revision
     };
     notify_clock_changes(revision);
     Ok(())

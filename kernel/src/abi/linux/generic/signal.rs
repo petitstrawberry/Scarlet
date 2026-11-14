@@ -1955,10 +1955,12 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 mod tests {
     #[test_case]
     fn waited_signal_validates_output_before_consuming_and_reports_known_info() {
-        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
         use crate::library::std::usercopy::copy_from_user;
+        // Linux mprotect accepts the lower user range; the RV64 native stack
+        // uses a separate high-VA layout.
         let task = crate::task::new_user_task("waited-signal".into(), 0);
-        let info = USER_STACK_END - PAGE_SIZE;
+        let info = USER_LOWER_CANONICAL_END - PAGE_SIZE;
         task.allocate_stack_pages(info, 1).unwrap();
         let state = Arc::new(crate::sync::IrqSpinLock::new(SignalState::new()));
         state.lock().add_pending(LinuxSignal::SIGUSR1);
@@ -1966,7 +1968,7 @@ mod tests {
         let mask = 1u64 << (LinuxSignal::SIGUSR1 as u32 - 1);
         task.vm_manager
             .protect_linux_memory_map_range(
-                crate::vm::vmem::MemoryArea::new(info, USER_STACK_END - 1),
+                crate::vm::vmem::MemoryArea::new(info, USER_LOWER_CANONICAL_END - 1),
                 1,
             )
             .unwrap();
@@ -1977,7 +1979,7 @@ mod tests {
         assert!(state.lock().is_pending(LinuxSignal::SIGUSR1));
         task.vm_manager
             .protect_linux_memory_map_range(
-                crate::vm::vmem::MemoryArea::new(info, USER_STACK_END - 1),
+                crate::vm::vmem::MemoryArea::new(info, USER_LOWER_CANONICAL_END - 1),
                 3,
             )
             .unwrap();

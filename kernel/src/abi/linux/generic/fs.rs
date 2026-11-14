@@ -7192,7 +7192,7 @@ mod tests {
         let write_handle = task.handle_table.insert(writer).unwrap();
         let read_fd = abi.allocate_fd(read_handle).unwrap();
         let write_fd = abi.allocate_fd(write_handle).unwrap();
-        let mut frame = crate::arch::Trapframe::new();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
         for (fd, command, size, expected) in [
             (read_fd, 1031, 4096, errno::to_result(errno::EBUSY)),
             (write_fd, 1032, 0, 65536),
@@ -7724,7 +7724,7 @@ mod tests {
         let mut abi = crate::abi::linux::generic::LinuxAbi::default();
         let fd = abi.allocate_fd(handle).unwrap();
         crate::task::set_mock_current_task(task.clone());
-        let mut frame = crate::arch::Trapframe::new();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
         frame.set_arg(0, fd);
         frame.set_arg(1, address);
         frame.set_arg(2, LENGTH);

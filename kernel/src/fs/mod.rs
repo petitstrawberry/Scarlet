@@ -527,8 +527,9 @@ impl DirectoryEntry {
             return None;
         }
 
-        // Safety: We've checked the size above
-        let entry = unsafe { ::core::ptr::read(data.as_ptr() as *const Self) };
+        // SAFETY: The complete record is present and all fields accept any bit
+        // pattern. A byte slice does not guarantee DirectoryEntry alignment.
+        let entry = unsafe { ::core::ptr::read_unaligned(data.as_ptr() as *const Self) };
 
         // Basic validation
         if entry.name_len as usize > 255 {
@@ -536,6 +537,28 @@ impl DirectoryEntry {
         }
 
         Some(entry)
+    }
+}
+
+#[cfg(test)]
+mod directory_entry_tests {
+    use super::DirectoryEntry;
+
+    #[test_case]
+    fn directory_entry_parses_unaligned_bytes_and_rejects_short_records() {
+        #[repr(align(8))]
+        struct Storage([u8; core::mem::size_of::<DirectoryEntry>() + 1]);
+        let mut storage = Storage([0; core::mem::size_of::<DirectoryEntry>() + 1]);
+        let bytes = &mut storage.0[1..];
+        bytes[..8].copy_from_slice(&0x1234_5678_8765_4321u64.to_ne_bytes());
+        bytes[8..16].copy_from_slice(&0x1_0000_0001u64.to_ne_bytes());
+        bytes[17] = 3;
+        bytes[24..27].copy_from_slice(b"foo");
+        let entry = DirectoryEntry::parse(bytes).unwrap();
+        assert_eq!(entry.file_id, 0x1234_5678_8765_4321);
+        assert_eq!(entry.size, 0x1_0000_0001);
+        assert_eq!(entry.name_str(), Ok("foo"));
+        assert!(DirectoryEntry::parse(&bytes[..bytes.len() - 1]).is_none());
     }
 }
 

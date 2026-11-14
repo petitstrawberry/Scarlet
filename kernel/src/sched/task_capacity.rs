@@ -234,18 +234,22 @@ mod tests {
     use alloc::string::ToString;
 
     #[test_case]
-    fn large_ram_uses_geometry_instead_of_a_fixed_user_cap() {
-        const RAM_PAGES_PER_STACK_SLOT: usize =
-            (TASK_KERNEL_STACK_SIZE / PAGE_SIZE) * STACK_PHYSICAL_BUDGET_DIVISOR;
-        let total_pages = KERNEL_KSTACK_SLOTS
-            .checked_mul(RAM_PAGES_PER_STACK_SLOT)
-            .expect("test memory size");
-        let limits = default_limits(total_pages);
+    fn large_slot_budgets_use_geometry_instead_of_a_fixed_user_cap() {
+        let limits = default_limits_for_slots(KERNEL_KSTACK_SLOTS + 1);
+        let total_pages = KERNEL_KSTACK_SLOTS * (TASK_KERNEL_STACK_SIZE / PAGE_SIZE);
 
         assert!(KERNEL_KSTACK_SLOTS > 1023);
         assert!(limits.max_user > 895);
         assert_eq!(limits.max_kernel, KERNEL_ROLE_MAX);
         assert_eq!(validate(limits, total_pages).unwrap(), KERNEL_KSTACK_SLOTS);
+    }
+
+    #[test_case]
+    fn largest_addressable_ram_keeps_a_valid_physical_stack_budget() {
+        let total_pages = usize::MAX / PAGE_SIZE;
+        let limits = default_limits(total_pages);
+        assert!(validate(limits, total_pages).is_ok());
+        assert!(limits.stack_bytes <= total_pages * PAGE_SIZE / STACK_PHYSICAL_BUDGET_DIVISOR);
     }
 
     #[test_case]
@@ -276,9 +280,7 @@ mod tests {
             max_kernel: 1,
             stack_bytes: (KERNEL_KSTACK_SLOTS + 1) * TASK_KERNEL_STACK_SIZE,
         };
-        let enough_pages =
-            (KERNEL_KSTACK_SLOTS + 1) * TASK_KERNEL_STACK_SIZE * STACK_PHYSICAL_BUDGET_DIVISOR
-                / PAGE_SIZE;
+        let enough_pages = (KERNEL_KSTACK_SLOTS + 1) * (TASK_KERNEL_STACK_SIZE / PAGE_SIZE);
         assert!(validate(too_many_slots, enough_pages).is_err());
     }
 

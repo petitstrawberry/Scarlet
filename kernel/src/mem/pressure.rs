@@ -19,7 +19,7 @@
 //! history; cumulative totals remain exact across that bound.
 
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::environment::MAX_NUM_CPUS;
 use crate::sync::{IrqSpinLock, Waker};
@@ -535,7 +535,7 @@ pub(crate) struct MemoryPressureTrigger {
     threshold_ns: u64,
     window_ns: u64,
     activated_ns: u64,
-    last_notified_ns: AtomicU64,
+    last_notified_ns: IrqSpinLock<u64>,
     event_ready: AtomicBool,
     waker: Arc<Waker>,
 }
@@ -558,7 +558,7 @@ impl MemoryPressureTrigger {
             threshold_ns: threshold_us.saturating_mul(1_000),
             window_ns: window_us.saturating_mul(1_000),
             activated_ns,
-            last_notified_ns: AtomicU64::new(NEVER),
+            last_notified_ns: IrqSpinLock::new(NEVER),
             event_ready: AtomicBool::new(false),
             waker: Arc::new(Waker::new_interruptible("memory-pressure-trigger")),
         });
@@ -570,17 +570,11 @@ impl MemoryPressureTrigger {
         if covered_ns < self.threshold_ns {
             return false;
         }
-        let last = self.last_notified_ns.load(Ordering::Acquire);
-        if last != NEVER && now_ns.saturating_sub(last) < self.window_ns {
+        let mut last = self.last_notified_ns.lock();
+        if *last != NEVER && now_ns.saturating_sub(*last) < self.window_ns {
             return false;
         }
-        if self
-            .last_notified_ns
-            .compare_exchange(last, now_ns, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
+        *last = now_ns;
         self.event_ready.store(true, Ordering::Release);
         true
     }
@@ -600,7 +594,7 @@ impl MemoryPressureTrigger {
             threshold_ns: 70_000_000,
             window_ns: 1_000_000_000,
             activated_ns: 0,
-            last_notified_ns: AtomicU64::new(NEVER),
+            last_notified_ns: IrqSpinLock::new(NEVER),
             event_ready: AtomicBool::new(false),
             waker: Arc::new(Waker::new_interruptible("memory-pressure-test")),
         })

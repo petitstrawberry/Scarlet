@@ -1507,7 +1507,7 @@ mod tests {
         task.set_namespace_id(1);
         peer.ensure_thread(task.get_id()).unwrap();
         let mut tx = [0; 64];
-        put64(&mut tx, 0, (0xa5a5a5a5usize << 32) | number as usize);
+        tx[..8].copy_from_slice(&((0xa5a5a5a5u64 << 32) | u64::from(number)).to_le_bytes());
         peer.command(&task, &LinuxAbi::default(), BC_TRANSACTION, &tx)
             .unwrap();
         let request = owner.endpoint.receive().unwrap().unwrap();
