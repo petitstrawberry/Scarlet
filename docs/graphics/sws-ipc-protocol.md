@@ -977,6 +977,30 @@ When the window becomes visible, SWS presents that latest content before
 releasing the pending callback. Overview/Home workspace previews count as live
 presentation, so their visible cards may continue receiving callbacks.
 
+### Independent next-encode credits (optional capability)
+
+Servers advertising `FRAME_CREDITS` (`1 << 19`) additionally accept
+`REQUEST_FRAME_CREDIT` (59), using the same 12-byte payload and zero routing
+flags as `REQUEST_FRAME`. A matching `FRAME_DONE` grants permission to prepare
+one new frame, independently of any earlier GPU completion, image commit, or
+presentation. Its timestamp is the **grant time**, not a scanout timestamp.
+Legacy `REQUEST_FRAME` semantics and message layouts remain unchanged.
+
+Clients send credit requests immediately, before waiting for prior GPU work.
+GPU images must still be committed only after their producing work completes;
+a credit never authorizes buffer reuse. Reuse still requires the matching
+`SGFX_BUFFER_RELEASED` and the producer's own GPU retirement. Clients keep a
+bounded pool (ScarletUI uses four targets), poll slot availability, and defer
+encoding without blocking the UI thread when every slot is retained.
+
+Only one callback request per window may be outstanding across both request
+types. SWS grants at most one credit per nominal 16,666,667 ns display tick,
+with visibility, scene-bootstrap and hidden-shell preparation rules. Missed
+ticks do not accumulate credits. The timer advances even without a pending
+commit, and due credits are granted before compositor GPU waits. This is
+nominal 60 Hz pacing; it does not claim hardware-vblank or presentation
+acknowledgment. Older servers require commit followed by `REQUEST_FRAME`.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)

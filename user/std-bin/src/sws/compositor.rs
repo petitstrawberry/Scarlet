@@ -6,7 +6,7 @@ use super::cursor_theme::CursorTheme;
 use super::damage::{
     DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage, shared_frame_damage,
 };
-use super::frame_callback::{frame_callback_is_ready, frame_callback_target};
+use super::frame_callback::{frame_callback_is_ready, frame_callback_target, frame_credit_deadline, frame_credit_is_eligible};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{
     CompositorInputEvent, ConsumedKeys, GestureEvent, GestureRecognizer, HeldKeys, InputManager,
@@ -2340,8 +2340,8 @@ struct PendingFrameCallback {
     client_id: usize,
     window_id: u32,
     callback_id: u64,
-    /// Presentation counter observed when the request entered the compositor.
-    requested_after_present: u64,
+    /// Legacy commit target, or None for an independent next-encode credit.
+    requested_after_present: Option<u64>,
 }
 
 use super::shell_presentation::{fixed_depth_visibility, shell_background_must_be_withheld};
@@ -7280,6 +7280,16 @@ impl Compositor {
     fn event_wait_timeout_ns(&self) -> i64 {
         let now = monotonic_time_ns();
         let mut timeout = COMPOSITOR_IDLE_RECHECK_NS as u64;
+        // Credits must advance even when no new image has committed. Otherwise
+        // the callback would accidentally serialize the producer behind GPU work.
+        for callback in &self.pending_frame_callbacks {
+            if callback.requested_after_present.is_none()
+                && let Some(window) = self.window_manager.get_window(callback.window_id)
+                && let Some(deadline) = self.next_frame_credit_deadline(window, now)
+            {
+                timeout = timeout.min(deadline.saturating_sub(now));
+            }
+        }
         if self.animations_enabled()
             && (self
                 .tablet_motion
@@ -7644,7 +7654,9 @@ impl Compositor {
             }
         }
         self.consume_event_signal_if_ready();
-        self.process_pending_events()
+        self.process_pending_events()?;
+        self.grant_pending_frame_callbacks();
+        Ok(())
     }
 
     fn note_frame_presented(&mut self) {
@@ -7726,6 +7738,8 @@ impl Compositor {
         super::trace::compositor_loop();
         super::trace::set_compositor_stage(super::trace::STAGE_PROCESS_EVENTS);
         self.process_pending_events()?;
+        // Grant due encode credits before the compositor's own GPU wait.
+        self.grant_pending_frame_callbacks();
         super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
         if self.gpu_compositor.is_some()
             && self.has_pending_redraw()
@@ -10141,7 +10155,7 @@ impl Compositor {
             .is_some_and(|window| window.owner_client_id == Some(client_id))
     }
 
-    fn queue_frame_callback(&mut self, client_id: usize, window_id: u32, callback_id: u64) {
+    fn queue_frame_callback(&mut self, client_id: usize, window_id: u32, callback_id: u64, is_credit: bool) {
         if !self.client_owns_window(client_id, window_id) {
             send_message_to_client(
                 client_id,
@@ -10167,18 +10181,29 @@ impl Compositor {
             .window_manager
             .get_window(window_id)
             .and_then(|window| window.last_frame_submission_counter);
-        let requested_after_present =
-            frame_callback_target(self.event_counter, last_submission_counter);
+        let requested_after_present = (!is_credit).then(||
+            frame_callback_target(self.event_counter, last_submission_counter));
         self.pending_frame_callbacks.push(PendingFrameCallback {
             client_id,
             window_id,
             callback_id,
-            // REQUEST_FRAME follows the corresponding buffer commit on the
+            // Legacy REQUEST_FRAME follows the corresponding buffer commit on the
             // socket. If a slow composition completed between those messages,
             // target the commit's submission counter instead of waiting for a
             // nonexistent extra redraw.
             requested_after_present,
         });
+    }
+
+    fn next_frame_credit_deadline(&self, window: &super::window::Window, now_ns: u64) -> Option<u64> {
+        if !frame_credit_is_eligible(
+            window.is_logically_presented(), window.has_presented_frame,
+            self.pending_workspace_scenes.contains(&window.id) && window.visible && !window.minimized,
+            window.prepares_while_workspace_hidden(),
+        ) {
+            return None;
+        }
+        frame_credit_deadline(window.last_frame_credit_tick, now_ns, FRAME_BATCH_INTERVAL_NS)
     }
 
     fn grant_pending_frame_callbacks(&mut self) {
@@ -10194,16 +10219,19 @@ impl Compositor {
             if window.owner_client_id != Some(callback.client_id) {
                 continue;
             }
-            let ready = frame_callback_is_ready(
-                window.is_logically_presented(),
-                window.has_presented_frame,
-                self.pending_workspace_scenes.contains(&callback.window_id)
-                    && window.visible
-                    && !window.minimized,
-                self.event_counter,
-                callback.requested_after_present,
-                window.prepares_while_workspace_hidden(),
-            );
+            let ready = match callback.requested_after_present {
+                Some(requested) => frame_callback_is_ready(
+                    window.is_logically_presented(),
+                    window.has_presented_frame,
+                    self.pending_workspace_scenes.contains(&callback.window_id)
+                        && window.visible && !window.minimized,
+                    self.event_counter,
+                    requested,
+                    window.prepares_while_workspace_hidden(),
+                ),
+                None => self.next_frame_credit_deadline(window, now_ns)
+                    .is_some_and(|deadline| deadline <= now_ns),
+            };
             if !ready {
                 waiting.push(callback);
                 continue;
@@ -10212,13 +10240,18 @@ impl Compositor {
                 super::home_trace::record(
                     7,
                     format_args!(
-                        "sws-frame-done window={} callback={} counter={} requested_after={}",
+                        "sws-frame-done window={} callback={} counter={} requested_after={:?}",
                         window.id,
                         callback.callback_id,
                         self.event_counter,
                         callback.requested_after_present,
                     ),
                 );
+            }
+            if callback.requested_after_present.is_none() {
+                if let Some(window) = self.window_manager.get_window_mut(callback.window_id) {
+                    window.last_frame_credit_tick = Some(now_ns / FRAME_BATCH_INTERVAL_NS);
+                }
             }
             let payload =
                 sws_protocol::payload_frame_done(callback.window_id, callback.callback_id, now_ns);
@@ -12289,8 +12322,9 @@ impl Compositor {
                 client_id,
                 window_id,
                 callback_id,
+                is_credit,
             } => {
-                self.queue_frame_callback(client_id, window_id, callback_id);
+                self.queue_frame_callback(client_id, window_id, callback_id, is_credit);
             }
             IpcEvent::BufferUpdated {
                 window_id,

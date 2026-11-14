@@ -34,7 +34,8 @@ impl PresentationQueue {
         // be rendered only after a later completed flip released its old use.
         let (sender, jobs) = mpsc::sync_channel::<Present>(1);
         let (responses, retired) = mpsc::sync_channel(3);
-        let profiling = std::env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1");
+        let profiling = std::env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1")
+            || std::env::args().any(|arg| arg == "--profile-frames");
         let worker = thread::Builder::new()
             .name("sws-present".into())
             .spawn(move || {

@@ -152,6 +152,11 @@ impl Capabilities {
     pub const fn supports_frame_callbacks(self) -> bool {
         self.capabilities & protocol::capabilities::FRAME_CALLBACKS != 0
     }
+
+    /// Whether next-encode credits are independent of GPU commits/presentation.
+    pub const fn supports_frame_credits(self) -> bool {
+        self.capabilities & protocol::capabilities::FRAME_CREDITS != 0
+    }
 }
 
 /// Surface identity and physical extent returned by configured creation.
@@ -2439,6 +2444,22 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Request one paced next-encode credit after negotiating FRAME_CREDITS.
+    /// Send immediately, without waiting for an earlier GPU submission/commit.
+    /// FRAME_DONE grants CPU work only; image reuse still needs BUFFER_RELEASED.
+    /// Legacy servers must use request_frame after their corresponding commit.
+    pub fn request_frame_credit(&self, surface_id: u32, callback_id: u64) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        if callback_id == 0 {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_request_frame(surface_id, callback_id);
+        self.send_message(protocol::client_msg::REQUEST_FRAME_CREDIT, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Capture or release raw relative pointer motion for a surface.
     ///
     /// Lock requests are accepted by SWS only while the surface is visible,
@@ -3507,6 +3528,12 @@ mod pointer_lock_tests {
         assert!(!capabilities.supports_frame_callbacks());
         capabilities.capabilities |= protocol::capabilities::FRAME_CALLBACKS;
         assert!(capabilities.supports_frame_callbacks());
+        assert!(!capabilities.supports_frame_credits());
+        capabilities.capabilities |= protocol::capabilities::FRAME_CREDITS;
+        assert!(capabilities.supports_frame_credits());
+        capabilities.capabilities &= !protocol::capabilities::FRAME_CALLBACKS;
+        assert!(!capabilities.supports_frame_callbacks());
+        assert!(capabilities.supports_frame_credits());
     }
 }
 

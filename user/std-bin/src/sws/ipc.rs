@@ -698,6 +698,7 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::CONFIGURED_WINDOW_CREATION
         | protocol::capabilities::WORKSPACE_SHELL
         | protocol::capabilities::FRAME_CALLBACKS
+        | protocol::capabilities::FRAME_CREDITS
         | protocol::capabilities::EXTENSION_BUFFER_OBJECTS
         | protocol::capabilities::SURFACE_REGIONS
         | protocol::capabilities::GAMEPAD_INPUT
@@ -4246,10 +4247,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     }
                 }
             }
-            Ok(ClientMessageRef::RequestFrame {
-                window_id,
-                callback_id,
-            }) => {
+            Ok(ClientMessageRef::RequestFrame { window_id, callback_id }
+                | ClientMessageRef::RequestFrameCredit { window_id, callback_id }) => {
                 if header.flags != 0 || request_id != 0 {
                     send_message_to_client(
                         client_id,
@@ -4271,6 +4270,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     client_id,
                     window_id,
                     callback_id,
+                    is_credit: u32::from(header.msg_type) == protocol::client_msg::REQUEST_FRAME_CREDIT,
                 });
             }
             Ok(ClientMessageRef::RegisterSgfxBuffer {
@@ -4831,6 +4831,7 @@ pub enum IpcEvent {
         client_id: usize,
         window_id: u32,
         callback_id: u64,
+        is_credit: bool,
     },
     /// Import one transferred shared SGFX image into the compositor context.
     RegisterSgfxBuffer {

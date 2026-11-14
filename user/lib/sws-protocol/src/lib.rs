@@ -104,6 +104,8 @@ pub mod capabilities {
     /// Shell registration may opt into menus up to MAX_MENU_TITLES_BYTES.
     /// Legacy registration and ordinary clients retain the 2048-byte limit.
     pub const FULL_APP_MENUS: u64 = 1 << 18;
+    /// Separate next-encode credits from legacy commit/presentation callbacks.
+    pub const FRAME_CREDITS: u64 = 1 << 19;
 }
 
 pub mod gamepad;
@@ -464,6 +466,8 @@ pub mod client_msg {
     pub const SET_TOUCH_INPUT: u32 = 56;
     pub const GET_CLIPBOARD_TEXT: u32 = 57;
     pub const SET_CLIPBOARD_TEXT: u32 = 58;
+    /// Request a paced next-encode credit; requires FRAME_CREDITS capability.
+    pub const REQUEST_FRAME_CREDIT: u32 = 59;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -1576,6 +1580,14 @@ pub enum ClientMessageRef<'a> {
         /// Owned window that needs another frame.
         window_id: u32,
         /// Client-selected non-zero identifier returned by `FRAME_DONE`.
+        callback_id: u64,
+    },
+
+    /// Request next-frame CPU encoding permission independently of commits.
+    /// FRAME_DONE grants a credit, never GPU completion, presentation or reuse.
+    /// At most one outstanding callback per window across both request types.
+    RequestFrameCredit {
+        window_id: u32,
         callback_id: u64,
     },
 
@@ -2840,7 +2852,7 @@ pub fn parse_client_message<'a>(
                 transaction: payload,
             })
         }
-        client_msg::REQUEST_FRAME => {
+        client_msg::REQUEST_FRAME | client_msg::REQUEST_FRAME_CREDIT => {
             if payload.len() != 12 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -2848,10 +2860,12 @@ pub fn parse_client_message<'a>(
             if callback_id == 0 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            Ok(ClientMessageRef::RequestFrame {
-                window_id: read_u32(payload, 0)?,
-                callback_id,
-            })
+            let window_id = read_u32(payload, 0)?;
+            if msg_type == client_msg::REQUEST_FRAME_CREDIT {
+                Ok(ClientMessageRef::RequestFrameCredit { window_id, callback_id })
+            } else {
+                Ok(ClientMessageRef::RequestFrame { window_id, callback_id })
+            }
         }
         client_msg::REGISTER_SGFX_BUFFER => {
             if payload.len() != 24 {
@@ -6374,6 +6388,22 @@ mod tests {
             parse_server_message(server_msg::FRAME_DONE, &payload_frame_done(77, 0, 1)),
             Err(ProtocolError::MalformedPayload)
         );
+    }
+
+    #[test]
+    fn frame_credit_is_opt_in_and_does_not_reinterpret_legacy_requests() {
+        let request = payload_request_frame(77, 1234);
+        assert_eq!(
+            parse_client_message(client_msg::REQUEST_FRAME_CREDIT, &request).unwrap(),
+            ClientMessageRef::RequestFrameCredit { window_id: 77, callback_id: 1234 }
+        );
+        assert!(matches!(parse_client_message(client_msg::REQUEST_FRAME, &request),
+            Ok(ClientMessageRef::RequestFrame { .. })));
+        assert_ne!(crate::capabilities::FRAME_CALLBACKS, crate::capabilities::FRAME_CREDITS);
+        for invalid in [&request[..11], &payload_request_frame(77, 0)[..]] {
+            assert_eq!(parse_client_message(client_msg::REQUEST_FRAME_CREDIT, invalid),
+                Err(ProtocolError::MalformedPayload));
+        }
     }
 
     #[test]

@@ -17,7 +17,8 @@ pub(crate) struct FrameProfile {
 
 impl FrameProfile {
     pub(crate) fn open() -> Option<Self> {
-        if !env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1") {
+        if !(env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1")
+            || env::args().any(|arg| arg == "--profile-frames")) {
             return None;
         }
         let file = std::fs::OpenOptions::new()
@@ -186,7 +187,8 @@ fn stage_name(stage: u32) -> &'static str {
 /// Start the trace watchdog when `SWS_LOG=trace` is selected.
 pub(crate) fn start_watchdog() {
     PROFILE_ENABLED.store(
-        env::var("SWS_PROFILE").is_ok_and(|value| value == "1"),
+        env::var("SWS_PROFILE").is_ok_and(|value| value == "1")
+            || env::args().any(|arg| arg == "--profile"),
         Ordering::Relaxed,
     );
     let enabled =
