@@ -465,7 +465,9 @@ fn buffer_upload_rejects_user_alias_of_owned_pages_before_copy() {
         .add_memory_map(VirtualMemoryMap::new(
             PhysicalMemoryArea::new(physical, physical + PAGE_SIZE as u64 - 1),
             MemoryArea::new(address, address + PAGE_SIZE - 1),
-            3,
+            crate::vm::vmem::VirtualMemoryPermission::Read as usize
+                | crate::vm::vmem::VirtualMemoryPermission::Write as usize
+                | crate::vm::vmem::VirtualMemoryPermission::User as usize,
             true,
             None,
         ))

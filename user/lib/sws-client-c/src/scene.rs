@@ -1,5 +1,5 @@
-//! Generic composition of immutable host chrome and external GPU content.
-//! No UI toolkit or application render loop is owned by this module.
+//! Generic composition of immutable host chrome and external image content.
+//! Hosts retain their UI/event loop and provide their shared window frame.
 use super::*;
 use scarlet_os::{
     SharedMemory,
@@ -81,6 +81,13 @@ struct Lease {
     serial: u64,
     scene_serial: Option<u64>,
     destroyed: bool,
+}
+struct CpuFrame<'a> {
+    width: u32,
+    height: u32,
+    insets: SwsInsets,
+    clip: &'a [SwsRect],
+    pixels: &'a [u8],
 }
 #[derive(Default)]
 pub(super) struct Scenes {
@@ -551,6 +558,249 @@ pub unsafe extern "C" fn sws_scene_create_with_flags(
         Ok(0)
     })
 }
+
+fn clip_span(clip: &[SwsRect], y: u32) -> Option<(u32, u32)> {
+    clip.iter()
+        .find(|row| y >= row.y && y < row.y.saturating_add(row.height))
+        .map(|row| (row.x, row.x.saturating_add(row.width)))
+}
+
+fn compose_chrome_frame(
+    chrome: &CpuFrame<'_>,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    pitch: usize,
+) -> Result<Vec<u8>, Error> {
+    let stride = chrome.width as usize * 4;
+    let bytes = stride
+        .checked_mul(chrome.height as usize)
+        .ok_or(Error::InvalidRequest)?;
+    let mut output = vec![0; bytes];
+    if chrome.pixels.len() != bytes {
+        return Err(Error::InvalidRequest);
+    }
+    let content = chrome
+        .insets
+        .content(chrome.width, chrome.height)
+        .ok_or(Error::InvalidRequest)?;
+    let fit_width = if u64::from(content.width) * u64::from(height)
+        <= u64::from(content.height) * u64::from(width)
+    {
+        content.width
+    } else {
+        (u64::from(content.height) * u64::from(width) / u64::from(height)) as u32
+    };
+    let fit_height = if u64::from(content.width) * u64::from(height)
+        <= u64::from(content.height) * u64::from(width)
+    {
+        (u64::from(content.width) * u64::from(height) / u64::from(width)) as u32
+    } else {
+        content.height
+    };
+    let fit_x = content.x + (content.width - fit_width) / 2;
+    let fit_y = content.y + (content.height - fit_height) / 2;
+
+    let fill_row = |output: &mut [u8], y: u32, left: u32, right: u32| {
+        for x in left..right {
+            let offset = y as usize * stride + x as usize * 4;
+            output[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+    };
+    // Keep letterboxing opaque inside ScarletUI's rounded outline while the
+    // transparent margin remains available to the desktop behind the window.
+    for y in content.y..content.y + content.height {
+        let Some((clip_left, clip_right)) = clip_span(chrome.clip, y) else {
+            continue;
+        };
+        let left = clip_left.max(content.x);
+        let right = clip_right.min(content.x + content.width);
+        if y < fit_y || y >= fit_y + fit_height {
+            fill_row(&mut output, y, left, right);
+        } else {
+            fill_row(&mut output, y, left, right.min(fit_x));
+            fill_row(&mut output, y, left.max(fit_x + fit_width), right);
+        }
+    }
+
+    for y in fit_y..fit_y + fit_height {
+        let Some((clip_left, clip_right)) = clip_span(chrome.clip, y) else {
+            continue;
+        };
+        let left = clip_left.max(fit_x);
+        let right = clip_right.min(fit_x + fit_width);
+        if left >= right {
+            continue;
+        }
+        let source_y = ((y - fit_y) as u64 * u64::from(height) / u64::from(fit_height)) as usize;
+        for x in left..right {
+            let source_x = ((x - fit_x) as u64 * u64::from(width) / u64::from(fit_width)) as usize;
+            let source = source_y * pitch + source_x * 4;
+            let target = y as usize * stride + x as usize * 4;
+            output[target..target + 4].copy_from_slice(&pixels[source..source + 4]);
+        }
+    }
+    // Match the layered scene: content is below the premultiplied ScarletUI
+    // chrome. In particular, the rounded border overlaps the content inset.
+    for (target, source) in output.chunks_exact_mut(4).zip(chrome.pixels.chunks_exact(4)) {
+        let inverse = 255 - u32::from(source[3]);
+        for channel in 0..4 {
+            target[channel] = (u32::from(source[channel])
+                + (u32::from(target[channel]) * inverse + 127) / 255).min(255) as u8;
+        }
+    }
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_scene_frame(
+    client: &mut Client,
+    id: u32,
+    width: u32,
+    height: u32,
+    stride: u32,
+    insets: SwsInsets,
+    pixels: &[u8],
+    clip: &[SwsRect],
+) -> Result<(), Error> {
+    if !client.scenes.contains(id) || client.closed.contains(&id) {
+        return Err(Error::SurfaceNotFound);
+    }
+    let extent = client
+        .connection
+        .with_surface(id, |s| (s.width(), s.height()));
+    if extent != Some((width, height)) {
+        return Err(Error::InvalidRequest);
+    }
+    let size = width as usize * height as usize * 4;
+    let shm =
+        SharedMemory::create(size, permissions::READ_WRITE).map_err(|_| Error::ShmHandleFailed)?;
+    let mapping = shm
+        .as_handle()
+        .as_memory_mapping()
+        .map_err(|_| Error::ShmHandleFailed)?;
+    let address = unsafe { mapping.mmap(0, size, permissions::READ_WRITE, flags::SHARED, 0) }
+        .map_err(|_| Error::ShmHandleFailed)?;
+    for y in 0..height as usize {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr().add(y * stride as usize),
+                (address as *mut u8).add(y * width as usize * 4),
+                width as usize * 4,
+            );
+        }
+    }
+    unsafe { munmap(address, size) }.map_err(|_| Error::ShmHandleFailed)?;
+    let pool = client.scenes.resource()?;
+    let buffer = client.scenes.resource()?;
+    let token = client.connection.send_request_with_handle(
+        msg::EXTENSION_REGISTER_SHM_POOL,
+        &p::payload_extension_register_shm_pool(pool, size as u64),
+        shm.as_handle(),
+    )?;
+    match client.connection.wait_response(token)?.message() {
+        ServerMessage::ExtensionShmPoolRegistered { pool_id, .. } if pool_id == pool => {}
+        ServerMessage::Error { code } => return Err(Error::ServerError(code)),
+        _ => return Err(Error::InvalidResponse),
+    }
+    client.connection.send_message(
+        msg::EXTENSION_DEFINE_BUFFER,
+        &p::payload_extension_define_buffer(buffer, pool, 0, width, height, width * 4, 0),
+    )?;
+    let frame = Frame {
+        width,
+        height,
+        insets,
+        clip: clip.to_vec(),
+        pool,
+        buffer,
+    };
+    let old = client
+        .scenes
+        .windows
+        .get_mut(&id)
+        .unwrap()
+        .frame
+        .replace(frame);
+    if let Err(error) = client.scenes.publish(
+        &client.connection,
+        id,
+        client.states.get(&id).copied().unwrap_or(0),
+    ) {
+        if let Some(failed) =
+            std::mem::replace(&mut client.scenes.windows.get_mut(&id).unwrap().frame, old)
+        {
+            let _ = retire_frame(&client.connection, failed);
+        }
+        return Err(error);
+    }
+    if let Some(old) = old {
+        retire_frame(&client.connection, old)?;
+    }
+    Ok(())
+}
+
+/// Compose a caller-owned shared UI frame with CPU content. The host
+/// keeps the frame alive on its UI thread and supplies it after input updates.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_scene_cpu_present(
+    id: u32,
+    frame: *const SwsSceneFrame,
+    pixels: *const std::ffi::c_void,
+    bytes: usize,
+    width: u32,
+    height: u32,
+    pitch: usize,
+) -> i32 {
+    let Some(f) = (unsafe { frame.as_ref() }) else {
+        return -1;
+    };
+    if !valid_size(width, height) || pixels.is_null() || pitch < width as usize * 4 {
+        return -1;
+    }
+    let Some(required) = (height as usize - 1)
+        .checked_mul(pitch)
+        .and_then(|n| n.checked_add(width as usize * 4))
+    else {
+        return -1;
+    };
+    if required > bytes || required > isize::MAX as usize {
+        return -1;
+    }
+    let Some((frame_pixels, clip)) = (unsafe { frame_parts(f) }) else {
+        return -1;
+    };
+    // Frame buffers from ScarletUI are tightly packed. Reject other layouts
+    // here rather than interpreting row padding as image data.
+    if f.stride != f.width * 4 {
+        return -1;
+    }
+    let image = unsafe { std::slice::from_raw_parts(pixels.cast::<u8>(), required) };
+    let frame = CpuFrame {
+        width: f.width,
+        height: f.height,
+        insets: f.insets,
+        clip,
+        pixels: frame_pixels,
+    };
+    let Ok(composite) = compose_chrome_frame(&frame, image, width, height, pitch) else {
+        return -1;
+    };
+    call(|c| {
+        submit_scene_frame(
+            c,
+            id,
+            f.width,
+            f.height,
+            f.width * 4,
+            f.insets,
+            &composite,
+            clip,
+        )?;
+        Ok(0)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sws_scene_geometry(id: u32, out: *mut SwsSceneGeometry) -> i32 {
     if out.is_null() {
@@ -579,11 +829,7 @@ pub unsafe extern "C" fn sws_scene_geometry(id: u32, out: *mut SwsSceneGeometry)
         Ok(0)
     })
 }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sws_scene_frame(id: u32, input: *const SwsSceneFrame) -> i32 {
-    let Some(f) = (unsafe { input.as_ref() }) else {
-        return -1;
-    };
+unsafe fn frame_parts(f: &SwsSceneFrame) -> Option<(&[u8], &[SwsRect])> {
     if !valid_size(f.width, f.height)
         || f.width as u64 * f.height as u64 > 16 * 1024 * 1024
         || f.insets.content(f.width, f.height).is_none()
@@ -593,11 +839,11 @@ pub unsafe extern "C" fn sws_scene_frame(id: u32, input: *const SwsSceneFrame) -
         || f.clip_count == 0
         || f.clip_count >= 256
     {
-        return -1;
+        return None;
     }
     let required = (f.height as usize - 1) * f.stride as usize + f.width as usize * 4;
     if required > f.bytes || required > isize::MAX as usize {
-        return -1;
+        return None;
     }
     // SAFETY: caller borrows these validated arrays for the duration of this call.
     let pixels = unsafe { std::slice::from_raw_parts(f.pixels.cast::<u8>(), required) };
@@ -608,74 +854,21 @@ pub unsafe extern "C" fn sws_scene_frame(id: u32, input: *const SwsSceneFrame) -
             || r.x.checked_add(r.width).is_none_or(|x| x > f.width)
             || r.y.checked_add(r.height).is_none_or(|y| y > f.height)
     }) {
-        return -1;
+        return None;
     }
+    Some((pixels, clip))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_scene_frame(id: u32, input: *const SwsSceneFrame) -> i32 {
+    let Some(f) = (unsafe { input.as_ref() }) else {
+        return -1;
+    };
+    let Some((pixels, clip)) = (unsafe { frame_parts(f) }) else {
+        return -1;
+    };
     call(|c| {
-        if !c.scenes.contains(id) || c.closed.contains(&id) {
-            return Err(Error::SurfaceNotFound);
-        }
-        let extent = c.connection.with_surface(id, |s| (s.width(), s.height()));
-        if extent != Some((f.width, f.height)) {
-            return Err(Error::InvalidRequest);
-        }
-        let size = f.width as usize * f.height as usize * 4;
-        let shm = SharedMemory::create(size, permissions::READ_WRITE)
-            .map_err(|_| Error::ShmHandleFailed)?;
-        let mapping = shm
-            .as_handle()
-            .as_memory_mapping()
-            .map_err(|_| Error::ShmHandleFailed)?;
-        let address = unsafe { mapping.mmap(0, size, permissions::READ_WRITE, flags::SHARED, 0) }
-            .map_err(|_| Error::ShmHandleFailed)?;
-        for y in 0..f.height as usize {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    pixels.as_ptr().add(y * f.stride as usize),
-                    (address as *mut u8).add(y * f.width as usize * 4),
-                    f.width as usize * 4,
-                );
-            }
-        }
-        unsafe { munmap(address, size) }.map_err(|_| Error::ShmHandleFailed)?;
-        let pool = c.scenes.resource()?;
-        let buffer = c.scenes.resource()?;
-        let token = c.connection.send_request_with_handle(
-            msg::EXTENSION_REGISTER_SHM_POOL,
-            &p::payload_extension_register_shm_pool(pool, size as u64),
-            shm.as_handle(),
-        )?;
-        match c.connection.wait_response(token)?.message() {
-            ServerMessage::ExtensionShmPoolRegistered { pool_id, .. } if pool_id == pool => {}
-            ServerMessage::Error { code } => return Err(Error::ServerError(code)),
-            _ => return Err(Error::InvalidResponse),
-        }
-        c.connection.send_message(
-            msg::EXTENSION_DEFINE_BUFFER,
-            &p::payload_extension_define_buffer(buffer, pool, 0, f.width, f.height, f.width * 4, 0),
-        )?;
-        let frame = Frame {
-            width: f.width,
-            height: f.height,
-            insets: f.insets,
-            clip: clip.to_vec(),
-            pool,
-            buffer,
-        };
-        let old = c.scenes.windows.get_mut(&id).unwrap().frame.replace(frame);
-        if let Err(e) = c
-            .scenes
-            .publish(&c.connection, id, c.states.get(&id).copied().unwrap_or(0))
-        {
-            if let Some(failed) =
-                std::mem::replace(&mut c.scenes.windows.get_mut(&id).unwrap().frame, old)
-            {
-                let _ = retire_frame(&c.connection, failed);
-            }
-            return Err(e);
-        }
-        if let Some(old) = old {
-            retire_frame(&c.connection, old)?;
-        }
+        submit_scene_frame(c, id, f.width, f.height, f.stride, f.insets, pixels, clip)?;
         Ok(0)
     })
 }
@@ -690,6 +883,79 @@ pub extern "C" fn sws_window_resizable(id: u32, enabled: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chrome_content_uses_the_shared_inset_and_clip() {
+        let chrome = CpuFrame {
+            width: 6,
+            height: 4,
+            insets: SwsInsets {
+                left: 1,
+                top: 1,
+                right: 1,
+                bottom: 1,
+            },
+            clip: &[
+                SwsRect {
+                    x: 1,
+                    y: 0,
+                    width: 4,
+                    height: 1,
+                },
+                SwsRect {
+                    x: 0,
+                    y: 1,
+                    width: 6,
+                    height: 2,
+                },
+                SwsRect {
+                    x: 1,
+                    y: 3,
+                    width: 4,
+                    height: 1,
+                },
+            ],
+            pixels: &[0; 6 * 4 * 4],
+        };
+        let source = [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255];
+        let output = compose_chrome_frame(&chrome, &source, 2, 2, 8).unwrap();
+        assert_eq!(
+            &output[((1 * 6 + 2) * 4)..((1 * 6 + 2) * 4 + 4)],
+            &[1, 2, 3, 255]
+        );
+        assert_eq!(
+            &output[((2 * 6 + 3) * 4)..((2 * 6 + 3) * 4 + 4)],
+            &[10, 11, 12, 255]
+        );
+        // Both letterbox columns must be opaque, without overwriting the frame.
+        for x in [1, 4] {
+            assert_eq!(&output[(6 + x) * 4..(6 + x) * 4 + 4], &[0, 0, 0, 255]);
+        }
+        assert_eq!(
+            &output[((1 * 6 + 0) * 4)..((1 * 6 + 0) * 4 + 4)],
+            &[0, 0, 0, 0]
+        );
+        assert_eq!(
+            &output[((0 * 6 + 0) * 4)..((0 * 6 + 0) * 4 + 4)],
+            &[0, 0, 0, 0]
+        );
+    }
+    #[test]
+    fn cpu_chrome_covers_content_and_letterboxing_without_filling_rounded_corners() {
+        let mut pixels = [0u8;36];
+        pixels[4..8].copy_from_slice(&[5,6,7,255]);
+        pixels[12..16].copy_from_slice(&[10,20,30,128]);
+        let clip = [SwsRect{x:1,y:0,width:1,height:1}, SwsRect{x:0,y:1,width:3,height:1}, SwsRect{x:1,y:2,width:1,height:1}];
+        let chrome=CpuFrame{width:3,height:3,insets:SwsInsets::default(),clip:&clip,pixels:&pixels};
+        let source=[100,100,100,255].repeat(9);
+        let output=compose_chrome_frame(&chrome,&source,3,3,12).unwrap();
+        assert_eq!(&output[..4],&[0;4]);
+        assert_eq!(&output[4..8],&[5,6,7,255]);
+        assert_eq!(&output[12..16],&[60,70,80,255]);
+        let output=compose_chrome_frame(&chrome,&source[..12],1,3,4).unwrap();
+        assert_eq!(&output[..4],&[0;4]);
+        assert_eq!(&output[12..16],&[10,20,30,255]);
+        assert_eq!(&output[16..20],&[100,100,100,255]);
+    }
     #[test]
     fn cropped_gpu_layers_keep_content_coordinates() {
         let content = SwsRect {

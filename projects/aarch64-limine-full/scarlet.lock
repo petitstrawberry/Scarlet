@@ -1742,6 +1742,30 @@ type = "path"
 path = "../../user/websocket-demo"
 
 [[sections.rootfs.layers]]
+kind = "archive"
+to = "/systems/android-aarch64"
+format = "tar-gz"
+strip_components = 1
+hash = "sha256:128346aca6186913cb28c9fab4b881a329a796eae9cfa36fd961a7eae821ebac"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-android/releases/download/v0.1.16/android-aarch64-v0.1.16.tar.gz"
+sha256 = "sha256:128346aca6186913cb28c9fab4b881a329a796eae9cfa36fd961a7eae821ebac"
+
+[[sections.rootfs.layers]]
+kind = "archive"
+to = "/"
+format = "tar-gz"
+strip_components = 1
+hash = "sha256:80857bddb0a8ea53aa471e47393f4e7d2593c6ff7df13eac64fab5c89b93de88"
+
+[sections.rootfs.layers.source]
+type = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-android/releases/download/v0.1.16/android-native-aarch64-v0.1.16.tar.gz"
+sha256 = "sha256:80857bddb0a8ea53aa471e47393f4e7d2593c6ff7df13eac64fab5c89b93de88"
+
+[[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/blitz"
 git_ref = "c26e20dfff971941486ca9f50c8dcd332ec404da"

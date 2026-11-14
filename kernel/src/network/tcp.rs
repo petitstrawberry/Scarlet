@@ -2460,13 +2460,13 @@ impl TcpSocket {
             }
             let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
             if remaining == Some(0) {
-                return Err(SocketError::WouldBlock);
+                return Err(SocketError::TimedOut);
             }
             match waker.wait_with_condition(task_id, trapframe, remaining, 0, || {
                 self.writable_capacity() > 0 || !tcp_send_side_open(self.get_state())
             }) {
                 WaitResult::Woken => {}
-                WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
                 WaitResult::Interrupted => return Err(SocketError::Interrupted),
             }
         }
@@ -2527,6 +2527,9 @@ impl TcpSocket {
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<usize, SocketError> {
         let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
+        let deadline = self
+            .read_timeout_ns()
+            .map(|timeout| crate::timer::get_time_ns().saturating_add(timeout));
 
         loop {
             {
@@ -2581,9 +2584,13 @@ impl TcpSocket {
                 if !self.recv_buffer.lock().is_empty() {
                     continue;
                 }
-                match waker.wait_with_timeout_result(task_id, trapframe, self.read_timeout_ns()) {
+                let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
+                if remaining == Some(0) {
+                    return Err(SocketError::TimedOut);
+                }
+                match waker.wait_with_timeout_result(task_id, trapframe, remaining) {
                     WaitResult::Woken => {}
-                    WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                    WaitResult::TimedOut => return Err(SocketError::TimedOut),
                     WaitResult::Interrupted => return Err(SocketError::Interrupted),
                 }
             }
@@ -3215,6 +3222,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         if Selectable::is_nonblocking(self) {
             return self.recv_data(buffer).map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
@@ -3233,6 +3241,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         self.recv_blocking(buffer, task.get_id(), task.get_trapframe())
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
@@ -3245,6 +3254,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         if Selectable::is_nonblocking(self) {
             return self.send_data(data).map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp send error".into()),
@@ -3263,6 +3273,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         self.send_blocking(data, task.get_id(), task.get_trapframe())
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp send error".into()),
@@ -3302,6 +3313,38 @@ impl crate::object::capability::Selectable for TcpSocket {
         }
 
         ready
+    }
+
+    fn subscribe_readiness(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        // Deferred errors are published through the receive/accept source and
+        // are also visible as exceptional readiness.
+        if interest.read || interest.except {
+            // epoll registrations persist when an unconnected socket starts
+            // listening. Keep both read sources subscribed across that change.
+            for source in [&self.accept_waker, &self.recv_waker] {
+                let waker = source
+                    .lock()
+                    .get_or_insert_with(|| {
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_readiness"))
+                    })
+                    .clone();
+                registrations.push(waker.subscribe_readiness(waiter));
+            }
+        }
+        if interest.write {
+            let waker = self
+                .send_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("tcp_send")))
+                .clone();
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
     }
 
     fn wait_until_ready(
@@ -3741,6 +3784,27 @@ impl TcpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::capability::selectable::Selectable;
+
+    #[test_case]
+    fn readiness_subscription_initializes_read_and_write_wakers() {
+        let socket = TcpSocket::new(Weak::new());
+        let waiter = Arc::new(crate::sync::Waker::new_interruptible("tcp-readiness"));
+        let registrations = socket
+            .subscribe_readiness(
+                crate::object::capability::selectable::ReadyInterest::rw(),
+                &waiter,
+            )
+            .unwrap();
+        assert_eq!(registrations.len(), 3);
+        assert!(socket.accept_waker.lock().is_some());
+        socket.accept_waker.lock().as_ref().unwrap().wake_one();
+        socket.recv_waker.lock().as_ref().unwrap().wake_all();
+        assert_eq!(registrations[0].generation(), 1);
+        assert_eq!(registrations[1].generation(), 1);
+        assert!(socket.recv_waker.lock().is_some());
+        assert!(socket.send_waker.lock().is_some());
+    }
 
     #[test_case]
     fn receive_window_accumulates_small_drains_since_the_last_advertisement() {

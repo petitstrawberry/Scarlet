@@ -38,6 +38,9 @@ fn eval_poll_handle(pfd: &mut PollHandle, task: &crate::task::Task) -> (bool, bo
     let mut selectable = false;
 
     if let Some(sel) = kobj.as_selectable() {
+        if sel.is_hung_up() {
+            pfd.revents |= POLLHUP;
+        }
         selectable = want_read || want_write || want_except;
         let rs = sel.current_ready(ReadyInterest {
             read: want_read,
@@ -300,6 +303,20 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     }
     if copy_to_user(&task, fds_ptr, &fds_buf).is_err() {
         return usize::MAX;
+    }
+    for record in fds_buf.chunks_exact(core::mem::size_of::<PollHandle>()) {
+        let handle = u32::from_ne_bytes(record[..4].try_into().unwrap());
+        let events = u16::from_ne_bytes(record[6..8].try_into().unwrap());
+        if events & (POLLIN | POLLOUT | POLLPRI) != 0
+            && let Some(object) = task.handle_table.get(handle)
+            && let Some(selectable) = object.as_selectable()
+        {
+            selectable.acknowledge_ready(super::ReadySet {
+                read: events & POLLIN != 0,
+                write: events & POLLOUT != 0,
+                except: events & POLLPRI != 0,
+            });
+        }
     }
     count
 }

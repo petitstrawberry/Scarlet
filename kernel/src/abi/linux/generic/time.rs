@@ -23,6 +23,8 @@ use crate::{
 use alloc::sync::{Arc, Weak};
 const NSEC_PER_SEC_I64: i64 = 1_000_000_000;
 const NSEC_PER_SEC_U64: u64 = 1_000_000_000;
+/// Linux accounting units per second; native clocks retain nanosecond units.
+pub(crate) const USER_HZ: u64 = 100;
 const TIMER_ABSTIME: i32 = 1;
 
 /// Linux POSIX timer shared state guarded by a spin mutex for interior mutability.
@@ -39,6 +41,7 @@ impl PosixTimerShared {
         sigev_value: u64,
         owner_task_id: usize,
         signal_state: Arc<IrqSpinLock<SignalState>>,
+        thread_target: Option<Weak<crate::task::Task>>,
     ) -> Self {
         Self {
             state: IrqSpinLock::new(PosixTimerState {
@@ -53,6 +56,7 @@ impl PosixTimerShared {
                 active: false,
                 owner_task_id,
                 signal_state,
+                thread_target,
                 overrun_count: 0,
                 generation: 0,
             }),
@@ -77,6 +81,7 @@ pub struct PosixTimerState {
     pub active: bool,
     pub owner_task_id: usize,
     pub signal_state: Arc<IrqSpinLock<SignalState>>,
+    thread_target: Option<Weak<crate::task::Task>>,
     pub overrun_count: u32,
     generation: u64,
 }
@@ -104,6 +109,28 @@ impl PosixTimer {
         owner_task_id: usize,
         signal_state: Arc<IrqSpinLock<SignalState>>,
     ) -> Self {
+        Self::new_with_thread_target(
+            id,
+            clock_id,
+            sigev_notify,
+            sigev_signo,
+            sigev_value,
+            owner_task_id,
+            signal_state,
+            None,
+        )
+    }
+
+    fn new_with_thread_target(
+        id: u64,
+        clock_id: i32,
+        sigev_notify: i32,
+        sigev_signo: i32,
+        sigev_value: u64,
+        owner_task_id: usize,
+        signal_state: Arc<IrqSpinLock<SignalState>>,
+        thread_target: Option<Weak<crate::task::Task>>,
+    ) -> Self {
         let shared = Arc::new(PosixTimerShared::new(
             id,
             clock_id,
@@ -112,6 +139,7 @@ impl PosixTimer {
             sigev_value,
             owner_task_id,
             signal_state,
+            thread_target,
         ));
         let handler = Arc::new(PosixTimerHandler {
             shared: Arc::downgrade(&shared),
@@ -192,7 +220,7 @@ impl TimerHandler for PosixTimerHandler {
         };
 
         let generation = context as u64;
-        let (notify, signo, owner_task_id, signal_state, next_period) = {
+        let (notify, signo, owner_task_id, signal_state, thread_target, next_period) = {
             let mut state = shared.lock();
             if !state.active || state.generation != generation {
                 return;
@@ -215,6 +243,7 @@ impl TimerHandler for PosixTimerHandler {
                 state.sigev_signo,
                 state.owner_task_id,
                 state.signal_state.clone(),
+                state.thread_target.clone(),
                 next_period,
             )
         };
@@ -226,6 +255,16 @@ impl TimerHandler for PosixTimerHandler {
                 locked.add_pending(signal);
                 drop(locked);
                 let _ = wake_task(owner_task_id);
+            }
+        }
+
+        if notify == SIGEV_THREAD_ID {
+            if let Some(target) = thread_target.and_then(|target| target.upgrade())
+                && let Some(signal_state) = live_signal_state(&target)
+                && let Some(signal) = LinuxSignal::from_u32(signo as u32)
+            {
+                signal_state.lock().add_pending(signal);
+                let _ = wake_task(target.get_id());
             }
         }
 
@@ -260,6 +299,113 @@ pub const SIGEV_NONE: i32 = 1;
 pub const SIGEV_THREAD: i32 = 2;
 pub const SIGEV_THREAD_ID: i32 = 4;
 
+const SIGEVENT_SIZE: usize = 64;
+const SIGEVENT_SIGNO_OFFSET: usize = 8;
+const SIGEVENT_NOTIFY_OFFSET: usize = 12;
+const SIGEVENT_THREAD_ID_OFFSET: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinuxSigEvent {
+    value: u64,
+    signo: i32,
+    notify: i32,
+    thread_id: i32,
+}
+
+fn read_sigevent(task: &crate::task::Task, address: usize) -> Result<LinuxSigEvent, usize> {
+    let mut bytes = [0u8; SIGEVENT_SIZE];
+    crate::library::std::usercopy::copy_from_user(task, address, &mut bytes)
+        .map_err(|_| errno::EFAULT)?;
+    Ok(LinuxSigEvent {
+        value: u64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+        signo: i32::from_ne_bytes(
+            bytes[SIGEVENT_SIGNO_OFFSET..SIGEVENT_SIGNO_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ),
+        notify: i32::from_ne_bytes(
+            bytes[SIGEVENT_NOTIFY_OFFSET..SIGEVENT_NOTIFY_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ),
+        thread_id: i32::from_ne_bytes(
+            bytes[SIGEVENT_THREAD_ID_OFFSET..SIGEVENT_THREAD_ID_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ),
+    })
+}
+
+fn write_timer_id(task: &crate::task::Task, address: usize, timer_id: i32) -> Result<(), usize> {
+    crate::library::std::usercopy::copy_to_user(task, address, &timer_id.to_ne_bytes())
+        .map_err(|_| errno::EFAULT)
+}
+
+/// Publish a newly registered timer as Linux's 32-bit `timer_t`.
+///
+/// The table uses a wider native key internally. Any conversion or user-copy
+/// failure rolls the registration back so callers cannot leak an unreachable
+/// timer.
+fn commit_timer_id(
+    abi: &LinuxAbi,
+    task: &crate::task::Task,
+    timer_id: u64,
+    address: usize,
+) -> Result<(), usize> {
+    let result = i32::try_from(timer_id)
+        .map_err(|_| errno::EAGAIN)
+        .and_then(|timer_id| write_timer_id(task, address, timer_id));
+    if result.is_err() {
+        abi.remove_posix_timer(timer_id);
+    }
+    result
+}
+
+fn is_live_task(task: &crate::task::Task) -> bool {
+    matches!(
+        task.get_state(),
+        crate::task::TaskState::Ready
+            | crate::task::TaskState::Running
+            | crate::task::TaskState::Blocked(_)
+    )
+}
+
+fn live_signal_state(task: &crate::task::Task) -> Option<Arc<IrqSpinLock<SignalState>>> {
+    if !is_live_task(task) {
+        return None;
+    }
+    task.linux_signal_state
+        .lock()
+        .as_ref()
+        .and_then(|state| state.upgrade())
+}
+
+fn resolve_thread_target<F>(
+    caller: &crate::task::Task,
+    namespace: &crate::task::namespace::TaskNamespace,
+    namespace_tid: i32,
+    lookup: F,
+) -> Option<Arc<crate::task::Task>>
+where
+    F: FnOnce(usize) -> Option<Arc<crate::task::Task>>,
+{
+    if namespace_tid <= 0 {
+        return None;
+    }
+    let namespace_tid = namespace_tid as usize;
+    let global_task_id = namespace.resolve_global_id(namespace_tid)?;
+    let target = lookup(global_task_id)?;
+    if target.get_id() != global_task_id
+        || target.try_get_namespace_id() != Some(namespace_tid)
+        || !core::ptr::eq(target.get_namespace().as_ref(), namespace)
+        || target.get_thread_group_id() != caller.get_thread_group_id()
+        || live_signal_state(&target).is_none()
+    {
+        return None;
+    }
+    Some(target)
+}
+
 fn is_supported_clock(clock_id: i32) -> bool {
     matches!(
         clock_id,
@@ -272,17 +418,6 @@ fn is_supported_clock(clock_id: i32) -> bool {
             | CLOCK_MONOTONIC_COARSE
             | CLOCK_BOOTTIME
     )
-}
-
-fn realtime_deadline_to_monotonic(
-    realtime_deadline_ns: u64,
-    realtime_now_ns: u64,
-    monotonic_now_ns: u64,
-) -> u64 {
-    monotonic_now_ns
-        .saturating_add(realtime_deadline_ns.saturating_sub(realtime_now_ns))
-        // TimerObject reserves zero as the disarmed value.
-        .max(1)
 }
 
 fn timespec_to_ns(ts: &TimeSpec) -> Result<u64, usize> {
@@ -326,6 +461,53 @@ struct ItimerSpec {
     it_value: TimeSpec,
 }
 
+fn read_timer_spec(task: &crate::task::Task, address: usize) -> Result<ItimerSpec, usize> {
+    let mut bytes = [0; 32];
+    crate::library::std::usercopy::copy_from_user(task, address, &mut bytes)
+        .map_err(|_| errno::EFAULT)?;
+    let number = |offset| i64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    Ok(ItimerSpec {
+        it_interval: TimeSpec {
+            tv_sec: number(0),
+            tv_nsec: number(8),
+        },
+        it_value: TimeSpec {
+            tv_sec: number(16),
+            tv_nsec: number(24),
+        },
+    })
+}
+fn write_timer_spec(
+    task: &crate::task::Task,
+    address: usize,
+    spec: &ItimerSpec,
+) -> Result<(), usize> {
+    let mut bytes = [0; 32];
+    for (index, value) in [
+        spec.it_interval.tv_sec,
+        spec.it_interval.tv_nsec,
+        spec.it_value.tv_sec,
+        spec.it_value.tv_nsec,
+    ]
+    .iter()
+    .enumerate()
+    {
+        bytes[index * 8..index * 8 + 8].copy_from_slice(&value.to_ne_bytes());
+    }
+    crate::library::std::usercopy::copy_to_user(task, address, &bytes).map_err(|_| errno::EFAULT)
+}
+
+fn write_clock_timespec(
+    task: &crate::task::Task,
+    address: usize,
+    value: &TimeSpec,
+) -> Result<(), usize> {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&value.tv_sec.to_ne_bytes());
+    bytes[8..].copy_from_slice(&value.tv_nsec.to_ne_bytes());
+    crate::library::std::usercopy::copy_to_user(task, address, &bytes).map_err(|_| errno::EFAULT)
+}
+
 /// Linux clock IDs (subset of commonly used ones)
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -335,6 +517,8 @@ pub const CLOCK_MONOTONIC_RAW: i32 = 4;
 pub const CLOCK_REALTIME_COARSE: i32 = 5;
 pub const CLOCK_MONOTONIC_COARSE: i32 = 6;
 pub const CLOCK_BOOTTIME: i32 = 7;
+pub const CLOCK_REALTIME_ALARM: i32 = 8;
+pub const CLOCK_BOOTTIME_ALARM: i32 = 9;
 
 const TFD_NONBLOCK: i32 = 0o00004000;
 const TFD_CLOEXEC: i32 = 0o02000000;
@@ -352,8 +536,24 @@ pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
 
     trapframe.increment_pc_next(&task);
 
-    if !is_supported_clock(clock_id) {
+    let wakeup = matches!(clock_id, CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM);
+    if !matches!(
+        clock_id,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_BOOTTIME
+            | CLOCK_REALTIME_ALARM
+            | CLOCK_BOOTTIME_ALARM
+    ) {
         return errno::to_result(errno::EINVAL);
+    }
+    if wakeup
+        && !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::RESERVE_WAKE)
+    {
+        return errno::to_result(errno::EPERM);
     }
 
     let valid_flags = TFD_NONBLOCK | TFD_CLOEXEC;
@@ -361,7 +561,16 @@ pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         return errno::to_result(errno::EINVAL);
     }
 
-    let timer = Arc::new(Timer::new(clock_id, (flags & TFD_NONBLOCK) != 0));
+    let nonblocking = flags & TFD_NONBLOCK != 0;
+    let timer = if wakeup {
+        match Timer::new_wakeup(clock_id, nonblocking) {
+            Ok(timer) => timer,
+            Err(_) => return errno::to_result(errno::ENOMEM),
+        }
+    } else {
+        Timer::new(clock_id, nonblocking)
+    };
+    let timer = Arc::new(timer);
     let kernel_obj = KernelObject::from_timer(timer);
     let handle = match task.handle_table.insert(kernel_obj) {
         Ok(handle) => handle,
@@ -421,14 +630,21 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         Some(timer) => timer,
         None => return errno::to_result(errno::EINVAL),
     };
+    if timer.is_wakeup()
+        && !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::RESERVE_WAKE)
+    {
+        return errno::to_result(errno::EPERM);
+    }
 
-    let new_value_paddr = match task.vm_manager.translate_to_kva(new_value_ptr) {
-        Some(addr) => addr,
-        None => return errno::to_result(errno::EFAULT),
+    let new_spec = match read_timer_spec(&task, new_value_ptr) {
+        Ok(spec) => spec,
+        Err(error) => return errno::to_result(error),
     };
-    let new_spec = unsafe { *(new_value_paddr as *const ItimerSpec) };
 
-    let mut first_ns = match timespec_to_ns(&new_spec.it_value) {
+    let first_ns = match timespec_to_ns(&new_spec.it_value) {
         Ok(ns) => ns,
         Err(errno_val) => return errno::to_result(errno_val),
     };
@@ -438,28 +654,21 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     };
 
     if old_value_ptr != 0 {
-        let old_value_paddr = match task.vm_manager.translate_to_kva(old_value_ptr) {
-            Some(addr) => addr as *mut ItimerSpec,
-            None => return errno::to_result(errno::EFAULT),
-        };
         let (remaining_ns, previous_interval_ns) = timer.snapshot();
         let snapshot = ItimerSpec {
             it_interval: ns_to_timespec(previous_interval_ns),
             it_value: ns_to_timespec(remaining_ns),
         };
-        unsafe {
-            *old_value_paddr = snapshot;
+        if let Err(error) = write_timer_spec(&task, old_value_ptr, &snapshot) {
+            return errno::to_result(error);
         }
     }
 
     let absolute = (flags & TIMER_ABSTIME) != 0;
-    if absolute
-        && first_ns != 0
-        && matches!(timer.clock_id(), CLOCK_REALTIME | CLOCK_REALTIME_COARSE)
-    {
-        let monotonic_now_ns = get_time_ns();
-        let realtime_now_ns = system_time_ns().unwrap_or(monotonic_now_ns);
-        first_ns = realtime_deadline_to_monotonic(first_ns, realtime_now_ns, monotonic_now_ns);
+    if absolute && matches!(timer.clock_id(), CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
+        return timer
+            .set_wall_time(first_ns, interval_ns, flags & TFD_TIMER_CANCEL_ON_SET != 0)
+            .map_or_else(|_| errno::to_result(errno::ENOMEM), |_| 0);
     }
 
     timer.set_time(first_ns, interval_ns, absolute);
@@ -495,20 +704,12 @@ pub fn sys_timerfd_gettime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let curr_value_paddr = match task.vm_manager.translate_to_kva(curr_value_ptr) {
-        Some(addr) => addr as *mut ItimerSpec,
-        None => return errno::to_result(errno::EFAULT),
-    };
     let (remaining_ns, interval_ns) = timer.snapshot();
     let snapshot = ItimerSpec {
         it_interval: ns_to_timespec(interval_ns),
         it_value: ns_to_timespec(remaining_ns),
     };
-    unsafe {
-        *curr_value_paddr = snapshot;
-    }
-
-    0
+    write_timer_spec(&task, curr_value_ptr, &snapshot).map_or_else(errno::to_result, |_| 0)
 }
 
 /// Linux `timer_create` implementation.
@@ -534,28 +735,20 @@ pub fn sys_timer_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         return errno::to_result(errno::EFAULT);
     }
 
-    let timerid_paddr = match task.vm_manager.translate_to_kva(timerid_ptr) {
-        Some(ptr) => ptr as *mut u64,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
     // Defaults if user does not supply struct sigevent
     let mut sigev_notify = SIGEV_SIGNAL;
     let mut sigev_signo = LinuxSignal::SIGALRM as i32;
     let mut sigev_value = 0u64;
+    let mut thread_target = None;
 
     if sevp_ptr != 0 {
-        let sevp_paddr = match task.vm_manager.translate_to_kva(sevp_ptr) {
-            Some(addr) => addr,
-            None => return errno::to_result(errno::EFAULT),
+        let sigevent = match read_sigevent(&task, sevp_ptr) {
+            Ok(sigevent) => sigevent,
+            Err(error) => return errno::to_result(error),
         };
-
-        unsafe {
-            let base = sevp_paddr as *const u8;
-            sigev_value = *(base as *const u64);
-            sigev_signo = *(base.add(8) as *const i32);
-            sigev_notify = *(base.add(12) as *const i32);
-        }
+        sigev_value = sigevent.value;
+        sigev_signo = sigevent.signo;
+        sigev_notify = sigevent.notify;
 
         match sigev_notify {
             SIGEV_SIGNAL => {
@@ -566,8 +759,25 @@ pub fn sys_timer_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
             SIGEV_NONE => {
                 // No additional validation needed
             }
-            SIGEV_THREAD | SIGEV_THREAD_ID => {
-                // Thread-based notifications require pthread helpers we do not have yet.
+            SIGEV_THREAD_ID => {
+                if sigev_signo <= 0 || LinuxSignal::from_u32(sigev_signo as u32).is_none() {
+                    return errno::to_result(errno::EINVAL);
+                }
+                let namespace = task.get_namespace();
+                let target = match resolve_thread_target(
+                    &task,
+                    &namespace,
+                    sigevent.thread_id,
+                    crate::sched::scheduler::get_task_by_id,
+                ) {
+                    Some(target) => target,
+                    None => return errno::to_result(errno::EINVAL),
+                };
+                thread_target = Some(Arc::downgrade(&target));
+            }
+            SIGEV_THREAD => {
+                // SIGEV_THREAD starts a userspace thread through pthreads and
+                // is not a kernel timer primitive.
                 return errno::to_result(errno::ENOSYS);
             }
             _ => {
@@ -576,23 +786,25 @@ pub fn sys_timer_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         }
     }
 
+    let signal_state = abi.signal_state.clone();
     let timer_id = match abi.create_posix_timer(|timer_id| {
-        Arc::new(PosixTimer::new(
+        Arc::new(PosixTimer::new_with_thread_target(
             timer_id,
             clock_id,
             sigev_notify,
             sigev_signo,
             sigev_value,
             task.get_id(),
-            abi.signal_state.clone(),
+            signal_state,
+            thread_target,
         ))
     }) {
         Ok(timer_id) => timer_id,
         Err(()) => return errno::to_result(errno::EAGAIN),
     };
 
-    unsafe {
-        *timerid_paddr = timer_id as u64;
+    if let Err(error) = commit_timer_id(abi, &task, timer_id, timerid_ptr) {
+        return errno::to_result(error);
     }
 
     trapframe.set_return_value(0);
@@ -628,12 +840,10 @@ pub fn sys_timer_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let new_value_paddr = match task.vm_manager.translate_to_kva(new_value_ptr) {
-        Some(addr) => addr,
-        None => return errno::to_result(errno::EFAULT),
+    let new_spec = match read_timer_spec(&task, new_value_ptr) {
+        Ok(value) => value,
+        Err(error) => return errno::to_result(error),
     };
-
-    let new_spec = unsafe { *(new_value_paddr as *const ItimerSpec) };
 
     let first_ns = match timespec_to_ns(&new_spec.it_value) {
         Ok(ns) => ns,
@@ -645,17 +855,13 @@ pub fn sys_timer_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
     };
 
     if old_value_ptr != 0 {
-        let old_value_paddr = match task.vm_manager.translate_to_kva(old_value_ptr) {
-            Some(addr) => addr as *mut ItimerSpec,
-            None => return errno::to_result(errno::EFAULT),
-        };
         let (remaining_ns, previous_interval_ns) = timer.snapshot();
         let snapshot = ItimerSpec {
             it_interval: ns_to_timespec(previous_interval_ns),
             it_value: ns_to_timespec(remaining_ns),
         };
-        unsafe {
-            *old_value_paddr = snapshot;
+        if let Err(error) = write_timer_spec(&task, old_value_ptr, &snapshot) {
+            return errno::to_result(error);
         }
     }
 
@@ -686,19 +892,14 @@ pub fn sys_timer_gettime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let setting_paddr = match task.vm_manager.translate_to_kva(setting_ptr) {
-        Some(addr) => addr as *mut ItimerSpec,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
     let (remaining_ns, interval_ns) = timer.snapshot();
     let current = ItimerSpec {
         it_interval: ns_to_timespec(interval_ns),
         it_value: ns_to_timespec(remaining_ns),
     };
 
-    unsafe {
-        *setting_paddr = current;
+    if let Err(error) = write_timer_spec(&task, setting_ptr, &current) {
+        return errno::to_result(error);
     }
 
     trapframe.set_return_value(0);
@@ -802,14 +1003,11 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
 
     trapframe.increment_pc_next(&task);
 
-    let timespec_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *mut TimeSpec,   // a1
-        None => return (-14_isize) as usize, // -EFAULT
-    };
+    let timespec_ptr = trapframe.get_arg(1);
 
     // Get the current time based on the clock type
     let timespec = match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => {
             // Wall clock (Unix epoch). Falls back to monotonic if no RTC has
             // initialized the wall clock yet (e.g. RTC-less hardware), so that
             // clock_gettime never fails for REALTIME.
@@ -824,7 +1022,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
                 tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
             }
         }
-        CLOCK_BOOTTIME => {
+        CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => {
             // Boot time (same as monotonic for now)
             let time_us = current_time();
             TimeSpec {
@@ -846,12 +1044,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         }
     };
 
-    // Write the timespec to user space
-    unsafe {
-        *timespec_ptr = timespec;
-    }
-
-    0 // Success
+    write_clock_timespec(&task, timespec_ptr, &timespec).map_or_else(errno::to_result, |_| 0)
 }
 
 /// Sleep relative to monotonic time, validating the Linux timespec and writing
@@ -985,27 +1178,359 @@ pub fn sys_clock_getres(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // If res pointer is provided, write resolution
-    if res_ptr != 0 {
-        if let Some(res_paddr) = task.vm_manager.translate_to_kva(res_ptr) {
-            unsafe {
-                // Write timespec structure with nanosecond resolution
-                // struct timespec { long tv_sec; long tv_nsec; }
-                let timespec = res_paddr as *mut [u64; 2];
-                *timespec = [
-                    0,         // tv_sec = 0
-                    1_000_000, // tv_nsec = 1 millisecond (reasonable resolution)
-                ];
-            }
-        }
+    if res_ptr == 0 {
+        return 0;
     }
-
-    0 // Always succeed
+    let resolution = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 1_000_000,
+    };
+    write_clock_timespec(&task, res_ptr, &resolution).map_or_else(errno::to_result, |_| 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn task_in_namespace(
+        name: &str,
+        global_id: usize,
+        thread_group_id: usize,
+        namespace: &Arc<crate::task::namespace::TaskNamespace>,
+    ) -> Arc<crate::task::Task> {
+        let mut task = crate::task::Task::new_with_namespace(
+            name.into(),
+            0,
+            crate::task::TaskType::User,
+            namespace.clone(),
+        );
+        task.set_id(global_id);
+        task.set_namespace_id(global_id);
+        task.set_thread_group_id(thread_group_id);
+        task.set_state(crate::task::TaskState::Running);
+        namespace.register_mapping(global_id, global_id);
+        Arc::new(task)
+    }
+
+    #[test_case]
+    fn timerfd_specs_cross_user_pages_and_reject_an_unmapped_tail() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::task::{Task, TaskType};
+        let task = Task::new("timerfd-usercopy".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        let spec = ItimerSpec {
+            it_interval: TimeSpec {
+                tv_sec: 2,
+                tv_nsec: 3,
+            },
+            it_value: TimeSpec {
+                tv_sec: 4,
+                tv_nsec: 5,
+            },
+        };
+        write_timer_spec(&task, base + PAGE_SIZE - 16, &spec).unwrap();
+        let read = read_timer_spec(&task, base + PAGE_SIZE - 16).unwrap();
+        assert_eq!(
+            (
+                read.it_interval.tv_sec,
+                read.it_interval.tv_nsec,
+                read.it_value.tv_sec,
+                read.it_value.tv_nsec
+            ),
+            (2, 3, 4, 5)
+        );
+        assert!(matches!(
+            read_timer_spec(&task, USER_STACK_END - 16),
+            Err(errno::EFAULT)
+        ));
+        assert_eq!(
+            write_timer_spec(&task, USER_STACK_END - 16, &spec),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test_case]
+    fn timer_create_reads_64_byte_sigevent_across_user_pages() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("timer-create-sigevent".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        let address = base + PAGE_SIZE - 40;
+        let mut bytes = [0xa5; SIGEVENT_SIZE];
+        bytes[..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_ne_bytes());
+        bytes[SIGEVENT_SIGNO_OFFSET..SIGEVENT_SIGNO_OFFSET + 4]
+            .copy_from_slice(&(LinuxSignal::SIGUSR1 as i32).to_ne_bytes());
+        bytes[SIGEVENT_NOTIFY_OFFSET..SIGEVENT_NOTIFY_OFFSET + 4]
+            .copy_from_slice(&SIGEV_THREAD_ID.to_ne_bytes());
+        bytes[SIGEVENT_THREAD_ID_OFFSET..SIGEVENT_THREAD_ID_OFFSET + 4]
+            .copy_from_slice(&73i32.to_ne_bytes());
+        copy_to_user(&task, address, &bytes).unwrap();
+
+        assert_eq!(
+            read_sigevent(&task, address),
+            Ok(LinuxSigEvent {
+                value: 0x1122_3344_5566_7788,
+                signo: LinuxSignal::SIGUSR1 as i32,
+                notify: SIGEV_THREAD_ID,
+                thread_id: 73,
+            })
+        );
+        assert_eq!(
+            read_sigevent(&task, USER_STACK_END - 40),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test_case]
+    fn timer_create_writes_4_byte_timer_id_across_cow_page() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::task::{CloneFlags, Task, TaskType};
+
+        let parent = Task::new("timer-create-id-cow".into(), 0, TaskType::User);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        parent.allocate_stack_pages(base, 2).unwrap();
+        let address = base + PAGE_SIZE - 2;
+        copy_to_user(&parent, address - 6, &[0xa5; 12]).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+
+        write_timer_id(&child, address, 0x1020_3040).unwrap();
+        let mut child_bytes = [0; 12];
+        copy_from_user(&child, address - 6, &mut child_bytes).unwrap();
+        assert_eq!(&child_bytes[..6], &[0xa5; 6]);
+        assert_eq!(
+            i32::from_ne_bytes(child_bytes[6..10].try_into().unwrap()),
+            0x1020_3040
+        );
+        assert_eq!(&child_bytes[10..], &[0xa5; 2]);
+
+        let mut parent_bytes = [0; 12];
+        copy_from_user(&parent, address - 6, &mut parent_bytes).unwrap();
+        assert_eq!(parent_bytes, [0xa5; 12]);
+        assert_eq!(
+            write_timer_id(&parent, USER_STACK_END - 2, 7),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test_case]
+    fn timer_create_output_failure_rolls_back_timer_registration() {
+        use crate::environment::USER_STACK_END;
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("timer-create-rollback".into(), 0, TaskType::User);
+        let abi = LinuxAbi::default();
+        let signal_state = abi.signal_state.clone();
+        let timer_id = abi
+            .create_posix_timer(|timer_id| {
+                Arc::new(PosixTimer::new(
+                    timer_id,
+                    CLOCK_MONOTONIC,
+                    SIGEV_SIGNAL,
+                    LinuxSignal::SIGALRM as i32,
+                    0,
+                    10,
+                    signal_state,
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(
+            commit_timer_id(&abi, &task, timer_id, USER_STACK_END),
+            Err(errno::EFAULT)
+        );
+        assert!(abi.get_posix_timer(timer_id).is_none());
+    }
+
+    #[test_case]
+    fn posix_timer_gettime_preserves_fork_cow_and_settime_failure_preserves_timer() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::task::{
+            CloneFlags, Task, TaskType, clear_mock_current_task, set_mock_current_task,
+        };
+        let parent = Task::new("posix-timer-cow".into(), 0, TaskType::User);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        parent.allocate_stack_pages(base, 2).unwrap();
+        let address = base + PAGE_SIZE - 16;
+        copy_to_user(&parent, address - 8, &[0xa5; 48]).unwrap();
+        let mut child = parent.clone_task(CloneFlags::default()).unwrap();
+        child.set_id(1);
+        let child = Arc::new(child);
+        set_mock_current_task(child.clone());
+        let mut abi = LinuxAbi::default();
+        let id = abi
+            .create_posix_timer(|id| {
+                Arc::new(PosixTimer::new(
+                    id,
+                    CLOCK_MONOTONIC,
+                    SIGEV_NONE,
+                    0,
+                    0,
+                    child.get_id(),
+                    abi.signal_state.clone(),
+                ))
+            })
+            .unwrap();
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, id as usize);
+        frame.set_arg(1, address);
+        assert_eq!(sys_timer_gettime(&mut abi, &mut frame), 0);
+        let mut output = [0; 48];
+        copy_from_user(&child, address - 8, &mut output).unwrap();
+        assert_eq!(&output[..8], &[0xa5; 8]);
+        assert_eq!(&output[8..40], &[0; 32]);
+        assert_eq!(&output[40..], &[0xa5; 8]);
+        copy_from_user(&parent, address - 8, &mut output).unwrap();
+        assert_eq!(output, [0xa5; 48]);
+        write_timer_spec(
+            &child,
+            address,
+            &ItimerSpec {
+                it_interval: TimeSpec {
+                    tv_sec: 60,
+                    tv_nsec: 0,
+                },
+                it_value: TimeSpec {
+                    tv_sec: 3600,
+                    tv_nsec: 0,
+                },
+            },
+        )
+        .unwrap();
+        frame.set_arg(0, id as usize);
+        frame.set_arg(1, 0);
+        frame.set_arg(2, address);
+        frame.set_arg(3, USER_STACK_END - 16);
+        assert_eq!(
+            sys_timer_settime(&mut abi, &mut frame),
+            errno::to_result(errno::EFAULT)
+        );
+        assert_eq!(abi.get_posix_timer(id).unwrap().snapshot(), (0, 0));
+        clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn sigev_thread_id_requires_live_same_process_namespace_target() {
+        let namespace = crate::task::namespace::TaskNamespace::new_root("timer-target".into());
+        let caller = task_in_namespace("timer-caller", 10, 10, &namespace);
+        let target = task_in_namespace("timer-target", 11, 10, &namespace);
+        let target_abi = LinuxAbi::default();
+        target_abi.bind_task_signals(&target);
+        assert_eq!(
+            resolve_thread_target(&caller, &namespace, 11, |_| Some(target.clone()))
+                .map(|task| task.get_id()),
+            Some(11)
+        );
+
+        let other_process = task_in_namespace("timer-other-process", 12, 12, &namespace);
+        other_process.set_state(crate::task::TaskState::Running);
+        let other_abi = LinuxAbi::default();
+        other_abi.bind_task_signals(&other_process);
+        assert!(
+            resolve_thread_target(&caller, &namespace, 12, |_| { Some(other_process.clone()) })
+                .is_none()
+        );
+
+        let dead = task_in_namespace("timer-dead-thread", 13, 10, &namespace);
+        let dead_abi = LinuxAbi::default();
+        dead_abi.bind_task_signals(&dead);
+        dead.set_state(crate::task::TaskState::Zombie);
+        assert!(resolve_thread_target(&caller, &namespace, 13, |_| Some(dead.clone())).is_none());
+    }
+
+    #[test_case]
+    fn sigev_thread_id_expiration_targets_only_named_thread() {
+        let namespace = crate::task::namespace::TaskNamespace::new_root("timer-expire".into());
+        let caller = task_in_namespace("timer-expire-caller", 20, 20, &namespace);
+        let target = task_in_namespace("timer-expire-target", 21, 20, &namespace);
+        let caller_abi = LinuxAbi::default();
+        caller_abi.bind_task_signals(&caller);
+        let target_abi = LinuxAbi::default();
+        target_abi.bind_task_signals(&target);
+        let timer = PosixTimer::new_with_thread_target(
+            1,
+            CLOCK_MONOTONIC,
+            SIGEV_THREAD_ID,
+            LinuxSignal::SIGUSR2 as i32,
+            0,
+            caller.get_id(),
+            caller_abi.signal_state.clone(),
+            Some(Arc::downgrade(&target)),
+        );
+        {
+            let mut state = timer.state();
+            state.active = true;
+            state.generation = 1;
+            state.interval_ns = 0;
+            state.next_deadline_ns = Some(get_time_ns());
+        }
+
+        timer.handler.clone().on_timer_expired(1);
+
+        assert!(
+            target_abi
+                .signal_state
+                .lock()
+                .is_pending(LinuxSignal::SIGUSR2)
+        );
+        assert!(
+            !caller_abi
+                .signal_state
+                .lock()
+                .is_pending(LinuxSignal::SIGUSR2)
+        );
+    }
+
+    #[test_case]
+    fn clock_timespec_is_page_split_and_fork_cow_isolated() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::task::{CloneFlags, Task, TaskType};
+
+        let parent = Task::new("linux-clock-cow".into(), 0, TaskType::User);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        parent.allocate_stack_pages(base, 2).unwrap();
+        copy_to_user(&parent, base + PAGE_SIZE - 8, &[0xa5; 24]).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        let value = TimeSpec {
+            tv_sec: 123,
+            tv_nsec: 456,
+        };
+        write_clock_timespec(&child, base + PAGE_SIZE - 8, &value).unwrap();
+
+        let mut child_bytes = [0; 24];
+        copy_from_user(&child, base + PAGE_SIZE - 8, &mut child_bytes).unwrap();
+        assert_eq!(
+            i64::from_ne_bytes(child_bytes[..8].try_into().unwrap()),
+            123
+        );
+        assert_eq!(
+            i64::from_ne_bytes(child_bytes[8..16].try_into().unwrap()),
+            456
+        );
+        assert_eq!(&child_bytes[16..], &[0xa5; 8]);
+        let mut parent_bytes = [0; 24];
+        copy_from_user(&parent, base + PAGE_SIZE - 8, &mut parent_bytes).unwrap();
+        assert_eq!(parent_bytes, [0xa5; 24]);
+        assert_eq!(
+            write_clock_timespec(&parent, USER_STACK_END - 8, &value),
+            Err(errno::EFAULT)
+        );
+    }
 
     #[test_case]
     fn gettimeofday_writes_microseconds_across_user_pages() {
@@ -1061,21 +1586,5 @@ mod tests {
         assert_eq!(CLOCK_MONOTONIC, 1);
         assert_eq!(CLOCK_PROCESS_CPUTIME_ID, 2);
         assert_eq!(CLOCK_THREAD_CPUTIME_ID, 3);
-    }
-
-    #[test_case]
-    fn realtime_deadline_preserves_remaining_wall_time() {
-        assert_eq!(realtime_deadline_to_monotonic(1_050, 1_000, 200), 250);
-    }
-
-    #[test_case]
-    fn past_realtime_deadline_maps_to_monotonic_now() {
-        assert_eq!(realtime_deadline_to_monotonic(999, 1_000, 200), 200);
-        assert_eq!(realtime_deadline_to_monotonic(999, 1_000, 0), 1);
-    }
-
-    #[test_case]
-    fn realtime_deadline_conversion_saturates() {
-        assert_eq!(realtime_deadline_to_monotonic(u64::MAX, 0, 1), u64::MAX);
     }
 }

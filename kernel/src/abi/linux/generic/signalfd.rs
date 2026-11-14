@@ -3,7 +3,10 @@
 //! so a descriptor inherited across exec or passed to another task cannot drain
 //! the creator's pending signals.
 
-use super::{LinuxAbi, errno, signal::SignalState};
+use super::{
+    LinuxAbi, errno,
+    signal::{LinuxSignal, SignalInfo, SignalState},
+};
 use crate::{
     arch::Trapframe,
     fs::{FileMetadata, SeekFrom},
@@ -17,7 +20,7 @@ use crate::{
     sync::{IrqSpinLock, waker::WaitResult},
     task::mytask,
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, Ordering},
@@ -46,30 +49,32 @@ impl SignalFd {
     }
 
     fn ready(&self, state: &SignalState) -> bool {
-        state.pending.raw() & *self.mask.lock() != 0
+        state.pending_mask() & *self.mask.lock() != 0
     }
 
     fn read_pending(&self, state: &mut SignalState, buffer: &mut [u8]) -> usize {
         let mut count = 0;
         for record in buffer.chunks_exact_mut(RECORD_SIZE) {
-            let pending = state.pending.raw() & *self.mask.lock();
-            if pending == 0 {
+            let Some((signal, info)) = state.take_pending_matching(*self.mask.lock()) else {
                 break;
-            }
-            let signo = pending.trailing_zeros() + 1;
-            state
-                .pending
-                .set_raw(state.pending.raw() & !(1 << (signo - 1)));
-            record.fill(0);
-            record[..4].copy_from_slice(&signo.to_ne_bytes());
-            // Existing Scarlet events do not retain siginfo payloads. SI_KERNEL
-            // explicitly identifies kernel-generated records, rather than
-            // claiming a userspace sender with a fabricated PID.
-            record[8..12].copy_from_slice(&128i32.to_ne_bytes());
+            };
+            write_record(record, signal, &info);
             count += RECORD_SIZE;
         }
         count
     }
+}
+
+fn write_record(record: &mut [u8], signal: LinuxSignal, info: &SignalInfo) {
+    record.fill(0);
+    record[..4].copy_from_slice(&(signal as u32).to_ne_bytes());
+    // SignalInfo::kernel supplies SI_KERNEL for records without payload data.
+    record[4..8].copy_from_slice(&info.bytes[4..8]);
+    record[8..12].copy_from_slice(&info.bytes[8..12]);
+    record[12..16].copy_from_slice(&info.bytes[16..20]);
+    record[16..20].copy_from_slice(&info.bytes[20..24]);
+    record[44..48].copy_from_slice(&info.bytes[24..28]);
+    record[48..56].copy_from_slice(&info.bytes[24..32]);
 }
 
 impl StreamOps for SignalFd {
@@ -106,6 +111,18 @@ impl Selectable for SignalFd {
         let mut ready = ReadySet::none();
         ready.read = interest.read && reader_state().is_some_and(|s| self.ready(&s.lock()));
         ready
+    }
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if !interest.read {
+            return Some(Vec::new());
+        }
+        let state = reader_state()?;
+        let waker = state.lock().pending_waker.clone();
+        Some(vec![waker.subscribe_readiness(waiter)])
     }
     fn wait_until_ready(
         &self,
@@ -315,6 +332,61 @@ mod tests {
         exec.bind_task_signals(&task);
         assert_eq!(fd.read(&mut records).unwrap(), 128);
         assert_eq!(u32::from_ne_bytes(records[..4].try_into().unwrap()), 17);
+        clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn signalfd_maps_sender_and_sigval_from_signalfd_siginfo() {
+        let mut info = SignalInfo::kernel(LinuxSignal::SIGRT32);
+        info.bytes[8..12].copy_from_slice(&(-1i32).to_ne_bytes());
+        info.bytes[16..20].copy_from_slice(&1234i32.to_ne_bytes());
+        info.bytes[20..24].copy_from_slice(&5678u32.to_ne_bytes());
+        info.bytes[24..32].copy_from_slice(&0x1234_5678_9abc_def0u64.to_ne_bytes());
+        let mut record = [0xa5; RECORD_SIZE];
+        write_record(&mut record, LinuxSignal::SIGRT32, &info);
+        assert_eq!(u32::from_ne_bytes(record[..4].try_into().unwrap()), 64);
+        assert_eq!(i32::from_ne_bytes(record[8..12].try_into().unwrap()), -1);
+        assert_eq!(u32::from_ne_bytes(record[12..16].try_into().unwrap()), 1234);
+        assert_eq!(u32::from_ne_bytes(record[16..20].try_into().unwrap()), 5678);
+        assert_eq!(
+            u32::from_ne_bytes(record[44..48].try_into().unwrap()),
+            0x9abc_def0
+        );
+        assert_eq!(
+            u64::from_ne_bytes(record[48..56].try_into().unwrap()),
+            0x1234_5678_9abc_def0
+        );
+    }
+
+    #[test_case]
+    fn signalfd_consumes_one_record_at_a_time_for_repeated_realtime_signals() {
+        let task = Arc::new(Task::new("signalfd-realtime".into(), 1, TaskType::Kernel));
+        set_mock_current_task(task.clone());
+        let abi = LinuxAbi::default();
+        abi.bind_task_signals(&task);
+        let fd = SignalFd::new(u64::MAX, true);
+        for payload in [0x1111u64, 0x2222] {
+            let mut info = SignalInfo::kernel(LinuxSignal::SIGRT32);
+            info.bytes[24..32].copy_from_slice(&payload.to_ne_bytes());
+            abi.signal_state
+                .lock()
+                .queue_pending_info(LinuxSignal::SIGRT32, info)
+                .unwrap();
+        }
+        let mut record = [0; RECORD_SIZE];
+        assert_eq!(fd.read(&mut record).unwrap(), RECORD_SIZE);
+        assert_eq!(u32::from_ne_bytes(record[..4].try_into().unwrap()), 64);
+        assert_eq!(
+            u64::from_ne_bytes(record[48..56].try_into().unwrap()),
+            0x1111
+        );
+        assert!(abi.signal_state.lock().is_pending(LinuxSignal::SIGRT32));
+        assert_eq!(fd.read(&mut record).unwrap(), RECORD_SIZE);
+        assert_eq!(
+            u64::from_ne_bytes(record[48..56].try_into().unwrap()),
+            0x2222
+        );
+        assert!(!abi.signal_state.lock().is_pending(LinuxSignal::SIGRT32));
         clear_mock_current_task();
     }
 }

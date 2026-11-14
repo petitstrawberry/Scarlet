@@ -91,9 +91,191 @@ impl Ext2Node {
     pub fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
         self.filesystem.read().clone()
     }
+
+    /// Internal EA access deliberately skips the public reserved-name policy.
+    /// Callers must supply a key produced by the xattr metadata API.
+    pub(super) fn raw_get_xattr(
+        &self,
+        name: &[u8],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(Error::Unsupported)?;
+        let fs = filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(Error::Unsupported)?;
+        fs.get_ext2_xattr(self.inode_number, name)
+    }
+
+    pub(super) fn raw_set_xattr(
+        &self,
+        name: &[u8],
+        value: &[u8],
+        mode: crate::fs::vfs_v2::xattr::SetMode,
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(Error::Unsupported)?;
+        let fs = filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(Error::Unsupported)?;
+        fs.set_ext2_xattr(self.inode_number, name, value, mode)
+    }
+
+    pub(super) fn raw_remove_xattr(
+        &self,
+        name: &[u8],
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(Error::Unsupported)?;
+        let fs = filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(Error::Unsupported)?;
+        fs.remove_ext2_xattr(self.inode_number, name)
+    }
+
+    fn label_metadata_error(
+        error: crate::fs::vfs_v2::xattr::Error,
+        operation: &str,
+    ) -> FileSystemError {
+        use crate::fs::vfs_v2::xattr::Error;
+        let kind = match error {
+            Error::PermissionDenied => FileSystemErrorKind::PermissionDenied,
+            Error::NoSpace => FileSystemErrorKind::NoSpace,
+            Error::TooLarge => FileSystemErrorKind::ValueOverflow,
+            Error::Io | Error::Unsupported | Error::InvalidName => FileSystemErrorKind::IoError,
+            Error::Missing | Error::Exists => FileSystemErrorKind::InvalidData,
+        };
+        FileSystemError::new(
+            kind,
+            format!(
+                "Failed to {} native ext2 label metadata: {:?}",
+                operation, error
+            ),
+        )
+    }
 }
 
 impl VfsNode for Ext2Node {
+    fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        xattr::validate_name(name)?;
+        self.raw_get_xattr(name)
+    }
+
+    fn set_xattr(
+        &self,
+        name: &[u8],
+        value: &[u8],
+        mode: crate::fs::vfs_v2::xattr::SetMode,
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        xattr::validate_name(name)?;
+        if value.len() > xattr::MAX_VALUE {
+            return Err(xattr::Error::TooLarge);
+        }
+        self.raw_set_xattr(name, value, mode)
+    }
+
+    fn list_xattrs(&self) -> Result<Vec<Vec<u8>>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(xattr::Error::Unsupported)?;
+        let fs = filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(xattr::Error::Unsupported)?;
+        let mut names = fs.list_ext2_xattrs(self.inode_number)?;
+        names.retain(|name| xattr::validate_name(name).is_ok());
+        Ok(names)
+    }
+
+    fn remove_xattr(&self, name: &[u8]) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        xattr::validate_name(name)?;
+        self.raw_remove_xattr(name)
+    }
+
+    fn read_label_metadata(&self, domain: &[u8; 16]) -> Result<Option<Vec<u8>>, FileSystemError> {
+        use crate::fs::vfs_v2::xattr;
+        let key = xattr::label_metadata_key(domain);
+        match self.raw_get_xattr(&key) {
+            Ok(value) if value.len() <= 512 => Ok(Some(value)),
+            Ok(_) => Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Native label metadata exceeds 512 bytes",
+            )),
+            Err(xattr::Error::Missing) => Ok(None),
+            Err(error) => Err(Self::label_metadata_error(error, "read")),
+        }
+    }
+
+    fn write_label_metadata(&self, domain: &[u8; 16], value: &[u8]) -> Result<(), FileSystemError> {
+        use crate::fs::vfs_v2::xattr;
+        if value.len() > 512 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::ValueOverflow,
+                "Native label metadata exceeds 512 bytes",
+            ));
+        }
+        let key = xattr::label_metadata_key(domain);
+        self.raw_set_xattr(&key, value, xattr::SetMode::Upsert)
+            .map_err(|error| Self::label_metadata_error(error, "write"))
+    }
+
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
+        let filesystem = self.filesystem()?.upgrade()?;
+        let fs = filesystem.as_any().downcast_ref::<Ext2FileSystem>()?;
+        (u32::from_le(fs.superblock.creator_os) == 0)
+            .then(|| {
+                fs.read_inode(self.inode_number)
+                    .ok()
+                    .map(|inode| inode.native_owner())
+            })
+            .flatten()
+    }
+    fn set_owner_identity(
+        &self,
+        principal: Option<crate::shield::identity::Principal>,
+        group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::IoError, "Resource filesystem gone")
+            })?;
+        filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotSupported, "Ownership unavailable")
+            })?
+            .set_inode_owner(self.inode_number, principal, group)
+    }
+
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        let filesystem = self.filesystem()?.upgrade()?;
+        Some(
+            filesystem
+                .as_any()
+                .downcast_ref::<Ext2FileSystem>()?
+                .labels_for_inode(self.inode_number),
+        )
+    }
+
     fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
         let filesystem = self
             .filesystem()

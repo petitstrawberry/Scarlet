@@ -6,7 +6,7 @@
 use crate::abi::linux::aarch64::LinuxAarch64Abi;
 use crate::abi::linux::generic::{
     LinuxAbi,
-    signal::{LinuxSignal, SignalAction},
+    signal::{LinuxSignal, SignalAction, SignalInfo},
 };
 use crate::arch::{Trapframe, fpu::FpuContext};
 use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
@@ -25,6 +25,8 @@ const RESERVED: usize = MCONTEXT + 288;
 const FRAME_SIZE: usize = RESERVED + 4096;
 const FPSIMD_MAGIC: u32 = 0x4650_8001;
 const FPSIMD_SIZE: usize = 528;
+const ESR_MAGIC: u32 = 0x4553_5201;
+const ESR_SIZE: usize = 16;
 const SA_ONSTACK: u64 = 0x0800_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
@@ -41,6 +43,11 @@ fn put32(bytes: &mut [u8], offset: usize, value: u32) {
 }
 fn get32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn write_siginfo(frame: &mut [u8], signal: LinuxSignal, info: Option<SignalInfo>) {
+    let info = info.unwrap_or_else(|| SignalInfo::kernel(signal));
+    frame[..128].copy_from_slice(&info.bytes);
 }
 
 fn encode_context(frame: &mut [u8], regs: &Trapframe, fp: &FpuContext, mask: u64) {
@@ -73,16 +80,19 @@ fn decode_context(frame: &[u8], regs: &mut Trapframe) -> Result<FpuContext, &'st
     if pc >= USER_LOWER_CANONICAL_END as u64
         || pc & 3 != 0
         || sp >= USER_LOWER_CANONICAL_END as u64
-        || sp & 15 != 0
         || pstate & 0xf != 0
     {
         return Err("invalid signal return context");
     }
     // Only FPSIMD is currently exposed to Linux applications. Validate the
     // record and terminator before mutating the live register context.
+    let mut terminator = RESERVED + FPSIMD_SIZE;
+    if get32(frame, terminator) == ESR_MAGIC && get32(frame, terminator + 4) == ESR_SIZE as u32 {
+        terminator += ESR_SIZE;
+    }
     if get32(frame, RESERVED) != FPSIMD_MAGIC
         || get32(frame, RESERVED + 4) != FPSIMD_SIZE as u32
-        || get64(frame, RESERVED + FPSIMD_SIZE) != 0
+        || get64(frame, terminator) != 0
     {
         return Err("invalid FPSIMD signal context");
     }
@@ -150,9 +160,43 @@ pub fn setup_signal_handler(
     handler: usize,
     signal: LinuxSignal,
 ) -> Result<(), &'static str> {
-    let (action, old_mask) = {
+    setup_signal_frame(abi, task, trapframe, handler, signal, None, None)
+}
+
+pub(crate) fn setup_signal_handler_with_info(
+    abi: &LinuxAbi,
+    task: &Task,
+    trapframe: &mut Trapframe,
+    handler: usize,
+    signal: LinuxSignal,
+    info: SignalInfo,
+) -> Result<(), &'static str> {
+    setup_signal_frame(abi, task, trapframe, handler, signal, Some(info), None)
+}
+
+struct MemoryFaultInfo {
+    address: usize,
+    code: u32,
+    esr: u64,
+}
+
+fn setup_signal_frame(
+    abi: &LinuxAbi,
+    task: &Task,
+    trapframe: &mut Trapframe,
+    handler: usize,
+    signal: LinuxSignal,
+    siginfo: Option<SignalInfo>,
+    fault: Option<MemoryFaultInfo>,
+) -> Result<(), &'static str> {
+    let (action, active_mask, old_mask) = {
         let state = abi.signal_state.lock();
-        (state.get_sigaction(signal), state.blocked.raw())
+        let active = state.blocked.raw();
+        (
+            state.get_sigaction(signal),
+            active,
+            state.suspend_restore_mask.unwrap_or(active),
+        )
     };
     let stack = &abi.thread_state;
     let on_altstack = stack.sigaltstack_size != 0
@@ -179,8 +223,11 @@ pub fn setup_signal_handler(
         return_stub(abi, task)?
     };
     let mut frame = vec![0u8; FRAME_SIZE];
-    put32(&mut frame, 0, signal as u32);
-    put32(&mut frame, 8, 128); // SI_KERNEL, for terminal process-control events.
+    write_siginfo(&mut frame, signal, siginfo);
+    if let Some(info) = &fault {
+        put32(&mut frame, 8, info.code);
+        put64(&mut frame, 16, info.address as u64);
+    }
     put64(&mut frame, UCONTEXT + 16, stack.sigaltstack_sp as u64);
     put32(
         &mut frame,
@@ -205,10 +252,17 @@ pub fn setup_signal_handler(
         vcpu.fpu.clone()
     };
     encode_context(&mut frame, trapframe, &fp, old_mask);
+    if let Some(info) = fault {
+        put64(&mut frame, MCONTEXT, info.address as u64);
+        put32(&mut frame, RESERVED + FPSIMD_SIZE, ESR_MAGIC);
+        put32(&mut frame, RESERVED + FPSIMD_SIZE + 4, ESR_SIZE as u32);
+        put64(&mut frame, RESERVED + FPSIMD_SIZE + 8, info.esr);
+    }
     copy_to_user(task, base, &frame).map_err(|_| "cannot write signal frame")?;
     {
         let mut state = abi.signal_state.lock();
-        let mut blocked = old_mask | action.mask;
+        state.suspend_restore_mask = None;
+        let mut blocked = active_mask | action.mask;
         if action.flags & SA_NODEFER == 0 {
             blocked |= 1u64 << (signal as u32 - 1);
         }
@@ -224,6 +278,45 @@ pub fn setup_signal_handler(
     trapframe.regs.reg[2] = base + UCONTEXT;
     trapframe.regs.reg[30] = restorer;
     Ok(())
+}
+
+/// Synchronous faults carry the original faulting PC, never a post-SVC PC.
+/// Blocked, ignored and default dispositions cannot defer a hardware fault.
+pub fn deliver_memory_fault(
+    abi: &LinuxAbi,
+    task: &Task,
+    frame: &mut Trapframe,
+    fault: crate::vm::fault::UserMemoryFault,
+) -> Result<bool, &'static str> {
+    use crate::vm::fault::UserMemoryFaultReason;
+    let handler = {
+        let state = abi.signal_state.lock();
+        if state.blocked.is_blocked(LinuxSignal::SIGSEGV) {
+            return Ok(false);
+        }
+        match state.get_handler(LinuxSignal::SIGSEGV) {
+            SignalAction::Custom(handler) => handler,
+            _ => return Ok(false),
+        }
+    };
+    let info = MemoryFaultInfo {
+        address: fault.access.vaddr,
+        code: match fault.reason {
+            UserMemoryFaultReason::Unmapped => 1,
+            UserMemoryFaultReason::Protection => 2,
+        },
+        esr: frame.esr_el1,
+    };
+    setup_signal_frame(
+        abi,
+        task,
+        frame,
+        handler,
+        LinuxSignal::SIGSEGV,
+        None,
+        Some(info),
+    )?;
+    Ok(true)
 }
 
 pub fn sys_rt_sigreturn(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -272,18 +365,22 @@ pub fn deliver_pending_handler(abi: &LinuxAbi, frame: &mut Trapframe, result: us
     frame.set_return_value(result);
     let pending = {
         let mut state = abi.signal_state.lock();
-        state.next_deliverable_signal().and_then(|signal| {
+        loop {
+            let Some(signal) = state.next_deliverable_signal() else {
+                break None;
+            };
             if let SignalAction::Custom(handler) = state.get_handler(signal) {
-                state.remove_pending(signal);
-                Some((signal, handler))
+                if let Some(info) = state.take_pending_info(signal) {
+                    break Some((signal, handler, info));
+                }
             } else {
-                None
+                break None;
             }
-        })
+        }
     };
-    if let Some((signal, handler)) = pending {
+    if let Some((signal, handler, info)) = pending {
         if let Some(task) = mytask() {
-            if setup_signal_handler(abi, &task, frame, handler, signal).is_err() {
+            if setup_signal_handler_with_info(abi, &task, frame, handler, signal, info).is_err() {
                 task.mark_signal_termination(11);
                 task.request_deferred_exit_group(139);
             }
@@ -298,6 +395,9 @@ pub fn dispatch_arch_syscall(
     syscall: usize,
 ) -> Option<usize> {
     match syscall {
+        133 => Some(crate::abi::linux::generic::signal::sys_rt_sigsuspend(
+            &mut abi.0, frame,
+        )),
         139 => Some(sys_rt_sigreturn(abi, frame)),
         _ => None,
     }
@@ -306,6 +406,118 @@ pub fn dispatch_arch_syscall(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn signal_frame_preserves_signal_info_sender_and_payload() {
+        use crate::environment::USER_STACK_END;
+        let mut task = crate::task::new_user_task("signal-siginfo".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let task = Arc::new(task);
+        task.allocate_stack_pages(USER_STACK_END - 2 * PAGE_SIZE, 2)
+            .unwrap();
+        let abi = LinuxAbi::default();
+        abi.signal_state
+            .lock()
+            .set_handler(LinuxSignal::SIGUSR1, SignalAction::Custom(0x400000));
+        let mut info = SignalInfo::kernel(LinuxSignal::SIGUSR1);
+        info.bytes[8..12].copy_from_slice(&(-1i32).to_ne_bytes());
+        info.bytes[16..20].copy_from_slice(&1234i32.to_ne_bytes());
+        info.bytes[20..24].copy_from_slice(&5678u32.to_ne_bytes());
+        info.bytes[24..32].copy_from_slice(&0x1234_5678_9abc_def0u64.to_ne_bytes());
+        abi.signal_state
+            .lock()
+            .queue_pending_info(LinuxSignal::SIGUSR1, info)
+            .unwrap();
+        crate::task::set_mock_current_task(task.clone());
+        let mut frame = Trapframe::new();
+        frame.sp = USER_STACK_END as u64;
+        let result = 17;
+        assert_eq!(
+            deliver_pending_handler(&abi, &mut frame, result),
+            LinuxSignal::SIGUSR1 as usize
+        );
+        let mut saved = vec![0; FRAME_SIZE];
+        copy_from_user(&task, frame.sp as usize, &mut saved).unwrap();
+        assert_eq!(get64(&saved, REGS), result as u64);
+        assert_eq!(get32(&saved, 0), LinuxSignal::SIGUSR1 as u32);
+        assert_eq!(get32(&saved, 8) as i32, -1);
+        assert_eq!(get32(&saved, 16) as i32, 1234);
+        assert_eq!(get32(&saved, 20), 5678);
+        assert_eq!(get64(&saved, 24), 0x1234_5678_9abc_def0);
+        crate::task::clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn sigsuspend_delivers_child_exit_and_sigreturn_restores_original_mask() {
+        use crate::abi::linux::generic::{errno, signal::sys_rt_sigsuspend};
+        use crate::environment::USER_STACK_END;
+        use crate::ipc::event::{Event, ProcessControlType};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        let mut task = crate::task::new_user_task("sigsuspend-child-exit".into(), 0);
+        task.set_id(usize::MAX - 64);
+        // A real exec allocates an address space before signal trampolines can
+        // fault in their private executable page.
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let task = Arc::new(task);
+        let base = USER_STACK_END - 3 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 3).unwrap();
+        copy_to_user(&task, base, &0x73u32.to_ne_bytes()).unwrap();
+        let mask_address = base + 16;
+        // Attempts to block SIGKILL/SIGSTOP must be discarded.
+        copy_to_user(&task, mask_address, &UNMASKABLE.to_ne_bytes()).unwrap();
+        let original_mask = (1u64 << 16) | (1u64 << 9);
+        let mut abi = LinuxAarch64Abi::default();
+        {
+            let mut state = abi.signal_state.lock();
+            state.blocked.set_raw(original_mask);
+            state.set_handler(LinuxSignal::SIGCHLD, SignalAction::Custom(0x400000));
+            // Ignored pending signals must not finish sigsuspend first.
+            state.set_handler(LinuxSignal::SIGUSR1, SignalAction::Ignore);
+            state.add_pending(LinuxSignal::SIGUSR1);
+        }
+        task.event_queue
+            .lock()
+            .enqueue(Event::immediate_process_control(
+                task.get_id() as u32,
+                ProcessControlType::ChildExit,
+            ));
+        set_mock_current_task(task.clone());
+        let mut frame = Trapframe::new();
+        frame.set_pc(base as u64);
+        frame.sp = (USER_STACK_END - 16) as u64;
+        frame.set_arg(0, mask_address);
+        frame.set_arg(1, 8);
+        let result = sys_rt_sigsuspend(&mut abi.0, &mut frame);
+        assert_eq!(result, errno::to_result(errno::EINTR));
+        assert_eq!(abi.signal_state.lock().blocked.raw(), 0);
+        let return_pc = frame.elr;
+        assert_eq!(deliver_pending_handler(&abi.0, &mut frame, result), 17);
+        assert_eq!(frame.elr, 0x400000);
+        let mut saved = vec![0; FRAME_SIZE];
+        copy_from_user(&task, frame.sp as usize, &mut saved).unwrap();
+        assert_eq!(get64(&saved, MASK), original_mask);
+        assert_eq!(get64(&saved, REGS), result as u64);
+        assert_eq!(abi.signal_state.lock().blocked.raw(), 1 << 16);
+        assert_eq!(abi.signal_state.lock().suspend_restore_mask, None);
+        assert_eq!(sys_rt_sigreturn(&mut abi, &mut frame), result);
+        assert_eq!(frame.elr, return_pc);
+        assert_eq!(abi.signal_state.lock().blocked.raw(), original_mask);
+
+        for (address, size, error) in [(mask_address, 16, errno::EINVAL), (0, 8, errno::EFAULT)] {
+            frame.set_pc(base as u64);
+            frame.set_arg(0, address);
+            frame.set_arg(1, size);
+            assert_eq!(
+                sys_rt_sigsuspend(&mut abi.0, &mut frame),
+                errno::to_result(error)
+            );
+            assert_eq!(abi.signal_state.lock().blocked.raw(), original_mask);
+            assert_eq!(abi.signal_state.lock().suspend_restore_mask, None);
+        }
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn signal_frame_restores_interrupted_registers_and_fpsimd() {
@@ -339,13 +551,65 @@ mod tests {
     }
 
     #[test_case]
+    fn fault_esr_record_is_accepted_but_malformed_extra_context_is_rejected() {
+        let mut original = Trapframe::new();
+        original.sp = 0x800000;
+        original.elr = 0x400000;
+        let mut bytes = vec![0; FRAME_SIZE];
+        encode_context(&mut bytes, &original, &FpuContext::new(), 0);
+        let extra = RESERVED + FPSIMD_SIZE;
+        put32(&mut bytes, extra, ESR_MAGIC);
+        put32(&mut bytes, extra + 4, ESR_SIZE as u32);
+        put64(&mut bytes, extra + 8, 0x92000006);
+        let mut restored = Trapframe::new();
+        assert!(decode_context(&bytes, &mut restored).is_ok());
+        assert_eq!(restored.elr, original.elr);
+        put32(&mut bytes, extra + 4, 8);
+        assert!(decode_context(&bytes, &mut restored).is_err());
+        put32(&mut bytes, extra + 4, ESR_SIZE as u32);
+        put32(&mut bytes, extra + ESR_SIZE, 1);
+        assert!(decode_context(&bytes, &mut restored).is_err());
+    }
+
+    #[test_case]
+    fn ignored_or_blocked_synchronous_faults_do_not_install_a_context() {
+        use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+        use crate::vm::fault::{UserMemoryFault, UserMemoryFaultReason};
+        let abi = LinuxAbi::default();
+        let task = crate::task::new_user_task("unhandled-fault".into(), 0);
+        let mut frame = Trapframe::new();
+        frame.elr = 0x400000;
+        let fault = UserMemoryFault {
+            access: AccessKind {
+                op: AccessOp::Load,
+                vaddr: 0,
+                size: None,
+            },
+            reason: UserMemoryFaultReason::Unmapped,
+        };
+        assert!(!deliver_memory_fault(&abi, &task, &mut frame, fault).unwrap());
+        abi.signal_state
+            .lock()
+            .set_handler(LinuxSignal::SIGSEGV, SignalAction::Ignore);
+        assert!(!deliver_memory_fault(&abi, &task, &mut frame, fault).unwrap());
+        {
+            let mut state = abi.signal_state.lock();
+            state.set_handler(LinuxSignal::SIGSEGV, SignalAction::Custom(0x500000));
+            state.blocked.set_raw(1 << 10);
+        }
+        assert!(!deliver_memory_fault(&abi, &task, &mut frame, fault).unwrap());
+        assert_eq!(frame.elr, 0x400000);
+        assert_eq!(frame.sp, 0);
+    }
+
+    #[test_case]
     fn invalid_signal_return_cannot_change_privileged_context() {
         let mut original = Trapframe::new();
         original.sp = 0x800000;
         original.elr = 0x400000;
         let mut frame = vec![0; FRAME_SIZE];
         encode_context(&mut frame, &original, &FpuContext::new(), 0);
-        for (offset, value) in [(PSTATE, 5), (PC, u64::MAX), (SP, 0x800001), (RESERVED, 0)] {
+        for (offset, value) in [(PSTATE, 5), (PC, u64::MAX), (SP, u64::MAX), (RESERVED, 0)] {
             let saved = get64(&frame, offset);
             put64(&mut frame, offset, value);
             let mut target = original.clone();
@@ -356,4 +620,53 @@ mod tests {
             put64(&mut frame, offset, saved);
         }
     }
+
+    #[test_case]
+    fn signal_return_allows_a_user_stack_adjusted_by_the_runtime() {
+        // ART's null-pointer trampoline pushes an eight-byte return PC into
+        // the interrupted stack, then restores alignment in its entry code.
+        let mut original = Trapframe::new();
+        original.sp = 0x800008;
+        original.elr = 0x400000;
+        let mut bytes = vec![0; FRAME_SIZE];
+        encode_context(&mut bytes, &original, &FpuContext::new(), 0);
+        let mut restored = Trapframe::new();
+        decode_context(&bytes, &mut restored).unwrap();
+        assert_eq!(restored.sp, 0x800008);
+    }
+}
+
+/// Synchronous seccomp SIGSYS: blocked/ignored faults terminate, caught faults
+/// carry the attempted call and may resume at the instruction following SVC.
+pub fn deliver_seccomp_trap(
+    abi: &LinuxAbi,
+    task: &Task,
+    frame: &mut Trapframe,
+    detail: u32,
+    number: usize,
+    address: usize,
+) -> Result<(), &'static str> {
+    let handler = {
+        let state = abi.signal_state.lock();
+        if state.blocked.raw() & (1 << 30) != 0 {
+            return Err("SIGSYS blocked");
+        }
+        match state.get_handler(LinuxSignal::SIGSYS) {
+            SignalAction::Custom(handler) => handler,
+            _ => return Err("SIGSYS not caught"),
+        }
+    };
+    setup_signal_handler(abi, task, frame, handler, LinuxSignal::SIGSYS)?;
+    let mut info = [0u8; 32];
+    put32(&mut info, 0, 31);
+    put32(&mut info, 4, detail);
+    put32(&mut info, 8, 1); // SYS_SECCOMP
+    put64(&mut info, 16, address as u64);
+    put32(&mut info, 24, number as u32);
+    put32(
+        &mut info,
+        28,
+        crate::abi::linux::generic::seccomp::AUDIT_ARCH,
+    );
+    copy_to_user(task, frame.regs.reg[1], &info).map_err(|_| "SIGSYS siginfo copy failed")
 }

@@ -125,6 +125,33 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
         Some(obj) => obj,
         None => return to_result(errno::EBADF),
     };
+    let maximum_permissions = kernel_obj
+        .as_memory_mappable()
+        .map_or(usize::MAX, |object| {
+            object.new_mapping_permissions(flags & MAP_SHARED != 0)
+        });
+    if prot & !maximum_permissions != 0 {
+        // Linux do_mmap distinguishes a noexec mount (EPERM) from other
+        // permission failures; mprotect reports a ceiling violation as EACCES.
+        let noexec = prot & PROT_EXEC != 0
+            && kernel_obj
+                .as_file()
+                .is_some_and(|file| !file.allows_execution());
+        return to_result(if noexec { errno::EPERM } else { errno::EACCES });
+    }
+    if let Some(result) = abi.extensions.mmap(
+        task,
+        &kernel_obj,
+        crate::abi::linux::extensions::FileMapping {
+            address: addr,
+            length: aligned_length,
+            protection: prot,
+            flags,
+            offset,
+        },
+    ) {
+        return result;
+    }
     // Special case: KVM vCPU mmap (shared kvm_run page).
     // kvmtool calls mmap(vcpu_fd, ...) to map the per-vCPU kvm_run structure.
     // This bypasses the generic MemoryMappingOps path because HypervisorVcpu
@@ -213,11 +240,13 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
     }
 
     if is_map_private_flag && !is_shared {
-        let owner = match task
-            .handle_table
-            .get_arc_clone(handle)
-            .and_then(|obj| obj.as_memory_mappable_arc())
-        {
+        let owner = match memory_mappable
+            .mapping_owner_for_range(offset, aligned_length)
+            .or_else(|| {
+                task.handle_table
+                    .get_arc_clone(handle)
+                    .and_then(|obj| obj.as_memory_mappable_arc())
+            }) {
             Some(owner) => owner,
             None => return to_result(errno::ENODEV),
         };
@@ -226,6 +255,7 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions,
             permissions: final_permissions,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -304,12 +334,16 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + ok_len_aligned - 1);
     let pmarea = crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + ok_len_aligned as u64 - 1);
 
-    let owner = task
-        .handle_table
-        .get_arc_clone(handle)
-        .and_then(|obj| obj.as_memory_mappable_arc());
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
+    let owner = memory_mappable
+        .mapping_owner_for_range(offset, ok_len_aligned)
+        .or_else(|| {
+            task.handle_table
+                .get_arc_clone(handle)
+                .and_then(|obj| obj.as_memory_mappable_arc())
+        });
+    let mut vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
         .with_memory_attribute(mapping_info.memory_attribute);
+    vm_map.maximum_permissions = maximum_permissions;
 
     let map_result = if is_fixed {
         task.vm_manager
@@ -445,17 +479,26 @@ fn handle_anonymous_mapping(
         }
     }
 
+    use crate::object::capability::memory_mapping::anon_owner::{
+        AnonymousPageOwner, AnonymousZeroPageOwner,
+    };
+    // Match native mmap: private faults already acquire their own physical
+    // page in the VM. Retaining a second mutable source page also makes fork
+    // clone that whole source owner once per fragmented VMA.
     let owner: alloc::sync::Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
-        alloc::sync::Arc::new(
-            crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner::new(),
-        );
+        if is_shared {
+            alloc::sync::Arc::new(AnonymousPageOwner::new())
+        } else {
+            alloc::sync::Arc::new(AnonymousZeroPageOwner::new())
+        };
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let vm_map = VirtualMemoryMap {
         pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
-        mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous(),
+        maximum_permissions: usize::MAX,
         permissions,
         is_shared,
         memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -527,7 +570,10 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .protect_linux_memory_map_range(MemoryArea::new(addr, end), prot)
     {
         Ok(()) => 0,
-        Err("Mapping does not support increasing permissions") => to_result(errno::EACCES),
+        Err(
+            "Mapping does not support increasing permissions"
+            | "Mapping permission ceiling exceeded",
+        ) => to_result(errno::EACCES),
         Err(_) => to_result(errno::ENOMEM),
     }
 }
@@ -572,36 +618,39 @@ fn madvise_for_task(task: &crate::task::Task, addr: usize, length: usize, advice
     const MADV_DONTNEED: usize = 4;
     const MADV_FREE: usize = 8;
     if advice == MADV_DONTNEED || advice == MADV_FREE {
-        for page in (addr..end).step_by(PAGE_SIZE) {
-            let Some(map) = task.vm_manager.search_memory_map(page) else {
-                return to_result(errno::ENOMEM);
-            };
-            if map.is_shared || map.permissions & 0x2 == 0 {
-                continue;
-            }
-            if let Some(owner) = &map.owner {
-                let name = owner.mmap_owner_name();
-                if !matches!(name.as_str(), "anonymous" | "fork-cow") {
+        return task.vm_manager.with_mapping_write(|| {
+            for page in (addr..end).step_by(PAGE_SIZE) {
+                let Some(map) = task.vm_manager.search_memory_map(page) else {
+                    return to_result(errno::ENOMEM);
+                };
+                if map.is_shared || map.permissions & 0x2 == 0 {
                     continue;
                 }
-                // A never-allocated anonymous page already reads as zero.
-                // In particular, glibc discards the unused part of every
-                // exiting thread's stack before waking pthread_join. Faulting
-                // that entire range in here turns cleanup into allocation/COW
-                // and page-table updates for thousands of untouched pages.
-                let page_idx = (page - map.vm_start) / PAGE_SIZE;
-                if name == "anonymous"
-                    && map.pmarea.start == 0
-                    && owner.is_page_resident(page_idx) == Some(false)
-                {
-                    continue;
+                if let Some(owner) = &map.owner {
+                    let name = owner.mmap_owner_name();
+                    if !matches!(name.as_str(), "anonymous" | "fork-cow") {
+                        continue;
+                    }
+                    // A never-allocated anonymous page already reads as zero.
+                    // In particular, glibc discards the unused part of every
+                    // exiting thread's stack before waking pthread_join. Faulting
+                    // that entire range in here turns cleanup into allocation/COW
+                    // and page-table updates for thousands of untouched pages.
+                    let page_idx = (page - map.vm_start) / PAGE_SIZE;
+                    if name == "anonymous"
+                        && map.pmarea.start == 0
+                        && owner.is_page_resident(page_idx) == Some(false)
+                    {
+                        continue;
+                    }
                 }
+                let Some(kva) = task.vm_manager.translate_to_kva_for_write(page) else {
+                    return to_result(errno::EFAULT);
+                };
+                unsafe { core::ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE) };
             }
-            let Some(kva) = task.vm_manager.translate_to_kva_for_write(page) else {
-                return to_result(errno::EFAULT);
-            };
-            unsafe { core::ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE) };
-        }
+            0
+        });
     }
     0
 }
@@ -614,13 +663,20 @@ fn user_range_is_mapped(task: &crate::task::Task, addr: usize, length: usize) ->
     let Some(end) = addr.checked_add(length - 1) else {
         return false;
     };
+    if end >= crate::environment::USER_LOWER_CANONICAL_END {
+        return false;
+    }
 
     let mut page = addr & !(PAGE_SIZE - 1);
+    let last_page = end & !(PAGE_SIZE - 1);
     loop {
-        if task.vm_manager.translate_to_kva(page).is_none() {
+        // A reserved VMA is mapped even when its PTE has not faulted in, or
+        // when PROT_NONE prevents access. Range queries must not require RAM
+        // backing or inspect the page immediately after the requested range.
+        if task.vm_manager.search_memory_map(page).is_none() {
             return false;
         }
-        if page >= end {
+        if page == last_page {
             break;
         }
         let Some(next) = page.checked_add(PAGE_SIZE) else {
@@ -815,7 +871,7 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-/// Linux in-place mapping shrink. Relocation and growth remain unsupported;
+/// Linux in-place shrink and fixed same-size private mapping relocation.
 /// never report success while leaving the original range unchanged.
 pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
@@ -826,6 +882,7 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let old_size = trapframe.get_arg(1);
     let new_size = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3);
+    let destination = trapframe.get_arg(4);
     trapframe.increment_pc_next(&task);
 
     const MREMAP_MAYMOVE: usize = 1;
@@ -854,14 +911,67 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if address
         .checked_add(old_len - 1)
         .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
-        || address
-            .checked_add(new_len - 1)
-            .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
     {
         return to_result(errno::EINVAL);
     }
-    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 || new_len > old_len {
+    if flags == (MREMAP_MAYMOVE | MREMAP_FIXED) && new_len == old_len {
+        if destination == 0
+            || !destination.is_multiple_of(PAGE_SIZE)
+            || destination
+                .checked_add(new_len - 1)
+                .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
+            || (address <= destination + new_len - 1 && destination <= address + old_len - 1)
+        {
+            return to_result(errno::EINVAL);
+        }
+        let replaced =
+            match task
+                .vm_manager
+                .relocate_private_memory_map_range(address, destination, old_len)
+            {
+                Ok(replaced) => replaced,
+                Err(error) => {
+                    use crate::vm::manager::RelocationError;
+                    return to_result(match error {
+                        RelocationError::InvalidRange => errno::EINVAL,
+                        RelocationError::UnmappedSource => errno::EFAULT,
+                        RelocationError::UnsupportedMapping => errno::EOPNOTSUPP,
+                        RelocationError::MissingPageTable | RelocationError::NoSpace => {
+                            errno::ENOMEM
+                        }
+                    });
+                }
+            };
+        // Only the overwritten destination is unmapped. The source ownership
+        // moved intact; releasing it here would free the new mapping's pages.
+        reclaim_private_removed_mappings(&task, &replaced);
+        return destination;
+    }
+    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 {
         return to_result(errno::EOPNOTSUPP);
+    }
+    if new_len > old_len {
+        return task
+            .vm_manager
+            .grow_private_anonymous_range(address, old_len, new_len, flags & MREMAP_MAYMOVE != 0)
+            .unwrap_or_else(|error| {
+                use crate::vm::manager::RelocationError;
+                to_result(match error {
+                    RelocationError::InvalidRange => errno::EINVAL,
+                    RelocationError::UnmappedSource => errno::EFAULT,
+                    RelocationError::UnsupportedMapping => errno::EOPNOTSUPP,
+                    RelocationError::MissingPageTable | RelocationError::NoSpace => errno::ENOMEM,
+                })
+            });
+    }
+    if new_len == old_len {
+        // Linux keeps the existing mapping when the requested size matches;
+        // MREMAP_MAYMOVE is only permission to relocate, not a requirement.
+        return if task.vm_manager.search_memory_map(address).is_some() {
+            address
+        } else {
+            to_result(errno::EFAULT)
+        };
     }
     let removed = match task
         .vm_manager
@@ -959,6 +1069,306 @@ mod tests {
     use super::*;
     use crate::library::std::usercopy::{copy_from_user, copy_to_user};
     use crate::task::{Task, TaskType};
+
+    #[test_case]
+    fn memfd_offsets_survive_fork_split_and_child_address_reuse() {
+        use crate::object::{KernelObject, capability::FileObject};
+        let task = crate::task::new_user_task("memfd-offsets".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let file = alloc::sync::Arc::new(super::super::memfd::MemfdFile::new(true).unwrap());
+        for page in 0..4 {
+            file.write_at(
+                (page * PAGE_SIZE) as u64,
+                &alloc::vec![page as u8 + 1; PAGE_SIZE],
+            )
+            .unwrap();
+        }
+        let handle = task
+            .handle_table
+            .insert(KernelObject::File(file.clone()))
+            .unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let base = 0x4000_0000;
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, 2 * PAGE_SIZE);
+        frame.set_arg(2, 3);
+        frame.set_arg(3, 0x11);
+        frame.set_arg(4, fd);
+        frame.set_arg(5, PAGE_SIZE);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        let mut byte = [0];
+        for process in [&task, &child] {
+            copy_from_user(process, base, &mut byte).unwrap();
+            assert_eq!(byte, [2]);
+            copy_from_user(process, base + PAGE_SIZE, &mut byte).unwrap();
+            assert_eq!(byte, [3]);
+        }
+        // Map another offset at the same address in the child; its owner
+        // must not change the parent's fault resolution.
+        let child_handle = child
+            .handle_table
+            .insert(KernelObject::File(file.clone()))
+            .unwrap();
+        let mut child_abi = LinuxAbi::default();
+        frame.set_arg(4, child_abi.allocate_fd(child_handle).unwrap());
+        frame.set_arg(5, 2 * PAGE_SIZE);
+        assert_eq!(mmap_for_task(&mut child_abi, &frame, &child), base);
+        copy_from_user(&child, base, &mut byte).unwrap();
+        assert_eq!(byte, [3]);
+        copy_from_user(&task, base, &mut byte).unwrap();
+        assert_eq!(byte, [2]);
+        let removed = child.vm_manager.remove_memory_map_range(base, PAGE_SIZE);
+        for map in &removed {
+            map.owner
+                .as_ref()
+                .unwrap()
+                .on_unmapped(map.vmarea.start, map.vmarea.size());
+        }
+        let grandchild = child
+            .clone_task(crate::task::CloneFlags::default())
+            .unwrap();
+        copy_to_user(&grandchild, base + PAGE_SIZE, &[0x55]).unwrap();
+        file.read_at((3 * PAGE_SIZE) as u64, &mut byte).unwrap();
+        assert_eq!(byte, [0x55]);
+    }
+
+    #[test_case]
+    fn memfd_future_write_seal_preserves_old_maps_and_blocks_new_shared_writers() {
+        use crate::object::{KernelObject, capability::FileObject};
+        let task = crate::task::new_user_task("memfd-future-write".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let file = alloc::sync::Arc::new(super::super::memfd::MemfdFile::new(true).unwrap());
+        file.truncate((3 * PAGE_SIZE) as u64).unwrap();
+        let handle = task
+            .handle_table
+            .insert(KernelObject::File(file.clone()))
+            .unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let base = 0x4000_0000;
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, 3 * PAGE_SIZE);
+        frame.set_arg(2, 3);
+        frame.set_arg(3, 0x11); // shared, fixed
+        frame.set_arg(4, fd);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        copy_to_user(&task, base, &[0x5a]).unwrap();
+        file.add_seals(0x10).unwrap();
+        assert!(file.write_at(0, &[0xff]).is_err());
+        // The original mapping and its fork inherit their captured ceiling.
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        let middle = MemoryArea::new(base + PAGE_SIZE, base + 2 * PAGE_SIZE - 1);
+        for process in [&task, &child] {
+            process
+                .vm_manager
+                .protect_linux_memory_map_range(middle, 1)
+                .unwrap();
+            process
+                .vm_manager
+                .protect_linux_memory_map_range(middle, 3)
+                .unwrap();
+            copy_to_user(process, base + PAGE_SIZE, &[0xa5]).unwrap();
+        }
+        let reader = base + 4 * PAGE_SIZE;
+        frame.set_arg(0, reader);
+        assert_eq!(
+            mmap_for_task(&mut abi, &frame, &task),
+            to_result(errno::EACCES)
+        );
+        assert!(task.vm_manager.search_memory_map(reader).is_none());
+        frame.set_arg(2, 5); // executable read-only JIT alias
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), reader);
+        assert_eq!(
+            task.vm_manager
+                .search_memory_map(reader)
+                .unwrap()
+                .permissions
+                & 7,
+            5
+        );
+        assert!(
+            task.vm_manager
+                .protect_linux_memory_map_range(MemoryArea::new(reader, reader + PAGE_SIZE - 1), 3)
+                .is_err()
+        );
+        let mut byte = [0];
+        copy_from_user(&task, reader + PAGE_SIZE, &mut byte).unwrap();
+        assert_eq!(byte, [0xa5]);
+        // Private COW writes remain allowed, without changing shared bytes.
+        let private = base + 8 * PAGE_SIZE;
+        frame.set_arg(0, private);
+        frame.set_arg(2, 3);
+        frame.set_arg(3, 0x12);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), private);
+        copy_to_user(&task, private, &[0xcc]).unwrap();
+        copy_from_user(&task, reader, &mut byte).unwrap();
+        assert_eq!(byte, [0x5a]);
+        task.handle_table.remove(handle);
+        let grandchild = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        assert!(
+            grandchild
+                .vm_manager
+                .protect_linux_memory_map_range(MemoryArea::new(reader, reader + PAGE_SIZE - 1), 3)
+                .is_err()
+        );
+        copy_to_user(&grandchild, base, &[0x77]).unwrap();
+        copy_from_user(&task, reader, &mut byte).unwrap();
+        assert_eq!(byte, [0x77]);
+    }
+
+    #[test_case]
+    fn noexec_file_mapping_ceiling_survives_fault_close_fork_and_split() {
+        use crate::fs::{FileType, drivers::tmpfs::TmpFS};
+        let task = crate::task::new_user_task("mmap-noexec".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let fs = alloc::sync::Arc::new(crate::fs::VfsManager::new());
+        task.set_vfs(fs.clone());
+        fs.create_dir("/noexec").unwrap();
+        fs.mount(TmpFS::new(0), "/noexec", 8).unwrap();
+        fs.create_file("/noexec/image", FileType::RegularFile)
+            .unwrap();
+        let object = fs.open("/noexec/image", 2).unwrap();
+        object
+            .as_stream()
+            .unwrap()
+            .write(&alloc::vec![0x5a; 3 * PAGE_SIZE])
+            .unwrap();
+        let handle = task.handle_table.insert(object).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let base = 0x40000000;
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, 3 * PAGE_SIZE);
+        frame.set_arg(2, 5);
+        frame.set_arg(3, 0x12);
+        frame.set_arg(4, fd);
+        assert_eq!(
+            mmap_for_task(&mut abi, &frame, &task),
+            to_result(errno::EPERM)
+        );
+        assert_eq!(task.vm_manager.memmap_len(), 0);
+        frame.set_arg(2, 3);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        copy_to_user(&task, base, &[0xa5]).unwrap(); // private COW
+        task.handle_table.remove(handle);
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        let middle = MemoryArea::new(base + PAGE_SIZE, base + 2 * PAGE_SIZE - 1);
+        for process in [&task, &child] {
+            process
+                .vm_manager
+                .protect_linux_memory_map_range(middle, 1)
+                .unwrap();
+            assert!(
+                process
+                    .vm_manager
+                    .protect_linux_memory_map_range(middle, 5)
+                    .is_err()
+            );
+            for page in 0..3 {
+                assert_eq!(
+                    process
+                        .vm_manager
+                        .search_memory_map(base + page * PAGE_SIZE)
+                        .unwrap()
+                        .maximum_permissions
+                        & 4,
+                    0
+                );
+            }
+            let mut byte = [0];
+            copy_from_user(process, base, &mut byte).unwrap();
+            assert_eq!(byte, [0xa5]);
+        }
+        let adjacent = base + 3 * PAGE_SIZE;
+        assert_eq!(
+            handle_anonymous_mapping(&task, adjacent, PAGE_SIZE, 3, 0x32),
+            adjacent
+        );
+        let mixed = MemoryArea::new(base + 2 * PAGE_SIZE, adjacent + PAGE_SIZE - 1);
+        assert!(
+            task.vm_manager
+                .protect_linux_memory_map_range(mixed, 5)
+                .is_err()
+        );
+        assert_eq!(
+            task.vm_manager
+                .search_memory_map(adjacent)
+                .unwrap()
+                .permissions
+                & 7,
+            3
+        );
+        assert!(
+            task.vm_manager
+                .protect_linux_memory_map_range(
+                    MemoryArea::new(adjacent, adjacent + PAGE_SIZE - 1),
+                    5
+                )
+                .is_ok()
+        );
+    }
+
+    #[test_case]
+    fn shared_file_fork_preserves_nonzero_backing_offset_and_split_origin() {
+        let task = crate::task::new_user_task("shared-file-offset-fork".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let vfs = alloc::sync::Arc::new(crate::fs::VfsManager::new());
+        task.set_vfs(vfs.clone());
+        vfs.create_file("/shared-image", crate::fs::FileType::RegularFile)
+            .unwrap();
+        let object = vfs.open("/shared-image", 2).unwrap();
+        let mut contents = alloc::vec![0u8; 4 * PAGE_SIZE];
+        for (index, page) in contents.chunks_exact_mut(PAGE_SIZE).enumerate() {
+            page.fill(0x11 * (index as u8 + 1));
+        }
+        object.as_stream().unwrap().write(&contents).unwrap();
+        let handle = task.handle_table.insert(object).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let base = 0x4000_0000;
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, 3 * PAGE_SIZE);
+        frame.set_arg(2, 3);
+        frame.set_arg(3, 0x11); // MAP_SHARED | MAP_FIXED
+        frame.set_arg(4, fd);
+        frame.set_arg(5, PAGE_SIZE);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        let mut bytes = [0; 16];
+        copy_from_user(&task, base, &mut bytes).unwrap();
+        assert_eq!(bytes, [0x22; 16]);
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        for process in [&task, &child] {
+            // The second page has not been faulted in before fork.
+            copy_from_user(process, base + PAGE_SIZE, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x33; 16]);
+        }
+        copy_to_user(&child, base + PAGE_SIZE, &[0xa5; 16]).unwrap();
+        copy_from_user(&task, base + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xa5; 16]);
+        // Remove the leading fragment, then inherit the original file binding
+        // into another child while its VMA starts after the mapping origin.
+        let removed = child.vm_manager.remove_memory_map_range(base, PAGE_SIZE);
+        reclaim_private_removed_mappings(&child, &removed);
+        let grandchild = child
+            .clone_task(crate::task::CloneFlags::default())
+            .unwrap();
+        drop(child);
+        task.handle_table.remove(handle);
+        for process in [&task, &grandchild] {
+            copy_from_user(process, base + 2 * PAGE_SIZE, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x44; 16]);
+        }
+    }
 
     #[test_case]
     fn mmap_unaligned_offset_preserves_fixed_mapping_and_aligned_offset_reads_file_page() {
@@ -1073,6 +1483,42 @@ mod tests {
         assert_eq!(byte, [0xa5]);
     }
 
+    #[test_case]
+    fn linux_private_anonymous_fork_keeps_only_immutable_zero_backing() {
+        let task = crate::task::new_user_task("linux-sparse-private".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let base = 0x2000_0000;
+        assert_eq!(
+            handle_anonymous_mapping(&task, base, 16 * PAGE_SIZE, 3, 0x32),
+            base
+        );
+        let source = task
+            .vm_manager
+            .search_memory_map(base)
+            .unwrap()
+            .owner
+            .unwrap();
+        for index in (0..16).step_by(2) {
+            copy_to_user(&task, base + index * PAGE_SIZE, &[index as u8 + 1]).unwrap();
+            // Private resident pages belong to the VM, not a duplicate mutable
+            // source owner which would be cloned for every remaining hole.
+            assert_eq!(source.is_page_resident(index), Some(false));
+        }
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        let mut byte = [0];
+        for index in 0..16 {
+            copy_from_user(&child, base + index * PAGE_SIZE, &mut byte).unwrap();
+            assert_eq!(byte, [if index % 2 == 0 { index as u8 + 1 } else { 0 }]);
+        }
+        copy_to_user(&child, base, &[0xee]).unwrap();
+        copy_from_user(&task, base, &mut byte).unwrap();
+        assert_eq!(byte, [1]);
+        copy_to_user(&child, base + PAGE_SIZE, &[0xdd]).unwrap();
+        copy_from_user(&task, base + PAGE_SIZE, &mut byte).unwrap();
+        assert_eq!(byte, [0]);
+        assert_eq!(source.is_page_resident(1), Some(false));
+    }
     #[test_case]
     fn madvise_discards_dirty_pages_without_populating_unused_stack_pages() {
         let task = Task::new("madvise-sparse-stack".into(), 0, TaskType::User);

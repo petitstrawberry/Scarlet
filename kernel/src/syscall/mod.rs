@@ -98,8 +98,9 @@ use crate::ipc::syscall::{
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
 use crate::network::syscall::{
     sys_network_clear_ipv4, sys_network_configure_ipv4, sys_network_list_interfaces,
-    sys_network_list_interfaces_v2, sys_network_list_links_v1, sys_network_set_gateway,
-    sys_network_set_ipv4, sys_network_set_netmask, sys_network_update_ipv4_v1,
+    sys_network_list_interfaces_v2, sys_network_list_links_v1, sys_network_read_link_statistics_v1,
+    sys_network_set_gateway, sys_network_set_ipv4, sys_network_set_netmask,
+    sys_network_traffic_configure_v1, sys_network_update_ipv4_v1,
 };
 use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_bind_interface, sys_socket_connect,
@@ -172,7 +173,15 @@ fn native_wide_scalars_preserve_signed_offsets_and_full_results() {
 #[cfg(feature = "profiler")]
 fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(&mytask().unwrap());
+    let caller = mytask().unwrap();
+    tf.increment_pc_next(&caller);
+    if caller
+        .execution_restrictions
+        .read()
+        .kernel_addresses_hidden()
+    {
+        return usize::MAX;
+    }
     crate::profiler::print_profiling_results();
     0
 }
@@ -216,11 +225,52 @@ syscall_table! {
     VfsViewClone = 522 => crate::executor::syscall::sys_vfs_view_clone,
     VfsViewOpen = 523 => crate::executor::syscall::sys_vfs_view_open,
     VfsViewMount = 524 => crate::executor::syscall::sys_vfs_view_mount,
+    VfsViewMountRestricted = 530 => crate::executor::syscall::sys_vfs_view_mount_restricted,
+    MountNamespaceCurrent = 533 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_current,
+    MountNamespaceJoin = 534 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_join,
+    MountNamespaceIdentity = 535 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_identity,
+    MountNamespaceCaptureDescendant = 537 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_capture_descendant,
+    VfsViewSetPropagation = 531 => crate::executor::syscall::sys_vfs_view_propagation,
+    VfsViewPublishFiles = 536 => crate::executor::syscall::sys_vfs_view_publish_files,
+    VfsViewBindRecursive = 532 => crate::executor::syscall::sys_vfs_view_bind_recursive,
     VfsViewBind = 525 => crate::executor::syscall::sys_vfs_view_bind,
     VfsViewOverlay = 526 => crate::executor::syscall::sys_vfs_view_overlay,
     VfsViewUnmount = 527 => crate::executor::syscall::sys_vfs_view_unmount,
     VfsViewCreateDirectory = 528 => crate::executor::syscall::sys_vfs_view_mkdir,
     VfsViewRoot = 529 => crate::executor::syscall::sys_vfs_view_root,
+    ResourceGroupCreate = 1330 => crate::task::resource_group::syscall::sys_resource_group_create,
+    ResourceGroupCurrent = 1331 => crate::task::resource_group::syscall::sys_resource_group_current,
+    ResourceGroupEnter = 1332 => crate::task::resource_group::syscall::sys_resource_group_enter,
+    ResourceGroupStatus = 1333 => crate::task::resource_group::syscall::sys_resource_group_status,
+    ResourceGroupRemove = 1334 => crate::task::resource_group::syscall::sys_resource_group_remove,
+    ResourceGroupCpus = 1335 => crate::task::resource_group::syscall::sys_resource_group_cpus,
+    ResourceGroupLeave = 1336 => crate::task::resource_group::syscall::sys_resource_group_leave,
+    ProcessScopeCreate = 1320 => crate::task::process_scope::syscall::sys_process_scope_create,
+    ProcessScopeEnter = 1321 => crate::task::process_scope::syscall::sys_process_scope_enter,
+    ProcessScopeSetReaper = 1322 => crate::task::process_scope::syscall::sys_process_scope_set_reaper,
+    ProcessScopeTerminate = 1323 => crate::task::process_scope::syscall::sys_process_scope_terminate,
+    ProcessScopeStatus = 1324 => crate::task::process_scope::syscall::sys_process_scope_status,
+    ShieldPolicyCreateExec = 1325 => crate::shield::syscall::sys_shield_policy_create_exec,
+    ShieldBindFile = 1326 => crate::shield::syscall::sys_shield_bind_file,
+    ShieldFilePolicy = 1340 => crate::shield::syscall::sys_shield_file_policy,
+    ShieldCreationLabel = 1341 => crate::shield::syscall::sys_shield_creation_label,
+    ShieldSocketCreationLabel = 1343 => crate::shield::syscall::sys_shield_socket_creation_label,
+    ShieldRelabelFile = 1342 => crate::shield::syscall::sys_shield_relabel_file,
+    ShieldPolicyExtend = 1344 => crate::shield::syscall::sys_shield_policy_extend,
+    ShieldPolicyGeneration = 1345 => crate::shield::syscall::sys_shield_policy_generation,
+    ShieldFilePersistence = 1346 => crate::shield::syscall::sys_shield_file_persistence,
+    ShieldPolicyFactory = 1347 => crate::shield::syscall::sys_shield_policy_factory,
+    VmLayoutConfigure = 1350 => crate::vm::layout::syscall::configure,
+    VmLayoutQuery = 1351 => crate::vm::layout::syscall::query,
+    ShieldPolicyCreate = 1310 => crate::shield::syscall::sys_shield_policy_create,
+    ShieldPolicyCurrent = 1311 => crate::shield::syscall::sys_shield_policy_current,
+    ShieldApply = 1312 => crate::shield::syscall::sys_shield_apply,
+    ShieldPolicyCreateWithTransitions = 1313 => crate::shield::syscall::sys_shield_policy_create_with_transitions,
+    ShieldTransition = 1314 => crate::shield::syscall::sys_shield_transition,
+    ShieldReserveExec = 1315 => crate::shield::syscall::sys_shield_reserve_exec,
+    ShieldClearExec = 1316 => crate::shield::syscall::sys_shield_clear_exec,
+    ShieldConstrainInformation = 1318 => crate::shield::syscall::sys_shield_constrain_information,
+    ShieldInformation = 1319 => crate::shield::syscall::sys_shield_information,
     EnvironmentCreate = 1300 => crate::executor::syscall::sys_environment_create,
     EnvironmentSetRoot = 1301 => crate::executor::syscall::sys_environment_set_root,
     EnvironmentRemoveRoot = 1302 => crate::executor::syscall::sys_environment_remove_root,
@@ -284,6 +334,8 @@ syscall_table! {
     GetKernelInfo = 51 => crate::system::sys_get_kernel_info,
     SetSystemTime = 52 => crate::task::syscall::sys_set_system_time,
     GetMemoryInfo = 53 => crate::system::sys_get_memory_info,
+    WakeDeadlineQuery = 54 => crate::system_power::wake::sys_query,
+    TaskCapacityControl = 55 => crate::sched::task_capacity::sys_control,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,
@@ -368,6 +420,7 @@ syscall_table! {
 
     // Shared Memory
     SharedMemoryCreate = 620 => sys_shared_memory_create,      // Create shared memory region
+    InputChannelCreate = 625 => crate::device::input::virtual_device::sys_input_channel_create,
     SharedMemoryResize = 621 => sys_shared_memory_resize,      // Resize shared memory region
 
     // Socket Handle Transfer (similar to SCM_RIGHTS)
@@ -419,6 +472,8 @@ syscall_table! {
     SocketGetPeerAddress = 919 => sys_socket_get_peer_address, // Query peer IPv4 address
     NetworkListLinksV1 = 920 => sys_network_list_links_v1,
     NetworkUpdateIpv4V1 = 921 => sys_network_update_ipv4_v1,
+    NetworkTrafficConfigureV1 = 922 => sys_network_traffic_configure_v1,
+    NetworkReadLinkStatisticsV1 = 923 => sys_network_read_link_statistics_v1,
 
     // === Task Event Operations ===
 

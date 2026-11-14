@@ -413,49 +413,59 @@ impl SocketObject for UdpSocket {
         buffer: &mut [u8],
         _flags: u32,
     ) -> Result<(usize, SocketAddress), SocketError> {
-        // Blocking mode: wait for data
-        if !self.is_nonblocking() {
-            let interest = crate::object::capability::selectable::ReadyInterest {
-                read: true,
-                write: false,
-                except: false,
-            };
-            let task = crate::task::mytask();
-            if let Some(t) = task {
-                let trapframe = t.get_trapframe();
-                let outcome = Selectable::wait_until_ready(
-                    self,
-                    interest,
-                    trapframe,
-                    self.read_timeout_ns(),
-                    0,
-                );
-                if matches!(
-                    outcome,
-                    crate::object::capability::selectable::SelectWaitOutcome::TimedOut
-                ) {
+        let blocking = !self.is_nonblocking();
+        let deadline = self
+            .read_timeout_ns()
+            .map(|timeout| crate::timer::get_time_ns().saturating_add(timeout));
+
+        loop {
+            if blocking {
+                let interest = crate::object::capability::selectable::ReadyInterest {
+                    read: true,
+                    write: false,
+                    except: false,
+                };
+                let Some(task) = crate::task::mytask() else {
                     return Err(SocketError::WouldBlock);
+                };
+                let trapframe = task.get_trapframe();
+                let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
+                if remaining == Some(0) {
+                    return Err(SocketError::TimedOut);
+                }
+                let outcome = Selectable::wait_until_ready(self, interest, trapframe, remaining, 0);
+                match outcome {
+                    crate::object::capability::selectable::SelectWaitOutcome::TimedOut => {
+                        return Err(SocketError::TimedOut);
+                    }
+                    crate::object::capability::selectable::SelectWaitOutcome::Interrupted => {
+                        return Err(SocketError::Interrupted);
+                    }
+                    crate::object::capability::selectable::SelectWaitOutcome::Ready => {}
                 }
             }
+
+            let mut recv_buf = self.recv_buffer.lock();
+
+            if recv_buf.is_empty() {
+                if !blocking {
+                    return Err(SocketError::WouldBlock);
+                }
+                continue;
+            }
+
+            let datagram = recv_buf.remove(0);
+            let len = buffer.len().min(datagram.len());
+            buffer[..len].copy_from_slice(&datagram[..len]);
+
+            return Ok((
+                len,
+                self.remote_addr
+                    .read()
+                    .clone()
+                    .unwrap_or(SocketAddress::Unspecified),
+            ));
         }
-
-        let mut recv_buf = self.recv_buffer.lock();
-
-        if recv_buf.is_empty() {
-            return Err(SocketError::WouldBlock);
-        }
-
-        let datagram = recv_buf.remove(0);
-        let len = buffer.len().min(datagram.len());
-        buffer[..len].copy_from_slice(&datagram[..len]);
-
-        Ok((
-            len,
-            self.remote_addr
-                .read()
-                .clone()
-                .unwrap_or(SocketAddress::Unspecified),
-        ))
     }
 }
 
@@ -563,6 +573,8 @@ impl crate::object::capability::StreamOps for UdpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
         let (len, _) = self.recvfrom(buffer, 0).map_err(|e| match e {
             SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+            SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
+            SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
             _ => crate::object::capability::StreamError::Other("udp recv error".into()),
         })?;
         Ok(len)
@@ -577,6 +589,8 @@ impl crate::object::capability::StreamOps for UdpSocket {
         self.sendto(data, &remote_addr, 0)
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
+                SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::InvalidAddress => {
                     crate::object::capability::StreamError::InvalidArgument
                 }
@@ -612,6 +626,31 @@ impl crate::object::capability::Selectable for UdpSocket {
         }
 
         ready
+    }
+
+    fn subscribe_readiness(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        if interest.read {
+            let waker = self
+                .recv_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("udp_recv")))
+                .clone();
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        if interest.write {
+            let waker = self
+                .send_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("udp_send")))
+                .clone();
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
     }
 
     fn wait_until_ready(
@@ -1165,6 +1204,24 @@ impl UdpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn readiness_subscription_initializes_receive_waker_and_tracks_delivery() {
+        let socket = UdpSocket::new(UdpLayer::new());
+        let waiter = Arc::new(crate::sync::Waker::new_interruptible("udp-readiness"));
+        let mut registrations = socket
+            .subscribe_readiness(
+                crate::object::capability::selectable::ReadyInterest::read(),
+                &waiter,
+            )
+            .unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert!(socket.recv_waker.lock().is_some());
+
+        let generation = registrations[0].generation();
+        socket.deliver_datagram(b"ready".to_vec());
+        assert!(registrations[0].generation() > generation);
+    }
 
     #[test_case]
     fn connected_udp_can_send_without_a_destination() {

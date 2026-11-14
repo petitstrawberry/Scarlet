@@ -18,6 +18,7 @@ use alloc::{
     vec::Vec,
 };
 use hashbrown::HashMap;
+pub mod android;
 pub mod linux;
 pub mod scarlet;
 pub mod xv6;
@@ -60,6 +61,13 @@ pub struct RuntimeConfig {
 /// share process-wide state through owned references where the ABI requires it.
 ///
 pub trait AbiModule: Send + Sync + 'static {
+    /// Implementation reused by a composed ABI. The outer module remains the
+    /// process ABI; this only exposes compatible state for transitions such as
+    /// exec. Implementations must return an owned component, never themselves.
+    fn base_abi(&self) -> Option<&dyn AbiModule> {
+        None
+    }
+
     /// Return the name used to register this concrete ABI implementation.
     ///
     /// # Arguments
@@ -79,6 +87,22 @@ pub trait AbiModule: Send + Sync + 'static {
     /// # Returns
     /// An owned name corresponding to its registry entry.
     fn get_name(&self) -> String;
+
+    /// Call-number domain used by inherited Shield execution constraints.
+    /// Unknown adapters cannot impersonate another ABI's filtered calls.
+    fn execution_domain(&self) -> &'static str {
+        "unknown"
+    }
+    fn handle_execution_denial(
+        &mut self,
+        _denial: crate::shield::execution::Denial,
+        frame: &mut Trapframe,
+    ) -> Result<usize, &'static str> {
+        let task = mytask().ok_or("no current task")?;
+        frame.increment_pc_next(&task);
+        task.request_deferred_exit_group(1);
+        Ok(usize::MAX)
+    }
 
     /// Clone this ABI module into a boxed trait object
     ///
@@ -102,6 +126,18 @@ pub trait AbiModule: Send + Sync + 'static {
     /// The ABI-encoded return value, or a kernel-side dispatch error. An `Ok`
     /// value can itself encode an ABI-level error such as a negative errno.
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
+
+    /// Convert a synchronous user access violation into this ABI's exception
+    /// convention. The saved PC still identifies the faulting instruction.
+    /// Return true only after installing a complete resumable handler context.
+    /// Unsupported ABIs keep the native fatal-fault behavior.
+    fn handle_user_memory_fault(
+        &mut self,
+        _fault: crate::vm::fault::UserMemoryFault,
+        _frame: &mut Trapframe,
+    ) -> Result<bool, &'static str> {
+        Ok(false)
+    }
 
     /// Deliver an unrecoverable synchronous userspace exception through this ABI.
     ///
@@ -499,6 +535,17 @@ pub struct AbiRegistry {
     factories: HashMap<String, fn() -> Box<dyn AbiModule + Send + Sync>>,
 }
 
+/// Find an ABI implementation within a composition without depending on the
+/// concrete outer module. Used to preserve compatible descriptor state on exec.
+pub fn abi_component<T: AbiModule>(mut abi: &dyn AbiModule) -> Option<&T> {
+    loop {
+        if abi.get_name() == T::name() {
+            return abi.as_any().downcast_ref::<T>();
+        }
+        abi = abi.base_abi()?;
+    }
+}
+
 impl AbiRegistry {
     fn new() -> Self {
         Self {
@@ -610,6 +657,15 @@ pub enum EventProcessOutcome {
     Exited(i32),
 }
 
+pub fn dispatch_user_memory_fault(
+    fault: crate::vm::fault::UserMemoryFault,
+    frame: &mut Trapframe,
+) -> Result<bool, &'static str> {
+    let task = mytask().ok_or("user memory fault without a task")?;
+    let pc = frame.get_current_pc() as usize;
+    task.with_resolve_abi_mut(pc, |abi| abi.handle_user_memory_fault(fault, frame))
+}
+
 /// Dispatch a user exception through the ABI owning the faulting PC.
 /// The caller must first establish that the exception originated in userspace.
 pub fn user_exception_dispatcher(trapframe: &mut Trapframe, address: usize, syndrome: u64) -> bool {
@@ -643,11 +699,19 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
     let res = if let Some(native_number) = scarlet_abi::decode_native_call(syscall_number) {
-        crate::syscall::syscall_handler_number(trapframe, native_number)
+        if let Some(denial) = execution_denial(&task, trapframe, "scarlet-native") {
+            task.with_default_abi_mut(|abi, _| abi.handle_execution_denial(denial, trapframe))
+        } else {
+            crate::syscall::syscall_handler_number(trapframe, native_number)
+        }
     } else {
         task.with_resolve_abi_mut(pc, |abi_module| {
-            // 4. Handle the system call with the resolved ABI
-            abi_module.handle_syscall(trapframe)
+            if let Some(denial) = execution_denial(&task, trapframe, abi_module.execution_domain())
+            {
+                abi_module.handle_execution_denial(denial, trapframe)
+            } else {
+                abi_module.handle_syscall(trapframe)
+            }
         })
     };
     crate::breadcrumb::drop(
@@ -660,4 +724,21 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     task.record_syscall_exit();
     crate::breadcrumb::drop(crate::breadcrumb::SYSCALL_EXIT, syscall_number as u64, 0);
     res
+}
+
+fn execution_denial(
+    task: &crate::task::Task,
+    frame: &Trapframe,
+    domain: &'static str,
+) -> Option<crate::shield::execution::Denial> {
+    let restrictions = task.execution_restrictions.read();
+    if !restrictions.is_constrained() {
+        return None;
+    }
+    restrictions.evaluate(&crate::shield::execution::Invocation {
+        domain,
+        number: frame.get_syscall_number() as u64,
+        instruction: frame.get_current_pc() as u64,
+        arguments: core::array::from_fn(|i| frame.get_arg(i) as u64),
+    })
 }

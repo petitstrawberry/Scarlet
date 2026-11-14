@@ -19,12 +19,18 @@ pub enum StreamError {
     EndOfStream,
     /// Operation would block (for non-blocking streams)
     WouldBlock,
+    /// The operation's I/O deadline elapsed before it could make progress.
+    /// Callers may report this as a terminal result; it is not a transient
+    /// readiness signal like [`StreamError::WouldBlock`].
+    TimedOut,
     /// Stream was closed or is invalid
     Closed,
     /// Invalid arguments provided (e.g., null buffer, invalid offset)
     InvalidArgument,
     /// Operation interrupted by signal
     Interrupted,
+    /// A pending operation was cancelled by a change to its clock or resource.
+    Cancelled,
     /// Permission denied for this operation
     PermissionDenied,
     /// Device-specific error
@@ -56,6 +62,12 @@ impl From<FileSystemError> for StreamError {
 pub trait StreamOps: Send + Sync {
     /// Read data from the stream
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError>;
+
+    /// Zero-byte writes normally succeed without dereferencing a user pointer.
+    /// Control streams may override this to implement an explicit reset command.
+    fn write_empty(&self) -> Result<usize, StreamError> {
+        Ok(0)
+    }
 
     /// Write data to the stream
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError>;

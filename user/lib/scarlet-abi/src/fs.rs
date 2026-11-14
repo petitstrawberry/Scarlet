@@ -80,3 +80,8 @@ const _: () = {
     assert!(core::mem::offset_of!(RawFileTimes, accessed) == 8);
     assert!(core::mem::offset_of!(RawFileTimes, modified) == 16);
 };
+
+/// Per-mount restrictions. Read-only mounts are not currently implemented.
+pub const VFS_MOUNT_NO_PRIVILEGE_GAIN: u32 = 2;
+pub const VFS_MOUNT_NO_DEVICES: u32 = 4;
+pub const VFS_MOUNT_NO_EXECUTE: u32 = 8;

@@ -7,6 +7,7 @@
 //! modules import these types from `crate::sync`; the `spin` crate is no
 //! longer re-exported.
 
+pub(crate) mod cache_padded;
 pub(crate) mod counter;
 pub mod cpu_local;
 pub(crate) mod diagnostic;
@@ -16,6 +17,7 @@ pub mod lazy;
 pub mod mutex;
 pub mod once;
 pub mod preempt;
+pub mod readiness;
 pub mod rw_spinlock;
 pub mod sequence;
 pub(crate) mod snapshot;
@@ -31,6 +33,7 @@ pub use preempt::{
     PreemptGuard, dump_active_preempt_guards, preempt_count, preempt_disable, preempt_enable,
     preemptible,
 };
+pub use readiness::ReadinessRegistration;
 pub use rw_spinlock::{
     IrqRwSpinLock, IrqRwSpinLockReadGuard, IrqRwSpinLockWriteGuard, RwSpinLock,
     RwSpinLockReadGuard, RwSpinLockWriteGuard,

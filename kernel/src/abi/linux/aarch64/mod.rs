@@ -84,6 +84,30 @@ impl AbiModule for LinuxAarch64Abi {
         Box::new(self.clone())
     }
 
+    fn execution_domain(&self) -> &'static str {
+        "linux-aarch64"
+    }
+    fn handle_user_memory_fault(
+        &mut self,
+        fault: crate::vm::fault::UserMemoryFault,
+        frame: &mut crate::arch::Trapframe,
+    ) -> Result<bool, &'static str> {
+        let task = crate::task::mytask().ok_or("memory fault without task")?;
+        self.0.bind_task_signals(&task);
+        let result = signal::deliver_memory_fault(&self.0, &task, frame, fault);
+        if !matches!(result, Ok(true)) {
+            task.mark_signal_termination(11);
+        }
+        result
+    }
+    fn handle_execution_denial(
+        &mut self,
+        denial: crate::shield::execution::Denial,
+        frame: &mut crate::arch::Trapframe,
+    ) -> Result<usize, &'static str> {
+        Ok(generic::seccomp::handle_denial(&mut self.0, denial, frame))
+    }
+
     fn handle_syscall(
         &mut self,
         trapframe: &mut crate::arch::Trapframe,
@@ -123,7 +147,7 @@ impl AbiModule for LinuxAarch64Abi {
             &self.0,
             &event,
             target_task_id,
-            signal::setup_signal_handler,
+            signal::setup_signal_handler_with_info,
         )
     }
 
@@ -140,13 +164,11 @@ impl AbiModule for LinuxAarch64Abi {
             self.0.reset_posix_timers();
             self.0.reset_record_locks();
         }
-        if self.0.thread_state.pending_clone_share_sighand
-            || _flags.is_set(crate::task::CloneFlagsDef::Thread)
-        {
-            self.0.clone_signal_state(true);
-        } else {
-            self.0.fork_signal_state();
-        }
+        let thread = _flags.is_set(crate::task::CloneFlagsDef::Thread);
+        self.0.clone_signal_state_with_group(
+            self.0.thread_state.pending_clone_share_sighand || thread,
+            thread,
+        );
         self.0.bind_task_signals(_child_task);
 
         let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
@@ -247,7 +269,9 @@ impl AbiModule for LinuxAarch64Abi {
             }
         }
 
-        Some(confidence.min(100))
+        // Generic ELF/path/inheritance heuristics must not tie with a derived
+        // ABI's positive format identification (for example its interpreter).
+        Some(confidence.min(95))
     }
 
     fn execute_binary(
@@ -314,6 +338,8 @@ impl AbiModule for LinuxAarch64Abi {
 
                         use crate::task::elf_loader::build_auxiliary_vector;
                         let mut auxv = build_auxiliary_vector(&load_result);
+                        generic::credentials::update_auxv(task, &mut auxv);
+                        generic::exec::add_clock_auxv(&mut auxv)?;
                         generic::exec::add_random_auxv(task, &mut sp, &mut auxv)?;
 
                         let auxv_size = auxv.len() * 16;
@@ -363,6 +389,7 @@ impl AbiModule for LinuxAarch64Abi {
                         generic::exec::write_auxiliary_vector(task, current_pos, &auxv)?;
 
                         sp = final_sp;
+                        task.vm_manager.record_process_entry_stack(sp)?;
 
                         task.set_entry_point(load_result.entry_point as usize);
                         task.vcpu.lock().iregs = IntRegisters::new();
@@ -377,7 +404,13 @@ impl AbiModule for LinuxAarch64Abi {
                     }
                     Err(e) => {
                         crate::println!("Failed to load Linux ELF binary: {:?}", e);
-                        Err("Failed to load Linux ELF binary")
+                        if e.message == "interpreter execution disabled on mount"
+                            || e.message == "execution disabled on mount"
+                        {
+                            Err("execution disabled on mount")
+                        } else {
+                            Err("Failed to load Linux ELF binary")
+                        }
                     }
                 }
             }
@@ -390,9 +423,7 @@ impl AbiModule for LinuxAarch64Abi {
         source: Option<&dyn AbiModule>,
         image: &crate::task::Task,
     ) -> Result<(), &'static str> {
-        let old = source
-            .filter(|abi| abi.get_name() == self.get_name())
-            .and_then(|abi| abi.as_any().downcast_ref::<Self>());
+        let old = source.and_then(crate::abi::abi_component::<Self>);
         self.0.prepare_exec_fds(old.map(|abi| &abi.0), image);
         Ok(())
     }

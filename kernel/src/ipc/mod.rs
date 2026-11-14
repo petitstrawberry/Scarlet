@@ -17,6 +17,7 @@ use alloc::string::String;
 pub mod counter;
 pub mod event;
 pub mod pipe;
+pub mod rpc;
 pub mod shared_memory;
 pub mod syscall;
 

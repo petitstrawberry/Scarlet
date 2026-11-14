@@ -702,6 +702,10 @@ impl FileObject for DevPtsFileObject {
 }
 
 impl Selectable for DevPtsFileObject {
+    fn is_hung_up(&self) -> bool {
+        matches!(&self.endpoint, DevPtsEndpoint::Master(master) if master.is_hung_up())
+    }
+
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.current_ready(interest),

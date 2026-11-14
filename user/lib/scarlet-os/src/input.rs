@@ -20,6 +20,10 @@ pub const SCTL_INPUT_GET_MT_SLOT_COUNT: u32 = 0x5353_0104;
 pub const SCTL_INPUT_GET_SWITCH_CAPABILITIES: u32 = 0x5353_0105;
 /// Query the current state of the `SW_*` switch code passed as the control argument.
 pub const SCTL_INPUT_GET_SWITCH_STATE: u32 = 0x5353_0106;
+/// Query support for packed (event type << 16 | code), returning zero or one.
+pub const SCTL_INPUT_HAS_EVENT_CODE: u32 = 0x5353_0107;
+/// Query current value for a supported packed (event type << 16 | code).
+pub const SCTL_INPUT_GET_EVENT_VALUE: u32 = 0x5353_0108;
 
 /// Device produces key or button events.
 pub const INPUT_CAP_KEY: u32 = 1 << 0;
@@ -342,7 +346,8 @@ mod tests {
         );
         assert!(InputDeviceKind::try_from(-1).is_err());
         assert_eq!(InputDeviceKind::try_from(7), Ok(InputDeviceKind::Gamepad));
-        assert!(InputDeviceKind::try_from(8).is_err());
+        assert_eq!(InputDeviceKind::try_from(8), Ok(InputDeviceKind::Buttons));
+        assert!(InputDeviceKind::try_from(9).is_err());
     }
 
     #[test]
@@ -366,4 +371,47 @@ mod tests {
         assert_eq!(switch_codes::SW_TABLET_MODE, 0x01);
         assert_eq!(InputDeviceKind::try_from(6), Ok(InputDeviceKind::Switch));
     }
+}
+
+/// Create an anonymous keyboard channel, returning (producer, receiver).
+/// The producer accepts bounded complete frames of native 16-byte input records.
+/// The receiver exposes the existing input metadata controls and native records.
+/// Neither endpoint is registered globally or published in a filesystem.
+pub fn create_virtual_keyboard() -> HandleResult<(Handle, Handle)> {
+    create_virtual_channel(1, 0, 0)
+}
+
+/// Create an anonymous relative mouse with three buttons and vertical and
+/// horizontal wheel axes. Returns separate producer and receiver capabilities.
+pub fn create_virtual_mouse() -> HandleResult<(Handle, Handle)> {
+    create_virtual_channel(2, 0, 0)
+}
+
+/// Create a single-contact direct touchscreen with coordinates in
+/// [0,width) × [0,height). Each dimension must be between 2 and 65536.
+/// Returns (producer, receiver), with the same ownership as keyboard channels.
+pub fn create_virtual_touchscreen(width: u32, height: u32) -> HandleResult<(Handle, Handle)> {
+    create_virtual_channel(4, width, height)
+}
+fn create_virtual_channel(kind: u32, width: u32, height: u32) -> HandleResult<(Handle, Handle)> {
+    let mut handles = [-1i32; 2];
+    // SAFETY: output is writable for the complete synchronous call. The kernel
+    // returns two independent owned handles only on success.
+    let result = unsafe {
+        scarlet_sys::syscall4(
+            scarlet_sys::Syscall::InputChannelCreate,
+            kind as usize,
+            width as usize,
+            height as usize,
+            handles.as_mut_ptr() as usize,
+        )
+    };
+    if result != 0 {
+        return Err(HandleError::SystemError(-1));
+    }
+    // Adopt both handles before propagating errors so either successful
+    // adoption is dropped if the other handle's introspection fails.
+    let producer = unsafe { Handle::from_raw(handles[0]) };
+    let receiver = unsafe { Handle::from_raw(handles[1]) };
+    Ok((producer?, receiver?))
 }

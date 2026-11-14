@@ -38,6 +38,66 @@ fn filesystem_timestamp_record_layout() {
 }
 
 #[test]
+fn policy_update_records_and_operation_numbers_are_stable() {
+    assert_layout!(abi::shield::RawPolicyUpdate,128,8,{
+        version:0, flags:4, expected_generation:8, labels:16,label_count:24,
+        rules:32,rule_count:40,transitions:48,transition_count:56,
+        exec_transitions:64,exec_transition_count:72,file_create:80,file_create_count:88,
+        file_relabel:96,file_relabel_count:104,reserved:112,
+    });
+    assert_eq!(abi::shield::POLICY_UPDATE_VERSION, 1);
+    assert_eq!(abi::Syscall::ShieldPolicyExtend as usize, 1344);
+    assert_eq!(abi::Syscall::ShieldPolicyGeneration as usize, 1345);
+    assert_eq!(abi::Syscall::ShieldFilePersistence as usize, 1346);
+    assert_layout!(abi::shield::RawPrincipalRangeTransition,16,4,{source:0,target:4,first:8,last:12});
+    assert_layout!(abi::shield::RawPolicyUpdateWithPrincipalRanges,224,8,{base:0,principal_ranges:208,principal_range_count:216});
+    assert_eq!(abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION, 3);
+}
+
+#[test]
+fn persistent_file_labels_use_symbolic_names_and_isolated_domains() {
+    let domain_a = [0x01; 16];
+    let domain_b = [0x02; 16];
+    let key_a = abi::shield::file_label_metadata_name(&domain_a);
+    let key_b = abi::shield::file_label_metadata_name(&domain_b);
+    assert_eq!(key_a.len(), 55);
+    assert_eq!(&key_a[..23], b"trusted.scarlet.shield.".as_slice());
+    assert_eq!(&key_a[23..], b"01010101010101010101010101010101".as_slice());
+    assert_ne!(key_a, key_b);
+    assert!(abi::shield::is_file_label_metadata_name(&key_a));
+    assert!(!abi::shield::is_file_label_metadata_name(
+        b"trusted.scarlet.public"
+    ));
+
+    let mut value = [0u8; abi::shield::FILE_LABEL_METADATA_MAX_BYTES];
+    let length = abi::shield::encode_file_label("u:object_r:private_file:s0", &mut value).unwrap();
+    assert_eq!(
+        &value[..length],
+        b"SLB1u:object_r:private_file:s0".as_slice()
+    );
+    let decoded = abi::shield::decode_file_label(&value[..length]).unwrap();
+    assert_eq!(decoded, "u:object_r:private_file:s0");
+
+    // Policy recreation may assign a different numeric ID to the same name.
+    let old_policy = [(1, "u:r:init:s0"), (4, "u:object_r:private_file:s0")];
+    let recreated_policy = [(1, "u:r:init:s0"), (9, "u:object_r:private_file:s0")];
+    let resolve = |labels: &[(u32, &str)]| {
+        labels
+            .iter()
+            .find_map(|(id, name)| (*name == decoded).then_some(*id))
+    };
+    assert_eq!(resolve(&old_policy), Some(4));
+    assert_eq!(resolve(&recreated_policy), Some(9));
+
+    // An unknown symbolic name and malformed/versionless metadata never map to
+    // an implicit label. Generic xattr writers cannot target the reserved key.
+    assert_eq!(resolve(&[(1, "u:r:init:s0")]), None);
+    assert_eq!(abi::shield::decode_file_label(b"dangling"), None);
+    assert_eq!(abi::shield::decode_file_label(b"SLB1\0"), None);
+    assert!(abi::shield::encode_file_label("", &mut value).is_none());
+}
+
+#[test]
 fn atomic_rename_extension_keeps_legacy_operation_number() {
     assert_eq!(abi::Syscall::VfsRename as usize, 409);
     assert_eq!(abi::Syscall::VfsRenameWithStatus as usize, 419);
@@ -72,6 +132,18 @@ fn native_memory_query_contract() {
     assert_layout!(abi::RawNativeFaultContext, 304, 8, {
         version: 0, size: 8, fault_address: 16, syndrome: 24,
         registers: 32, sp: 280, pc: 288, nzcv: 296,
+    });
+}
+
+#[test]
+fn native_task_capacity_v1_contract() {
+    assert_layout!(abi::RawTaskCapacityLimitsV1, 32, 8, {
+        size: 0, version: 4, max_user_tasks: 8, max_kernel_tasks: 16, max_stack_bytes: 24,
+    });
+    assert_layout!(abi::RawTaskCapacitySnapshotV1, 80, 8, {
+        size: 0, version: 4, max_user_tasks: 8, max_kernel_tasks: 16, max_stack_bytes: 24,
+        active_user_tasks: 32, active_kernel_tasks: 40, pending_user_tasks: 48,
+        pending_kernel_tasks: 56, stack_slots: 64, used_stack_slots: 72,
     });
 }
 
@@ -171,6 +243,7 @@ fn scheduler_results_preserve_unknown_values() {
         abi::RawSchedulerResult::AdmissionFailed,
         abi::RawSchedulerResult::Busy,
         abi::RawSchedulerResult::BufferTooSmall,
+        abi::RawSchedulerResult::PermissionDenied,
     ];
     for (raw, expected) in results.into_iter().enumerate() {
         assert_eq!(expected.as_raw(), raw as u32);
@@ -179,7 +252,7 @@ fn scheduler_results_preserve_unknown_values() {
             Some(expected)
         );
     }
-    for raw in [12, u32::MAX] {
+    for raw in [13, u32::MAX] {
         assert_eq!(abi::RawSchedulerResult::from_raw(raw), None);
     }
     let statuses = [
@@ -210,9 +283,16 @@ fn network_management_v1_layouts() {
         id: 0, generation: 8, name: 16, mac_address: 48,
         kind: 54, state: 55, mtu: 56, reserved: 60,
     });
+    assert_layout!(abi::network::NetworkReadLinkStatisticsV1, 64, 8, {
+        version: 0, size: 4, id: 8, generation: 16, rx_packets: 24,
+        rx_bytes: 32, tx_packets: 40, tx_bytes: 48, layer: 56, reserved: 60,
+    });
     assert_layout!(abi::network::NetworkUpdateIpv4V1, 40, 8, {
         id: 0, generation: 8, address: 16, netmask: 20, gateway: 24,
         flags: 28, metric: 32, reserved: 36,
+    });
+    assert_layout!(abi::network::NetworkTrafficConfigureV1, 80, 8, {
+        version: 0, operation: 4, remaining: 8, subject: 16, meter: 48,
     });
 }
 
@@ -243,6 +323,7 @@ fn native_syscall_numbers() {
         SetTaskDeadline = 44, GetTaskDeadline = 45, SetSchedulerAttr = 46,
         GetSchedulerAttr = 47, GetSchedulerState = 48, FutexWait = 49,
         FutexWake = 50, GetKernelInfo = 51, SetSystemTime = 52, GetMemoryInfo = 53,
+        WakeDeadlineQuery = 54, TaskCapacityControl = 55,
         RegisterAbiZone = 90, UnregisterAbiZone = 91,
         CreateNamespace = 92, HandleQuery = 100, HandleSetRole = 101,
         HandleClose = 102, HandleDuplicate = 103,
@@ -266,11 +347,11 @@ fn native_syscall_numbers() {
         FsMount = 500, FsUmount = 501,
         FsPivotRoot = 502,
         VfsViewCreate = 520, VfsViewCurrent = 521, VfsViewClone = 522,
-        VfsViewOpen = 523, VfsViewMount = 524, VfsViewBind = 525,
+        VfsViewOpen = 523, VfsViewMount = 524, VfsViewBind = 525, VfsViewPublishFiles = 536,
         VfsViewOverlay = 526, VfsViewUnmount = 527,
         VfsViewCreateDirectory = 528, VfsViewRoot = 529,
         Pipe = 600, EventSendDirect = 615,
-        EventSendGroup = 616, SharedMemoryCreate = 620, SharedMemoryResize = 621,
+        EventSendGroup = 616, SharedMemoryCreate = 620, SharedMemoryResize = 621, InputChannelCreate = 625,
         SocketSendHandle = 630, SocketRecvHandle = 631,
         SocketSendHandleAndData = 632, SocketRecvHandleAndData = 633,
         EventHandlerRegister = 640, EventHandlerUnregister = 641,
@@ -286,6 +367,7 @@ fn native_syscall_numbers() {
         NetworkListInterfacesV2 = 916, NetworkClearIpv4 = 917,
         SocketGetLocalAddress = 918, SocketGetPeerAddress = 919,
         NetworkListLinksV1 = 920, NetworkUpdateIpv4V1 = 921,
+        NetworkTrafficConfigureV1 = 922, NetworkReadLinkStatisticsV1 = 923,
         GetCpuDebugInfo = 997, GetTaskDebugInfo = 998, ProfilerDump = 999,
         Shutdown = 1000, ShvVmCreate = 1100, ShvVcpuCreate = 1101,
         ShvVcpuRun = 1102, LsmLoad = 1200, LsmUnload = 1201, LsmList = 1202,
@@ -293,5 +375,45 @@ fn native_syscall_numbers() {
         EnvironmentRemoveRoot = 1302, EnvironmentSeal = 1303,
         EnvironmentCurrent = 1304, EnvironmentGetRoot = 1305,
         EnvironmentSpawn = 1306, EnvironmentExec = 1307,
+        MountNamespaceCurrent = 533,
+        MountNamespaceJoin = 534,
+        MountNamespaceIdentity = 535,
+        MountNamespaceCaptureDescendant = 537,
+        VfsViewSetPropagation = 531,
+        VfsViewBindRecursive = 532,
+        VfsViewMountRestricted = 530,
+        ResourceGroupCreate = 1330,
+        ResourceGroupCurrent = 1331,
+        ResourceGroupEnter = 1332,
+        ResourceGroupStatus = 1333,
+        ResourceGroupRemove = 1334,
+        ResourceGroupCpus = 1335,
+        ResourceGroupLeave = 1336,
+        ProcessScopeCreate = 1320,
+        ProcessScopeEnter = 1321,
+        ProcessScopeSetReaper = 1322,
+        ProcessScopeTerminate = 1323,
+        ProcessScopeStatus = 1324,
+        ShieldPolicyCreateExec = 1325,
+        ShieldBindFile = 1326,
+        ShieldFilePolicy = 1340,
+        ShieldCreationLabel = 1341,
+        ShieldSocketCreationLabel = 1343,
+        ShieldRelabelFile = 1342,
+        VmLayoutConfigure = 1350,
+        VmLayoutQuery = 1351,
+        ShieldPolicyCreate = 1310,
+        ShieldPolicyCurrent = 1311,
+        ShieldApply = 1312,
+        ShieldPolicyCreateWithTransitions = 1313,
+        ShieldTransition = 1314,
+        ShieldReserveExec = 1315,
+        ShieldClearExec = 1316,
+        ShieldConstrainInformation = 1318,
+        ShieldInformation = 1319,
+        ShieldPolicyExtend = 1344, ShieldPolicyGeneration = 1345,
+        ShieldFilePersistence = 1346,
+        ShieldPolicyFactory = 1347,
+
     }
 }

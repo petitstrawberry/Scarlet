@@ -12,9 +12,12 @@ use crate::sched::scheduler::{
     wake_task_on,
 };
 use crate::sync::IrqSpinLock;
+use crate::sync::ReadinessRegistration;
+use crate::sync::readiness::ReadinessSource;
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -215,6 +218,8 @@ pub struct Waker {
     /// Repeated wakes are coalesced: resource multiplicity lives in the
     /// protected producer state, not in this synchronization primitive.
     pending_wakes: AtomicUsize,
+    /// Weak readiness listeners registered by multi-object waiters.
+    readiness_subscribers: ReadinessSource,
 }
 
 impl Waker {
@@ -242,6 +247,33 @@ impl Waker {
         true
     }
 
+    fn dispatch_readiness(&self, targets: Vec<Arc<Waker>>, wake_all: bool) -> usize {
+        if targets.is_empty() {
+            return 0;
+        }
+
+        let mut woken_count = 0;
+        let mut visited = Vec::with_capacity(targets.len().saturating_add(1));
+        visited.push(self as *const Waker);
+        let mut pending = VecDeque::from(targets);
+        while let Some(target) = pending.pop_front() {
+            let target_ptr = Arc::as_ptr(&target);
+            if visited.contains(&target_ptr) {
+                continue;
+            }
+            visited.push(target_ptr);
+
+            let next = target.readiness_subscribers.notify();
+            if wake_all {
+                woken_count += target.wake_all_queued();
+            } else if target.wake_one_queued() {
+                woken_count += 1;
+            }
+            pending.extend(next);
+        }
+        woken_count
+    }
+
     /// Create a new interruptible waker
     ///
     /// Interruptible wakers allow waiting tasks to be interrupted by signals
@@ -263,6 +295,7 @@ impl Waker {
             block_type: BlockedType::Interruptible,
             name,
             pending_wakes: AtomicUsize::new(0),
+            readiness_subscribers: ReadinessSource::new(),
         }
     }
 
@@ -287,7 +320,20 @@ impl Waker {
             block_type: BlockedType::Uninterruptible,
             name,
             pending_wakes: AtomicUsize::new(0),
+            readiness_subscribers: ReadinessSource::new(),
         }
+    }
+
+    /// Subscribe a waiter to readiness notifications from this source.
+    ///
+    /// The source holds the returned subscription weakly. The subscription
+    /// holds `waiter` weakly, so neither side can keep the other alive through
+    /// a reference cycle. Retain the registration in whatever state persists
+    /// across scans. Sample [`ReadinessRegistration::generation`] immediately
+    /// before each readiness check so a notification during that check is
+    /// visible on the next iteration.
+    pub fn subscribe_readiness(&self, waiter: &Arc<Waker>) -> ReadinessRegistration {
+        self.readiness_subscribers.subscribe(waiter)
     }
 
     /// Block the current task and add it to the wait queue
@@ -430,11 +476,12 @@ impl Waker {
         trapframe: &mut Trapframe,
         timeout_ns: u64,
     ) -> bool {
-        self.wait_with_timeout_until_owned(task_id, trapframe, timeout_ns, || false)
+        self.wait_with_timeout_result_until_owned(task_id, trapframe, timeout_ns, || false)
+            .legacy_woken()
     }
 
-    /// Register a timed wait, then recheck readiness before scheduling.
-    /// The readiness closure and its captures are consumed before sleeping.
+    /// Compatibility wrapper for callers that only distinguish an event wake
+    /// from a timeout.
     pub fn wait_with_timeout_until_owned(
         self: Arc<Self>,
         task_id: usize,
@@ -442,8 +489,26 @@ impl Waker {
         timeout_ns: u64,
         ready: impl FnOnce() -> bool,
     ) -> bool {
+        self.wait_with_timeout_result_until_owned(task_id, trapframe, timeout_ns, ready)
+            .legacy_woken()
+    }
+
+    /// Consume an owned Waker and readiness closure before scheduling, with
+    /// a relative timeout and distinct interruption result. Register first,
+    /// then recheck readiness so a concurrent producer cannot be missed.
+    pub fn wait_with_timeout_result_until_owned(
+        self: Arc<Self>,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: u64,
+        ready: impl FnOnce() -> bool,
+    ) -> WaitResult {
         if timeout_ns == 0 {
-            return false;
+            return if ready() {
+                WaitResult::Woken
+            } else {
+                WaitResult::TimedOut
+            };
         }
 
         use crate::timer::{TimerHandle, TimerHandler, add_timer, get_time_ns};
@@ -480,7 +545,7 @@ impl Waker {
         }
 
         let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) else {
-            return false;
+            return WaitResult::TimedOut;
         };
         let outcome = Arc::new(WaitOutcome::new());
         let handler = Arc::new(OwnedTimeoutWake {
@@ -506,7 +571,7 @@ impl Waker {
             if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
                 let _ = task.finish_software_timer(timer_handle);
             }
-            return outcome.finish_after_resume().legacy_woken();
+            return outcome.finish_after_resume();
         }
 
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
@@ -518,16 +583,20 @@ impl Waker {
             should_schedule = false;
         }
 
+        let weak_waker = Arc::downgrade(&self);
         drop(self);
         if should_schedule {
             schedule(trapframe);
         }
 
-        let event_won = outcome.finish_after_resume().legacy_woken();
+        let result = outcome.finish_after_resume();
+        if let Some(waker) = weak_waker.upgrade() {
+            let _ = waker.remove_wait_registration(task_id, &outcome);
+        }
         if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
             let _ = task.finish_software_timer(timer_handle);
         }
-        event_won
+        result
     }
 
     #[cfg(test)]
@@ -1123,8 +1192,11 @@ impl Waker {
     ///
     /// # Returns
     ///
-    /// * `true` if a task was woken up
-    /// * `false` if the wait queue was empty
+    /// * `true` if a task was woken from this waker's source queue
+    /// * `false` if this waker's source queue had no live task
+    ///
+    /// Readiness targets are woken unconditionally as a side effect. Their
+    /// deliveries do not change this return value.
     ///
     /// # Examples
     ///
@@ -1135,6 +1207,13 @@ impl Waker {
     /// }
     /// ```
     pub fn wake_one(&self) -> bool {
+        let targets = self.readiness_subscribers.notify();
+        let delivered = self.wake_one_queued();
+        let _ = self.dispatch_readiness(targets, false);
+        delivered
+    }
+
+    fn wake_one_queued(&self) -> bool {
         loop {
             let entry = {
                 let mut queue = self.wait_queue.lock();
@@ -1188,7 +1267,9 @@ impl Waker {
     ///
     /// # Returns
     ///
-    /// The number of tasks that were woken up
+    /// The number of tasks woken from this waker's source queue. Readiness
+    /// targets are woken unconditionally as a side effect, including when this
+    /// wait queue is empty, and do not change this count.
     ///
     /// # Examples
     ///
@@ -1198,6 +1279,13 @@ impl Waker {
     /// println!("Woke up {} tasks", woken_count);
     /// ```
     pub fn wake_all(&self) -> usize {
+        let targets = self.readiness_subscribers.notify();
+        let woken_count = self.wake_all_queued();
+        let _ = self.dispatch_readiness(targets, true);
+        woken_count
+    }
+
+    fn wake_all_queued(&self) -> usize {
         let mut woken_count = 0;
 
         loop {
@@ -1410,6 +1498,11 @@ impl Waker {
     pub(crate) fn pending_wake_count_for_test(&self) -> usize {
         self.pending_wakes.load(Ordering::SeqCst)
     }
+
+    #[cfg(test)]
+    pub(crate) fn readiness_subscriber_count_for_test(&self) -> usize {
+        self.readiness_subscribers.subscriber_count_for_test()
+    }
 }
 
 impl fmt::Debug for Waker {
@@ -1471,6 +1564,93 @@ mod tests {
             BlockedType::Uninterruptible
         );
         assert_eq!(uninterruptible_waker.waiting_count(), 0);
+    }
+
+    #[test_case]
+    fn test_readiness_notification_wakes_target_queue() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let source = Arc::new(Waker::new_interruptible("readiness-wake-source"));
+        let target = Arc::new(Waker::new_interruptible("readiness-wake-target"));
+        let task_id = add_task(
+            Task::new("readiness-target-waiter".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let task = get_task_by_id(task_id).expect("readiness target waiter must be registered");
+        task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        mark_blocked(task_id);
+        target.wait_queue.lock().push_back(pending_entry(task_id));
+        let _registration = source.subscribe_readiness(&target);
+
+        assert!(!source.wake_one());
+        assert_eq!(task.get_state(), TaskState::Ready);
+        assert_eq!(target.waiting_count(), 0);
+
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn test_wake_one_still_dispatches_after_waking_a_local_task() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let source = Arc::new(Waker::new_interruptible("readiness-local-source"));
+        let target = Arc::new(Waker::new_interruptible("readiness-remote-target"));
+        let local_id = add_task(
+            Task::new("readiness-local-waiter".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let target_id = add_task(
+            Task::new("readiness-remote-waiter".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let local_task =
+            get_task_by_id(local_id).expect("readiness local waiter must be registered");
+        let target_task =
+            get_task_by_id(target_id).expect("readiness remote waiter must be registered");
+        for (task, task_id) in [(&local_task, local_id), (&target_task, target_id)] {
+            task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+            mark_blocked(task_id);
+        }
+        source.wait_queue.lock().push_back(pending_entry(local_id));
+        target.wait_queue.lock().push_back(pending_entry(target_id));
+        let _registration = source.subscribe_readiness(&target);
+
+        assert!(source.wake_one());
+        assert_eq!(local_task.get_state(), TaskState::Ready);
+        assert_eq!(target_task.get_state(), TaskState::Ready);
+        assert_eq!(source.waiting_count(), 0);
+        assert_eq!(target.waiting_count(), 0);
+
+        drop((local_task, target_task));
+        reset();
+    }
+
+    #[test_case]
+    fn test_wake_all_count_excludes_subscribed_target_tasks() {
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let source = Arc::new(Waker::new_interruptible("readiness-all-source"));
+        let target = Arc::new(Waker::new_interruptible("readiness-all-target"));
+        let task_id = add_task(
+            Task::new("readiness-all-waiter".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let task = get_task_by_id(task_id).expect("readiness all waiter must be registered");
+        task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        mark_blocked(task_id);
+        target.wait_queue.lock().push_back(pending_entry(task_id));
+        let _registration = source.subscribe_readiness(&target);
+
+        assert_eq!(source.wake_all(), 0);
+        assert_eq!(task.get_state(), TaskState::Ready);
+        assert_eq!(target.waiting_count(), 0);
+
+        drop(task);
+        reset();
     }
 
     #[test_case]
@@ -1546,6 +1726,28 @@ mod tests {
             assert_eq!(waker.waiting_count(), 0);
             assert!(!has_ready_tasks(local_cpu));
         }
+
+        // A ready condition after timed registration must remove both the
+        // wait entry and the timer's strong Waker reference, without sleeping.
+        let owned = Arc::new(Waker::new_interruptible("owned-level-recheck"));
+        let weak = Arc::downgrade(&owned);
+        assert_eq!(
+            owned.clone().wait_with_timeout_result_until_owned(
+                task_id,
+                &mut Trapframe::new(),
+                1_000 * crate::timer::NANOSECONDS_PER_MILLISECOND,
+                || {
+                    assert_eq!(owned.waiting_count(), 1);
+                    true
+                },
+            ),
+            WaitResult::Woken
+        );
+        assert_eq!(owned.waiting_count(), 0);
+        assert_eq!(Arc::strong_count(&owned), 1);
+        assert_eq!(task.get_state(), TaskState::Running);
+        drop(owned);
+        assert!(weak.upgrade().is_none());
 
         set_current_task_for_test(local_cpu, None);
         task.running_cpu.store(usize::MAX, Ordering::SeqCst);
@@ -1633,6 +1835,74 @@ mod tests {
         assert_eq!(task.get_state(), TaskState::Ready);
         assert_eq!(waker.waiting_count(), 0);
         drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn rpc_endpoint_arrival_wakes_receiver_behind_pending_caller() {
+        use crate::ipc::rpc::{RpcEndpoint, RpcMessage};
+
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let endpoint = RpcEndpoint::new();
+        let peer = RpcEndpoint::new();
+        let message = |opcode| RpcMessage {
+            opcode,
+            bytes: alloc::vec![],
+            objects: alloc::vec![],
+            capabilities: alloc::vec![],
+            retained: None,
+        };
+        let outgoing = peer.send(message(1)).unwrap();
+        let shared = endpoint.waker();
+        outgoing.notify_on_completion(&shared);
+        let caller_id = add_task(
+            Task::new("rpc-pending-caller".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let receiver_id = add_task(
+            Task::new("rpc-idle-receiver".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let caller = get_task_by_id(caller_id).unwrap();
+        let receiver = get_task_by_id(receiver_id).unwrap();
+        for (task, id) in [(&caller, caller_id), (&receiver, receiver_id)] {
+            remove_from_ready_queues(id);
+            task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+            mark_blocked(id);
+        }
+        let caller_outcome = Arc::new(WaitOutcome::new());
+        let receiver_outcome = Arc::new(WaitOutcome::new());
+        // The first waiter cannot receive: it is waiting for a different call.
+        // A unicast arrival would wake it and strand the idle receiver behind it.
+        shared.wait_queue.lock().extend([
+            WaitQueueEntry::new(caller_id, caller_outcome.clone()),
+            WaitQueueEntry::new(receiver_id, receiver_outcome.clone()),
+        ]);
+        assert!(!outgoing.ready());
+        assert!(!endpoint.ready());
+        assert_eq!(shared.pending_wake_count_for_test(), 0);
+
+        let incoming = endpoint.send(message(2)).unwrap();
+        assert!(endpoint.ready());
+        assert!(!outgoing.ready());
+        assert_eq!(caller.get_state(), TaskState::Ready);
+        assert_eq!(receiver.get_state(), TaskState::Ready);
+        assert_eq!(shared.waiting_count(), 0);
+        assert_eq!(caller_outcome.finish_after_resume(), WaitResult::Woken);
+        assert_eq!(receiver_outcome.finish_after_resume(), WaitResult::Woken);
+
+        endpoint
+            .receive()
+            .unwrap()
+            .unwrap()
+            .reply(message(3))
+            .unwrap();
+        peer.receive().unwrap().unwrap().reply(message(4)).unwrap();
+        assert_eq!(incoming.take_reply().unwrap().unwrap().opcode, 3);
+        assert_eq!(outgoing.take_reply().unwrap().unwrap().opcode, 4);
+        drop((incoming, outgoing, caller, receiver));
         reset();
     }
 

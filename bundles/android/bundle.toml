@@ -1,0 +1,18 @@
+# Android userspace and native manager from scarlet-bundle-android v0.1.16.
+# Producer manifest: 2af1f50ea347375019bb5bda283e2bc498851bc9.
+
+[[layers]]
+kind = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-android/releases/download/v0.1.16/android-aarch64-v0.1.16.tar.gz"
+sha256 = { aarch64 = "sha256:128346aca6186913cb28c9fab4b881a329a796eae9cfa36fd961a7eae821ebac" }
+format = "tar-gz"
+strip_components = 1
+to = "/systems/android-aarch64"
+
+[[layers]]
+kind = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-android/releases/download/v0.1.16/android-native-aarch64-v0.1.16.tar.gz"
+sha256 = { aarch64 = "sha256:80857bddb0a8ea53aa471e47393f4e7d2593c6ff7df13eac64fab5c89b93de88" }
+format = "tar-gz"
+strip_components = 1
+to = "/"

@@ -26,6 +26,10 @@ impl AnonymousZeroPageOwner {
 }
 
 impl MemoryMappingOps for AnonymousZeroPageOwner {
+    fn supports_private_relocation(&self) -> bool {
+        true
+    }
+
     fn get_mapping_info(
         &self,
         _offset: usize,
@@ -60,7 +64,7 @@ impl MemoryMappingOps for AnonymousZeroPageOwner {
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
         let mut page = self.page.write();
         if page.is_none() {
-            *page = Some(ContiguousPages::new(1).ok_or(ResolveFaultError::Unmapped)?);
+            *page = Some(ContiguousPages::new(1).ok_or(ResolveFaultError::NoMemory)?);
         }
         Ok(ResolveFaultResult {
             paddr_page_base: page.as_ref().unwrap().as_paddr(),
@@ -106,6 +110,10 @@ impl Drop for AnonymousPageOwner {
 }
 
 impl MemoryMappingOps for AnonymousPageOwner {
+    fn supports_private_relocation(&self) -> bool {
+        true
+    }
+
     fn get_mapping_info(
         &self,
         _offset: usize,
@@ -140,7 +148,7 @@ impl MemoryMappingOps for AnonymousPageOwner {
         let paddr = if let Some(&existing) = pages.get(&page_idx) {
             existing
         } else {
-            let paddr = self.alloc_page().ok_or(ResolveFaultError::Unmapped)?;
+            let paddr = self.alloc_page().ok_or(ResolveFaultError::NoMemory)?;
             pages.insert(page_idx, paddr);
             paddr
         };
@@ -207,19 +215,39 @@ pub fn fork_clone_owner(owner: &AnonymousPageOwner) -> Option<Arc<dyn MemoryMapp
 
 pub struct ForkCowPageOwner {
     base_page_idx: usize,
-    pages: IrqRwSpinLock<Option<ContiguousPages>>,
+    allocation_page_offset: usize,
+    shared: bool,
+    pages: Arc<ContiguousPages>,
 }
 
 impl ForkCowPageOwner {
     pub fn new(base_page_idx: usize, pages: ContiguousPages) -> Self {
+        Self::from_shared(base_page_idx, 0, Arc::new(pages), false)
+    }
+
+    pub(crate) fn from_shared(
+        base_page_idx: usize,
+        allocation_page_offset: usize,
+        pages: Arc<ContiguousPages>,
+        shared: bool,
+    ) -> Self {
         Self {
             base_page_idx,
-            pages: IrqRwSpinLock::new(Some(pages)),
+            allocation_page_offset,
+            shared,
+            pages,
         }
     }
 }
 
 impl MemoryMappingOps for ForkCowPageOwner {
+    fn supports_shared_permission_changes(&self) -> bool {
+        self.shared
+    }
+    fn supports_private_relocation(&self) -> bool {
+        true
+    }
+
     fn get_mapping_info(
         &self,
         _offset: usize,
@@ -246,12 +274,13 @@ impl MemoryMappingOps for ForkCowPageOwner {
         page_idx: usize,
         _vm_start: usize,
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
-        let pages = self.pages.read();
-        let pages = pages.as_ref().ok_or(ResolveFaultError::Unmapped)?;
+        let pages = &self.pages;
         if page_idx < self.base_page_idx {
             return Err(ResolveFaultError::Unmapped);
         }
-        let offset = page_idx - self.base_page_idx;
+        let offset = (page_idx - self.base_page_idx)
+            .checked_add(self.allocation_page_offset)
+            .ok_or(ResolveFaultError::Unmapped)?;
         if offset >= pages.len() {
             return Err(ResolveFaultError::Unmapped);
         }
@@ -262,7 +291,7 @@ impl MemoryMappingOps for ForkCowPageOwner {
     }
 
     fn fault_page_permissions(&self, access: &AccessKind, default_permissions: usize) -> usize {
-        if access.op == AccessOp::Store {
+        if self.shared || access.op == AccessOp::Store {
             default_permissions
         } else {
             default_permissions & !0x2
@@ -270,7 +299,7 @@ impl MemoryMappingOps for ForkCowPageOwner {
     }
 
     fn private_fault_requires_copy(&self, access: &AccessKind) -> bool {
-        access.op == AccessOp::Store
+        !self.shared && access.op == AccessOp::Store
     }
 
     fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {

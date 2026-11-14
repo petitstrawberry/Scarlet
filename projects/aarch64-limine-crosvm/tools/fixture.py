@@ -2,6 +2,7 @@
 """Private crosvm project archive and QEMU verification helpers."""
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -89,12 +90,16 @@ def activate_profile(profile):
         temporary.unlink(missing_ok=True)
 
 
-def run_guest(command, output, timeout):
+def run_guest(command, output, timeout, input_fifo=None):
     """Watch serial output; timeout=0 removes only the overall time limit."""
     result = "QEMU exited before the success marker"
     started = time.monotonic()
-    with (output / "serial.log").open("wb") as serial, subprocess.Popen(
-        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    if input_fifo is not None and not input_fifo.is_fifo():
+        raise ValueError("serial input must be an existing FIFO")
+    # RDWR keeps EOF from closing QEMU's stdin when a diagnostic writer exits.
+    source = input_fifo.open("r+b", buffering=0) if input_fifo else nullcontext(subprocess.DEVNULL)
+    with source as input_stream, (output / "serial.log").open("wb") as serial, subprocess.Popen(
+        command, stdin=input_stream, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     ) as process:
         try:
             with selectors.DefaultSelector() as selector:

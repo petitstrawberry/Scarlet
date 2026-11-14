@@ -28,6 +28,7 @@ kernel/src/lsm/generated_symbols.rs
 
 # Generated validation output and retired native-toolchain scratch trees.
 **/evidence/
+**/checkpoints/
 /tools/native-rustc/
 /tools/native-linker/
 

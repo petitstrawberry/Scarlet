@@ -13,6 +13,8 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
     let stdio = bootstrap::console_at(console)?;
     let backing = bootstrap::backing(cmdline, false)?;
     let (environment, views) = bootstrap::environment(backing)?;
+    let policy_factory = std::shield::PolicyFactory::acquire()
+        .map_err(|_| "bootstrap policy construction authority unavailable")?;
     // Distribution policy is independent of CPU width. A console/recovery
     // image can explicitly select its first program while using the same
     // sealed Environment and handle setup as the full service-manager image.
@@ -37,6 +39,10 @@ fn boot() -> Result<core::convert::Infallible, &'static str> {
         source: view.as_handle(),
         target: index as u32 + 3,
     }));
+    handles.push(HandleMapping {
+        source: policy_factory.as_handle(),
+        target: views.len() as u32 + 3,
+    });
     println!("init: starting {} in the default Environment", program);
     environment
         .exec(

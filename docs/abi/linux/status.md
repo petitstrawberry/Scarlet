@@ -13,6 +13,16 @@ captures the current scope, known gaps, and the recommended way to exercise it.
   userspace VMMs
 - **Demo**: See [demo.md](demo.md) for running instructions.
 
+### Android ABI
+
+The separate `android-aarch64` ABI composes the Linux implementation with
+Android-specific device translations. Binder support lives in
+`kernel/src/abi/android/binder/` and uses native RPC primitives.
+Android userspace and its launcher are maintained in
+[scarlet-bundle-android](https://github.com/petitstrawberry/scarlet-bundle-android).
+Scarlet consumes the released runtime and native application archives through
+`bundles/android/bundle.toml`.
+
 ### Exec argument limits (2026-10-19)
 
 Debian trixie's `python3.13-minimal` 3.13.5-2+deb13u5 postinst invokes

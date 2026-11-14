@@ -11,18 +11,23 @@
 
 pub mod syscall;
 
-use crate::arch::Trapframe;
+extern crate alloc;
 
-/// Maximum one-shot delay between readiness scans when multi-registration is
-/// unavailable. The delay is always clipped to the caller's absolute deadline.
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use crate::arch::Trapframe;
+use crate::sync::{ReadinessRegistration, Waker};
+
+/// Maximum one-shot delay between readiness scans for objects without native
+/// subscriptions. The delay is always clipped to the caller's absolute deadline.
 pub const MULTI_READINESS_RECHECK_NS: u64 = crate::timer::NANOSECONDS_PER_MILLISECOND;
 
 /// Return the next deadline-clipped readiness recheck delay.
 ///
-/// Multi-object waits cannot yet register a single task with every object's
-/// Waker. Callers therefore anchor a timed wait to one object and use bounded
-/// one-shot rechecks for the remaining objects until Selectable gains native
-/// multi-registration support.
+/// Objects that implement [`Selectable::subscribe_readiness`] use native
+/// notification. For each object that returns `None`, callers retain a bounded
+/// one-shot recheck so a readiness change cannot be missed indefinitely.
 ///
 /// # Arguments
 ///
@@ -103,6 +108,16 @@ pub enum SelectWaitOutcome {
 
 /// Objects that can be waited on by select/pselect.
 pub trait Selectable {
+    /// Acknowledge readiness that has actually been delivered to a caller.
+    /// Queries and nested wait-set peeks must not consume notifications. This
+    /// nonblocking hook is for coalesced notifications, not stream payloads.
+    fn acknowledge_ready(&self, _ready: ReadySet) {}
+
+    /// Whether the peer endpoint has disconnected, independent of requested readiness.
+    fn is_hung_up(&self) -> bool {
+        false
+    }
+
     /// Return current readiness for the given interest set.
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         // Default: treat as always-ready for read/write interests, except is false
@@ -117,6 +132,23 @@ pub trait Selectable {
             set.except = false;
         }
         set
+    }
+
+    /// Register native readiness notification for this object.
+    ///
+    /// `None` means the object cannot provide native notification and the
+    /// caller must retain its bounded readiness recheck fallback. `Some(empty)`
+    /// means readiness is constant for this interest and needs no further
+    /// polling after the caller's current readiness check. A non-empty result
+    /// contains persistent registrations that the caller should retain across
+    /// waits. Sample their generations immediately before each readiness scan
+    /// so a notification during the scan is visible on the next iteration.
+    fn subscribe_readiness(
+        &self,
+        _interest: ReadyInterest,
+        _waiter: &Arc<Waker>,
+    ) -> Option<Vec<ReadinessRegistration>> {
+        None
     }
 
     /// Block the current task using the provided trapframe until the interest

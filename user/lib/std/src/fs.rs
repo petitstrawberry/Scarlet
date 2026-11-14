@@ -40,6 +40,7 @@ fn stream_error_to_io(error: StreamError, message: &'static str) -> Error {
     let kind = match error {
         StreamError::Interrupted => ErrorKind::Interrupted,
         StreamError::WouldBlock => ErrorKind::WouldBlock,
+        StreamError::SystemError(110) => ErrorKind::TimedOut,
         StreamError::EndOfStream => ErrorKind::UnexpectedEof,
         StreamError::PermissionDenied => ErrorKind::PermissionDenied,
         StreamError::InvalidParameter => ErrorKind::InvalidInput,

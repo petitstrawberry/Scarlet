@@ -274,3 +274,7 @@ fn test_mount_options() {
     assert!(options.readonly);
     assert!(!default_options.readonly);
 }
+
+pub mod mount_restrictions;
+
+pub mod propagation;

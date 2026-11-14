@@ -577,7 +577,10 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
 
     let socket = match domain {
         SocketDomain::Local => {
-            let socket = Arc::new(LocalSocket::new(socket_type, protocol));
+            let socket = match LocalSocket::try_new(socket_type, protocol) {
+                Ok(socket) => Arc::new(socket),
+                Err(error) => return socket_error_result(error),
+            };
             LocalSocket::init_self_weak(&socket);
             socket as Arc<dyn SocketObject>
         }
@@ -1039,10 +1042,14 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
     let array_ptr = tf.get_arg(0);
 
     // Create a connected socket pair using LocalSocket::create_connected_pair
-    let (socket1, socket2) = LocalSocket::create_connected_pair(
+    let (socket1, socket2) = match LocalSocket::try_create_connected_pair_with_type(
+        SocketType::Stream,
         String::from("socketpair:0"),
         String::from("socketpair:1"),
-    );
+    ) {
+        Ok(pair) => pair,
+        Err(error) => return socket_error_result(error),
+    };
 
     // Add both sockets to handle table
     let kernel_obj1 = KernelObject::from_socket_object(socket1);
@@ -1390,6 +1397,73 @@ pub fn sys_network_list_links_v1(tf: &mut Trapframe) -> usize {
     records.len()
 }
 
+fn native_errno(errno: i32) -> usize {
+    (-(errno as isize)) as usize
+}
+
+fn link_statistics_error(error: crate::network::link::LinkStatisticsError) -> usize {
+    use crate::network::link::LinkStatisticsError;
+    native_errno(match error {
+        LinkStatisticsError::InvalidRequest => 22,
+        LinkStatisticsError::NotFound => 19,
+        LinkStatisticsError::Changed => 11,
+    })
+}
+
+/// Read one interface's existing counters, selected by the incarnation fields
+/// from `NetworkListLinksV1`. The request is also the output record.
+pub fn sys_network_read_link_statistics_v1(tf: &mut Trapframe) -> usize {
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
+    tf.increment_pc_next(&task);
+
+    let ptr = tf.get_arg(0);
+    if tf.get_arg(1) != scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize {
+        return native_errno(EINVAL);
+    }
+    if ptr == 0 {
+        return native_errno(EFAULT);
+    }
+
+    let mut request = scarlet_abi::network::NetworkReadLinkStatisticsV1::default();
+    // SAFETY: the destination is the exact, fully initialized 64-byte ABI record.
+    let request_bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut request as *mut scarlet_abi::network::NetworkReadLinkStatisticsV1).cast::<u8>(),
+            scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize,
+        )
+    };
+    if copy_from_user(&task, ptr, request_bytes).is_err() {
+        return native_errno(EFAULT);
+    }
+    if !request.is_query() {
+        return native_errno(EINVAL);
+    }
+
+    let response = match NetworkManager::get_manager().read_link_statistics(request) {
+        Ok(response) => response,
+        Err(error) => return link_statistics_error(error),
+    };
+
+    // Build the complete response before copying it. A failed copy_to_user may
+    // leave a partial destination; callers must ignore the record on EFAULT.
+    // SAFETY: response has the same explicit 64-byte layout as the request.
+    let response_bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&response as *const scarlet_abi::network::NetworkReadLinkStatisticsV1).cast::<u8>(),
+            scarlet_abi::network::LINK_STATISTICS_SIZE_V1 as usize,
+        )
+    };
+    if copy_to_user(&task, ptr, response_bytes).is_err() {
+        return native_errno(EFAULT);
+    }
+    0
+}
+
 pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
     let Some(task) = mytask() else {
         return usize::MAX;
@@ -1409,5 +1483,115 @@ pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
     match NetworkManager::get_manager().update_link_ipv4(request) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
+    }
+}
+
+pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
+    tf.increment_pc_next(&task);
+    if !task
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_TRAFFIC)
+    {
+        return usize::MAX;
+    }
+    let mut request = scarlet_abi::network::NetworkTrafficConfigureV1::default();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut request as *mut scarlet_abi::network::NetworkTrafficConfigureV1).cast::<u8>(),
+            80,
+        )
+    };
+    if copy_from_user(&task, tf.get_arg(0), bytes).is_err()
+        || request.version != scarlet_abi::network::TRAFFIC_CONFIGURE_VERSION_V1
+    {
+        return usize::MAX;
+    }
+    if request.operation == scarlet_abi::network::TRAFFIC_CONFIGURE_QUERY {
+        // This mask describes the native operations implemented below, not
+        // foreign packet programs or socket-tag accounting.
+        return traffic_query(&request).unwrap_or(usize::MAX);
+    }
+    let manager = NetworkManager::get_manager();
+    let result = match request.operation {
+        scarlet_abi::network::TRAFFIC_CONFIGURE_METER_SET => request
+            .subject_name()
+            .ok_or("Invalid meter name")
+            .and_then(|name| manager.set_traffic_meter(name, request.remaining)),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_METER_REMOVE => request
+            .subject_name()
+            .ok_or("Invalid meter name")
+            .and_then(|name| manager.remove_traffic_meter(name)),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_LINK_SET => request
+            .subject_name()
+            .zip(request.meter_name())
+            .ok_or("Invalid link meter")
+            .and_then(|(interface, meter)| {
+                manager.set_interface_traffic_meter(interface, Some(meter))
+            }),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_LINK_CLEAR => request
+            .subject_name()
+            .ok_or("Invalid link name")
+            .and_then(|interface| manager.set_interface_traffic_meter(interface, None)),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_GLOBAL_SET => request
+            .meter_name()
+            .ok_or("Invalid global meter")
+            .and_then(|meter| manager.set_global_traffic_meter(Some(meter))),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_GLOBAL_CLEAR => {
+            manager.set_global_traffic_meter(None)
+        }
+        scarlet_abi::network::TRAFFIC_CONFIGURE_LINKS_CLEAR_METER => request
+            .meter_name()
+            .ok_or("Invalid traffic meter")
+            .and_then(|meter| manager.clear_link_traffic_meter(meter)),
+        _ => Err("Unknown traffic operation"),
+    };
+    result.map_or(usize::MAX, |_| 0)
+}
+
+fn traffic_query(request: &scarlet_abi::network::NetworkTrafficConfigureV1) -> Option<usize> {
+    (request.remaining == 0 && request.subject == [0; 32] && request.meter == [0; 32])
+        .then_some(scarlet_abi::network::TRAFFIC_CONFIGURE_SUPPORTED_V1 as usize)
+}
+
+#[cfg(test)]
+mod traffic_query_tests {
+    #[test_case]
+    fn capability_query_rejects_configuration_payloads() {
+        let mut request = scarlet_abi::network::NetworkTrafficConfigureV1::default();
+        assert_eq!(super::traffic_query(&request), Some(0xfe));
+        request.remaining = 1;
+        assert_eq!(super::traffic_query(&request), None);
+        request.remaining = 0;
+        request.subject[31] = 1;
+        assert_eq!(super::traffic_query(&request), None);
+        request.subject = [0; 32];
+        request.meter[0] = 1;
+        assert_eq!(super::traffic_query(&request), None);
+    }
+}
+
+#[cfg(test)]
+mod link_statistics_tests {
+    use super::*;
+    use crate::network::link::LinkStatisticsError;
+
+    #[test_case]
+    fn link_statistics_errors_preserve_errno_contract() {
+        assert_eq!(
+            link_statistics_error(LinkStatisticsError::InvalidRequest),
+            (-22isize) as usize
+        );
+        assert_eq!(
+            link_statistics_error(LinkStatisticsError::NotFound),
+            (-19isize) as usize
+        );
+        assert_eq!(
+            link_statistics_error(LinkStatisticsError::Changed),
+            (-11isize) as usize
+        );
     }
 }

@@ -718,6 +718,7 @@ fn stream_error_to_io(error: crate::handle::capability::StreamError) -> std::io:
     let kind = match error {
         StreamError::Interrupted => ErrorKind::Interrupted,
         StreamError::WouldBlock => ErrorKind::WouldBlock,
+        StreamError::SystemError(110) => ErrorKind::TimedOut,
         StreamError::EndOfStream => ErrorKind::UnexpectedEof,
         StreamError::PermissionDenied => ErrorKind::PermissionDenied,
         StreamError::InvalidParameter => ErrorKind::InvalidInput,

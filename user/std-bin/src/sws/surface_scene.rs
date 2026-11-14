@@ -87,14 +87,18 @@ pub fn composite(
     {
         return Err("Invalid scene layer bounds");
     }
+    let sample_x: Vec<i64> = (0..layer.width)
+        .map(|x| {
+            (layer.source_x as i64
+                + (2 * x as i64 + 1) * layer.source_width as i64 / (2 * layer.width as i64))
+                / 256
+        })
+        .collect();
     for y in 0..layer.height {
         let sy = (layer.source_y as i64
             + (2 * y as i64 + 1) * layer.source_height as i64 / (2 * layer.height as i64))
             / 256;
-        for x in 0..layer.width {
-            let sx = (layer.source_x as i64
-                + (2 * x as i64 + 1) * layer.source_width as i64 / (2 * layer.width as i64))
-                / 256;
+        for (x, &sx) in sample_x.iter().enumerate() {
             let w = source.width as i64;
             let h = source.height as i64;
             let (bx, by) = match layer.transform {
@@ -116,13 +120,20 @@ pub fn composite(
             } else {
                 source.bytes[src + 3] as u32
             };
-            for c in 0..3 {
-                target[dst + c] = (source.bytes[src + c] as u32
-                    + (target[dst + c] as u32 * (255 - alpha) + 127) / 255)
-                    .min(255) as u8;
+            if alpha == 255 {
+                target[dst..dst + 3].copy_from_slice(&source.bytes[src..src + 3]);
+                target[dst + 3] = 255;
+                continue;
             }
-            target[dst + 3] =
-                (alpha + (target[dst + 3] as u32 * (255 - alpha) + 127) / 255).min(255) as u8;
+            if alpha != 0 || source.bytes[src..src + 3] != [0, 0, 0] {
+                for c in 0..3 {
+                    target[dst + c] = (source.bytes[src + c] as u32
+                        + (target[dst + c] as u32 * (255 - alpha) + 127) / 255)
+                        .min(255) as u8;
+                }
+                target[dst + 3] =
+                    (alpha + (target[dst + 3] as u32 * (255 - alpha) + 127) / 255).min(255) as u8;
+            }
         }
     }
     Ok(())
@@ -289,7 +300,8 @@ mod tests {
                     width: 2,
                     height: 1,
                     stride: 8,
-                    opaque: false
+                    opaque: false,
+                    gpu_buffer: None,
                 },
                 &mut dst,
                 2,

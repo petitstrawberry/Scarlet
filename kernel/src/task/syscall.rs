@@ -29,7 +29,7 @@ use crate::sched::scheduler::{
     SchedulerAffinity, SchedulerAttr, SchedulerControlResult, SchedulerPolicy, cleanup_zombie,
     cpu_usage_snapshot, current_task_deadline, current_task_scheduler_attr,
     current_task_scheduler_state, disable_current_task_deadline, enable_current_task_deadline,
-    enqueue_task, get_all_task_ids, get_task_by_id, remove_task_from_queues, schedule,
+    enqueue_task, get_task_by_id, get_task_pool, remove_task_from_queues, schedule,
     set_current_task_scheduler_affinity, set_current_task_scheduler_attr,
     update_current_task_scheduler_fair_fields,
 };
@@ -45,6 +45,7 @@ const RAW_SCHEDULER_ATTR_V1_SIZE: usize = 128;
 const RAW_SCHEDULER_STATE_V1_SIZE: usize = 160;
 const SCHED_POLICY_FAIR: u32 = 0;
 const SCHED_POLICY_DEADLINE: u32 = 1;
+const SCHED_POLICY_FIFO: u32 = 2;
 const SCHED_AFFINITY_ANY: u32 = 0;
 const SCHED_AFFINITY_SINGLE: u32 = 1;
 const SCHED_AFFINITY_MASK: u32 = 2;
@@ -90,7 +91,7 @@ fn validate_scheduler_attr_header(bytes: &[u8]) -> Result<(), SchedulerControlRe
     if decode_native_u32(bytes, 12) != 0 {
         return Err(SchedulerControlResult::InvalidFlags);
     }
-    if decode_native_u32(bytes, 76) != 0
+    if (decode_native_u32(bytes, 8) != SCHED_POLICY_FIFO && decode_native_u32(bytes, 76) != 0)
         || (0..6).any(|index| decode_native_u64(bytes, 80 + index * 8) != 0)
     {
         return Err(SchedulerControlResult::InvalidArgument);
@@ -171,6 +172,20 @@ fn decode_scheduler_attr(
             }
             SchedulerPolicy::Fair
         }
+        SCHED_POLICY_FIFO => {
+            if decode_native_u64(bytes, 48) != 0
+                || decode_native_u64(bytes, 56) != 0
+                || decode_native_u64(bytes, 64) != 0
+                || decode_native_u32(bytes, 72) != SCHED_CPU_ID_NONE
+            {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            let priority = u8::try_from(decode_native_u32(bytes, 76))
+                .ok()
+                .filter(|priority| *priority != 0)
+                .ok_or(SchedulerControlResult::InvalidArgument)?;
+            SchedulerPolicy::Fifo { priority }
+        }
         SCHED_POLICY_DEADLINE => SchedulerPolicy::Deadline {
             params: TaskDeadlineParams {
                 runtime_ns: decode_native_u64(bytes, 48),
@@ -221,6 +236,7 @@ fn write_scheduler_attr(
 ) {
     let (policy, runtime_ns, deadline_ns, period_ns, deadline_cpu_id) = match attributes.policy {
         SchedulerPolicy::Fair => (SCHED_POLICY_FAIR, 0, 0, 0, SCHED_CPU_ID_NONE),
+        SchedulerPolicy::Fifo { .. } => (SCHED_POLICY_FIFO, 0, 0, 0, SCHED_CPU_ID_NONE),
         SchedulerPolicy::Deadline { params, cpu_id } => (
             SCHED_POLICY_DEADLINE,
             params.runtime_ns,
@@ -242,6 +258,15 @@ fn write_scheduler_attr(
     encode_native_u64(bytes, 56, deadline_ns);
     encode_native_u64(bytes, 64, period_ns);
     encode_native_u32(bytes, 72, deadline_cpu_id);
+    encode_native_u32(
+        bytes,
+        76,
+        if let SchedulerPolicy::Fifo { priority } = attributes.policy {
+            priority as u32
+        } else {
+            0
+        },
+    );
 }
 
 fn write_scheduler_mask_metadata(
@@ -828,9 +853,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             // Wait for any process child owned by a thread in this process.
             // Joinable thread children are reaped only by specific-PID joins.
             for child_pid in get_waitable_process_children(&task) {
-                if task.get_namespace().resolve_local_id(child_pid).is_none() {
+                let Some(child_local_pid) = task.get_namespace().resolve_local_id(child_pid) else {
                     continue;
-                }
+                };
                 let Some(wait_owner) = get_thread_group_wait_owner(&task, child_pid) else {
                     continue;
                 };
@@ -867,12 +892,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                             return usize::MAX;
                         }
                         trapframe.increment_pc_next(&task);
-                        // Return child's PID in caller's namespace (if visible)
-                        if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
-                            return local;
-                        }
-                        // Not visible in this namespace; keep searching
-                        continue;
+                        // The task reaper can remove namespace mappings after
+                        // wait() succeeds. Return the ID captured before reaping.
+                        return child_local_pid;
                     }
                     Err(error) => match error {
                         WaitError::ChildNotExited(_) | WaitError::NoSuchChild(_) => continue,
@@ -1586,6 +1608,7 @@ pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
     let mut output = [0u8; RAW_SCHEDULER_STATE_V1_SIZE];
     let policy = match state.attributes.policy {
         SchedulerPolicy::Fair => SCHED_POLICY_FAIR,
+        SchedulerPolicy::Fifo { .. } => SCHED_POLICY_FIFO,
         SchedulerPolicy::Deadline { .. } => SCHED_POLICY_DEADLINE,
     };
     let (affinity_kind, configured_cpu_id, _) = raw_affinity(state.active_affinity);
@@ -1593,6 +1616,15 @@ pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
     encode_native_u32(&mut output, 4, SCHEDULER_CONTROL_VERSION_V1);
     encode_native_u32(&mut output, 8, state.status);
     encode_native_u32(&mut output, 12, policy);
+    encode_native_u32(
+        &mut output,
+        44,
+        if let SchedulerPolicy::Fifo { priority } = state.attributes.policy {
+            priority as u32
+        } else {
+            0
+        },
+    );
     encode_native_u32(&mut output, 16, 0);
     encode_native_u32(&mut output, 20, affinity_kind);
     encode_native_u32(&mut output, 24, configured_cpu_id);
@@ -1794,7 +1826,8 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
     // Increment PC before yielding to avoid re-executing the syscall on resume
     trapframe.increment_pc_next(&task);
 
-    // Yield CPU to scheduler - returns when this task is scheduled again
+    // FIFO yield rotates only among runnable peers at the same priority.
+    task.fixed_priority.request_yield();
     schedule(trapframe);
 
     0
@@ -1960,7 +1993,6 @@ const SYSCALL_ERROR: usize = usize::MAX;
 /// sys_create_namespace(NS_CREATE_TASK | NS_CREATE_VFS, "container1");
 /// ```
 pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
-    use crate::fs::VfsManager;
     use crate::task::namespace::TaskNamespace;
 
     let task = mytask().unwrap();
@@ -1972,6 +2004,11 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     // Never claim isolation for namespace types that are not implemented.
     // Validate before creating any of the requested namespaces.
     if flags & !(NS_CREATE_TASK | NS_CREATE_VFS) != 0 {
+        return SYSCALL_ERROR;
+    }
+
+    // A running thread group cannot be split into inconsistent PID spaces.
+    if flags & NS_CREATE_TASK != 0 && !task.can_replace_exec_image() {
         return SYSCALL_ERROR;
     }
 
@@ -1989,26 +2026,10 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     };
 
     let prepared_fs = if flags & NS_CREATE_VFS != 0 {
-        let Some(source) = task.get_vfs() else {
-            return SYSCALL_ERROR;
-        };
-        let Some(environment) = task.execution_environment.read().clone() else {
-            return SYSCALL_ERROR;
-        };
-        let cloned = match environment.clone_mount_namespaces() {
-            Ok(environment) => environment,
+        match task.prepare_mount_namespace() {
+            Ok(prepared) => Some(prepared),
             Err(_) => return SYSCALL_ERROR,
-        };
-        let abi = task.with_default_abi(|abi| abi.get_name());
-        let root = match cloned.root(&abi) {
-            Ok(root) => root,
-            Err(_) => return SYSCALL_ERROR,
-        };
-        let fs = VfsManager::from_view(root);
-        if fs.set_cwd_by_path(&source.get_cwd_path()).is_err() {
-            return SYSCALL_ERROR;
         }
-        Some((cloned, fs))
     } else {
         None
     };
@@ -2017,9 +2038,8 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name);
         task.set_namespace(new_task_ns);
     }
-    if let Some((environment, fs)) = prepared_fs {
-        *task.execution_environment.write() = Some(environment);
-        task.set_vfs(fs);
+    if let Some((namespace, fs)) = prepared_fs {
+        task.install_mount_namespace(namespace, fs);
     }
 
     0
@@ -2053,6 +2073,10 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+fn task_info_ids() -> alloc::vec::Vec<usize> {
+    get_task_pool().task_ids_snapshot()
+}
+
 /// Return the number of tasks currently visible to the caller.
 ///
 /// # Arguments
@@ -2067,7 +2091,7 @@ pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
     if task.get_thread_group_id() == 1 {
         crate::emergency_println!("[power-trace] init task-count enter");
     }
-    let count = get_all_task_ids().len();
+    let count = task_info_ids().len();
     #[cfg(feature = "sync-debug")]
     if task.get_thread_group_id() == 1 {
         crate::emergency_println!("[power-trace] init task-count result={}", count);
@@ -2102,7 +2126,10 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
         crate::emergency_println!("[power-trace] init task-list enter");
     }
 
-    let ids = get_all_task_ids();
+    // Scheduler queues omit tasks that are blocked while waiting for a lock,
+    // binder reply, futex or signal. The task-info ABI promises a snapshot of
+    // every active task, so enumerate the task pool rather than run queues.
+    let ids = task_info_ids();
     let count = core::cmp::min(capacity, ids.len());
     let now_ns = crate::time::current_time_ns();
     #[cfg(feature = "sync-debug")]
@@ -2272,7 +2299,7 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
         let target_tgid = selected.get_thread_group_id();
         let local_tgid = namespace.resolve_local_id(target_tgid).unwrap_or(0);
 
-        let targets: Vec<_> = get_all_task_ids()
+        let targets: Vec<_> = task_info_ids()
             .into_iter()
             .filter_map(|global_id| {
                 let local_pid = namespace.resolve_local_id(global_id)?;
@@ -2319,7 +2346,7 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
                 flags |= TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED;
             }
 
-            let info = TaskDebugInfo {
+            let mut info = TaskDebugInfo {
                 size: core::mem::size_of::<TaskDebugInfo>() as u32,
                 version: TASK_DEBUG_INFO_VERSION_V1,
                 state: target.state.load(Ordering::Acquire).to_u8(),
@@ -2336,6 +2363,13 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
                 syscall_pc: execution.syscall_pc,
                 cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
             };
+            if caller
+                .execution_restrictions
+                .read()
+                .kernel_addresses_hidden()
+            {
+                crate::shield::information::redact_task(&mut info);
+            }
             let Some(offset) = written.checked_mul(entry_size) else {
                 return usize::MAX;
             };
@@ -2435,7 +2469,7 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             flags |= CPU_DEBUG_FLAG_TIMER_ARMED;
         }
 
-        let info = CpuDebugInfo {
+        let mut info = CpuDebugInfo {
             size: core::mem::size_of::<CpuDebugInfo>() as u32,
             version: CPU_DEBUG_INFO_VERSION_V1,
             flags,
@@ -2448,6 +2482,13 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             breadcrumb_aux2: breadcrumb.aux2,
             timer_deadline_ns,
         };
+        if caller
+            .execution_restrictions
+            .read()
+            .kernel_addresses_hidden()
+        {
+            crate::shield::information::redact_cpu(&mut info);
+        }
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 &info as *const CpuDebugInfo as *const u8,
@@ -2463,7 +2504,74 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::process_control_for_signal;
+    use super::{process_control_for_signal, task_info_ids};
+
+    #[cfg(feature = "sync-debug")]
+    #[test_case]
+    fn task_debug_info_count_includes_blocked_threads_outside_run_queues() {
+        use crate::arch::Trapframe;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, register_task, reset};
+        use crate::task::{BlockedType, Task, TaskDebugInfo, TaskState, TaskType};
+
+        reset();
+        let leader_id = register_task(Task::new("DebugLeader".into(), 0, TaskType::Kernel));
+        let leader = get_task_by_id(leader_id).unwrap();
+        let mut member = Task::new("DebugBlocked".into(), 0, TaskType::Kernel);
+        member.set_thread_group_id(leader_id);
+        member.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        let member_id = register_task(member);
+        let member = get_task_by_id(member_id).unwrap();
+        register_task(Task::new("OtherProcess".into(), 0, TaskType::Kernel));
+        assert!(!get_all_task_ids().contains(&member_id));
+        crate::task::set_mock_current_task(leader.clone());
+        // RISC-V advances the syscall PC by fetching the calling instruction.
+        let code = USER_STACK_END - PAGE_SIZE;
+        leader.allocate_stack_pages(code, 1).unwrap();
+        for index in 0..2 {
+            copy_to_user(&leader, code + index * 4, &0x73u32.to_ne_bytes()).unwrap();
+        }
+        let mut frame = Trapframe::new();
+        frame.set_pc(code as u64);
+        frame.set_arg(2, 0);
+        frame.set_arg(3, core::mem::size_of::<TaskDebugInfo>());
+        // Selecting either member must return the full thread group.
+        for selector in [leader.get_namespace_id(), member.get_namespace_id()] {
+            frame.set_arg(0, selector);
+            assert_eq!(super::sys_get_task_debug_info(&mut frame), 2);
+        }
+        crate::task::clear_mock_current_task();
+        drop(member);
+        drop(leader);
+        reset();
+    }
+
+    #[test_case]
+    fn task_info_snapshot_keeps_blocked_tasks_outside_run_queues() {
+        use crate::sched::scheduler::{
+            get_task_by_id, register_task, remove_task_from_queues, reset,
+        };
+        use crate::task::{BlockedType, Task, TaskState, TaskType};
+        use alloc::string::ToString;
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let id = register_task(Task::new(
+            "BlockedTaskInfo".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let target = get_task_by_id(id).unwrap();
+        target.state.store(
+            TaskState::Blocked(BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        remove_task_from_queues(id);
+        assert!(task_info_ids().contains(&id));
+        drop(target);
+        reset();
+    }
     use crate::ipc::event::ProcessControlType;
 
     #[test_case]

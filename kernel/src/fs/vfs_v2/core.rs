@@ -200,14 +200,72 @@ impl fmt::Debug for VfsEntry {
 /// This trait provides only basic APIs for file/directory attributes, type checks, fs reference, and downcasting.
 /// All operation APIs (lookup, create, remove, open, etc.) are consolidated in FileSystemOperations for clear separation of concerns.
 pub trait VfsNode: Send + Sync + Any {
+    /// Native labels belong to the inode rather than its pathname or an ABI.
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        None
+    }
+
+    /// Read the persistent Shield label for one stable policy domain.
+    /// Memory-backed nodes retain the value in inode-owned RAM metadata;
+    /// persistent filesystems override these methods to use durable storage.
+    fn read_label_metadata(&self, domain: &[u8; 16]) -> Result<Option<Vec<u8>>, FileSystemError> {
+        let labels = self.shield_labels().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem cannot retain file labels",
+            )
+        })?;
+        labels.read_label_metadata(domain)
+    }
+
+    /// Replace the persistent Shield label for one stable policy domain. An
+    /// empty value is stored as malformed metadata, not treated as removal.
+    /// The per-inode Shield transaction lock, rather than an IRQ spin lock,
+    /// spans read/check/write operations that may perform disk I/O.
+    fn write_label_metadata(&self, domain: &[u8; 16], value: &[u8]) -> Result<(), FileSystemError> {
+        let labels = self.shield_labels().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem cannot retain file labels",
+            )
+        })?;
+        labels.write_label_metadata(domain, value)
+    }
+
     /// Returns the unique identifier in the filesystem
     fn id(&self) -> u64;
 
     /// Returns a (Weak) reference to the filesystem this node belongs to
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>>;
 
+    /// Directory watches require a non-reused identity until removal retires
+    /// the watch. This does not grant retained file authority or advisory locks.
+    fn supports_directory_notifications(&self) -> bool {
+        self.is_directory().unwrap_or(false)
+            && self
+                .filesystem()
+                .and_then(|fs| fs.upgrade())
+                .is_some_and(|fs| fs.supports_retained_node_identity())
+    }
+
     /// Get metadata for this node
     fn metadata(&self) -> Result<FileMetadata, FileSystemError>;
+
+    /// Optional native ownership metadata. Backends that expose delegation may
+    /// store it and enforce changes; unsupported backends retain their current model.
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
+        None
+    }
+    fn set_owner_identity(
+        &self,
+        _principal: Option<crate::shield::identity::Principal>,
+        _group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Owner metadata unsupported",
+        ))
+    }
 
     /// Update only selected timestamps. Unsupported filesystems must fail.
     fn set_times(&self, _times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
@@ -215,6 +273,25 @@ pub trait VfsNode: Send + Sync + Any {
             FileSystemErrorKind::NotSupported,
             "Timestamp updates are unsupported",
         ))
+    }
+
+    /// Opaque inode attributes, independent of ABI and pathname lifetime.
+    fn get_xattr(&self, _name: &[u8]) -> Result<Vec<u8>, super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+    fn set_xattr(
+        &self,
+        _name: &[u8],
+        _value: &[u8],
+        _mode: super::xattr::SetMode,
+    ) -> Result<(), super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+    fn list_xattrs(&self) -> Result<Vec<Vec<u8>>, super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+    fn remove_xattr(&self, _name: &[u8]) -> Result<(), super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
     }
 
     /// Get the file type of this node
@@ -273,13 +350,19 @@ pub trait FileSystemOperations: Send + Sync {
     /// in combination with file identifiers to create globally unique cache keys.
     fn fs_id(&self) -> FileSystemId;
 
+    /// Retaining a node pins a stable inode identity across aliases and unlink.
+    /// Used by native metadata authorities that must never label a reused inode.
+    fn supports_retained_node_identity(&self) -> bool {
+        false
+    }
+
     /// Whether `(fs_id(), VfsNode::id())` is a safe advisory-lock identity.
     ///
     /// All aliases, including hard links, must keep the same node ID, and a
     /// live open description must prevent reuse of its inode identity. A
     /// path-based identity (such as the current overlay nodes) is insufficient.
     fn supports_advisory_locks(&self) -> bool {
-        false
+        self.supports_retained_node_identity()
     }
 
     /// Look up a child node by name within a parent directory
@@ -314,6 +397,23 @@ pub trait FileSystemOperations: Send + Sync {
     }
 
     /// Create a new file in the specified directory
+    /// Backends initialize native labels before publishing a directory entry.
+    fn create_labeled(
+        &self,
+        parent: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        if label.is_some() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem cannot atomically publish inode labels",
+            ));
+        }
+        self.create(parent, name, file_type, mode)
+    }
     fn create(
         &self,
         parent_node: &Arc<dyn VfsNode>,
@@ -527,6 +627,10 @@ impl VfsFileObject {
 }
 
 impl StreamOps for VfsFileObject {
+    fn write_empty(&self) -> Result<usize, StreamError> {
+        self.inner.write_empty()
+    }
+
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         self.inner.read(buffer)
     }
@@ -547,6 +651,26 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
+    fn mapping_owner_for_range(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Option<Arc<dyn MemoryMappingOps>> {
+        self.inner.mapping_owner_for_range(offset, length)
+    }
+    fn new_mapping_permissions(&self, is_shared: bool) -> usize {
+        self.inner.new_mapping_permissions(is_shared) & self.maximum_mapping_permissions()
+    }
+
+    fn maximum_mapping_permissions(&self) -> usize {
+        self.inner.maximum_mapping_permissions()
+            & if self.mount_point.restrictions.allows_execution() {
+                usize::MAX
+            } else {
+                !(crate::vm::vmem::VirtualMemoryPermission::Execute as usize)
+            }
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,
@@ -566,6 +690,11 @@ impl MemoryMappingOps for VfsFileObject {
 
     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
         self.inner.on_mapped(vaddr, paddr, length, offset);
+    }
+
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {
+        self.inner
+            .on_mapping_inherited(vaddr, paddr, length, vm_start);
     }
 
     fn on_unmapped(&self, vaddr: usize, length: usize) {
@@ -594,6 +723,14 @@ impl MemoryMappingOps for VfsFileObject {
 }
 
 impl FileObject for VfsFileObject {
+    fn allows_execution(&self) -> bool {
+        self.mount_point.restrictions.allows_execution() && self.inner.allows_execution()
+    }
+    fn allows_execution_privilege_gain(&self) -> bool {
+        self.mount_point.restrictions.allows_privilege_gain()
+            && self.inner.allows_execution_privilege_gain()
+    }
+
     fn supports_append(&self) -> bool {
         self.inner.supports_append()
     }
@@ -647,6 +784,20 @@ impl FileObject for VfsFileObject {
 }
 
 impl Selectable for VfsFileObject {
+    fn acknowledge_ready(&self, ready: ReadySet) {
+        self.inner.acknowledge_ready(ready);
+    }
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &alloc::sync::Arc<crate::sync::Waker>,
+    ) -> Option<alloc::vec::Vec<crate::sync::readiness::ReadinessRegistration>> {
+        self.inner.subscribe_readiness(interest, waiter)
+    }
+    fn is_hung_up(&self) -> bool {
+        self.inner.is_hung_up()
+    }
+
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         self.inner.current_ready(interest)
     }

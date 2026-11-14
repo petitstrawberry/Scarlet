@@ -67,6 +67,36 @@ impl MemoryMappingInfo {
 /// closing the originating handle does not by itself release that owner. These
 /// hooks supply backing/lifecycle behavior; they do not install PTEs themselves.
 pub trait MemoryMappingOps: Send + Sync {
+    /// Whether a process fork inherits this mapping. Process-specific receive
+    /// buffers can opt out; threads sharing the address space keep the mapping.
+    fn inherit_on_fork(&self) -> bool {
+        true
+    }
+
+    /// Permanent permission ceiling, including subsequent protection changes.
+    fn maximum_mapping_permissions(&self) -> usize {
+        usize::MAX
+    }
+
+    /// Admit a new mapping and capture its permission ceiling. Restrictions
+    /// added later must not revoke permissions from an already admitted VMA.
+    /// Call once per mmap and retain the result across placement retries,
+    /// protection changes, VMA splits, and fork. Private COW mappings may have
+    /// a different ceiling from mappings that can modify the shared object.
+    fn new_mapping_permissions(&self, _is_shared: bool) -> usize {
+        self.maximum_mapping_permissions()
+    }
+
+    /// Optional range-specific owner, retaining the object's backing and offset
+    /// independently of virtual addresses reused in other processes.
+    fn mapping_owner_for_range(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {
+        None
+    }
+
     /// Get mapping information for a region of the object
     ///
     /// Returns the physical address, permissions, sharing information, and
@@ -123,6 +153,15 @@ pub trait MemoryMappingOps: Send + Sync {
     /// a reserved VMA whose individual pages have not yet been faulted in.
     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
 
+    /// Notify an owner that fork retained an existing shared mapping.
+    ///
+    /// `vm_start` is the original virtual mapping origin, including after a
+    /// partial unmap. It is not an offset in the backing object. Existing
+    /// backing bindings remain valid through the retained owner Arc. Owners
+    /// that count mapping references may increment that count here; the
+    /// default preserves the binding without registering a new mapping.
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {}
+
     /// Notification that a mapping has been removed
     ///
     /// Called when a mapping of this object has been removed from
@@ -154,6 +193,18 @@ pub trait MemoryMappingOps: Send + Sync {
     /// permissions after creation. Anonymous and fork-COW backing can opt in;
     /// object/device mappings retain their existing permission ceiling.
     fn supports_permission_changes(&self) -> bool {
+        false
+    }
+
+    /// Whether shared mappings may regain permissions within the ceiling
+    /// captured at admission. Device and other shared owners must opt in.
+    fn supports_shared_permission_changes(&self) -> bool {
+        false
+    }
+
+    /// Whether private normal-memory backing can move while preserving page
+    /// indices. Owners opting in must not track the original virtual address.
+    fn supports_private_relocation(&self) -> bool {
         false
     }
 
@@ -327,6 +378,9 @@ pub struct ResolveFaultResult {
 pub enum ResolveFaultError {
     Invalid,
     Unmapped,
+    /// Backing could not be allocated. Unlike an invalid address, this may
+    /// be retried after reclaiming unused cache pages outside the owner lock.
+    NoMemory,
 }
 
 #[cfg(test)]

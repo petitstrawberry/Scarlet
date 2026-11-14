@@ -34,13 +34,19 @@
 //! VFS v2 provides backward compatibility while offering improved APIs.
 //! New code should use the v2 interfaces for better performance and maintainability.
 pub mod cache;
+pub mod capability_files;
 pub mod core;
 pub mod descriptor;
 pub mod drivers;
 pub mod file_lock;
 pub mod manager;
 pub mod mount_tree;
+pub mod namespace;
+pub mod notify;
+pub mod propagation;
 pub mod syscall;
+pub mod userfs;
+pub mod xattr;
 
 // VFS v2 test modules
 #[cfg(test)]

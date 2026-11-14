@@ -94,3 +94,57 @@ Host keyboard inspection, invalid-package feedback and window scrolling are
 checked with an explicit scratch package. Native compilation uses the current
 Scarlet toolchain. These checks do not demonstrate installation/removal in a
 running Scarlet desktop or power-loss recovery.
+
+## Explicit application capability grants
+
+stemd reads administrator-owned `/etc/stemd.d/capabilities/*.toml` once at startup.
+A grant fixes the application ID and complete argument vector, then assigns only
+the capability handles configured on that entry. For example:
+
+```toml
+[[application]]
+id = "org.scarlet.example-manager"
+argv = ["/applications/example-manager.app/bin/manager", "--view-handle", "3"]
+
+[[application.view]]
+root = "/systems/example"
+target = 3
+```
+
+An application may also receive creation-only policy-factory authority:
+
+```toml
+[[application]]
+id = "org.scarlet.policy-tool"
+argv = ["/bin/policy-tool"]
+shield_policy_factory = 4
+```
+
+`shield_policy_factory` is an optional scalar that assigns the factory handle to
+the stated slot. It must be between 3 and 255 and cannot equal the target of any
+View grant on the same application. A factory-only application may omit Views or
+set `view = []`; an application with neither a View nor a factory is rejected.
+The factory is independent creation-only authority, while View handles retain
+their management authority. Neither grants the existing policy-management
+handle.
+
+The command must exactly match the resolved desktop entry, including arguments.
+An IPC command override, added file argument or replacement desktop command is
+rejected for a configured ID. The executable and rooted Views are opened during
+startup; standard input and captured logs occupy handles 0–2. Handles 3–255 can
+be explicitly assigned, and ordinary applications keep their existing launch
+path. A transferred View is management authority, not a path string; the child
+must deliberately pass it on if another executable needs it.
+`root = "/"` copies the native View's existing mount topology, including `/dev`
+and `/tmp`, at startup. Other roots use a directory-rooted View without child
+mounts. Both forms have independent mount topology and share their underlying
+filesystem data.
+Native `#!/bin/sh` app scripts use the system shell, as with normal app launch;
+the grant still matches the script's original command and arguments exactly.
+
+These files have the same installation trust boundary as stemd's service
+configuration. They are not loaded from an application's writable resources or
+reloaded by `ReloadApplications`. Invalid or duplicate grants disable application
+launch with an error while normal service startup continues. A launch message can
+select a configured application only when its ID and argv match exactly; it cannot
+supply, replace or add a View or policy-factory handle.

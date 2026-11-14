@@ -34,7 +34,9 @@ pub mod config;
 pub mod ethernet;
 pub mod ethernet_interface;
 pub mod icmp;
+pub mod ip;
 pub mod ipv4;
+pub mod ipv6;
 pub mod link;
 pub mod local;
 pub mod packet;
@@ -43,6 +45,8 @@ pub mod protocol_stack;
 pub mod socket;
 pub mod syscall;
 pub mod tcp;
+pub mod traffic;
+pub mod traffic_policy;
 pub mod udp;
 #[cfg(all(test, target_arch = "riscv64"))]
 pub mod virtio_net_tests;
@@ -239,6 +243,12 @@ pub trait NetworkInterface: Send + Sync {
     fn stats(&self) -> InterfaceStats;
 }
 
+struct SocketReferences {
+    count: usize,
+    identity: u64,
+    owner: crate::shield::identity::ActiveIdentity,
+}
+
 /// Network Manager - Global socket and connection manager
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
@@ -260,7 +270,7 @@ pub struct NetworkManager {
     socket_to_id: IrqRwSpinLock<BTreeMap<usize, SocketId>>,
 
     /// Logical owning references carried by socket kernel objects.
-    socket_handle_references: IrqRwSpinLock<BTreeMap<usize, usize>>,
+    socket_handle_references: IrqRwSpinLock<BTreeMap<usize, SocketReferences>>,
 
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
@@ -279,6 +289,9 @@ pub struct NetworkManager {
 
     /// Network configuration
     network_config: IrqRwSpinLock<NetworkConfig>,
+
+    /// Named metering objects shared by management adapters and packet rules.
+    traffic_meters: IrqRwSpinLock<BTreeMap<String, Arc<traffic_policy::Meter>>>,
 }
 
 impl NetworkManager {
@@ -298,6 +311,7 @@ impl NetworkManager {
             default_interface: IrqRwSpinLock::new(None),
             arp_cache: IrqRwSpinLock::new(BTreeMap::new()),
             network_config: IrqRwSpinLock::new(NetworkConfig::default()),
+            traffic_meters: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -402,6 +416,11 @@ impl NetworkManager {
         let _ = crate::network::config::clear_interface_ipv4(name);
         self.interfaces.write().remove(name);
         links.remove(name);
+        if let Some(layer) = self.get_layer("ip")
+            && let Some(ip) = layer.as_any().downcast_ref::<ipv4::Ipv4Layer>()
+        {
+            ip.set_traffic_policy(name, None);
+        }
         if let Some(layer) = self.get_layer("ethernet")
             && let Some(ethernet) = layer.as_any().downcast_ref::<ethernet::EthernetLayer>()
         {
@@ -702,6 +721,9 @@ impl NetworkManager {
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
+                if !ip.admit_traffic(interface_name, traffic::Direction::Receive, total_length) {
+                    return;
+                }
                 if let Some(handler) = ip.get_protocol_handler(protocol) {
                     let src_ip = crate::network::ipv4::Ipv4Address::from_bytes(header.source_ip);
                     let dst_ip = crate::network::ipv4::Ipv4Address::from_bytes(header.dest_ip);
@@ -867,10 +889,34 @@ impl NetworkManager {
     pub(crate) fn retain_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
         let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
         let mut references = self.socket_handle_references.write();
-        let count = references.entry(socket_ptr).or_insert(0);
-        *count = count
+        let entry = references
+            .entry(socket_ptr)
+            .or_insert_with(|| SocketReferences {
+                count: 0,
+                identity: self.next_socket_id.fetch_add(1, Ordering::Relaxed) as u64,
+                owner: crate::task::mytask()
+                    .map(|task| task.credentials.read().identity())
+                    .unwrap_or(crate::shield::identity::ActiveIdentity {
+                        principal: crate::shield::identity::Principal(u32::MAX),
+                        group: crate::shield::identity::Group(u32::MAX),
+                    }),
+            });
+        entry.count = entry
+            .count
             .checked_add(1)
             .expect("socket handle reference count overflow");
+    }
+
+    /// Stable native identity and creator, shared by dup/fork/IPC owners.
+    pub(crate) fn socket_handle_identity(
+        &self,
+        socket: &Arc<dyn SocketObject>,
+    ) -> Option<(u64, crate::shield::identity::ActiveIdentity)> {
+        let key = Arc::as_ptr(socket) as *const () as usize;
+        self.socket_handle_references
+            .read()
+            .get(&key)
+            .map(|entry| (entry.identity, entry.owner))
     }
 
     /// Release one logical owning reference and close the final socket owner.
@@ -889,8 +935,8 @@ impl NetworkManager {
                 debug_assert!(false, "untracked socket handle reference released");
                 return;
             };
-            if *count > 1 {
-                *count -= 1;
+            if count.count > 1 {
+                count.count -= 1;
                 false
             } else {
                 references.remove(&socket_ptr);
@@ -1103,5 +1149,34 @@ mod tests {
             manager.lookup_named_socket(name),
             Err(SocketError::ConnectionRefused)
         ));
+    }
+
+    #[test_case]
+    fn named_global_meter_is_shared_with_the_real_ipv4_admission_path() {
+        let manager = NetworkManager::new();
+        let ip = ipv4::Ipv4Layer::new();
+        manager.register_layer("ip", ip.clone());
+        manager.set_traffic_meter("globalAlert", 10).unwrap();
+        assert_eq!(
+            manager.set_interface_traffic_meter("missing", Some("globalAlert")),
+            Err("Link removed")
+        );
+        manager
+            .set_global_traffic_meter(Some("globalAlert"))
+            .unwrap();
+        assert!(ip.admit_traffic("any", traffic::Direction::Receive, 6));
+        assert!(!ip.admit_traffic("any", traffic::Direction::Transmit, 5));
+        assert_eq!(
+            manager
+                .traffic_meter("globalAlert")
+                .unwrap()
+                .snapshot()
+                .remaining,
+            0
+        );
+        manager.set_global_traffic_meter(None).unwrap();
+        assert!(ip.admit_traffic("any", traffic::Direction::Transmit, 5));
+        manager.remove_traffic_meter("globalAlert").unwrap();
+        assert!(manager.traffic_meter("globalAlert").is_none());
     }
 }

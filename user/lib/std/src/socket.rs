@@ -17,6 +17,9 @@ impl crate::io::Write for Socket {
                 StreamError::WouldBlock => {
                     crate::io::Error::new(crate::io::ErrorKind::WouldBlock, "Would block")
                 }
+                StreamError::SystemError(110) => {
+                    crate::io::Error::new(crate::io::ErrorKind::TimedOut, "Timed out")
+                }
                 StreamError::EndOfStream => {
                     crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "End of stream")
                 }
@@ -54,6 +57,9 @@ impl crate::io::Read for Socket {
                 ),
                 StreamError::WouldBlock => {
                     crate::io::Error::new(crate::io::ErrorKind::WouldBlock, "Would block")
+                }
+                StreamError::SystemError(110) => {
+                    crate::io::Error::new(crate::io::ErrorKind::TimedOut, "Timed out")
                 }
                 StreamError::EndOfStream => {
                     crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "End of stream")

@@ -8,6 +8,7 @@ extern crate alloc;
 use crate::sync::IrqSpinLock;
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -70,6 +71,10 @@ pub const SCTL_INPUT_GET_MT_SLOT_COUNT: u32 = 0x5353_0104;
 pub const SCTL_INPUT_GET_SWITCH_CAPABILITIES: u32 = 0x5353_0105;
 /// Return the current state of the `SW_*` switch code passed in `arg`.
 pub const SCTL_INPUT_GET_SWITCH_STATE: u32 = 0x5353_0106;
+/// Query support for packed (event type << 16 | code), returning zero or one.
+pub const SCTL_INPUT_HAS_EVENT_CODE: u32 = 0x5353_0107;
+/// Query current value for a supported packed (event type << 16 | code).
+pub const SCTL_INPUT_GET_EVENT_VALUE: u32 = 0x5353_0108;
 
 /// Device produces key or button events.
 pub const INPUT_CAP_KEY: u32 = 1 << 0;
@@ -335,8 +340,9 @@ impl EventDevice {
         // Generate device name
         let name = alloc::format!("{}{}", device_type, id);
 
-        // Create a unique waker name based on the device name
-        let waker_name = alloc::format!("event_{}", name).leak();
+        // Waiter identity belongs to the Waker, not this diagnostic label.
+        // Virtual channels can be short-lived, so do not leak a label per device.
+        let waker_name = "input-event";
 
         Self {
             name,
@@ -442,6 +448,24 @@ impl EventDevice {
     /// Check if there are events available to read
     fn has_events(&self) -> bool {
         !self.queue.lock().events.is_empty()
+    }
+
+    /// Drain complete native records without sleeping or changing the device's
+    /// shared nonblocking flag. An empty queue returns zero.
+    pub(super) fn drain_records(&self, buffer: &mut [u8]) -> usize {
+        let mut queue = self.queue.lock();
+        let mut count = 0;
+        for record in buffer.chunks_exact_mut(InputEvent::size()) {
+            let Some(event) = queue.events.pop_front() else {
+                break;
+            };
+            record[..8].copy_from_slice(&event.time.to_ne_bytes());
+            record[8..10].copy_from_slice(&event.type_.to_ne_bytes());
+            record[10..12].copy_from_slice(&event.code.to_ne_bytes());
+            record[12..16].copy_from_slice(&event.value.to_ne_bytes());
+            count += InputEvent::size();
+        }
+        count
     }
 }
 
@@ -560,6 +584,19 @@ impl Selectable for EventDevice {
         set.write = false;
 
         set
+    }
+
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if interest.read {
+            Some(alloc::vec![self.waker.subscribe_readiness(waiter)])
+        } else {
+            // Input devices have no writable readiness source.
+            Some(Vec::new())
+        }
     }
 
     fn wait_until_ready(

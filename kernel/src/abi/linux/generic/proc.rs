@@ -2,17 +2,13 @@ use alloc::{string::String, sync::Arc, vec, vec::Vec};
 
 use crate::task::INIT_TASK_ID;
 use crate::{
-    abi::linux::generic::{
-        LinuxAbi, errno,
-        signal::{LinuxSignal, deliver_signal},
-    },
+    abi::linux::generic::{LinuxAbi, errno, signal::LinuxSignal},
     arch::Trapframe,
     library::std::usercopy::{copy_from_user, copy_to_user},
     sched::scheduler::{
-        get_all_task_ids, get_task_by_id, online_cpu_mask, reconcile_task_affinity, schedule,
-        update_task_nice,
+        get_all_task_ids, get_task_by_id, online_cpu_mask, schedule, update_task_nice,
     },
-    task::{CloneFlags, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask},
+    task::{CloneFlags, ExitStatusPolicy, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask},
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -121,11 +117,32 @@ pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    if flags == 0 {
-        0
-    } else {
-        errno::to_result(errno::ENOSYS)
+    unshare_filesystem(&task, flags).map_or_else(errno::to_result, |_| 0)
+}
+
+pub(crate) fn unshare_filesystem(task: &Task, flags: usize) -> Result<(), usize> {
+    const CLONE_FS: usize = 0x200;
+    const CLONE_NEWNS: usize = 0x20000;
+    if flags & !(CLONE_FS | CLONE_NEWNS) != 0 {
+        return Err(errno::EOPNOTSUPP);
     }
+    if flags & CLONE_NEWNS != 0 {
+        if !task
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_MOUNTS)
+        {
+            return Err(errno::EPERM);
+        }
+        let (namespace, fs) = task.prepare_mount_namespace().map_err(|_| errno::ENOMEM)?;
+        task.install_mount_namespace(namespace, fs);
+    } else if flags & CLONE_FS != 0 {
+        let fs = task.get_vfs().ok_or(errno::EIO)?;
+        task.set_vfs(crate::fs::VfsManager::clone_with_shared_mount_namespace(
+            &fs,
+        ));
+    }
+    Ok(())
 }
 
 const LINUX_CPU_MASK_SIZE: usize = core::mem::size_of::<usize>();
@@ -234,8 +251,18 @@ pub fn sys_sched_setaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     if mask == 0 {
         return errno::to_result(errno::EINVAL);
     }
-    target.set_cpu_affinity_mask(mask);
-    reconcile_task_affinity(&target);
+    if caller.credentials.read().identity().principal
+        != target.credentials.read().identity().principal
+        && !caller
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_RESOURCES)
+    {
+        return errno::to_result(errno::EPERM);
+    }
+    if crate::task::resource_group::set_task_affinity(&target, mask).is_err() {
+        return errno::to_result(errno::EINVAL);
+    }
     if target.get_id() == caller.get_id() {
         schedule(trapframe);
     }
@@ -354,47 +381,121 @@ pub fn sys_getpriority(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     linux_raw_priority(nice)
 }
 
-#[repr(C)]
-struct LinuxSchedParam {
-    sched_priority: i32,
+fn set_fifo_policy(
+    caller: &Task,
+    target: &Task,
+    policy: usize,
+    priority: i32,
+) -> Result<(), usize> {
+    let value = match policy {
+        0 if priority == 0 => 0,
+        1 if (1..=99).contains(&priority) => priority as u8,
+        0 | 1 => return Err(errno::EINVAL),
+        _ => return Err(errno::EOPNOTSUPP),
+    };
+    let authorized = caller
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_SCHEDULING);
+    if (!authorized
+        && caller.credentials.read().identity().principal
+            != target.credentials.read().identity().principal)
+        || (!authorized && value > target.fixed_priority.base())
+    {
+        return Err(errno::EPERM);
+    }
+    let _transaction = crate::task::resource_group::transaction().map_err(|_| errno::EBUSY)?;
+    crate::sched::scheduler::set_task_fifo_priority(target, value).map_err(|_| errno::EBUSY)
 }
 
-pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
-
-    trapframe.increment_pc_next(&task);
-
-    0 // SCHED_OTHER
-}
-
-pub fn sys_sched_getparam(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
-    let param_ptr = trapframe.get_arg(1);
-
-    trapframe.increment_pc_next(&task);
-
-    if param_ptr == 0 {
+fn sched_set(abi: &mut LinuxAbi, frame: &mut Trapframe, parameter_only: bool) -> usize {
+    let _ = abi;
+    let caller = mytask().unwrap();
+    let pid = frame.get_arg(0);
+    let policy = frame.get_arg(1);
+    let pointer = frame.get_arg(if parameter_only { 1 } else { 2 });
+    frame.increment_pc_next(&caller);
+    let target = match resolve_task_pid(&caller, pid) {
+        Ok(task) => task,
+        Err(error) => return errno::to_result(error),
+    };
+    let mut bytes = [0u8; 4];
+    if copy_from_user(&caller, pointer, &mut bytes).is_err() {
         return errno::to_result(errno::EFAULT);
     }
-
-    let kva = match task.vm_manager.translate_to_kva(param_ptr) {
-        Some(kva) => kva,
-        None => return errno::to_result(errno::EFAULT),
+    let priority = i32::from_ne_bytes(bytes);
+    let policy = if parameter_only {
+        usize::from(target.fixed_priority.base() != 0)
+    } else {
+        policy
     };
-
-    unsafe {
-        // SAFETY: `kva` is the translated address for the user-provided
-        // `struct sched_param *` in the current task.
-        *(kva as *mut LinuxSchedParam) = LinuxSchedParam { sched_priority: 0 };
+    set_fifo_policy(&caller, &target, policy, priority).map_or_else(errno::to_result, |_| 0)
+}
+pub fn sys_sched_setscheduler(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_set(abi, frame, false)
+}
+pub fn sys_sched_setparam(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_set(abi, frame, true)
+}
+pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = frame.get_arg(0);
+    frame.increment_pc_next(&caller);
+    match resolve_task_pid(&caller, pid) {
+        Ok(task) => {
+            if task.deadline_enabled() {
+                6
+            } else {
+                // RPC priority inheritance affects dispatch, not the
+                // configured policy that userspace can inherit or restore.
+                usize::from(task.fixed_priority.base() != 0)
+            }
+        }
+        Err(error) => errno::to_result(error),
     }
-
-    0
+}
+pub fn sys_sched_getparam(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = frame.get_arg(0);
+    let pointer = frame.get_arg(1);
+    frame.increment_pc_next(&caller);
+    let task = match resolve_task_pid(&caller, pid) {
+        Ok(task) => task,
+        Err(error) => return errno::to_result(error),
+    };
+    let priority = task.fixed_priority.base();
+    if priority > 99 {
+        return errno::to_result(errno::EOVERFLOW);
+    }
+    copy_to_user(&caller, pointer, &(priority as i32).to_ne_bytes())
+        .map_or_else(|_| errno::to_result(errno::EFAULT), |_| 0)
+}
+fn sched_priority_limit(frame: &mut Trapframe, maximum: bool) -> usize {
+    let caller = mytask().unwrap();
+    let policy = frame.get_arg(0);
+    frame.increment_pc_next(&caller);
+    match policy {
+        0 => 0,
+        1 => {
+            if maximum {
+                99
+            } else {
+                1
+            }
+        }
+        _ => errno::to_result(errno::EINVAL),
+    }
+}
+pub fn sys_sched_get_priority_max(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_priority_limit(frame, true)
+}
+pub fn sys_sched_get_priority_min(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_priority_limit(frame, false)
 }
 
 pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    task.fixed_priority.request_yield();
 
     trapframe.increment_pc_next(&task);
     schedule(trapframe);
@@ -579,7 +680,7 @@ pub fn sys_kill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     for target in targets {
-        let result = deliver_signal(abi, &task, &target, signal);
+        let result = super::signal::deliver_process_signal(abi, &task, &target, signal);
         if result != 0 {
             return result;
         }
@@ -670,7 +771,13 @@ pub fn sys_getpid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_getppid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    let Some(parent_id) = task.get_parent_id() else {
+    // Linux reports the parent of the process (thread-group leader), not the
+    // task that happened to adopt this individual thread.
+    let parent_id = match get_task_by_id(task.get_thread_group_id()) {
+        Some(leader) => leader.get_parent_id(),
+        None => task.get_parent_id(),
+    };
+    let Some(parent_id) = parent_id else {
         return 0;
     };
     let parent_process_id = get_task_by_id(parent_id)
@@ -692,6 +799,8 @@ pub fn sys_gettid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 const PR_SET_NAME: i32 = 15;
 const PR_GET_NAME: i32 = 16;
+const PR_SET_TAGGED_ADDR_CTRL: i32 = 55;
+const PR_GET_TAGGED_ADDR_CTRL: i32 = 56;
 const TASK_COMM_LEN: usize = 16;
 
 fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
@@ -705,8 +814,8 @@ fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
 
 /// Linux prctl system call (syscall 167).
 ///
-/// Implements thread-name access and accepts other operations as compatibility
-/// no-ops until their behavior is needed.
+/// Implements thread-name access and rejects unsupported tagged-address modes.
+/// Other operations currently remain compatibility no-ops.
 ///
 /// # Arguments
 ///
@@ -716,7 +825,7 @@ fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
 /// # Returns
 ///
 /// Zero on success or a negative Linux errno encoded as `usize`.
-pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EIO),
@@ -730,6 +839,56 @@ pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     match option {
+        // AArch64 TBI permits userspace-only tagged accesses, but Scarlet does
+        // not accept tagged syscall pointers or implement MTE. Pretending SET
+        // succeeded makes Bionic pass tags into that unsupported syscall ABI.
+        PR_SET_TAGGED_ADDR_CTRL | PR_GET_TAGGED_ADDR_CTRL => errno::to_result(errno::EINVAL),
+        47 => {
+            if trapframe.get_arg(3) != 0 || trapframe.get_arg(4) != 0 {
+                return errno::to_result(errno::EINVAL);
+            }
+            super::credentials::ambient(&task, arg2, trapframe.get_arg(2))
+        }
+        7 => usize::from(abi.keep_caps), // PR_GET_KEEPCAPS
+        8 => {
+            // PR_SET_KEEPCAPS: preserved across fork, reset on exec.
+            if abi.keep_caps_locked {
+                errno::to_result(errno::EPERM)
+            } else if trapframe.get_arg(1) > 1 {
+                errno::to_result(errno::EINVAL)
+            } else {
+                abi.keep_caps = trapframe.get_arg(1) == 1;
+                0
+            }
+        }
+        27 | 28 => super::credentials::securebits(abi, &task, option, arg2),
+        23 | 24 => super::credentials::bounding(&task, option, arg2),
+        // Scarlet has no core-dump or ambient ptrace backend. Report the actual
+        // disabled state; only the idempotent disable is supported.
+        3 => 0, // PR_GET_DUMPABLE
+        4 => match arg2 {
+            0 => 0,
+            1 => errno::to_result(errno::EOPNOTSUPP),
+            _ => errno::to_result(errno::EINVAL),
+        },
+        21 => super::seccomp::mode(&task), // PR_GET_SECCOMP
+        22 => super::seccomp::set_mode(&task, arg2, trapframe.get_arg(2)),
+        38 => {
+            // PR_SET_NO_NEW_PRIVS: irreversible, inherited by all exec paths.
+            if arg2 != 1 || (2..5).any(|i| trapframe.get_arg(i) != 0) {
+                errno::to_result(errno::EINVAL)
+            } else {
+                task.execution_restrictions.write().seal_authority();
+                0
+            }
+        }
+        39 => {
+            if (1..5).any(|i| trapframe.get_arg(i) != 0) {
+                errno::to_result(errno::EINVAL)
+            } else {
+                usize::from(task.execution_restrictions.read().no_new_authority())
+            }
+        }
         PR_SET_NAME => {
             let mut name = [0u8; TASK_COMM_LEN];
             if copy_from_user(&task, arg2, &mut name).is_err() {
@@ -749,7 +908,8 @@ pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 0
             }
         }
-        _ => 0,
+        // Never acknowledge an unimplemented process-security operation.
+        _ => errno::to_result(errno::EINVAL),
     }
 }
 
@@ -867,65 +1027,74 @@ pub fn sys_setsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0) as i32;
-    let resource = trapframe.get_arg(1);
-    let _new_rlim_ptr = trapframe.get_arg(2);
-    let old_rlim_ptr = trapframe.get_arg(3);
-
-    trapframe.increment_pc_next(&task);
-
-    // Linux validates the output pointer for write access. Chromium also
-    // relies on EFAULT here to verify that protected memory is read-only.
-    if old_rlim_ptr != 0 {
-        // sysconf(_SC_OPEN_MAX) uses this value. APT's exec helper falls back
-        // to walking every descriptor below it when /proc/self/fd cannot be
-        // opened. Reporting the old generic 32-bit maximum made that walk
-        // run billions of fcntl calls despite our 1024-entry descriptor table.
-        const RLIMIT_NOFILE: usize = 7;
-        let limit = if resource == RLIMIT_NOFILE {
-            super::MAX_FDS as u64
-        } else {
-            0xFFFF_FFFFu64
-        };
-        let mut rlimit = [0u8; 16];
-        rlimit[..8].copy_from_slice(&limit.to_ne_bytes());
-        rlimit[8..].copy_from_slice(&limit.to_ne_bytes());
-        if copy_to_user(&task, old_rlim_ptr, &rlimit).is_err() {
-            return errno::to_result(errno::EFAULT);
-        }
+/// Read only limits backed by Scarlet's current fixed-capacity resources.
+/// Mutable Linux resource limits and automatic stack growth are not implemented.
+pub(super) fn resource_limit(task: &Task, resource: usize) -> Result<u64, usize> {
+    match resource {
+        3 => task
+            .vm_manager
+            .process_entry_stack()
+            .map(|stack| (stack.top - stack.base) as u64)
+            .ok_or(errno::EOPNOTSUPP),
+        7 => Ok(super::MAX_FDS as u64),
+        0..=15 => Err(errno::EOPNOTSUPP),
+        _ => Err(errno::EINVAL),
     }
-
-    0 // Always succeed
 }
 
-/// Accept a Linux capability drop in the view, which currently runs without
-/// a separate capability model. Validate the v3 UAPI data before succeeding.
-pub fn sys_capset(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return errno::to_result(errno::ESRCH),
+fn copy_resource_limit(task: &Task, resource: usize, output: usize) -> usize {
+    let limit = match resource_limit(task, resource) {
+        Ok(limit) => limit,
+        Err(error) => return errno::to_result(error),
     };
-    let header_ptr = trapframe.get_arg(0);
-    let data_ptr = trapframe.get_arg(1);
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&limit.to_ne_bytes());
+    bytes[8..].copy_from_slice(&limit.to_ne_bytes());
+    if copy_to_user(task, output, &bytes).is_err() {
+        errno::to_result(errno::EFAULT)
+    } else {
+        0
+    }
+}
+
+pub fn sys_getrlimit(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let resource = trapframe.get_arg(0);
+    let output = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+    copy_resource_limit(&task, resource, output)
+}
+
+pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let pid = trapframe.get_arg(0) as i32;
+    let resource = trapframe.get_arg(1);
+    let new_limit = trapframe.get_arg(2);
+    let output = trapframe.get_arg(3);
     trapframe.increment_pc_next(&task);
 
-    let mut header = [0u8; 8];
-    if copy_from_user(&task, header_ptr, &mut header).is_err() {
-        return errno::to_result(errno::EFAULT);
+    if pid < 0 || resource > 15 {
+        return errno::to_result(errno::EINVAL);
     }
-    let version = u32::from_ne_bytes(header[..4].try_into().unwrap());
-    let data_len = match version {
-        0x1998_0330 => 12,
-        0x2007_1026 | 0x2008_0522 => 24,
-        _ => return errno::to_result(errno::EINVAL),
-    };
-    let mut data = [0u8; 24];
-    if copy_from_user(&task, data_ptr, &mut data[..data_len]).is_err() {
-        return errno::to_result(errno::EFAULT);
+    let pid = pid as usize;
+    let local_pid = task
+        .get_namespace()
+        .resolve_local_id(task.get_thread_group_id());
+    if pid != 0 && Some(pid) != local_pid && Some(pid) != task.try_get_namespace_id() {
+        return errno::to_result(if task.get_namespace().resolve_global_id(pid).is_some() {
+            errno::EOPNOTSUPP
+        } else {
+            errno::ESRCH
+        });
     }
-    0
+    // Never report a successful limit update without changing enforcement.
+    if new_limit != 0 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
+    if output == 0 {
+        return resource_limit(&task, resource).map_or_else(errno::to_result, |_| 0);
+    }
+    copy_resource_limit(&task, resource, output)
 }
 
 #[repr(C)]
@@ -988,82 +1157,6 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-pub fn sys_getuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root user (UID 0)
-}
-
-pub fn sys_geteuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root user (EUID 0)
-}
-
-pub fn sys_getresuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let ruid_ptr = trapframe.get_arg(0);
-    let euid_ptr = trapframe.get_arg(1);
-    let suid_ptr = trapframe.get_arg(2);
-
-    trapframe.increment_pc_next(&task);
-
-    for ptr in [ruid_ptr, euid_ptr, suid_ptr] {
-        if ptr == 0 {
-            continue;
-        }
-
-        let Some(kva) = task.vm_manager.translate_to_kva(ptr) else {
-            return errno::to_result(errno::EFAULT);
-        };
-        unsafe {
-            core::ptr::write(kva as *mut u32, 0);
-        }
-    }
-
-    0
-}
-
-pub fn sys_getgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root group (GID 0)
-}
-
-pub fn sys_getresgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let rgid_ptr = trapframe.get_arg(0);
-    let egid_ptr = trapframe.get_arg(1);
-    let sgid_ptr = trapframe.get_arg(2);
-
-    trapframe.increment_pc_next(&task);
-
-    for ptr in [rgid_ptr, egid_ptr, sgid_ptr] {
-        if ptr == 0 {
-            continue;
-        }
-
-        let Some(kva) = task.vm_manager.translate_to_kva(ptr) else {
-            return errno::to_result(errno::EFAULT);
-        };
-        unsafe {
-            core::ptr::write(kva as *mut u32, 0);
-        }
-    }
-
-    0
-}
-
-pub fn sys_getegid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root group (EGID 0)
-}
-
 /// Linux utsname structure for uname system call
 /// This structure must match Linux's struct utsname layout
 #[repr(C)]
@@ -1081,6 +1174,14 @@ pub struct UtsName {
     pub machine: [u8; 65],
     /// Domain name (GNU extension)
     pub domainname: [u8; 65],
+}
+
+// Keep uname and /proc/version consistent within the Linux ABI.
+pub(super) const LINUX_ABI_RELEASE: &str = "6.1.0-scarlet_linux_abi_module";
+pub(super) const LINUX_ABI_VERSION: &str = "#1 SMP Scarlet";
+
+pub(super) fn linux_version_text() -> alloc::string::String {
+    alloc::format!("Linux version {LINUX_ABI_RELEASE} ({LINUX_ABI_VERSION}) (scarlet@build) #1\n")
 }
 
 impl UtsName {
@@ -1104,11 +1205,11 @@ impl UtsName {
         uts.nodename[..nodename.len()].copy_from_slice(nodename);
 
         // Release (kernel version)
-        let release = b"6.1.0-scarlet_linux_abi_module";
+        let release = LINUX_ABI_RELEASE.as_bytes();
         uts.release[..release.len()].copy_from_slice(release);
 
         // Version (build info)
-        let version = b"#1 SMP Scarlet";
+        let version = LINUX_ABI_VERSION.as_bytes();
         uts.version[..version.len()].copy_from_slice(version);
 
         let machine = if cfg!(target_arch = "riscv64") {
@@ -1184,6 +1285,10 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let flags = trapframe.get_arg(0);
+    if !matches!(flags & 0xff, 0 | 17) {
+        trapframe.increment_pc_next(&parent_task);
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
     let child_stack = trapframe.get_arg(1);
     let parent_tid_ptr = trapframe.get_arg(2) as *mut i32; // a2
     let tls = trapframe.get_arg(3); //a3 (TLS)
@@ -1261,6 +1366,9 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
+            child_task
+                .parent_exit_event
+                .store(flags & 0xff == 17, core::sync::atomic::Ordering::Release);
             child_task.vcpu.lock().set_return_value(0);
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
@@ -1283,6 +1391,15 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 );
             }
 
+            // Linux join is completed by CLONE_CHILD_CLEARTID and userspace
+            // futex wakeup. The native pool must therefore retire an exited
+            // thread directly instead of retaining an uncollectable zombie.
+            if is_process_child {
+                child_task.set_exit_status_policy(ExitStatusPolicy::Retain);
+            } else {
+                child_task.set_exit_status_policy(ExitStatusPolicy::Discard);
+            }
+
             let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
             let parent_id = parent_task.get_id();
 
@@ -1300,7 +1417,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     abi.thread_state_mut().pending_clone_is_thread = false;
                     abi.thread_state_mut().pending_clone_share_sighand = false;
                     abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
-                    return usize::MAX;
+                    return errno::to_result(errno::EAGAIN);
                 }
             };
             // Linux-facing process/thread IDs are namespace-local.  The child
@@ -1358,7 +1475,15 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             child_linux_tid
         }
-        Err(_) => usize::MAX,
+        Err(error) => {
+            crate::println!(
+                "[linux clone] creation failed: parent={} flags={:#x} reason={}",
+                parent_task.get_id(),
+                flags,
+                error
+            );
+            errno::to_result(clone_failure_errno(error))
+        }
     };
 
     // Clear pending flag in parent after clone completes
@@ -1368,52 +1493,21 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     ret
 }
 
-/// Linux sys_setgid implementation (syscall 144)
-///
-/// Set group ID. This is a stub implementation that always succeeds.
-///
-/// Arguments:
-/// - gid: group ID to set
-///
-/// Returns:
-/// - 0 on success
-pub fn sys_setgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
-    };
-
-    let _gid = trapframe.get_arg(0);
-
-    // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(&task);
-
-    // Always succeed - group ID is ignored in this stub
-    0
-}
-
-/// Linux sys_setuid implementation (syscall 146)
-///
-/// Set user ID. This is a stub implementation that always succeeds.
-///
-/// Arguments:
-/// - uid: user ID to set
-///
-/// Returns:
-/// - 0 on success
-pub fn sys_setuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
-    };
-
-    let _uid = trapframe.get_arg(0);
-
-    // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(&task);
-
-    // Always succeed - user ID is ignored in this stub
-    0
+/// Translate Scarlet task-creation failures into the Linux clone errno that
+/// libc can report without relying on a stale value from an earlier syscall.
+fn clone_failure_errno(error: &str) -> usize {
+    if error.starts_with("Failed to allocate pages")
+        || error.contains("kernel stack memory")
+        || error.contains("kernel stack mmap")
+        || error.contains("map kernel stack")
+        || error.contains("Kernel root page table")
+    {
+        errno::ENOMEM
+    } else {
+        // Task-pool exhaustion, kernel-stack slot exhaustion and transient
+        // resource-admission contention are all retryable by pthread users.
+        errno::EAGAIN
+    }
 }
 
 /// Wait for process to change state (wait4 system call).
@@ -1446,7 +1540,9 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::EPERM),
     };
 
-    let pid = trapframe.get_arg(0) as isize;
+    // Linux pid_t is a signed 32-bit argument. AArch64 callers may leave the
+    // upper register bits zero even for -1; the syscall must sign-extend it.
+    let pid = trapframe.get_arg(0) as u32 as i32 as isize;
     let wstatus = trapframe.get_arg(1) as *mut i32;
     let options = trapframe.get_arg(2);
     let _rusage = trapframe.get_arg(3); // TODO: Implement resource usage tracking
@@ -1953,6 +2049,218 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 #[cfg(test)]
 mod tests {
     #[test_case]
+    fn clone_failures_report_stable_resource_errors() {
+        assert_eq!(
+            clone_failure_errno("Failed to allocate pages"),
+            errno::ENOMEM
+        );
+        assert_eq!(
+            clone_failure_errno("kernel stack mmap failed"),
+            errno::ENOMEM
+        );
+        assert_eq!(
+            clone_failure_errno("No free kernel stack window slots"),
+            errno::EAGAIN
+        );
+        assert_eq!(clone_failure_errno("task pool is full"), errno::EAGAIN);
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    #[test_case]
+    fn linux_thread_exit_clears_tid_and_releases_pool_and_kernel_stack() {
+        #[cfg(target_arch = "aarch64")]
+        use crate::abi::linux::aarch64::LinuxAarch64Abi as LinuxArchAbi;
+        #[cfg(target_arch = "riscv64")]
+        use crate::abi::linux::riscv64::LinuxRiscv64Abi as LinuxArchAbi;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::sched::scheduler::{add_task, get_task_pool, register_online_cpu, reset};
+        use crate::task::{
+            CloneFlags, CloneFlagsDef, ExitStatusPolicy, TaskState, clear_mock_current_task,
+        };
+        use alloc::boxed::Box;
+
+        reset();
+        clear_mock_current_task();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+
+        let leader = Task::new("linux-thread-leader".into(), 0, TaskType::User);
+        leader.init();
+        let tid_address = USER_STACK_END - PAGE_SIZE;
+        let initial_tid = 0x1234_5678u32;
+        copy_to_user(&leader, tid_address, &initial_tid.to_ne_bytes()).unwrap();
+        let mut linux_abi = LinuxArchAbi::default();
+        linux_abi.0.thread_state.pending_clone_is_thread = true;
+        linux_abi.0.thread_state.clear_child_tid_ptr = Some(tid_address);
+        leader.install_exec_abi(Box::new(linux_abi));
+        leader.finish_exec_dispatch();
+        let leader_id = add_task(leader, cpu);
+        let leader = get_task_by_id(leader_id).unwrap();
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        thread_flags.set(CloneFlagsDef::Vm);
+        thread_flags.set(CloneFlagsDef::Files);
+        thread_flags.set(CloneFlagsDef::ClearChildTid);
+        let thread = leader.clone_task(thread_flags).unwrap();
+        thread.set_exit_status_policy(ExitStatusPolicy::Discard);
+        let kernel_stack_base = thread.get_kernel_stack_window_base().unwrap().1;
+        let thread_id = add_task(thread, cpu);
+        let thread = get_task_by_id(thread_id).unwrap();
+        assert!(leader.adopt_registered_child(&thread));
+        assert!(leader.get_children().contains(&thread_id));
+
+        thread.exit(7);
+        assert_eq!(thread.get_state(), TaskState::Terminated);
+        assert_eq!(thread.get_parent_id(), Some(leader_id));
+        assert_eq!(thread.get_exit_status(), None);
+        assert!(get_task_by_id(thread_id).is_none());
+        let mut tid_bytes = [0u8; 4];
+        copy_from_user(&leader, tid_address, &mut tid_bytes).unwrap();
+        assert_eq!(u32::from_ne_bytes(tid_bytes), 0);
+
+        drop(thread);
+        assert_eq!(get_task_pool().reclaim_retired_tasks_now(), 1);
+        assert!(!leader.get_children().contains(&thread_id));
+
+        // Reuse of the exact slot proves Task::drop returned it to the shared
+        // kernel-stack allocator rather than retaining a zombie's window.
+        let replacement = Task::new("linux-thread-kstack-reuse".into(), 0, TaskType::User);
+        replacement.init();
+        assert_eq!(
+            replacement.get_kernel_stack_window_base().unwrap().1,
+            kernel_stack_base
+        );
+
+        drop(replacement);
+        drop(leader);
+        reset();
+    }
+
+    #[test_case]
+    fn linux_getppid_uses_thread_group_leader_parent() {
+        use crate::sched::scheduler::{add_task, register_online_cpu, reset};
+        use crate::task::{
+            CloneFlags, CloneFlagsDef, clear_mock_current_task, set_mock_current_task,
+        };
+
+        reset();
+        clear_mock_current_task();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+
+        let parent = Task::new("getppid-parent".into(), 0, TaskType::User);
+        parent.init();
+        let parent_id = add_task(parent, cpu);
+        let parent = get_task_by_id(parent_id).unwrap();
+
+        let leader = parent.clone_task(CloneFlags::default()).unwrap();
+        let leader_id = add_task(leader, cpu);
+        let leader = get_task_by_id(leader_id).unwrap();
+        assert!(parent.adopt_registered_process_child(&leader));
+
+        let mut thread_flags = CloneFlags::default();
+        thread_flags.set(CloneFlagsDef::Thread);
+        let thread = leader.clone_task(thread_flags).unwrap();
+        let thread_id = add_task(thread, cpu);
+        let thread = get_task_by_id(thread_id).unwrap();
+        assert!(leader.adopt_registered_child(&thread));
+
+        set_mock_current_task(thread.clone());
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        assert_eq!(sys_getppid(&mut abi, &mut frame), parent.get_namespace_id());
+        assert_ne!(sys_getppid(&mut abi, &mut frame), thread.get_namespace_id());
+        clear_mock_current_task();
+
+        drop(thread);
+        drop(leader);
+        drop(parent);
+        reset();
+    }
+
+    #[test_case]
+    fn resource_queries_use_entry_reservation_and_validate_output() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        let task = crate::task::new_user_task("resource-query".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        assert_eq!(resource_limit(&task, 3), Err(errno::EOPNOTSUPP));
+        let base = USER_STACK_END - 4 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 4).unwrap();
+        task.vm_manager
+            .record_process_entry_stack(USER_STACK_END - 128)
+            .unwrap();
+        assert_eq!(resource_limit(&task, 3), Ok((4 * PAGE_SIZE) as u64));
+        assert_eq!(resource_limit(&task, 7), Ok(super::super::MAX_FDS as u64));
+        assert_eq!(resource_limit(&task, 16), Err(errno::EINVAL));
+        assert_eq!(resource_limit(&task, 2), Err(errno::EOPNOTSUPP));
+        assert_eq!(copy_resource_limit(&task, 3, base), 0);
+        let mut bytes = [0; 16];
+        copy_from_user(&task, base, &mut bytes).unwrap();
+        assert_eq!(
+            u64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+            (4 * PAGE_SIZE) as u64
+        );
+        assert_eq!(&bytes[..8], &bytes[8..]);
+        task.vm_manager
+            .protect_linux_memory_map_range(
+                crate::vm::vmem::MemoryArea::new(base, base + PAGE_SIZE - 1),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            copy_resource_limit(&task, 3, base),
+            errno::to_result(errno::EFAULT)
+        );
+        assert_eq!(
+            copy_resource_limit(&task, 3, 0),
+            errno::to_result(errno::EFAULT)
+        );
+        assert_eq!(resource_limit(&task, 3), Ok((4 * PAGE_SIZE) as u64));
+    }
+
+    #[test_case]
+    fn entry_stack_survives_clone_and_changes_only_on_committed_exec() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::task::{CloneFlags, CloneFlagsDef};
+        let parent = crate::task::new_user_task("entry-stack".into(), 0);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        parent
+            .allocate_stack_pages(USER_STACK_END - 4 * PAGE_SIZE, 4)
+            .unwrap();
+        parent
+            .vm_manager
+            .record_process_entry_stack(USER_STACK_END - 128)
+            .unwrap();
+        let initial = parent.vm_manager.process_entry_stack().unwrap();
+        let fork = parent.clone_task(CloneFlags::default()).unwrap();
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Vm);
+        let sibling = parent.clone_task(flags).unwrap();
+        assert_eq!(fork.vm_manager.process_entry_stack(), Some(initial));
+        assert_eq!(sibling.vm_manager.process_entry_stack(), Some(initial));
+        let image = parent.new_exec_image();
+        assert!(image.vm_manager.process_entry_stack().is_none());
+        image
+            .allocate_stack_pages(USER_STACK_END - 8 * PAGE_SIZE, 8)
+            .unwrap();
+        image
+            .vm_manager
+            .record_process_entry_stack(USER_STACK_END - 256)
+            .unwrap();
+        let replacement = image.vm_manager.process_entry_stack();
+        assert_eq!(parent.vm_manager.process_entry_stack(), Some(initial));
+        drop(sibling);
+        parent.vm_manager.exchange_exec_image(&image.vm_manager);
+        assert_eq!(parent.vm_manager.process_entry_stack(), replacement);
+        assert_eq!(fork.vm_manager.process_entry_stack(), Some(initial));
+        assert_eq!(image.vm_manager.process_entry_stack(), Some(initial));
+    }
+
+    #[test_case]
     fn linux_wait_encoding_distinguishes_exit_codes_from_signals() {
         assert_eq!(super::linux_wait_status(1, None), 0x100);
         assert_eq!(super::linux_wait_status(137, None), 0x8900);
@@ -1963,6 +2271,77 @@ mod tests {
     }
 
     use super::*;
+
+    #[test_case]
+    fn prctl_rejects_unimplemented_tagged_pointer_and_security_operations() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        let task = Arc::new(Task::new("tagged-address-prctl".into(), 1, TaskType::User));
+        let code = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(code, 1).unwrap();
+        for index in 0..8 {
+            copy_to_user(&task, code + index * 4, &0x73u32.to_ne_bytes()).unwrap();
+        }
+        set_mock_current_task(task);
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        frame.set_pc(code as u64);
+        for (operation, value) in [
+            (PR_SET_TAGGED_ADDR_CTRL, 1), // Bionic's tagged-heap feature probe.
+            (PR_SET_TAGGED_ADDR_CTRL, 0),
+            (PR_GET_TAGGED_ADDR_CTRL, 0),
+            (23, 64), // PR_CAPBSET_READ must terminate unsupported queries.
+            (38, 0),  // PR_SET_NO_NEW_PRIVS cannot be cleared.
+            (22, 99), // Unsupported seccomp mode.
+            (i32::MAX, 0),
+        ] {
+            frame.set_arg(0, operation as usize);
+            frame.set_arg(1, value);
+            assert_eq!(
+                sys_prctl(&mut abi, &mut frame),
+                errno::to_result(errno::EINVAL)
+            );
+        }
+        for (operation, value, expected) in [
+            (3, 0, 0),
+            (4, 0, 0),
+            (4, 1, errno::to_result(errno::EOPNOTSUPP)),
+            (4, 2, errno::to_result(errno::EINVAL)),
+        ] {
+            frame.set_arg(0, operation);
+            frame.set_arg(1, value);
+            assert_eq!(sys_prctl(&mut abi, &mut frame), expected);
+        }
+        clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn wait4_decodes_zero_extended_negative_pid_at_the_syscall_boundary() {
+        use crate::sched::scheduler::{register_task, reset};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        reset();
+        let parent = Task::new("wait4-pid-width".into(), 0, TaskType::User);
+        parent.init();
+        let parent = get_task_by_id(register_task(parent)).unwrap();
+        let child = Task::new("wait4-live-child".into(), 0, TaskType::User);
+        child.init();
+        let child = get_task_by_id(register_task(child)).unwrap();
+        assert!(parent.adopt_registered_child(&child));
+        let code = 0x2000_0000;
+        parent.allocate_stack_pages(code, 1).unwrap();
+        copy_to_user(&parent, code, &0x73u32.to_ne_bytes()).unwrap();
+        set_mock_current_task(parent.clone());
+        let mut abi = LinuxAbi::default();
+        for encoded in [u32::MAX as usize, usize::MAX] {
+            let mut frame = Trapframe::new();
+            frame.set_pc(code as u64);
+            frame.set_arg(0, encoded);
+            frame.set_arg(1, 0);
+            frame.set_arg(2, 1); // WNOHANG, with one live process child.
+            assert_eq!(sys_wait4(&mut abi, &mut frame), 0);
+        }
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn wait4_honors_nohang_and_returns_to_pending_signal_handlers() {
@@ -2088,6 +2467,43 @@ mod tests {
         assert_eq!(linux_raw_priority(SCHED_NICE_MIN), 40);
         assert_eq!(linux_raw_priority(0), 20);
         assert_eq!(linux_raw_priority(SCHED_NICE_MAX), 1);
+    }
+
+    #[test_case]
+    fn scheduler_queries_keep_rpc_donations_out_of_userspace_policy() {
+        use crate::sched::scheduler::{register_task, reset};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        reset();
+        let task = Task::new("sched-query-donation".into(), 0, TaskType::User);
+        task.init();
+        let task = get_task_by_id(register_task(task)).unwrap();
+        let address = 0x2000_0000;
+        task.allocate_stack_pages(address, 1).unwrap();
+        copy_to_user(&task, address, &0x73u32.to_ne_bytes()).unwrap();
+        set_mock_current_task(task.clone());
+        let mut abi = LinuxAbi::default();
+        let donation = crate::task::fixed_priority::PriorityLease::enter(&task, 8).unwrap();
+        for base in [0, 3] {
+            task.fixed_priority.configure(base);
+            let mut frame = Trapframe::new();
+            frame.set_pc(address as u64);
+            frame.set_arg(0, 0);
+            assert_eq!(
+                sys_sched_getscheduler(&mut abi, &mut frame),
+                usize::from(base != 0)
+            );
+            frame.set_pc(address as u64);
+            frame.set_arg(1, address + 16);
+            assert_eq!(sys_sched_getparam(&mut abi, &mut frame), 0);
+            let mut bytes = [0; 4];
+            copy_from_user(&task, address + 16, &mut bytes).unwrap();
+            assert_eq!(i32::from_ne_bytes(bytes), i32::from(base));
+            assert_eq!(task.fixed_priority.effective(), 8);
+        }
+        drop(donation);
+        clear_mock_current_task();
+        drop(task);
+        reset();
     }
 
     #[test_case]

@@ -4434,11 +4434,10 @@ impl Compositor {
         match result {
             Ok(releases) => {
                 if super::home_trace::enabled()
-                    && let Some(home) = self
-                        .window_manager
-                        .get_windows()
-                        .iter()
-                        .find(|w| w.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home") && w.is_presented())
+                    && let Some(home) = self.window_manager.get_windows().iter().find(|w| {
+                        w.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                            && w.is_presented()
+                    })
                 {
                     super::home_trace::record(
                         6,
@@ -4882,6 +4881,12 @@ impl Compositor {
 
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
+            let sample_x: Vec<u32> = (x0..x1)
+                .map(|sx| {
+                    ((i64::from(sx - win_x0) * i64::from(source_width)) / i64::from(visual_width))
+                        as u32
+                })
+                .collect();
             for sy in y0..y1 {
                 let (row_x0, row_x1) = match rounded_clip {
                     Some((rect, radius)) => {
@@ -4899,8 +4904,7 @@ impl Compositor {
                     / i64::from(visual_height)) as u32;
                 let screen_row_off = (sy as u32 * stride) as usize;
                 for sx in row_x0..row_x1 {
-                    let wx = ((i64::from(sx - win_x0) * i64::from(source_width))
-                        / i64::from(visual_width)) as u32;
+                    let wx = sample_x[(sx - x0) as usize];
                     let window_offset = base_offset
                         .saturating_add(wy as usize * row_stride)
                         .saturating_add(wx as usize * 4);
@@ -4920,6 +4924,12 @@ impl Compositor {
             }
         } else {
             // Slow path for transparent windows: per-pixel alpha blending
+            let sample_x: Vec<u32> = (x0..x1)
+                .map(|sx| {
+                    ((i64::from(sx - win_x0) * i64::from(source_width)) / i64::from(visual_width))
+                        as u32
+                })
+                .collect();
             for sy in y0..y1 {
                 let (row_x0, row_x1) = match rounded_clip {
                     Some((rect, radius)) => {
@@ -4937,8 +4947,7 @@ impl Compositor {
                     / i64::from(visual_height)) as u32;
                 let screen_row_off = (sy as u32 * stride) as usize;
                 for sx in row_x0..row_x1 {
-                    let wx = ((i64::from(sx - win_x0) * i64::from(source_width))
-                        / i64::from(visual_width)) as u32;
+                    let wx = sample_x[(sx - x0) as usize];
                     let window_offset = base_offset
                         .saturating_add(wy as usize * row_stride)
                         .saturating_add(wx as usize * 4);
@@ -4956,6 +4965,18 @@ impl Compositor {
                         // Apply window opacity to pixel alpha
                         let effective_alpha =
                             ((src_a as f32 * presentation_opacity) as u32).min(255);
+
+                        if effective_alpha == 255 {
+                            screen_buffer[screen_offset] = src_b as u8;
+                            screen_buffer[screen_offset + 1] = src_g as u8;
+                            screen_buffer[screen_offset + 2] = src_r as u8;
+                            screen_buffer[screen_offset + 3] = 255;
+                            continue;
+                        }
+                        if effective_alpha == 0 {
+                            screen_buffer[screen_offset + 3] = 255;
+                            continue;
+                        }
 
                         let dst_b = screen_buffer[screen_offset] as u32;
                         let dst_g = screen_buffer[screen_offset + 1] as u32;
@@ -6928,7 +6949,7 @@ impl Compositor {
             let native = self
                 .window_manager
                 .get_window(window_id)
-                .is_some_and(|window| window.touch_input && window.extension_owner.is_none());
+                .is_some_and(|window| window.touch_input);
             // The compatibility ABI exposes one logical pointer, not one
             // pointer per physical source. Keep a single legacy-primary
             // contact across the whole seat so duplicate/overlapping direct
@@ -12400,7 +12421,9 @@ impl Compositor {
                 let trace_home = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home"));
+                    .is_some_and(|window| {
+                        window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                    });
                 if trace_home {
                     super::home_trace::record(
                         3,
@@ -12492,7 +12515,9 @@ impl Compositor {
                 let trace_home = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home"));
+                    .is_some_and(|window| {
+                        window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                    });
                 if trace_home {
                     super::home_trace::record(
                         4,
@@ -12514,7 +12539,8 @@ impl Compositor {
                             identity,
                             commit_serial,
                             result.is_ok(),
-                            self.window_manager.get_window(window_id)
+                            self.window_manager
+                                .get_window(window_id)
                                 .is_some_and(|window| window.prepares_while_workspace_hidden()),
                         ),
                     );

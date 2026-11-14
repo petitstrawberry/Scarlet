@@ -10,6 +10,7 @@ use crate::task::mytask;
 const EAGAIN: i32 = 11;
 const EINTR: i32 = 4;
 const ENOMEM: i32 = 12;
+const ETIMEDOUT: i32 = 110;
 // Large userspace reads must not require an equally large contiguous kernel
 // allocation (e.g. rustc's shared library is over 100 MiB). Stream reads may
 // return a prefix; read_exact/read_to_end continue from the returned offset.
@@ -40,7 +41,9 @@ fn io_buffer(count: usize) -> Result<alloc::vec::Vec<u8>, usize> {
 fn stream_error_result(error: super::StreamError) -> usize {
     match error {
         super::StreamError::WouldBlock => (-EAGAIN) as usize,
+        super::StreamError::TimedOut => (-ETIMEDOUT) as usize,
         super::StreamError::Interrupted => (-EINTR) as usize,
+        super::StreamError::Cancelled => (-(scarlet_abi::ERRNO_ECANCELED as isize)) as usize,
         _ => usize::MAX,
     }
 }
@@ -138,6 +141,10 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
+    if count == 0 {
+        return stream.write_empty().unwrap_or_else(stream_error_result);
+    }
+
     // Copy from user space before writing so buffers crossing page boundaries
     // are handled correctly.
     // Keep write boundaries intact for message-oriented streams. An oversized
@@ -158,7 +165,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{EAGAIN, EINTR, ENOMEM, io_buffer, read_buffer, stream_error_result};
+    use super::{EAGAIN, EINTR, ENOMEM, ETIMEDOUT, io_buffer, read_buffer, stream_error_result};
     use crate::object::capability::StreamError;
 
     #[test_case]
@@ -177,6 +184,10 @@ mod tests {
         assert_eq!(
             stream_error_result(StreamError::Interrupted),
             (-EINTR) as usize
+        );
+        assert_eq!(
+            stream_error_result(StreamError::TimedOut),
+            (-ETIMEDOUT) as usize
         );
         assert_eq!(stream_error_result(StreamError::IoError), usize::MAX);
     }

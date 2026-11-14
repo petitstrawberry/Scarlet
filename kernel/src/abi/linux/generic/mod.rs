@@ -1,23 +1,40 @@
+pub mod cgroup;
+pub mod credentials;
+mod device_tree;
+mod power_supply;
+pub mod seccomp;
 #[macro_use]
 mod macros;
 pub mod errno;
 pub(crate) mod exec;
+mod fd_transfer;
 pub mod fs;
 pub mod futex;
+mod log;
 mod memfd;
+pub(crate) use fd_transfer::DescriptorReceipt;
+mod bpf;
+mod config;
+mod inotify;
 pub mod mm;
 mod mode;
+mod mount_namespace;
 mod native_handle;
+mod oom;
 pub mod pipe;
+mod pressure;
 pub mod proc;
 mod proc_fd;
 mod proc_text;
+mod process_memory;
+pub(crate) mod quota;
 mod record_lock;
 pub mod signal;
 mod signalfd;
 pub mod socket;
 pub mod time;
 pub mod utimens;
+mod xattr;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
@@ -94,6 +111,8 @@ pub struct LinuxFdTable {
     fd_flags: Vec<u32>,
     file_status_flags: Vec<u32>,
     free_fds: Vec<usize>,
+    generations: Vec<u64>,
+    epolls: BTreeMap<u32, Arc<fs::EpollLifetime>>,
 }
 
 impl Default for LinuxFdTable {
@@ -103,15 +122,33 @@ impl Default for LinuxFdTable {
 
         Self {
             fd_to_handle: vec![None; MAX_FDS],
+            generations: vec![0; MAX_FDS],
             fd_flags: vec![0; MAX_FDS],
             file_status_flags: vec![0; MAX_FDS],
             free_fds,
+            epolls: BTreeMap::new(),
         }
+    }
+}
+
+impl LinuxFdTable {
+    fn retain_epoll(&mut self, handle: u32) {
+        if fs::is_epoll_handle(handle) {
+            self.epolls
+                .entry(handle)
+                .or_insert_with(|| Arc::new(fs::EpollLifetime::new(handle)));
+        }
+    }
+    fn prune_epolls(&mut self) {
+        let descriptors = &self.fd_to_handle;
+        self.epolls
+            .retain(|handle, _| descriptors.contains(&Some(*handle)));
     }
 }
 
 #[derive(Clone)]
 pub struct LinuxAbi {
+    pub(super) extensions: &'static dyn super::extensions::LinuxAbiExtensions,
     pub namespace: Arc<crate::task::namespace::TaskNamespace>,
     fd_table: Arc<IrqRwSpinLock<LinuxFdTable>>,
     pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
@@ -120,6 +157,8 @@ pub struct LinuxAbi {
     record_locks: Arc<record_lock::ProcessLocks>,
     exec_unlocks: Vec<record_lock::FileKey>,
     pub(crate) umask: u32,
+    pub(crate) keep_caps: bool,
+    pub(crate) keep_caps_locked: bool,
     #[cfg(target_arch = "aarch64")]
     pub(crate) signal_restorer: Arc<IrqSpinLock<Option<usize>>>,
 }
@@ -129,6 +168,7 @@ impl Default for LinuxAbi {
         let namespace = crate::task::namespace::get_root_namespace().clone();
 
         Self {
+            extensions: &super::extensions::NoExtensions,
             namespace,
             fd_table: Arc::new(IrqRwSpinLock::new(LinuxFdTable::default())),
             signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
@@ -137,6 +177,8 @@ impl Default for LinuxAbi {
             record_locks: Arc::new(record_lock::ProcessLocks::new()),
             exec_unlocks: Vec::new(),
             umask: 0o022,
+            keep_caps: false,
+            keep_caps_locked: false,
             #[cfg(target_arch = "aarch64")]
             signal_restorer: Arc::new(IrqSpinLock::new(None)),
         }
@@ -144,6 +186,16 @@ impl Default for LinuxAbi {
 }
 
 impl LinuxAbi {
+    /// Compose the common Linux implementation with an ABI-specific policy.
+    /// Exec copies descriptor state separately, so extensions never migrate
+    /// from the source process into a plain Linux target ABI.
+    pub fn with_extensions(extensions: &'static dyn super::extensions::LinuxAbiExtensions) -> Self {
+        Self {
+            extensions,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn bind_task_signals(&self, task: &crate::task::Task) {
         *task.linux_signal_state.lock() = Some(Arc::downgrade(&self.signal_state));
     }
@@ -153,9 +205,21 @@ impl LinuxAbi {
     }
 
     pub(crate) fn clone_signal_state(&mut self, share_handlers: bool) {
-        // Every child inherits a mask value, never the parent's mutable mask
-        // or pending queue. CLONE_SIGHAND shares only the disposition table.
-        let state = self.signal_state.lock().clone_for_child(share_handlers);
+        self.clone_signal_state_with_group(share_handlers, false);
+    }
+
+    pub(crate) fn clone_signal_state_with_group(
+        &mut self,
+        share_handlers: bool,
+        share_pending: bool,
+    ) {
+        // Each child owns its mask and thread-directed queue. Only threads
+        // share process-directed pending records; CLONE_SIGHAND alone shares
+        // the disposition table without joining that process queue.
+        let state = self
+            .signal_state
+            .lock()
+            .clone_for_child(share_handlers, share_pending);
         self.signal_state = Arc::new(IrqSpinLock::new(state));
         #[cfg(target_arch = "aarch64")]
         {
@@ -166,7 +230,10 @@ impl LinuxAbi {
 
     /// Prepare an independent fd table without closing any handle in the caller.
     pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
+        credentials::prepare_exec(image);
+        self.keep_caps = false;
         if let Some(source) = source {
+            self.keep_caps_locked = source.keep_caps_locked;
             self.umask = source.umask;
             self.record_locks = source.record_locks.clone();
             let mut signals = source.signal_state.lock().clone();
@@ -179,6 +246,7 @@ impl LinuxAbi {
         if source.is_none() {
             for handle in image.handle_table.active_handles() {
                 if (handle as usize) < MAX_FDS {
+                    table.generations[handle as usize] = 1;
                     table.fd_to_handle[handle as usize] = Some(handle);
                     if image
                         .handle_table
@@ -200,7 +268,7 @@ impl LinuxAbi {
         for fd in 0..MAX_FDS {
             if let Some(handle) = table.fd_to_handle[fd] {
                 if (source.is_some() && table.fd_flags[fd] & fs::FD_CLOEXEC != 0)
-                    || !image.handle_table.is_valid_handle(handle)
+                    || (!fs::is_epoll_handle(handle) && !image.handle_table.is_valid_handle(handle))
                 {
                     // Defer lock release until exec commits. A failed loader
                     // must preserve both the descriptor and its POSIX locks.
@@ -223,6 +291,7 @@ impl LinuxAbi {
             .rev()
             .filter(|&fd| table.fd_to_handle[fd].is_none())
             .collect();
+        table.prune_epolls();
         self.fd_table = Arc::new(IrqRwSpinLock::new(table));
         self.namespace = image.get_namespace().clone();
         self.thread_state.tgid = image.try_get_namespace_id().unwrap_or(0);
@@ -251,6 +320,15 @@ impl LinuxAbi {
             self.record_locks.unlock_file(key);
         }
     }
+    pub(crate) fn close_descriptor_object(
+        &self,
+        task: &crate::task::Task,
+        object: &crate::object::KernelObject,
+    ) {
+        self.release_record_locks_for_object(object);
+        self.extensions.flush_on_close(task, object);
+    }
+
     pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState {
         &mut self.thread_state
     }
@@ -283,12 +361,14 @@ impl LinuxAbi {
 
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
         let mut table = self.fd_table.write();
-        let fd = if let Some(freed_fd) = table.free_fds.pop() {
-            freed_fd
-        } else {
-            return Err("Too many open files");
-        };
+        let fd = *table.free_fds.last().ok_or("Too many open files")?;
+        let generation = table.generations[fd]
+            .checked_add(1)
+            .ok_or("Descriptor generation exhausted")?;
+        table.free_fds.pop();
+        table.generations[fd] = generation;
         table.fd_to_handle[fd] = Some(handle);
+        table.retain_epoll(handle);
         Ok(fd)
     }
 
@@ -300,10 +380,15 @@ impl LinuxAbi {
         if table.fd_to_handle[fd].is_some() {
             return Err("File descriptor already in use");
         }
+        let generation = table.generations[fd]
+            .checked_add(1)
+            .ok_or("Descriptor generation exhausted")?;
         if let Some(pos) = table.free_fds.iter().position(|&x| x == fd) {
             table.free_fds.remove(pos);
         }
+        table.generations[fd] = generation;
         table.fd_to_handle[fd] = Some(handle);
+        table.retain_epoll(handle);
         Ok(())
     }
 
@@ -322,6 +407,7 @@ impl LinuxAbi {
                 table.fd_flags[fd] = 0;
                 table.file_status_flags[fd] = 0;
                 table.free_fds.push(fd);
+                table.prune_epolls();
                 Some(handle)
             } else {
                 None
@@ -345,6 +431,11 @@ impl LinuxAbi {
 
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         let mut table = self.fd_table.write();
+        for fd in 0..3 {
+            table.generations[fd] = table.generations[fd]
+                .checked_add(1)
+                .expect("stdio descriptor generation exhausted");
+        }
         table.fd_to_handle[0] = Some(stdin_handle);
         table.fd_to_handle[1] = Some(stdout_handle);
         table.fd_to_handle[2] = Some(stderr_handle);
@@ -439,6 +530,9 @@ impl LinuxAbi {
     }
 
     pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
+        if signal::is_pending_wake(event) {
+            return;
+        }
         if let Some(signal) = signal::handle_event_to_signal(event) {
             let mut signal_state = self.signal_state.lock();
             signal_state.add_pending(signal);
@@ -501,12 +595,6 @@ pub(crate) fn unsupported_syscall(trapframe: &mut Trapframe) -> usize {
     errno::to_result(errno::ENOSYS)
 }
 
-pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObject) {
-    // Socket finalization is tied to KernelObject logical ownership rather
-    // than Linux descriptor-table scans. Dropping the removed object releases
-    // exactly one owning reference, including fork/dup and queued IPC rights.
-}
-
 pub fn dispatch_common_syscall(
     abi: &mut LinuxAbi,
     frame: &mut crate::arch::Trapframe,
@@ -524,6 +612,18 @@ syscall_table! {
     Invalid = 0 => |_abi: &mut crate::abi::linux::generic::LinuxAbi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
+    Setxattr = 5 => xattr::sys_setxattr,
+    Lsetxattr = 6 => xattr::sys_lsetxattr,
+    Fsetxattr = 7 => xattr::sys_fsetxattr,
+    Getxattr = 8 => xattr::sys_getxattr,
+    Lgetxattr = 9 => xattr::sys_lgetxattr,
+    Fgetxattr = 10 => xattr::sys_fgetxattr,
+    Listxattr = 11 => xattr::sys_listxattr,
+    Llistxattr = 12 => xattr::sys_llistxattr,
+    Flistxattr = 13 => xattr::sys_flistxattr,
+    Removexattr = 14 => xattr::sys_removexattr,
+    Lremovexattr = 15 => xattr::sys_lremovexattr,
+    Fremovexattr = 16 => xattr::sys_fremovexattr,
     Getcwd = 17 => fs::sys_getcwd,
     Eventfd2 = 19 => fs::sys_eventfd2,
     EpollCtl = 21 => fs::sys_epoll_ctl,
@@ -533,12 +633,16 @@ syscall_table! {
     Dup = 23 => fs::sys_dup,
     Dup3 = 24 => fs::sys_dup3,
     Fcntl = 25 => fs::sys_fcntl,
-    InotifyInit1 = 26 => fs::sys_inotify_init1,
+    InotifyInit1 = 26 => inotify::sys_init1,
+    InotifyAddWatch = 27 => inotify::sys_add_watch,
+    InotifyRmWatch = 28 => inotify::sys_rm_watch,
     Ioctl = 29 => fs::sys_ioctl,
+    MknodAt = 33 => fs::sys_mknodat,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
     SymlinkAt = 36 => fs::sys_symlinkat,
     RenameAt = 38 => fs::sys_renameat,
+    Umount2 = 39 => fs::sys_umount2,
     Mount = 40 => fs::sys_mount,
     Statfs = 43 => fs::sys_statfs,
     Fstatfs = 44 => fs::sys_fstatfs,
@@ -574,7 +678,8 @@ syscall_table! {
     Fsync = 82 => fs::sys_fsync,
     Fdatasync = 83 => fs::sys_fsync,
     UtimensAt = 88 => utimens::sys_utimensat,
-    Capset = 91 => proc::sys_capset,
+    Capget = 90 => credentials::sys_capget,
+    Capset = 91 => credentials::sys_capset,
     TimerfdCreate = 85 => time::sys_timerfd_create,
     TimerfdSettime = 86 => time::sys_timerfd_settime,
     TimerfdGettime = 87 => time::sys_timerfd_gettime,
@@ -582,6 +687,7 @@ syscall_table! {
     ExitGroup = 94 => proc::sys_exit_group,
     SetTidAddress = 96 => proc::sys_set_tid_address,
     Waitid = 95 => proc::sys_waitid,
+    Setns = 268 => mount_namespace::sys_setns,
     Unshare = 97 => proc::sys_unshare,
     Futex = 98 => futex::sys_futex,
     SetRobustList = 99 => proc::sys_set_robust_list,
@@ -594,35 +700,50 @@ syscall_table! {
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
     ClockNanosleep = 115 => time::sys_clock_nanosleep,
+    Syslog = 116 => log::sys_syslog,
+    SchedSetparam = 118 => proc::sys_sched_setparam,
+    SchedSetscheduler = 119 => proc::sys_sched_setscheduler,
     SchedGetscheduler = 120 => proc::sys_sched_getscheduler,
     SchedGetparam = 121 => proc::sys_sched_getparam,
     SchedSetaffinity = 122 => proc::sys_sched_setaffinity,
     SchedGetaffinity = 123 => proc::sys_sched_getaffinity,
     SchedYield = 124 => proc::sys_sched_yield,
+    SchedGetPriorityMax = 125 => proc::sys_sched_get_priority_max,
+    SchedGetPriorityMin = 126 => proc::sys_sched_get_priority_min,
     Sigaltstack = 132 => signal::sys_sigaltstack,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
+    RtSigtimedwait = 137 => signal::sys_rt_sigtimedwait,
+    RtSigqueueinfo = 138 => signal::sys_rt_sigqueueinfo,
     Setpriority = 140 => proc::sys_setpriority,
     Getpriority = 141 => proc::sys_getpriority,
-    SetGid = 144 => proc::sys_setgid,
-    SetUid = 146 => proc::sys_setuid,
-    GetResUid = 148 => proc::sys_getresuid,
-    GetResGid = 150 => proc::sys_getresgid,
+    SetRegid = 143 => credentials::sys_setregid,
+    SetGid = 144 => credentials::sys_setgid,
+    SetReuid = 145 => credentials::sys_setreuid,
+    SetUid = 146 => credentials::sys_setuid,
+    SetResUid = 147 => credentials::sys_setresuid,
+    GetResUid = 148 => credentials::sys_getresuid,
+    SetResGid = 149 => credentials::sys_setresgid,
+    GetResGid = 150 => credentials::sys_getresgid,
     SetPgid = 154 => proc::sys_setpgid,
     GetPgid = 155 => proc::sys_getpgid,
     GetSid = 156 => proc::sys_getsid,
     SetSid = 157 => proc::sys_setsid,
     Uname = 160 => proc::sys_uname,
+    Getrlimit = 163 => proc::sys_getrlimit,
     Umask = 166 => fs::sys_umask,
+    GetGroups = 158 => credentials::sys_getgroups,
+    SetGroups = 159 => credentials::sys_setgroups,
     Prctl = 167 => proc::sys_prctl,
+    Seccomp = 277 => seccomp::sys_seccomp,
     Getcpu = 168 => proc::sys_getcpu,
     Gettimeofday = 169 => time::sys_gettimeofday,
     GetPid = 172 => proc::sys_getpid,
     GetPpid = 173 => proc::sys_getppid,
-    GetUid = 174 => proc::sys_getuid,
-    GetEuid = 175 => proc::sys_geteuid,
-    GetGid = 176 => proc::sys_getgid,
-    GetEgid = 177 => proc::sys_getegid,
+    GetUid = 174 => credentials::sys_getuid,
+    GetEuid = 175 => credentials::sys_geteuid,
+    GetGid = 176 => credentials::sys_getgid,
+    GetEgid = 177 => credentials::sys_getegid,
     GetTid = 178 => proc::sys_gettid,
     Sysinfo = 179 => proc::sys_sysinfo,
     Kill = 129 => proc::sys_kill,
@@ -643,6 +764,8 @@ syscall_table! {
     Munlockall = 231 => mm::sys_munlockall,
     Mincore = 232 => mm::sys_mincore,
     Madvise = 233 => mm::sys_madvise,
+    ProcessVmReadv = 270 => process_memory::sys_readv,
+    Bpf = 280 => bpf::sys_bpf,
     Mlock2 = 284 => mm::sys_mlock2,
     Accept4 = 242 => socket::sys_accept4,
     Getrandom = 278 => fs::sys_getrandom,

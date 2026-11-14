@@ -1,0 +1,10 @@
+[package]
+name = "android-runtime"
+version = "0.1.0"
+edition = "2024"
+workspace = "../../.cargo"
+
+[dependencies]
+scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
+sws-client-c = { path = "../lib/sws-client-c" }
+scarlet-ui-core = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }

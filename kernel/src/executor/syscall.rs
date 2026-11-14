@@ -280,7 +280,82 @@ handler!(sys_vfs_view_mkdir, |task, tf| {
         .map_err(|_| "create directory failed")?;
     Ok(0)
 });
-handler!(sys_vfs_view_mount, |task, tf| {
+// Retain every source capability before publishing the single immutable mount.
+// Reading source records never changes the destination View on failure.
+fn publication_files(
+    task: &Task,
+    address: usize,
+    count: usize,
+) -> Result<Vec<crate::fs::vfs_v2::capability_files::Export>> {
+    use crate::fs::vfs_v2::capability_files::Export;
+    use crate::object::handle::AccessMode;
+    if count == 0 || count > 64 {
+        return Err("invalid publication count");
+    }
+    let mut exports = Vec::new();
+    for index in 0..count {
+        let mut bytes = [0; 16];
+        let pointer = address
+            .checked_add(index * 16)
+            .ok_or("invalid publication pointer")?;
+        copy_from_user(task, pointer, &mut bytes).map_err(|_| "invalid publication record")?;
+        let name = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        let handle = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+        let access = u32::from_ne_bytes(bytes[12..16].try_into().unwrap());
+        let name = text_arg(
+            task,
+            usize::try_from(name).map_err(|_| "invalid name address")?,
+        )?;
+        let (source, metadata) = task
+            .handle_table
+            .get_arc_clone_with_metadata(handle)
+            .ok_or("invalid source handle")?;
+        let ceiling = match metadata.access_mode {
+            AccessMode::ReadOnly => 1,
+            AccessMode::WriteOnly => 2,
+            AccessMode::ReadWrite => 3,
+        };
+        if access == 0 || access & !ceiling != 0 {
+            return Err("publication exceeds source handle access");
+        }
+        let source = match source {
+            KernelObject::File(file) => file,
+            _ => return Err("file capability required"),
+        };
+        exports.push(Export::new(name, source, access).map_err(|_| "invalid file publication")?);
+    }
+    Ok(exports)
+}
+handler!(sys_vfs_view_publish_files, |task, tf| {
+    let fs = view(&task, tf.get_arg(0), true)?;
+    let path = text_arg(&task, tf.get_arg(1))?;
+    let files = publication_files(&task, tf.get_arg(2), tf.get_arg(3))?;
+    let published = crate::fs::vfs_v2::capability_files::CapabilityFiles::new(files)
+        .map_err(|_| "invalid publications")?;
+    let _guard = VIEW_COMPOSITION.lock();
+    if is_root_path(&fs, &path) {
+        return Err("cannot publish over View root");
+    }
+    use crate::fs::vfs_v2::mount_tree::MountRestrictions;
+    fs.mount(
+        published,
+        &path,
+        MountRestrictions::NO_EXECUTE | MountRestrictions::NO_PRIVILEGE_GAIN,
+    )
+    .map_err(|_| "file publication mount failed")?;
+    Ok(0)
+});
+handler!(sys_vfs_view_mount, |task, tf| { mount_view(&task, tf, 0) });
+handler!(sys_vfs_view_mount_restricted, |task, tf| {
+    mount_view(
+        &task,
+        tf,
+        u32::try_from(tf.get_arg(4)).map_err(|_| "invalid mount restrictions")?,
+    )
+});
+fn mount_view(task: &Task, tf: &crate::arch::Trapframe, restrictions: u32) -> Result<usize> {
+    crate::fs::vfs_v2::mount_tree::MountRestrictions::from_bits(restrictions)
+        .map_err(|_| "unsupported mount restrictions")?;
     let fs = view(&task, tf.get_arg(0), true)?;
     let path = text_arg(&task, tf.get_arg(1))?;
     let fstype = text_arg(&task, tf.get_arg(2))?;
@@ -296,11 +371,34 @@ handler!(sys_vfs_view_mount, |task, tf| {
     let filesystem = crate::fs::get_fs_driver_manager()
         .create_from_option_string(&fstype, &options)
         .map_err(|_| "filesystem creation failed")?;
-    fs.mount(filesystem, &path, 0)
+    fs.mount(filesystem, &path, restrictions)
         .map_err(|_| "view mount failed")?;
+    Ok(0)
+}
+handler!(sys_vfs_view_propagation, |task, tf| {
+    let fs = view(&task, tf.get_arg(0), true)?;
+    let path = text_arg(&task, tf.get_arg(1))?;
+    let mode = match tf.get_arg(2) {
+        0 => crate::fs::vfs_v2::propagation::Propagation::Private,
+        1 => crate::fs::vfs_v2::propagation::Propagation::Shared,
+        2 => crate::fs::vfs_v2::propagation::Propagation::Downstream,
+        _ => return Err("invalid propagation mode"),
+    };
+    if tf.get_arg(3) > 1 {
+        return Err("invalid recursive option");
+    }
+    let _guard = VIEW_COMPOSITION.lock();
+    fs.set_mount_propagation(&path, mode, tf.get_arg(3) == 1)
+        .map_err(|_| "propagation change failed")?;
     Ok(0)
 });
 handler!(sys_vfs_view_bind, |task, tf| {
+    bind_view(&task, tf, false)
+});
+handler!(sys_vfs_view_bind_recursive, |task, tf| {
+    bind_view(&task, tf, true)
+});
+fn bind_view(task: &Task, tf: &Trapframe, recursive: bool) -> Result<usize> {
     let target = view(&task, tf.get_arg(0), true)?;
     let target_path = text_arg(&task, tf.get_arg(1))?;
     let source = view(&task, tf.get_arg(2), false)?;
@@ -313,10 +411,11 @@ handler!(sys_vfs_view_bind, |task, tf| {
         add_dependency(&target.view(), &source.view())?;
     }
     target
-        .bind_mount_from(&source, &source_path, &target_path)
+        .bind_mount_from_recursive(&source, &source_path, &target_path, recursive)
         .map_err(|_| "view bind failed")?;
     Ok(0)
-});
+}
+
 handler!(sys_vfs_view_overlay, |task, tf| {
     require_builder(&task)?;
     let lower = view(&task, tf.get_arg(0), false)?;
@@ -481,6 +580,20 @@ handler!(sys_environment_spawn, |task, tf| {
         crate::task::TaskType::User,
         task.get_namespace(),
     );
+    *child.process_scope.write() = task.process_scope.read().clone();
+    child.set_scheduler_affinity_config(
+        task.scheduler_affinity_kind(),
+        task.requested_cpu_affinity_mask(),
+    );
+    child.resource_membership = task
+        .resource_membership
+        .fork_with_affinity(child.requested_cpu_affinity_mask())?;
+    *child.security_subject.write() = task.security_subject.read().clone();
+    *child.pending_exec_transition.write() = task.pending_exec_transition.read().clone();
+    *child.creation_label.write() = task.creation_label.read().clone();
+    *child.socket_creation_label.write() = task.socket_creation_label.read().clone();
+    *child.credentials.write() = task.credentials.read().clone();
+    *child.execution_restrictions.write() = task.execution_restrictions.read().clone();
     child.max_stack_size = task.max_stack_size;
     child.max_data_size = task.max_data_size;
     child.max_text_size = task.max_text_size;
@@ -489,7 +602,6 @@ handler!(sys_environment_spawn, |task, tf| {
     child.set_controlling_tty(task.get_controlling_tty().as_ref().map(Arc::downgrade));
     child.set_nice(task.sched_nice.load(Ordering::Relaxed));
     child.set_core_preference(task.core_preference());
-    child.set_scheduler_affinity_config(task.scheduler_affinity_kind(), task.cpu_affinity_mask());
     child.init();
     let mut next_tf = Trapframe::new();
     TransparentExecutor::execute_in_environment_with_abi(
@@ -557,7 +669,9 @@ mod tests {
                     physical + 2 * PAGE_SIZE as u64 - 1,
                 ),
                 MemoryArea::new(base, base + 2 * PAGE_SIZE - 1),
-                VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                VirtualMemoryPermission::Read as usize
+                    | VirtualMemoryPermission::Write as usize
+                    | VirtualMemoryPermission::User as usize,
                 false,
                 None,
             ))
@@ -638,5 +752,45 @@ mod tests {
             exec_options(&task, base + 2 * PAGE_SIZE - 1).err(),
             Some("invalid options")
         );
+    }
+}
+
+#[cfg(test)]
+mod file_publication_tests {
+    use super::*;
+    use crate::object::capability::Selectable;
+    use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
+    #[test_case]
+    fn file_publication_checks_handle_rights_and_user_record_bounds() {
+        let task = Task::new("publication-test".into(), 0, crate::task::TaskType::User);
+        let address = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(address, 1).unwrap();
+        let (send, receive) =
+            crate::device::input::virtual_device::InputEndpoint::pair(1, 0, 0).unwrap();
+        let handle = task
+            .handle_table
+            .insert_with_metadata(
+                KernelObject::from_file_object(receive),
+                HandleMetadata {
+                    handle_type: HandleType::IpcChannel,
+                    access_mode: AccessMode::ReadOnly,
+                    special_semantics: None,
+                },
+            )
+            .unwrap();
+        let mut record = [0; 16];
+        record[..8].copy_from_slice(&((address + 64) as u64).to_ne_bytes());
+        record[8..12].copy_from_slice(&handle.to_ne_bytes());
+        record[12..16].copy_from_slice(&1u32.to_ne_bytes());
+        crate::library::std::usercopy::copy_to_user(&task, address + 64, b"event0\0").unwrap();
+        crate::library::std::usercopy::copy_to_user(&task, address, &record).unwrap();
+        assert!(publication_files(&task, address, 1).is_ok());
+        record[12..16].copy_from_slice(&3u32.to_ne_bytes());
+        crate::library::std::usercopy::copy_to_user(&task, address, &record).unwrap();
+        assert!(publication_files(&task, address, 1).is_err());
+        assert!(publication_files(&task, usize::MAX, 1).is_err());
+        assert!(publication_files(&task, address, 65).is_err());
+        task.handle_table.remove(handle);
+        assert!(send.is_hung_up());
     }
 }

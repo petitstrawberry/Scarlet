@@ -137,11 +137,22 @@ impl InlineContextEntry {
 pub struct LayerContext {
     inline: [Option<InlineContextEntry>; CONTEXT_INLINE_ENTRIES],
     overflow: BTreeMap<String, Vec<u8>>,
+    traffic_budget: Option<Arc<super::traffic::Budget>>,
 }
 
 impl LayerContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Native authority selected by the owning socket/stack, never decoded
+    /// from arbitrary routing keys or a userspace packet's contents.
+    pub fn set_traffic_budget(&mut self, budget: Arc<super::traffic::Budget>) {
+        self.traffic_budget = Some(budget);
+    }
+
+    pub fn traffic_budget(&self) -> Option<&Arc<super::traffic::Budget>> {
+        self.traffic_budget.as_ref()
     }
 
     /// Own arbitrary routing metadata. Short, common-size entries never touch

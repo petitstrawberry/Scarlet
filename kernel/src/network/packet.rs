@@ -15,6 +15,7 @@ pub struct PacketBuffer {
     storage: Vec<u8>,
     start: usize,
     link_token: Option<(u64, u64)>,
+    traffic_reservation: Option<super::traffic::Reservation>,
 }
 
 impl PacketBuffer {
@@ -33,6 +34,7 @@ impl PacketBuffer {
             storage,
             start: headroom,
             link_token: None,
+            traffic_reservation: None,
         })
     }
 
@@ -53,6 +55,7 @@ impl PacketBuffer {
             storage,
             start: headroom,
             link_token: None,
+            traffic_reservation: None,
         })
     }
 
@@ -62,6 +65,7 @@ impl PacketBuffer {
             storage,
             start: 0,
             link_token: None,
+            traffic_reservation: None,
         }
     }
 
@@ -70,6 +74,25 @@ impl PacketBuffer {
     }
     pub fn set_link_token(&mut self, token: Option<(u64, u64)>) {
         self.link_token = token;
+    }
+
+    pub fn reserve_traffic(
+        &mut self,
+        budget: &alloc::sync::Arc<super::traffic::Budget>,
+    ) -> Result<(), SocketError> {
+        if self.traffic_reservation.is_some() {
+            return Err(SocketError::InvalidPacket);
+        }
+        self.traffic_reservation = Some(
+            budget
+                .reserve(super::traffic::Direction::Transmit, self.len())
+                .map_err(|_| SocketError::PermissionDenied)?,
+        );
+        Ok(())
+    }
+
+    pub fn take_traffic_reservation(&mut self) -> Option<super::traffic::Reservation> {
+        self.traffic_reservation.take()
     }
 
     pub fn len(&self) -> usize {
@@ -87,8 +110,10 @@ impl PacketBuffer {
     pub fn prepend(&mut self, header: &[u8]) -> Result<(), SocketError> {
         if header.len() > self.start {
             let token = self.link_token;
-            *self = Self::from_slice(self.as_slice(), header.len())?;
-            self.link_token = token;
+            let mut replacement = Self::from_slice(self.as_slice(), header.len())?;
+            replacement.link_token = token;
+            replacement.traffic_reservation = self.traffic_reservation.take();
+            *self = replacement;
         }
         self.start -= header.len();
         self.storage[self.start..self.start + header.len()].copy_from_slice(header);
@@ -126,6 +151,27 @@ impl PacketBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn owned_packet_reservation_survives_reallocation_and_cancels_with_queue_drop() {
+        let budget = super::super::traffic::Budget::new();
+        budget.configure(Some(40), None).unwrap();
+        let mut packet = PacketBuffer::from_slice(&[7; 40], 0).unwrap();
+        packet.reserve_traffic(&budget).unwrap();
+        packet.prepend(&[0; 14]).unwrap();
+        packet.pad_to(60).unwrap();
+        assert_eq!(budget.snapshot().reserved_bytes, 40);
+        assert_eq!(budget.snapshot().transmitted.bytes, 0);
+        assert!(packet.reserve_traffic(&budget).is_err());
+        drop(packet);
+        assert_eq!(budget.snapshot().reserved_bytes, 0);
+        let mut packet = PacketBuffer::from_slice(&[8; 40], 14).unwrap();
+        packet.reserve_traffic(&budget).unwrap();
+        packet.take_traffic_reservation().unwrap().commit();
+        drop(packet);
+        assert_eq!(budget.snapshot().reserved_bytes, 0);
+        assert_eq!(budget.snapshot().transmitted.bytes, 40);
+    }
 
     #[test_case]
     fn packet_headers_preserve_payload_address_and_final_allocation() {

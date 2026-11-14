@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicU8, Ordering};
 // Minimal FUTEX op codes (match Linux)
 const FUTEX_WAIT: u32 = 0;
 const FUTEX_WAKE: u32 = 1;
+const FUTEX_REQUEUE: u32 = 3;
+const FUTEX_CMP_REQUEUE: u32 = 4;
 // musl probes this operation before enabling priority-inheritance mutexes.
 const FUTEX_LOCK_PI: u32 = 6;
 // Extended ops commonly used by musl
@@ -43,12 +45,16 @@ enum FutexKey {
 
 struct FutexWaitOutcome {
     state: AtomicU8,
+    // Requeue changes this while holding both queues. Cleanup rechecks the
+    // location under the selected queue lock before removing a registration.
+    key: IrqSpinLock<FutexKey>,
 }
 
 impl FutexWaitOutcome {
-    const fn new() -> Self {
+    const fn new(key: FutexKey) -> Self {
         Self {
             state: AtomicU8::new(WAIT_PENDING),
+            key: IrqSpinLock::new(key),
         }
     }
 
@@ -176,20 +182,97 @@ fn remove_unused_queue(key: FutexKey) {
     }
 }
 
-fn remove_waiter(key: FutexKey, task_id: usize, outcome: &Arc<FutexWaitOutcome>) {
-    let queue = {
-        let map = FUTEX_QUEUES.call_once(init_futex_queues).lock();
-        map.get(&key).cloned()
-    };
-    let Some(queue) = queue else {
+fn remove_waiter(task_id: usize, outcome: &Arc<FutexWaitOutcome>) {
+    loop {
+        let key = *outcome.key.lock();
+        let queue = {
+            let map = FUTEX_QUEUES.call_once(init_futex_queues).lock();
+            map.get(&key).cloned()
+        };
+        let Some(queue) = queue else {
+            if *outcome.key.lock() != key {
+                continue;
+            }
+            return;
+        };
+        let mut waiters = queue.waiters.lock();
+        if *outcome.key.lock() != key {
+            drop(waiters);
+            drop(queue);
+            remove_unused_queue(key);
+            continue;
+        }
+        waiters
+            .retain(|waiter| waiter.task_id != task_id || !Arc::ptr_eq(&waiter.outcome, outcome));
+        drop(waiters);
+        drop(queue);
+        remove_unused_queue(key);
         return;
+    }
+}
+
+fn requeue_key(
+    source: FutexKey,
+    destination: FutexKey,
+    wake_count: usize,
+    move_count: usize,
+    compare: impl FnOnce() -> Result<(), usize>,
+) -> Result<usize, usize> {
+    let from = get_futex_queue(source);
+    let to = get_futex_queue(destination);
+    // A consistent order permits opposite-direction requeues without a cycle.
+    // The registry lock is never held while acquiring this pair of locks.
+    let result = {
+        let (first, second) = if source <= destination {
+            (&from, &to)
+        } else {
+            (&to, &from)
+        };
+        let mut first_waiters = first.waiters.lock();
+        let mut second_waiters = (source != destination).then(|| second.waiters.lock());
+        let (from_waiters, to_waiters) = if source <= destination {
+            (&mut *first_waiters, second_waiters.as_deref_mut())
+        } else {
+            (
+                &mut **second_waiters.as_mut().unwrap(),
+                Some(&mut *first_waiters),
+            )
+        };
+        compare().map(|()| {
+            let mut selected = Vec::new();
+            let mut retained = VecDeque::new();
+            let mut moved = 0;
+            let mut to_waiters = to_waiters;
+            while let Some(waiter) = from_waiters.pop_front() {
+                if selected.len() < wake_count && waiter.outcome.try_wake() {
+                    selected.push(waiter);
+                } else if waiter.outcome.is_pending() {
+                    if moved < move_count {
+                        moved += 1;
+                        if let Some(target) = to_waiters.as_mut() {
+                            *waiter.outcome.key.lock() = destination;
+                            target.push_back(waiter);
+                            continue;
+                        }
+                    }
+                    retained.push_back(waiter);
+                }
+            }
+            *from_waiters = retained;
+            (selected, moved)
+        })
     };
-    queue
-        .waiters
-        .lock()
-        .retain(|waiter| waiter.task_id != task_id || !Arc::ptr_eq(&waiter.outcome, outcome));
-    drop(queue);
-    remove_unused_queue(key);
+    drop(from);
+    drop(to);
+    remove_unused_queue(source);
+    remove_unused_queue(destination);
+    result.map(|(selected, moved)| {
+        for waiter in &selected {
+            let _ = crate::sched::scheduler::wake_task(waiter.task_id);
+            waiter.outcome.complete_wake();
+        }
+        selected.len() + moved
+    })
 }
 
 fn wake_key(key: FutexKey, max: usize, wake_bitset: u32) -> usize {
@@ -232,7 +315,6 @@ fn wake_key(key: FutexKey, max: usize, wake_bitset: u32) -> usize {
 
 struct FutexTimeoutHandler {
     task_id: usize,
-    key: FutexKey,
     outcome: Arc<FutexWaitOutcome>,
     timer_handle: IrqSpinLock<Option<TimerHandle>>,
 }
@@ -241,7 +323,7 @@ impl TimerHandler for FutexTimeoutHandler {
     fn on_timer_expired(self: Arc<Self>, _context: usize) {
         let timeout_won = self.outcome.try_timeout();
         if timeout_won {
-            remove_waiter(self.key, self.task_id, &self.outcome);
+            remove_waiter(self.task_id, &self.outcome);
         }
         if let Some(task) = crate::sched::scheduler::get_task_by_id(self.task_id)
             && let Some(timer_handle) = self.timer_handle.lock().take()
@@ -370,7 +452,7 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let op_raw = trapframe.get_arg(1) as u32;
     let val = trapframe.get_arg(2) as i32;
     let timeout = trapframe.get_arg(3) as usize;
-    let _uaddr2 = trapframe.get_arg(4) as usize;
+    let uaddr2 = trapframe.get_arg(4) as usize;
     let val3 = trapframe.get_arg(5) as u32;
 
     // Always advance PC to avoid re-executing syscall on resume
@@ -402,7 +484,7 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
             let tid = task.get_id();
             let queue = get_futex_queue(key);
-            let outcome = Arc::new(FutexWaitOutcome::new());
+            let outcome = Arc::new(FutexWaitOutcome::new(key));
 
             let wait_error = {
                 let mut waiters = queue.waiters.lock();
@@ -453,7 +535,6 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let timer_handle = deadline.map(|deadline| {
                 let handler = Arc::new(FutexTimeoutHandler {
                     task_id: tid,
-                    key,
                     outcome: outcome.clone(),
                     timer_handle: IrqSpinLock::new(None),
                 });
@@ -474,10 +555,7 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // A signal or process-control wake can resume the task without a
             // matching FUTEX_WAKE. Remove this exact registration so a later
             // wait at the same address cannot consume it.
-            queue
-                .waiters
-                .lock()
-                .retain(|waiter| waiter.task_id != tid || !Arc::ptr_eq(&waiter.outcome, &outcome));
+            remove_waiter(tid, &outcome);
             if let Some(timer_handle) = timer_handle {
                 let _ = task.finish_software_timer(timer_handle);
             }
@@ -505,6 +583,39 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // Return number of woken tasks
             woken
         }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            // Argument four is an integer count for these operations, not a
+            // timespec pointer. Linux consumes its low signed 32 bits.
+            let move_count = timeout as i32;
+            if val < 0 || move_count < 0 || uaddr2 & 3 != 0 {
+                return super::errno::to_result(super::errno::EINVAL);
+            }
+            if op_raw & FUTEX_CLOCK_REALTIME != 0 {
+                return super::errno::to_result(super::errno::ENOSYS);
+            }
+            if uaddr2 == 0 || task.vm_manager.translate_to_kva(uaddr2).is_none() {
+                return super::errno::to_result(super::errno::EFAULT);
+            }
+            let Some(destination) = futex_key(&task, uaddr2, private) else {
+                return super::errno::to_result(super::errno::EFAULT);
+            };
+            requeue_key(key, destination, val as usize, move_count as usize, || {
+                if cmd == FUTEX_CMP_REQUEUE {
+                    let address = task
+                        .vm_manager
+                        .translate_to_kva(uaddr)
+                        .ok_or(super::errno::EFAULT)?;
+                    // The aligned atomic compare and queue transfer are ordered
+                    // against WAIT/WAKE by the same queue locks.
+                    let word = unsafe { &*(address as *const core::sync::atomic::AtomicU32) };
+                    if word.load(Ordering::SeqCst) != val3 {
+                        return Err(super::errno::EAGAIN);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_or_else(super::errno::to_result)
+        }
         FUTEX_LOCK_PI => {
             // PI futexes are not implemented. Report the feature as unsupported
             // so pthread users can fall back to ordinary mutexes.
@@ -520,6 +631,162 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_key(address: usize) -> FutexKey {
+        FutexKey::Private {
+            thread_group_id: usize::MAX - 100,
+            address,
+        }
+    }
+
+    fn register_test_waiter(key: FutexKey, task_id: usize, bitset: u32) -> Arc<FutexWaitOutcome> {
+        let outcome = Arc::new(FutexWaitOutcome::new(key));
+        get_futex_queue(key).waiters.lock().push_back(FutexWaiter {
+            task_id,
+            bitset,
+            outcome: outcome.clone(),
+        });
+        outcome
+    }
+
+    #[test_case]
+    fn requeue_compares_atomically_and_preserves_waiter_bitsets() {
+        let source = test_key(0x1000);
+        let target = test_key(0x2000);
+        let first = register_test_waiter(source, usize::MAX - 1, 1);
+        let second = register_test_waiter(source, usize::MAX - 2, 2);
+        let third = register_test_waiter(source, usize::MAX - 3, 4);
+        assert_eq!(
+            requeue_key(source, target, 1, 1, || Err(super::super::errno::EAGAIN)),
+            Err(super::super::errno::EAGAIN)
+        );
+        assert_eq!(get_futex_queue(source).waiters.lock().len(), 3);
+        assert_eq!(wake_key(target, 10, FUTEX_BITSET_MATCH_ANY), 0);
+        assert_eq!(requeue_key(source, target, 1, 1, || Ok(())), Ok(2));
+        assert_eq!(first.finish_after_resume(), FutexWaitResult::Woken);
+        assert_eq!(*second.key.lock(), target);
+        assert!(second.is_pending());
+        assert_eq!(wake_key(target, 1, 1), 0);
+        assert_eq!(wake_key(target, 1, 2), 1);
+        assert_eq!(second.finish_after_resume(), FutexWaitResult::Woken);
+        assert_eq!(wake_key(source, 1, 4), 1);
+        assert_eq!(third.finish_after_resume(), FutexWaitResult::Woken);
+        assert!(!FUTEX_QUEUES.get().unwrap().lock().contains_key(&source));
+        assert!(!FUTEX_QUEUES.get().unwrap().lock().contains_key(&target));
+    }
+
+    #[test_case]
+    fn requeued_waiters_are_removed_after_timeout_interrupt_and_exit() {
+        let source = test_key(0x3000);
+        let middle = test_key(0x4000);
+        let target = test_key(0x5000);
+        let id = usize::MAX - 4;
+        for mode in 0..3 {
+            let outcome = register_test_waiter(source, id, FUTEX_BITSET_MATCH_ANY);
+            assert_eq!(requeue_key(source, middle, 0, 1, || Ok(())), Ok(1));
+            assert_eq!(requeue_key(middle, target, 0, 1, || Ok(())), Ok(1));
+            // Same-key requeue counts the registration without duplicating it.
+            assert_eq!(requeue_key(target, target, 0, 1, || Ok(())), Ok(1));
+            match mode {
+                0 => {
+                    let handler = Arc::new(FutexTimeoutHandler {
+                        task_id: id,
+                        outcome: outcome.clone(),
+                        timer_handle: IrqSpinLock::new(None),
+                    });
+                    handler.on_timer_expired(0);
+                    assert_eq!(outcome.finish_after_resume(), FutexWaitResult::TimedOut);
+                }
+                1 => {
+                    assert_eq!(outcome.finish_after_resume(), FutexWaitResult::Interrupted);
+                    remove_waiter(id, &outcome);
+                }
+                _ => remove_task_waiter(id),
+            }
+            for key in [source, middle, target] {
+                assert_eq!(wake_key(key, 10, FUTEX_BITSET_MATCH_ANY), 0);
+                assert!(!FUTEX_QUEUES.get().unwrap().lock().contains_key(&key));
+            }
+        }
+    }
+
+    #[test_case]
+    fn requeue_syscall_validates_counts_addresses_and_compared_value() {
+        use super::super::errno;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        let task = crate::task::new_user_task("requeue-validation".into(), 0);
+        let address = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(address, 1).unwrap();
+        copy_to_user(&task, address, &7u32.to_ne_bytes()).unwrap();
+        copy_to_user(&task, address + 8, &0x00000073u32.to_ne_bytes()).unwrap();
+        set_mock_current_task(Arc::new(task));
+        let mut abi = LinuxAbi::default();
+        for (op, wake, count, target, expected, result) in [
+            (
+                FUTEX_CMP_REQUEUE,
+                0,
+                1,
+                address + 4,
+                6,
+                errno::to_result(errno::EAGAIN),
+            ),
+            (FUTEX_CMP_REQUEUE, 0, 1, address + 4, 7, 0),
+            (FUTEX_REQUEUE, 0, 1, address + 4, 0, 0),
+            (
+                FUTEX_REQUEUE,
+                usize::MAX,
+                1,
+                address + 4,
+                0,
+                errno::to_result(errno::EINVAL),
+            ),
+            (
+                FUTEX_REQUEUE,
+                0,
+                usize::MAX,
+                address + 4,
+                0,
+                errno::to_result(errno::EINVAL),
+            ),
+            (
+                FUTEX_REQUEUE,
+                0,
+                1,
+                address + 1,
+                0,
+                errno::to_result(errno::EINVAL),
+            ),
+            (FUTEX_REQUEUE, 0, 1, 0, 0, errno::to_result(errno::EFAULT)),
+            (
+                FUTEX_REQUEUE | FUTEX_CLOCK_REALTIME,
+                0,
+                1,
+                address + 4,
+                0,
+                errno::to_result(errno::ENOSYS),
+            ),
+        ] {
+            let mut frame = Trapframe::new();
+            frame.set_pc((address + 8) as u64);
+            for (i, arg) in [
+                address,
+                (op | FUTEX_PRIVATE_FLAG) as usize,
+                wake,
+                count,
+                target,
+                expected,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                frame.set_arg(i, arg);
+            }
+            assert_eq!(sys_futex(&mut abi, &mut frame), result);
+        }
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn futex_wait_with_queued_interrupt_does_not_sleep_or_leave_a_waiter() {

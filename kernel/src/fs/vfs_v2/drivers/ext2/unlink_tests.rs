@@ -25,15 +25,15 @@ fn unlink_fixture(two_links: bool) -> Arc<Ext2FileSystem> {
     descriptors[0..4].copy_from_slice(&3_u32.to_le_bytes());
     descriptors[4..8].copy_from_slice(&4_u32.to_le_bytes());
     descriptors[8..12].copy_from_slice(&5_u32.to_le_bytes());
-    device.enqueue_request(Box::new(BlockIORequest {
+    let results = device.submit_requests(vec![Box::new(BlockIORequest {
         request_type: BlockIORequestType::Write,
         sector: 4,
         sector_count: 2,
         head: 0,
         cylinder: 0,
         buffer: descriptors,
-    }));
-    assert!(device.process_requests()[0].result.is_ok());
+    })]);
+    assert!(results[0].result.is_ok());
     let mut bitmap = vec![0; 1024];
     bitmap[1 / 8] |= 1 << (1 % 8); // root inode 2
     bitmap[10 / 8] |= 1 << (10 % 8); // file inode 11
@@ -58,6 +58,64 @@ fn unlink_fixture(two_links: bool) -> Arc<Ext2FileSystem> {
     };
     fs.write_block_cached(301, &entries).unwrap();
     fs
+}
+
+#[test_case]
+fn ext2_block_symlinks_at_inline_boundary_read_and_reclaim_data() {
+    for length in [59, 60, 61] {
+        let fs = unlink_fixture(false);
+        let target = "x".repeat(length);
+        let mut inode = fs.read_inode(11).unwrap();
+        inode.mode = (EXT2_S_IFLNK | 0o777).to_le();
+        inode.size = (length as u32).to_le();
+        inode.blocks = 2_u32.to_le();
+        fs.write_inode(11, &inode).unwrap();
+        let mut buffer = vec![0; 1024];
+        buffer[..length].copy_from_slice(target.as_bytes());
+        let results = fs
+            .block_device
+            .submit_requests(vec![Box::new(BlockIORequest {
+                request_type: BlockIORequestType::Write,
+                sector: fs.block_to_sector(300),
+                sector_count: 2,
+                head: 0,
+                cylinder: 0,
+                buffer,
+            })]);
+        assert!(results[0].result.is_ok());
+        let root = fs.root_node();
+        let node = fs.lookup(&root, &"file".to_string()).unwrap();
+        assert!(node.is_symlink().unwrap());
+        assert_eq!(node.read_link().unwrap(), target);
+        fs.remove(&root, &"file".to_string()).unwrap();
+        drop(node);
+        fs.reclaim_unlinked_inodes().unwrap();
+        assert_eq!(
+            fs.read_block_cached(3).unwrap()[299 / 8] & (1 << (299 % 8)),
+            0
+        );
+    }
+}
+
+#[test_case]
+fn ext2_inline_symlink_classification_accounts_for_external_attributes() {
+    let (_device, fs, _) = create_writeback_test_file();
+    let mut inode = Ext2Inode::empty();
+    inode.mode = (EXT2_S_IFLNK | 0o777).to_le();
+    inode.size = 60_u32.to_le();
+    inode.block = [u32::from_le_bytes(*b"abcd"); 15];
+    let target = "abcd".repeat(15);
+    assert_eq!(inode.read_symlink_target(&fs).unwrap(), target);
+    inode.file_acl = 301_u32.to_le();
+    inode.blocks = 2_u32.to_le();
+    assert_eq!(inode.read_symlink_target(&fs).unwrap(), target);
+    assert_eq!(
+        fs.file_type_from_inode(&inode, 11).unwrap(),
+        FileType::SymbolicLink(target)
+    );
+    inode.size = 61_u32.to_le();
+    assert!(inode.read_symlink_target(&fs).is_err());
+    assert!(fs.file_type_from_inode(&inode, 11).is_err());
 }
 
 #[test_case]

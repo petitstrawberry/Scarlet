@@ -28,7 +28,11 @@ storage. Environment variables are passed unchanged.
 Same-ABI exec preserves cwd. Cross-ABI exec starts at `/`. Fork shares the
 Environment and mount views but copies cwd and the handle table. `CLONE_FS`
 explicitly shares the filesystem context, including cwd. A requested VFS
-namespace clone copies all ABI views together, preserving a coherent Environment.
+namespace split snapshots the current ABI views into a process-side mapping.
+It retains the same Environment identity; fork and exec inherit the mapping.
+Linux `unshare(CLONE_NEWNS)` uses the same primitive, so Binder domains do not
+change when mounts are isolated. Explicit views outside the snapshot retain
+the identity of their supplied capability.
 
 Loading takes place in an unpublished process image. Failure leaves the live
 memory mappings, ABI, Environment, cwd, handle table and user registers intact.

@@ -27,7 +27,10 @@ const SCARLET_MAIR_EL1: u64 = MAIR_NORMAL_WRITE_BACK
     | (MAIR_DEVICE_GRE << 24)
     | (MAIR_DEVICE_NGNRNE << 32);
 // TCR_EL1.IPS=0b010 selects a 40-bit PA range; QEMU virt can place PCI ECAM above 36 bits.
-const SCARLET_TCR_EL1: u64 = 0x2_B510_3510;
+// TBI0 ignores the top byte of TTBR0 addresses, as AArch64 Linux userspace
+// expects. Scudo tags its internal headers even with heap tagging disabled.
+// This does not enable MTE or the separate tagged-pointer syscall ABI.
+const SCARLET_TCR_EL1: u64 = 0x2_B510_3510 | (1 << 37);
 // UCT (bit 15) permits EL0 to read CTR_EL0 for cache-line sizing.
 // UCI (bit 26) permits EL0 cache maintenance by virtual address, including
 // DC CVAU and IC IVAU. JITs such as Box64 use these to synchronize generated

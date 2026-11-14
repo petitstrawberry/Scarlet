@@ -20,9 +20,10 @@ use alloc::{string::String, sync::Arc};
 use crate::ipc::StreamIpcOps;
 use crate::object::capability::{Selectable, StreamError};
 
-fn stream_error_to_socket_error(error: StreamError) -> SocketError {
+pub(super) fn stream_error_to_socket_error(error: StreamError) -> SocketError {
     match error {
         StreamError::WouldBlock => SocketError::WouldBlock,
+        StreamError::TimedOut => SocketError::TimedOut,
         StreamError::Interrupted => SocketError::Interrupted,
         StreamError::Closed | StreamError::BrokenPipe => SocketError::NotConnected,
         StreamError::InvalidArgument => SocketError::InvalidArgument,
@@ -284,6 +285,12 @@ pub enum SocketState {
 /// Socket errors
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketError {
+    /// The requested endpoint label is not authorized.
+    PermissionDenied,
+    DestinationRequired,
+    MessageTooLarge,
+    ProtocolMismatch,
+    BrokenPipe,
     /// Invalid socket address
     InvalidAddress,
     /// Address already in use
@@ -332,6 +339,11 @@ pub enum SocketError {
 /// Convert a socket error into the positive errno used by Scarlet Native.
 pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
     match error {
+        SocketError::PermissionDenied => 13,
+        SocketError::DestinationRequired => 89,
+        SocketError::MessageTooLarge => 90,
+        SocketError::ProtocolMismatch => 91,
+        SocketError::BrokenPipe => 32,
         SocketError::InvalidAddress | SocketError::InvalidArgument => 22,
         SocketError::AddressInUse => 98,
         SocketError::AddressNotAvailable => 99,
@@ -349,6 +361,24 @@ pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
         SocketError::ProtocolNotSupported => 93,
         SocketError::InvalidPacket | SocketError::Other(_) => 5,
     }
+}
+
+/// Map socket I/O failures to Scarlet's native errno space. I/O deadlines use
+/// the retry-style `EAGAIN` result expected by Linux `SO_RCVTIMEO` and
+/// `SO_SNDTIMEO`; connect deadlines remain `ETIMEDOUT`.
+pub(crate) fn socket_io_error_to_native_errno(error: &SocketError) -> i32 {
+    match error {
+        SocketError::TimedOut | SocketError::WouldBlock => 11,
+        SocketError::Interrupted => 4,
+        error => socket_error_to_native_errno(error),
+    }
+}
+
+/// Native message options; ABI modules translate their own flag encodings.
+pub mod message_flags {
+    pub const NONBLOCK: u32 = 1;
+    pub const PEEK: u32 = 2;
+    pub const FULL_LENGTH: u32 = 4;
 }
 
 /// Socket control operations trait
@@ -486,6 +516,16 @@ mod tests {
     fn test_socket_type() {
         assert_eq!(SocketType::Stream, SocketType::Stream);
         assert_ne!(SocketType::Stream, SocketType::Datagram);
+    }
+
+    #[test_case]
+    fn terminal_stream_deadline_maps_to_socket_timeout_and_io_eagain() {
+        assert_eq!(
+            stream_error_to_socket_error(StreamError::TimedOut),
+            SocketError::TimedOut
+        );
+        assert_eq!(socket_error_to_native_errno(&SocketError::TimedOut), 110);
+        assert_eq!(socket_io_error_to_native_errno(&SocketError::TimedOut), 11);
     }
 
     #[test_case]

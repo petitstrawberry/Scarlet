@@ -11,7 +11,7 @@ use std::{
     ffi::{CStr, c_char},
     sync::{Mutex, OnceLock},
 };
-mod scene;
+pub mod scene;
 
 use sws_client::{
     Connection, Error, Event, EventReceiver, Handle, SgfxBufferIdentity, SgfxDamageRect,
@@ -39,6 +39,27 @@ pub struct SwsEvent {
     pub height: u32,
 }
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SwsTouchFrame {
+    pub window_id: u32,
+    pub seat_id: u32,
+    pub serial: u64,
+    pub time_ns: u64,
+    pub change_count: u32,
+    pub reserved: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SwsTouchChange {
+    pub id: u64,
+    pub phase: u32,
+    pub x: i32,
+    pub y: i32,
+    pub pressure: i32,
+    pub touch_major: i32,
+    pub reserved: u32,
+}
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SwsBuffer {
     pub window_id: u32,
@@ -64,11 +85,137 @@ pub struct SwsGpuEvent {
     pub code: u32,
 }
 
+const MAX_PENDING_TOUCH_FRAMES: usize = 64;
+
+struct QueuedTouchFrame {
+    frame: SwsTouchFrame,
+    changes: Vec<SwsTouchChange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TouchQueueResult {
+    Queued,
+    Overflowed,
+    AlreadyOverflowed,
+}
+
+#[derive(Default)]
+struct TouchQueues {
+    frames: BTreeMap<u32, VecDeque<QueuedTouchFrame>>,
+    overflowed: BTreeSet<u32>,
+}
+
+impl TouchQueues {
+    fn push(&mut self, window_id: u32, frame: sws_protocol::touch::Frame) -> TouchQueueResult {
+        if self.overflowed.contains(&window_id) {
+            return TouchQueueResult::AlreadyOverflowed;
+        }
+        let queue = self.frames.entry(window_id).or_default();
+        if queue.len() >= MAX_PENDING_TOUCH_FRAMES {
+            self.overflowed.insert(window_id);
+            return TouchQueueResult::Overflowed;
+        }
+
+        let changes = frame
+            .changes
+            .into_iter()
+            .map(|change| SwsTouchChange {
+                id: change.id,
+                phase: change.phase as u32,
+                x: change.x,
+                y: change.y,
+                pressure: change.pressure.unwrap_or(-1),
+                touch_major: change.touch_major.unwrap_or(-1),
+                reserved: 0,
+            })
+            .collect::<Vec<_>>();
+        queue.push_back(QueuedTouchFrame {
+            frame: SwsTouchFrame {
+                window_id,
+                seat_id: frame.seat_id,
+                serial: frame.serial,
+                time_ns: frame.time_ns,
+                change_count: changes.len() as u32,
+                reserved: 0,
+            },
+            changes,
+        });
+        TouchQueueResult::Queued
+    }
+
+    fn pop(&mut self, window_id: u32) -> Option<QueuedTouchFrame> {
+        let queue = self.frames.get_mut(&window_id)?;
+        let frame = queue.pop_front()?;
+        if queue.is_empty() {
+            self.frames.remove(&window_id);
+        }
+        Some(frame)
+    }
+
+    fn remove(&mut self, window_id: u32) {
+        self.frames.remove(&window_id);
+        self.overflowed.remove(&window_id);
+    }
+}
+
+/// Copy the front frame only when the destination can hold every change,
+/// then consume exactly that one queue entry.
+unsafe fn copy_touch_frame(
+    touch: &mut TouchQueues,
+    window_id: u32,
+    frame: *mut SwsTouchFrame,
+    changes: *mut SwsTouchChange,
+    capacity: u32,
+) -> Result<bool, Error> {
+    let Some(queue) = touch.frames.get(&window_id) else {
+        return Ok(false);
+    };
+    let Some(queued) = queue.front() else {
+        return Ok(false);
+    };
+    if queued.changes.len() > capacity as usize {
+        return Err(Error::InvalidRequest);
+    }
+
+    // SAFETY: the caller checks both outputs are non-null and promises storage
+    // for `capacity` changes. The check above covers the complete frame.
+    unsafe {
+        frame.write(queued.frame);
+        std::ptr::copy_nonoverlapping(queued.changes.as_ptr(), changes, queued.changes.len());
+    }
+    touch.pop(window_id);
+    Ok(true)
+}
+
+fn queue_touch_frame(
+    touch: &mut TouchQueues,
+    events: &mut VecDeque<SwsEvent>,
+    window_id: u32,
+    frame: sws_protocol::touch::Frame,
+) -> TouchQueueResult {
+    let result = touch.push(window_id, frame);
+    match result {
+        TouchQueueResult::Queued => events.push_back(SwsEvent {
+            window_id,
+            kind: 8,
+            ..Default::default()
+        }),
+        TouchQueueResult::Overflowed => events.push_back(SwsEvent {
+            window_id,
+            kind: 7,
+            ..Default::default()
+        }),
+        TouchQueueResult::AlreadyOverflowed => {}
+    }
+    result
+}
+
 struct Client {
     connection: Connection,
     scenes: scene::Scenes,
     gpu_events: BTreeMap<u32, EventReceiver>,
     events: VecDeque<SwsEvent>,
+    touch: TouchQueues,
     states: BTreeMap<u32, u32>,
     closed: BTreeSet<u32>,
     closing: BTreeSet<u32>,
@@ -106,6 +253,13 @@ impl Client {
                     value: input.value,
                     ..Default::default()
                 },
+                Event::TouchFrame { surface_id, frame } => {
+                    if !self.gpu_events.contains_key(&surface_id) {
+                        continue;
+                    }
+                    queue_touch_frame(&mut self.touch, &mut self.events, surface_id, frame);
+                    continue;
+                }
                 Event::SurfaceConfigure {
                     surface_id,
                     width,
@@ -248,6 +402,7 @@ fn call_profiled(operation: u32, f: impl FnOnce(&mut Client) -> Result<i32, Erro
             scenes: scene::Scenes::default(),
             gpu_events: BTreeMap::new(),
             events: VecDeque::new(),
+            touch: TouchQueues::default(),
             states: BTreeMap::new(),
             closed: BTreeSet::new(),
             closing: BTreeSet::new(),
@@ -491,6 +646,7 @@ pub extern "C" fn sws_window_destroy(id: u32) -> i32 {
         client.states.remove(&id);
         client.closed.remove(&id);
         client.closing.remove(&id);
+        client.touch.remove(id);
         client.events.retain(|event| event.window_id != id);
         Ok(0)
     })
@@ -523,6 +679,7 @@ pub extern "C" fn sws_window_destroy_sync(id: u32, timeout_ms: u32) -> i32 {
         client.states.remove(&id);
         client.closed.remove(&id);
         client.closing.remove(&id);
+        client.touch.remove(id);
         client.events.retain(|event| event.window_id != id);
         Ok(0)
     })
@@ -564,6 +721,19 @@ pub extern "C" fn sws_window_pointer_lock(id: u32, enabled: u32) -> i32 {
     })
 }
 
+/// Enable or disable native direct-touch frames for an owned window.
+/// Disabling asks SWS to cancel its active native contacts.
+#[unsafe(no_mangle)]
+pub extern "C" fn sws_window_set_touch_input(window_id: u32, enabled: i32) -> i32 {
+    call(|client| {
+        if client.closed.contains(&window_id) || !client.gpu_events.contains_key(&window_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        client.connection.set_touch_input(window_id, enabled != 0)?;
+        Ok(0)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sws_poll_event(out: *mut SwsEvent) -> i32 {
     if out.is_null() {
@@ -578,6 +748,35 @@ pub unsafe extern "C" fn sws_poll_event(out: *mut SwsEvent) -> i32 {
             return Ok(1);
         }
         Ok(0)
+    })
+}
+
+/// Copy the oldest complete touch frame for an owned window when it fits.
+/// An insufficient capacity leaves the frame queued and returns `-1`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_poll_touch_frame(
+    window_id: u32,
+    frame: *mut SwsTouchFrame,
+    changes: *mut SwsTouchChange,
+    capacity: u32,
+) -> i32 {
+    if frame.is_null() || changes.is_null() {
+        return -1;
+    }
+    call(|client| {
+        client.dispatch()?;
+        if client.closed.contains(&window_id) || !client.gpu_events.contains_key(&window_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        // SAFETY: both outputs are non-null and the caller promises writable
+        // storage for `capacity` change records.
+        Ok(unsafe {
+            if copy_touch_frame(&mut client.touch, window_id, frame, changes, capacity)? {
+                1
+            } else {
+                0
+            }
+        })
     })
 }
 
@@ -747,4 +946,176 @@ pub unsafe extern "C" fn sws_gpu_poll(id: u32, out: *mut SwsGpuEvent) -> i32 {
         }
         Ok(0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sws_protocol::touch::{Change, Frame, Phase};
+
+    fn change(id: u64, phase: Phase) -> Change {
+        Change {
+            id,
+            phase,
+            x: -(id as i32) + 3,
+            y: id as i32 + 7,
+            pressure: Some(id as i32 + 11),
+            touch_major: Some(id as i32 + 13),
+        }
+    }
+
+    fn frame(serial: u64) -> Frame {
+        Frame {
+            seat_id: 9,
+            serial,
+            time_ns: 1_000 + serial,
+            changes: vec![
+                change(10, Phase::Down),
+                change(20, Phase::Move),
+                change(30, Phase::Up),
+                Change {
+                    pressure: None,
+                    touch_major: None,
+                    ..change(40, Phase::Cancel)
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn touch_abi_layout_and_conversion_preserve_frame_fields() {
+        assert_eq!(core::mem::size_of::<SwsTouchFrame>(), 32);
+        assert_eq!(core::mem::size_of::<SwsTouchChange>(), 32);
+
+        let mut queues = TouchQueues::default();
+        assert_eq!(queues.push(77, frame(123)), TouchQueueResult::Queued);
+        let queued = queues.pop(77).expect("queued frame");
+
+        assert_eq!(
+            queued.frame,
+            SwsTouchFrame {
+                window_id: 77,
+                seat_id: 9,
+                serial: 123,
+                time_ns: 1_123,
+                change_count: 4,
+                reserved: 0,
+            }
+        );
+        assert_eq!(
+            queued.changes,
+            vec![
+                SwsTouchChange {
+                    id: 10,
+                    phase: 0,
+                    x: -7,
+                    y: 17,
+                    pressure: 21,
+                    touch_major: 23,
+                    reserved: 0
+                },
+                SwsTouchChange {
+                    id: 20,
+                    phase: 1,
+                    x: -17,
+                    y: 27,
+                    pressure: 31,
+                    touch_major: 33,
+                    reserved: 0
+                },
+                SwsTouchChange {
+                    id: 30,
+                    phase: 2,
+                    x: -27,
+                    y: 37,
+                    pressure: 41,
+                    touch_major: 43,
+                    reserved: 0
+                },
+                SwsTouchChange {
+                    id: 40,
+                    phase: 3,
+                    x: -37,
+                    y: 47,
+                    pressure: -1,
+                    touch_major: -1,
+                    reserved: 0
+                },
+            ]
+        );
+        assert!(queues.pop(77).is_none());
+    }
+
+    #[test]
+    fn touch_queue_is_per_window_bounded_and_removed_with_the_window() {
+        let mut queues = TouchQueues::default();
+        let mut events = VecDeque::new();
+
+        for serial in 0..MAX_PENDING_TOUCH_FRAMES as u64 {
+            assert_eq!(
+                queue_touch_frame(&mut queues, &mut events, 4, frame(serial)),
+                TouchQueueResult::Queued
+            );
+        }
+        assert_eq!(events.len(), MAX_PENDING_TOUCH_FRAMES);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.window_id == 4 && event.kind == 8)
+        );
+
+        assert_eq!(
+            queue_touch_frame(&mut queues, &mut events, 4, frame(64)),
+            TouchQueueResult::Overflowed
+        );
+        assert_eq!(events.back().unwrap().kind, 7);
+        assert_eq!(
+            queue_touch_frame(&mut queues, &mut events, 4, frame(65)),
+            TouchQueueResult::AlreadyOverflowed
+        );
+        assert_eq!(events.len(), MAX_PENDING_TOUCH_FRAMES + 1);
+
+        assert_eq!(
+            queue_touch_frame(&mut queues, &mut events, 5, frame(200)),
+            TouchQueueResult::Queued
+        );
+        queues.remove(4);
+        assert!(queues.pop(4).is_none());
+        assert!(queues.pop(5).is_some());
+        assert_eq!(
+            queue_touch_frame(&mut queues, &mut events, 4, frame(300)),
+            TouchQueueResult::Queued
+        );
+    }
+
+    #[test]
+    fn touch_copy_requires_complete_capacity_and_consumes_only_after_success() {
+        let mut queues = TouchQueues::default();
+        assert_eq!(queues.push(8, frame(400)), TouchQueueResult::Queued);
+        let mut output = SwsTouchFrame::default();
+        let mut changes = [SwsTouchChange::default(); 4];
+
+        // SAFETY: both output buffers cover their stated capacities.
+        assert_eq!(
+            unsafe { copy_touch_frame(&mut queues, 8, &mut output, changes.as_mut_ptr(), 3) },
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(
+            queues.frames.get(&8).map(VecDeque::len),
+            Some(1),
+            "insufficient capacity must not consume the frame"
+        );
+
+        let mut output = SwsTouchFrame::default();
+        // SAFETY: both output buffers cover their stated capacities.
+        assert_eq!(
+            unsafe { copy_touch_frame(&mut queues, 8, &mut output, changes.as_mut_ptr(), 4) },
+            Ok(true)
+        );
+        assert_eq!(output.serial, 400);
+        assert_eq!(changes[0].id, 10);
+        assert_eq!(changes[3].phase, 3);
+        assert_eq!(changes[3].pressure, -1);
+        assert!(queues.frames.get(&8).is_none());
+    }
 }

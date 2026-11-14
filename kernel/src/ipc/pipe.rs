@@ -5,9 +5,7 @@
 //! - UnidirectionalPipe: Traditional unidirectional pipe (read-only or write-only)
 
 use crate::sync::{IrqSpinLock, sequence::IdSequence};
-#[cfg(test)]
-use alloc::vec::Vec;
-use alloc::{collections::VecDeque, format, string::String, sync::Arc};
+use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use super::{IpcError, StreamIpcOps};
@@ -35,6 +33,13 @@ pub trait PipeObject: StreamIpcOps + CloneOps {
 
     /// Get the buffer size of the pipe
     fn buffer_size(&self) -> usize;
+
+    /// Resize shared buffering without discarding queued bytes. A zero size or
+    /// a size smaller than the queued data returns `InvalidArgument`; allocation
+    /// failure returns `NoSpace`. Failure leaves both endpoints unchanged.
+    fn resize_buffer(&self, _size: usize) -> Result<usize, StreamError> {
+        Err(StreamError::NotSupported)
+    }
 
     /// Get the number of bytes currently in the pipe buffer
     fn available_bytes(&self) -> usize;
@@ -108,6 +113,33 @@ struct SharedPipeData {
 }
 
 impl SharedPipeData {
+    fn resize_buffer(&self, size: usize) -> Result<usize, StreamError> {
+        if size == 0 {
+            return Err(StreamError::InvalidArgument);
+        }
+        if self.state.lock().max_size == size {
+            return Ok(size);
+        }
+        // Allocate before taking the queue lock. Readers and writers may make
+        // progress meanwhile; validate the current queue before publishing.
+        let mut replacement = VecDeque::new();
+        replacement
+            .try_reserve_exact(size)
+            .map_err(|_| StreamError::NoSpace)?;
+        let old = {
+            let mut state = self.state.lock();
+            if state.buffer.len() > size {
+                return Err(StreamError::InvalidArgument);
+            }
+            replacement.extend(state.buffer.iter().copied());
+            state.max_size = size;
+            core::mem::replace(&mut state.buffer, replacement)
+        };
+        drop(old);
+        self.write_waker.wake_all();
+        Ok(size)
+    }
+
     fn new(buffer_size: usize) -> Arc<Self> {
         static NEXT_PIPE_ID: IdSequence = IdSequence::new();
         Arc::new(Self {
@@ -367,6 +399,9 @@ impl CloneOps for PipeEndpoint {
 }
 
 impl PipeObject for PipeEndpoint {
+    fn resize_buffer(&self, size: usize) -> Result<usize, StreamError> {
+        self.data.resize_buffer(size)
+    }
     fn pipe_id(&self) -> Option<u64> {
         Some(self.data.id)
     }
@@ -542,6 +577,9 @@ impl CloneOps for UnidirectionalPipe {
 }
 
 impl PipeObject for UnidirectionalPipe {
+    fn resize_buffer(&self, size: usize) -> Result<usize, StreamError> {
+        self.endpoint.resize_buffer(size)
+    }
     fn pipe_id(&self) -> Option<u64> {
         self.endpoint.pipe_id()
     }
@@ -606,6 +644,21 @@ impl Selectable for UnidirectionalPipe {
         set
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        if interest.read && self.endpoint.can_read {
+            registrations.push(self.endpoint.data.read_waker.subscribe_readiness(waiter));
+        }
+        if interest.write && self.endpoint.can_write {
+            registrations.push(self.endpoint.data.write_waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
+    }
+
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,
@@ -659,6 +712,42 @@ impl Selectable for UnidirectionalPipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn resizing_shares_capacity_preserves_data_and_notifies_full_writers() {
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(8);
+        let clone = writer.clone();
+        writer.set_nonblocking(true);
+        assert_eq!(writer.write(b"12345678").unwrap(), 8);
+        let waiter = Arc::new(Waker::new_interruptible("pipe-resize"));
+        let registrations = writer
+            .subscribe_readiness(ReadyInterest::write(), &waiter)
+            .unwrap();
+        let generation = registrations[0].generation();
+        assert!(!writer.current_ready(ReadyInterest::write()).write);
+        assert!(matches!(
+            reader.resize_buffer(4),
+            Err(StreamError::InvalidArgument)
+        ));
+        assert_eq!(clone.buffer_size(), 8);
+        assert_eq!(reader.resize_buffer(16).unwrap(), 16);
+        assert_eq!(clone.buffer_size(), 16);
+        // Small pipes promise atomic writes up to their capacity, so first
+        // consume the queued bytes before checking their writable readiness.
+        assert!(registrations[0].generation() > generation);
+        assert_eq!(clone.write(b"abcdefgh").unwrap(), 8);
+        let mut bytes = [0; 16];
+        assert_eq!(reader.read(&mut bytes).unwrap(), 16);
+        assert_eq!(&bytes, b"12345678abcdefgh");
+        assert!(writer.current_ready(ReadyInterest::write()).write);
+        assert_eq!(writer.resize_buffer(4).unwrap(), 4);
+        assert_eq!(reader.buffer_size(), 4);
+        assert!(matches!(
+            reader.resize_buffer(0),
+            Err(StreamError::InvalidArgument)
+        ));
+        assert_eq!(reader.buffer_size(), 4);
+    }
 
     #[test_case]
     fn test_pipe_creation() {

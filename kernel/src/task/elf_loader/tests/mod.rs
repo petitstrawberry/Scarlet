@@ -324,6 +324,11 @@ fn native_interpreter_handoff_preserves_main_metadata_and_initial_stack() {
         .unwrap();
         assert_eq!(sp % 16, 0);
         assert_eq!(argv, sp + word);
+        let entry_stack = task.vm_manager.process_entry_stack().unwrap();
+        assert_eq!(
+            (entry_stack.base, entry_stack.top, entry_stack.initial_sp),
+            (top - PAGE_SIZE, top, sp)
+        );
         let mut stack = vec![0; top - sp];
         copy_from_user(&task, sp, &mut stack).unwrap();
         let read = |index| model.read_word(&stack, index * word).unwrap().unsigned();
@@ -332,6 +337,7 @@ fn native_interpreter_handoff_preserves_main_metadata_and_initial_stack() {
         assert_eq!(read(5), 0); // envp terminator
         for (kind, expected) in [
             (AT_ENTRY, 0x11000),
+            (AT_SECURE, 0),
             (AT_BASE, bias),
             (AT_PHDR, result.program_headers.phdr_addr),
             (AT_PHENT, ph_size as u64),
@@ -822,4 +828,39 @@ fn test_load_elf_bss_zeroed() {
             i
         );
     }
+}
+
+#[test_case]
+fn noexec_checks_main_elf_and_dynamic_interpreter_before_executable_mapping() {
+    use alloc::sync::Arc;
+    let fs = Arc::new(VfsManager::new());
+    fs.create_dir("/noexec").unwrap();
+    fs.mount(TmpFS::new(0), "/noexec", 8).unwrap();
+    let interpreter = native_fixture(&[0x42; 4], PAGE_SIZE as u64);
+    let main = fixture_with_interpreter("/noexec/ld");
+    for (path, bytes) in [("/main", &main), ("/noexec/ld", &interpreter)] {
+        fs.create_file(path, FileType::RegularFile).unwrap();
+        fs.open(path, O_RDWR)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .write(bytes)
+            .unwrap();
+    }
+    let task = new_user_task("noexec-elf".into(), 0);
+    task.set_vfs(fs.clone());
+    let file = fs.open("/noexec/ld", 0).unwrap();
+    assert_eq!(
+        analyze_and_load_elf(file.as_file().unwrap(), &task)
+            .unwrap_err()
+            .message,
+        "execution disabled on mount"
+    );
+    let main = fs.open("/main", 0).unwrap();
+    assert_eq!(
+        analyze_and_load_elf(main.as_file().unwrap(), &task)
+            .unwrap_err()
+            .message,
+        "interpreter execution disabled on mount"
+    );
 }

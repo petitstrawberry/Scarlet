@@ -10,6 +10,33 @@ use core::mem;
 /// ext2 magic number
 pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
 
+/// The compatible feature bit indicating that external EA blocks are in use.
+pub const EXT2_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0008;
+
+/// ext2 extended-attribute block magic (`0xEA020000` on disk).
+pub const EXT2_XATTR_MAGIC: u32 = 0xEA02_0000;
+pub const EXT2_XATTR_REFCOUNT_MAX: u32 = 1024;
+pub const EXT2_XATTR_HEADER_SIZE: usize = 32;
+pub const EXT2_XATTR_ENTRY_SIZE: usize = 16;
+pub const EXT2_XATTR_PAD: usize = 4;
+/// Prefix of an inode-body extended-attribute area. Unlike an external EA
+/// block, this consists only of the magic value followed by entries.
+pub const EXT2_XATTR_IBODY_HEADER_SIZE: usize = 4;
+/// Inodes can carry `i_extra_isize` and inode-body EAs after the original
+/// 128-byte ext2 inode. The extension is aligned to four bytes.
+pub const EXT2_GOOD_OLD_INODE_SIZE: usize = 128;
+pub const EXT2_INODE_EXTRA_ISIZE_OFFSET: usize = EXT2_GOOD_OLD_INODE_SIZE;
+pub const EXT2_MINIMAL_EXTRA_ISIZE: usize = 4;
+
+/// Extended-attribute name indexes. Index zero stores the VFS name verbatim.
+pub const EXT2_XATTR_INDEX_USER: u8 = 1;
+pub const EXT2_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
+pub const EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
+pub const EXT2_XATTR_INDEX_TRUSTED: u8 = 4;
+// e2fsprogs' system.* namespace uses index 7; index 5 is reserved for Lustre.
+pub const EXT2_XATTR_INDEX_SYSTEM: u8 = 7;
+pub const EXT2_XATTR_INDEX_SECURITY: u8 = 6;
+
 /// ext2 root inode number
 pub const EXT2_ROOT_INO: u32 = 2;
 
@@ -22,6 +49,72 @@ pub const EXT2_S_IFCHR: u16 = 0x2000; // Character device
 pub const EXT2_S_IFBLK: u16 = 0x6000; // Block device
 pub const EXT2_S_IFIFO: u16 = 0x1000; // FIFO (pipe)
 pub const EXT2_S_IFSOCK: u16 = 0xC000; // Socket
+
+/// Header of one external ext2 extended-attribute block.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct Ext2XattrHeader {
+    pub magic: u32,
+    pub refcount: u32,
+    pub blocks: u32,
+    pub hash: u32,
+    pub reserved: [u32; 4],
+}
+
+impl Ext2XattrHeader {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
+        if data.len() < EXT2_XATTR_HEADER_SIZE {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Insufficient data for ext2 xattr header",
+            ));
+        }
+        Ok(unsafe { *(data.as_ptr() as *const Self) })
+    }
+
+    pub fn refcount(&self) -> u32 {
+        u32::from_le(self.refcount)
+    }
+}
+
+/// Fixed header of an external ext2 extended-attribute entry.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct Ext2XattrEntry {
+    pub name_len: u8,
+    pub name_index: u8,
+    pub value_offs: u16,
+    pub value_block: u32,
+    pub value_size: u32,
+    pub hash: u32,
+}
+
+impl Ext2XattrEntry {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
+        if data.len() < EXT2_XATTR_ENTRY_SIZE {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Insufficient data for ext2 xattr entry",
+            ));
+        }
+        Ok(unsafe { *(data.as_ptr() as *const Self) })
+    }
+}
+
+/// Entry alignment is `align(EXT2_XATTR_ENTRY_SIZE + name_len, 4)`.
+pub fn ext2_xattr_entry_len(name_len: usize) -> Option<usize> {
+    EXT2_XATTR_ENTRY_SIZE
+        .checked_add(name_len)
+        .and_then(|len| len.checked_add(EXT2_XATTR_PAD - 1))
+        .map(|len| len & !(EXT2_XATTR_PAD - 1))
+}
+
+/// Value alignment is the on-disk `EXT2_XATTR_SIZE` macro.
+pub fn ext2_xattr_value_len(value_len: usize) -> Option<usize> {
+    value_len
+        .checked_add(EXT2_XATTR_PAD - 1)
+        .map(|len| len & !(EXT2_XATTR_PAD - 1))
+}
 
 /// ext2 Superblock structure
 ///
@@ -356,6 +449,26 @@ pub struct Ext2Inode {
 }
 
 impl Ext2Inode {
+    /// Linux-format osd2 uid/gid high words occupy offsets four and six.
+    /// https://www.kernel.org/doc/html/latest/filesystems/ext4/inodes.html
+    pub fn native_owner(&self) -> crate::shield::identity::ActiveIdentity {
+        crate::shield::identity::ActiveIdentity {
+            principal: crate::shield::identity::Principal(
+                u32::from(u16::from_le(self.uid))
+                    | (u32::from(u16::from_le_bytes(self.osd2[4..6].try_into().unwrap())) << 16),
+            ),
+            group: crate::shield::identity::Group(
+                u32::from(u16::from_le(self.gid))
+                    | (u32::from(u16::from_le_bytes(self.osd2[6..8].try_into().unwrap())) << 16),
+            ),
+        }
+    }
+    pub fn set_native_owner(&mut self, owner: crate::shield::identity::ActiveIdentity) {
+        self.uid = (owner.principal.0 as u16).to_le();
+        self.gid = (owner.group.0 as u16).to_le();
+        self.osd2[4..6].copy_from_slice(&((owner.principal.0 >> 16) as u16).to_le_bytes());
+        self.osd2[6..8].copy_from_slice(&((owner.group.0 >> 16) as u16).to_le_bytes());
+    }
     pub fn empty() -> Self {
         Self {
             mode: 0,
@@ -428,6 +541,15 @@ impl Ext2Inode {
         u32::from_le(self.blocks)
     }
 
+    /// External extended-attribute block, or zero when none is attached.
+    pub fn get_file_acl(&self) -> u32 {
+        u32::from_le(self.file_acl)
+    }
+
+    pub fn set_file_acl(&mut self, block: u32) {
+        self.file_acl = block.to_le();
+    }
+
     /// Get block pointer at index
     pub fn get_block(&self, index: usize) -> Option<u32> {
         if index < 15 {
@@ -460,6 +582,19 @@ impl Ext2Inode {
     /// Check if this is a symbolic link
     pub fn is_symlink(&self) -> bool {
         (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFLNK
+    }
+
+    /// Inline symlinks have no data blocks. Size alone is insufficient:
+    /// e2fsprogs stores a 60-byte target in a block, while older Scarlet
+    /// images can contain an inline target of that size. An external xattr
+    /// block contributes to i_blocks but does not hold the link target.
+    pub fn is_fast_symlink(&self, block_size: u32) -> bool {
+        let attribute_sectors = if u32::from_le(self.file_acl) != 0 {
+            block_size / 512
+        } else {
+            0
+        };
+        self.is_symlink() && self.get_blocks() == attribute_sectors
     }
 
     /// Check if this is a FIFO (pipe)
@@ -513,7 +648,13 @@ impl Ext2Inode {
 
         let size = self.get_size() as usize;
 
-        if size <= 60 {
+        if self.is_fast_symlink(filesystem.block_size) {
+            if size > 60 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Inline symlink target exceeds inode storage",
+                ));
+            }
             // Fast symlink: target path is stored in inode.block array
             let inode_bytes = unsafe {
                 core::slice::from_raw_parts(
@@ -534,6 +675,12 @@ impl Ext2Inode {
             })
         } else {
             // Slow symlink: target path is stored in data blocks
+            if size >= filesystem.block_size as usize {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Symlink target exceeds one data block",
+                ));
+            }
             let first_block = u32::from_le(self.block[0]);
             if first_block == 0 {
                 return Err(FileSystemError::new(
@@ -553,8 +700,7 @@ impl Ext2Inode {
                 buffer: vec![0u8; filesystem.block_size as usize],
             });
 
-            filesystem.block_device.enqueue_request(request);
-            let results = filesystem.block_device.process_requests();
+            let results = filesystem.block_device.submit_requests(vec![request]);
 
             let block_data = if let Some(result) = results.first() {
                 match &result.result {

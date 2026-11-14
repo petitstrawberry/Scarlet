@@ -4,6 +4,7 @@
 //! It implements FileSystemOperations directly and uses VfsNode for internal
 //! structure representation.
 
+use crate::fs::vfs_v2::xattr::{self, Error as XattrError, SetMode};
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
@@ -77,6 +78,41 @@ impl TmpFS {
         fs
     }
 
+    /// Apply the initial identity of the filesystem root. Linux tmpfs takes
+    /// these as mount options, so init can create a private mount point whose
+    /// first entries are owned by a specific principal/group with a fixed mode.
+    fn set_root_identity(
+        &self,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<(), FileSystemError> {
+        if mode.is_some_and(|mode| mode & !0o7777 != 0) {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidOperation,
+                "Invalid tmpfs mode",
+            ));
+        }
+        let root = self.root.read().clone();
+        if let Some(mode) = mode {
+            root.metadata.write().permissions = FilePermission {
+                read: mode & 0o444 != 0,
+                write: mode & 0o222 != 0,
+                execute: mode & 0o111 != 0,
+            };
+        }
+        if uid.is_some() || gid.is_some() {
+            let mut owner = root.owner.write();
+            if let Some(uid) = uid {
+                owner.principal = crate::shield::identity::Principal(uid);
+            }
+            if let Some(gid) = gid {
+                owner.group = crate::shield::identity::Group(gid);
+            }
+        }
+        Ok(())
+    }
+
     /// VFS v2 driver registration API: create from option string
     /// Example option: "mem=1048576" etc.
     pub fn create_from_option_string(option: Option<&str>) -> Arc<dyn FileSystemOperations> {
@@ -139,7 +175,7 @@ impl FileSystemOperations for TmpFS {
         self.fs_id
     }
 
-    fn supports_advisory_locks(&self) -> bool {
+    fn supports_retained_node_identity(&self) -> bool {
         true
     }
 
@@ -237,6 +273,16 @@ impl FileSystemOperations for TmpFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.create_labeled(parent_node, name, file_type, mode, None)
+    }
+    fn create_labeled(
+        &self,
+        parent_node: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone()).map_err(|_| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -312,6 +358,11 @@ impl FileSystemOperations for TmpFS {
         // After creation, set the filesystem reference.
         if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
             tmp_node.set_filesystem(fs_ref);
+        }
+        if let Some(label) = label {
+            label.initialize(new_node.as_ref()).map_err(|reason| {
+                FileSystemError::new(FileSystemErrorKind::PermissionDenied, reason)
+            })?;
         }
         // Add to parent directory
         {
@@ -680,6 +731,7 @@ impl FileSystemOperations for TmpFS {
 /// Each node contains metadata, content (for symlinks), children (for directories),
 /// and references to its parent and filesystem. All fields are protected by locks for thread safety.
 pub struct TmpNode {
+    labels: Arc<crate::shield::file::Labels>,
     /// File name
     name: IrqRwSpinLock<String>,
     /// File type
@@ -690,6 +742,9 @@ pub struct TmpNode {
     data_lock: Mutex<()>,
     /// File content (for symlinks)
     content: IrqRwSpinLock<Vec<u8>>,
+    /// Attributes follow the inode, including open-but-unlinked files.
+    xattrs: IrqRwSpinLock<BTreeMap<Vec<u8>, Vec<u8>>>,
+    owner: IrqRwSpinLock<crate::shield::identity::ActiveIdentity>,
     /// Child nodes (for directories)
     children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
@@ -703,6 +758,17 @@ pub struct TmpNode {
 
 impl Drop for TmpNode {
     fn drop(&mut self) {
+        if let Some(filesystem) = self.filesystem().and_then(|weak| weak.upgrade()) {
+            if let Some(tmpfs) = filesystem.as_any().downcast_ref::<TmpFS>() {
+                tmpfs.subtract_memory_usage(
+                    self.xattrs
+                        .read()
+                        .iter()
+                        .map(|(k, v)| k.len() + v.len())
+                        .sum(),
+                );
+            }
+        }
         let metadata = self.metadata.read();
         if metadata.file_type == FileType::RegularFile {
             if let Some(cache_id) = *self.cache_id.read() {
@@ -759,6 +825,9 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            labels: crate::shield::file::Labels::new(),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -788,6 +857,9 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            labels: crate::shield::file::Labels::new(),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -817,6 +889,9 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            labels: crate::shield::file::Labels::new(),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -847,6 +922,9 @@ impl TmpNode {
             data_lock: Mutex::new(()),
             // Store symlink target in content as UTF-8 bytes
             content: IrqRwSpinLock::new(target.into_bytes()),
+            labels: crate::shield::file::Labels::new(),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -914,7 +992,125 @@ impl TmpNode {
     }
 }
 
+fn initial_owner() -> crate::shield::identity::ActiveIdentity {
+    crate::task::mytask()
+        .map(|task| task.credentials.read().identity())
+        .unwrap_or(crate::shield::identity::ActiveIdentity {
+            principal: crate::shield::identity::Principal(0),
+            group: crate::shield::identity::Group(0),
+        })
+}
+
 impl VfsNode for TmpNode {
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
+        Some(self.labels.clone())
+    }
+
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
+        Some(*self.owner.read())
+    }
+    fn set_owner_identity(
+        &self,
+        principal: Option<crate::shield::identity::Principal>,
+        group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        use crate::shield::identity::MANAGE_OWNERS;
+        let task = crate::task::mytask().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "Owner authority required",
+            )
+        })?;
+        let credentials = task.credentials.read();
+        let mut current = self.owner.write();
+        if !credentials.permits(MANAGE_OWNERS) {
+            let ids = credentials.groups();
+            if credentials.identity().principal != current.principal
+                || principal.is_some_and(|next| next != current.principal)
+                || group.is_some_and(|next| {
+                    !ids.contains(next) && !credentials.supplementary().contains(&next)
+                })
+            {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::PermissionDenied,
+                    "Owner authority required",
+                ));
+            }
+        }
+        if let Some(principal) = principal {
+            current.principal = principal;
+        }
+        if let Some(group) = group {
+            current.group = group;
+        }
+        Ok(())
+    }
+
+    fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, XattrError> {
+        xattr::validate_name(name)?;
+        self.xattrs
+            .read()
+            .get(name)
+            .cloned()
+            .ok_or(XattrError::Missing)
+    }
+
+    fn list_xattrs(&self) -> Result<Vec<Vec<u8>>, XattrError> {
+        Ok(self.xattrs.read().keys().cloned().collect())
+    }
+
+    fn set_xattr(&self, name: &[u8], value: &[u8], mode: SetMode) -> Result<(), XattrError> {
+        xattr::validate_name(name)?;
+        if value.len() > xattr::MAX_VALUE {
+            return Err(XattrError::TooLarge);
+        }
+        let mut attrs = self.xattrs.write();
+        let old = attrs.get(name);
+        match (mode, old.is_some()) {
+            (SetMode::Create, true) => return Err(XattrError::Exists),
+            (SetMode::Replace, false) => return Err(XattrError::Missing),
+            _ => (),
+        }
+        let old_size = old.map_or(0, |v| name.len() + v.len());
+        let new_size = name.len() + value.len();
+        let used: usize = attrs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if used - old_size + new_size > xattr::MAX_NODE_BYTES
+            || (old.is_none() && attrs.len() == xattr::MAX_NODE_ATTRIBUTES)
+        {
+            return Err(XattrError::NoSpace);
+        }
+        let fs = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(XattrError::Unsupported)?;
+        let tmpfs = fs
+            .as_any()
+            .downcast_ref::<TmpFS>()
+            .ok_or(XattrError::Unsupported)?;
+        tmpfs
+            .reserve_memory_usage(new_size.saturating_sub(old_size))
+            .map_err(|_| XattrError::NoSpace)?;
+        attrs.insert(name.to_vec(), value.to_vec());
+        tmpfs.subtract_memory_usage(old_size.saturating_sub(new_size));
+        Ok(())
+    }
+
+    fn remove_xattr(&self, name: &[u8]) -> Result<(), XattrError> {
+        xattr::validate_name(name)?;
+        let fs = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(XattrError::Unsupported)?;
+        let tmpfs = fs
+            .as_any()
+            .downcast_ref::<TmpFS>()
+            .ok_or(XattrError::Unsupported)?;
+        let mut attrs = self.xattrs.write();
+        let value = attrs.remove(name).ok_or(XattrError::Missing)?;
+        tmpfs.subtract_memory_usage(name.len() + value.len());
+        Ok(())
+    }
+
     fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
         let mut metadata = self.metadata.write();
         if let Some(accessed) = times.accessed {
@@ -1279,14 +1475,12 @@ impl TmpFileObject {
             match device_guard_ref.device_type() {
                 DeviceType::Char => {
                     if let Some(char_device) = device_guard_ref.as_char_device() {
-                        let mut bytes_written = 0;
-                        for &byte in buffer {
-                            match char_device.write_byte(byte) {
-                                Ok(_) => bytes_written += 1,
-                                Err(_) => break,
-                            }
-                        }
-                        return Ok(bytes_written);
+                        // Preserve the device's bulk-write contract, including
+                        // atomicity and failures. Returning Ok(0) on a rejected
+                        // nonempty write makes userspace write-all loops spin.
+                        return char_device.write(buffer).map_err(|error| {
+                            FileSystemError::new(FileSystemErrorKind::IoError, error)
+                        });
                     } else {
                         return Err(FileSystemError {
                             kind: FileSystemErrorKind::NotSupported,
@@ -1951,8 +2145,66 @@ impl FileSystemDriver for TmpFSDriver {
         options: &str,
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         // Parse tmpfs options (e.g., "size=64M")
-        let memory_limit = parse_tmpfs_size_option(options).unwrap_or(64 * 1024 * 1024); // Default 64MB
-        Ok(TmpFS::new(memory_limit))
+        let mut memory_limit = 64 * 1024 * 1024;
+        let (mut mode, mut uid, mut gid) = (None, None, None);
+        for option in options.split(',').filter(|part| !part.is_empty()) {
+            if option.starts_with("size=") || option.starts_with("mem=") {
+                memory_limit = if option.starts_with("size=") {
+                    parse_tmpfs_size_option(option)
+                } else {
+                    option
+                        .strip_prefix("mem=")
+                        .and_then(|value| value.parse::<usize>().ok())
+                }
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::InvalidOperation,
+                        "Invalid tmpfs size option",
+                    )
+                })?;
+                if memory_limit == 0 {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidOperation,
+                        "Empty tmpfs size",
+                    ));
+                }
+                continue;
+            }
+            // The remaining options are mount security flags the VFS enforces
+            // through its own mount constraints, plus root identity.
+            if matches!(
+                option,
+                "nodev" | "noexec" | "nosuid" | "relatime" | "rw" | "ro"
+            ) {
+                continue;
+            }
+            let mut parse = |prefix: &str, radix: u32| -> Result<u32, FileSystemError> {
+                option
+                    .strip_prefix(prefix)
+                    .and_then(|value| u32::from_str_radix(value, radix).ok())
+                    .ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::InvalidOperation,
+                            "Invalid tmpfs identity option",
+                        )
+                    })
+            };
+            if option.starts_with("mode=") {
+                mode = Some(parse("mode=", 8)?);
+            } else if option.starts_with("uid=") {
+                uid = Some(parse("uid=", 10)?);
+            } else if option.starts_with("gid=") {
+                gid = Some(parse("gid=", 10)?);
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidOperation,
+                    "Invalid or unsupported tmpfs option",
+                ));
+            }
+        }
+        let fs = TmpFS::new(memory_limit);
+        fs.set_root_identity(mode, uid, gid)?;
+        Ok(fs)
     }
 
     fn name(&self) -> &'static str {
@@ -1984,7 +2236,7 @@ fn parse_tmpfs_size_option(options: &str) -> Option<usize> {
             };
 
             if let Ok(number) = number_part.parse::<usize>() {
-                return Some(number * multiplier);
+                return number.checked_mul(multiplier);
             }
         }
     }

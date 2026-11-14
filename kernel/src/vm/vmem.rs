@@ -10,18 +10,35 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// Virtual addresses may be reused while fragments of an old mapping survive,
 /// so `vm_start` alone cannot identify the allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MappingOrigin(usize);
+pub struct MappingOrigin {
+    identity: usize,
+    anonymous: bool,
+}
 
 impl MappingOrigin {
     pub(crate) fn new() -> Self {
         static NEXT_ORIGIN: AtomicUsize = AtomicUsize::new(1);
-        Self(
-            NEXT_ORIGIN
+        Self {
+            identity: NEXT_ORIGIN
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                     next.checked_add(1)
                 })
                 .expect("Virtual mapping origin identities exhausted"),
-        )
+            anonymous: false,
+        }
+    }
+
+    /// Retain anonymous provenance even after faults replace every owner with
+    /// resident pages. A resident private file mapping must not become growable.
+    pub(crate) fn new_anonymous() -> Self {
+        Self {
+            anonymous: true,
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn is_anonymous(self) -> bool {
+        self.anonymous
     }
 }
 
@@ -51,6 +68,8 @@ pub struct VirtualMemoryMap {
     pub vm_start: usize,
     pub mapping_origin: MappingOrigin,
     pub permissions: usize,
+    /// Permanent authority ceiling retained through VMA transformations.
+    pub maximum_permissions: usize,
     pub is_shared: bool,
     pub memory_attribute: MemoryAttribute,
     pub owner: Option<Arc<dyn MemoryMappingOps>>,
@@ -78,6 +97,7 @@ impl Default for VirtualMemoryMap {
             vmarea: MemoryArea::new(0, 0),
             vm_start: 0,
             mapping_origin: MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0,
             is_shared: false,
             memory_attribute: MemoryAttribute::Normal,
@@ -115,6 +135,9 @@ impl VirtualMemoryMap {
             vmarea,
             vm_start: vmarea.start,
             mapping_origin: MappingOrigin::new(),
+            maximum_permissions: owner
+                .as_ref()
+                .map_or(usize::MAX, |o| o.maximum_mapping_permissions()),
             permissions,
             is_shared,
             memory_attribute: MemoryAttribute::Normal,

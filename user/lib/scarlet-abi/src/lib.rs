@@ -14,6 +14,7 @@ pub mod native_scalar;
 pub mod network;
 pub mod power_supply;
 pub mod shared_image;
+pub mod shield;
 pub mod tls;
 pub mod video_image;
 pub mod wireless;
@@ -105,6 +106,23 @@ pub struct RawSystemTimeUpdateV1 {
 }
 
 const _: [(); 24] = [(); core::mem::size_of::<RawSystemTimeUpdateV1>()];
+
+/// Coherent view of native wake reservations. Flags: bit 0 has a monotonic
+/// deadline, bit 1 has unread wake events, bit 2 is software-only, and bit 3
+/// has explicit suspend inhibitors. The power
+/// manager must remain awake for unread events, and must arrange hardware wake
+/// before suspending with a deadline. Reserved is zero; version is one.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RawWakeDeadlineSnapshotV1 {
+    pub version: u32,
+    pub flags: u32,
+    pub revision: u64,
+    pub monotonic_deadline_ns: u64,
+    pub pending_events: u32,
+    pub reserved: u32,
+}
+const _: [(); 32] = [(); core::mem::size_of::<RawWakeDeadlineSnapshotV1>()];
 
 /// Running-kernel identity returned by [`Syscall::GetKernelInfo`].
 ///
@@ -273,6 +291,8 @@ pub const SCHEDULER_CONTROL_VERSION_V1: u32 = 1;
 pub const SCHED_POLICY_FAIR: u32 = 0;
 /// Periodic deadline-reservation scheduler policy.
 pub const SCHED_POLICY_DEADLINE: u32 = 1;
+/// Preemptive fixed-priority FIFO scheduling. Priority 1..=255 is in reserved0.
+pub const SCHED_POLICY_FIFO: u32 = 2;
 
 /// Allow execution on any online CPU.
 pub const SCHED_AFFINITY_ANY: u32 = 0;
@@ -324,6 +344,8 @@ pub enum RawSchedulerResult {
     Busy = 10,
     /// A user-provided output or affinity-mask buffer was too small.
     BufferTooSmall = 11,
+    /// The caller has no scheduling authority.
+    PermissionDenied = 12,
 }
 
 impl RawSchedulerResult {
@@ -350,6 +372,7 @@ impl RawSchedulerResult {
             9 => Some(Self::AdmissionFailed),
             10 => Some(Self::Busy),
             11 => Some(Self::BufferTooSmall),
+            12 => Some(Self::PermissionDenied),
             _ => None,
         }
     }
@@ -436,7 +459,7 @@ pub struct RawSchedulerAttrV1 {
     pub size: u32,
     /// ABI version, which must be [`SCHEDULER_CONTROL_VERSION_V1`] for v1.
     pub version: u32,
-    /// Requested policy: [`SCHED_POLICY_FAIR`] or [`SCHED_POLICY_DEADLINE`].
+    /// Requested policy: Fair, Deadline, or FIFO.
     pub policy: u32,
     /// Requested flags, which must be [`SCHED_ATTR_FLAGS_NONE`] in v1.
     pub flags: u32,
@@ -489,10 +512,8 @@ pub struct RawSchedulerAttrV1 {
     /// [`RawSchedulerAttrV1::affinity_kind`] and related mask fields regardless
     /// of the active policy.
     pub deadline_cpu_id: u32,
-    /// Reserved fixed-width field following [`RawSchedulerAttrV1::deadline_cpu_id`].
-    ///
-    /// Callers must initialize this to zero. The kernel must reject a nonzero
-    /// input value and return zero for output.
+    /// FIFO priority 1..=255 when policy is SCHED_POLICY_FIFO; zero otherwise.
+    /// This extends v1's policy-specific reserved field without changing layout.
     pub reserved0: u32,
     /// Reserved for future ABI expansion.
     ///
@@ -584,9 +605,7 @@ pub struct RawSchedulerStateV1 {
     pub nice: i32,
     /// Configured Fair fallback minimum utilization in capacity units.
     pub util_min: u32,
-    /// Reserved for future fixed-width state fields.
-    ///
-    /// The kernel must return this as zero; callers must ignore it.
+    /// Configured FIFO priority for SCHED_POLICY_FIFO; zero for other policies.
     pub reserved0: u32,
     /// Current EEVDF virtual runtime, in scheduler virtual-time units.
     pub fair_vruntime_ns: u64,
@@ -722,6 +741,7 @@ pub const SCTL_SOCKET_TAKE_ERROR: u32 = 0x5353_0010;
 
 /// Interrupted system call.
 pub const ERRNO_EINTR: i32 = 4;
+pub const ERRNO_ECANCELED: i32 = 125;
 /// Input/output error.
 pub const ERRNO_EIO: i32 = 5;
 /// Bad handle.
@@ -803,7 +823,7 @@ pub const fn decode_native_call(number: usize) -> Option<usize> {
 
 /// Select the native SDK transport without changing its argument convention.
 pub const fn syscall_transport_number(syscall: Syscall) -> usize {
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "android")) {
         NATIVE_CALL_BASE | syscall as usize
     } else {
         syscall as usize
@@ -821,6 +841,43 @@ pub struct RawMemoryInfo {
 }
 
 const _: [(); 24] = [(); core::mem::size_of::<RawMemoryInfo>()];
+
+/// Version 1 task-capacity limits accepted by `TaskCapacityControl`.
+#[repr(C, align(8))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawTaskCapacityLimitsV1 {
+    /// Size of this record in bytes.
+    pub size: u32,
+    /// ABI version, currently one.
+    pub version: u32,
+    /// Maximum number of user tasks, including pending admissions.
+    pub max_user_tasks: u64,
+    /// Maximum number of kernel tasks, including pending admissions.
+    pub max_kernel_tasks: u64,
+    /// Maximum physical bytes reserved for task kernel stacks.
+    pub max_stack_bytes: u64,
+}
+const _: [(); 32] = [(); core::mem::size_of::<RawTaskCapacityLimitsV1>()];
+
+/// Version 1 task-capacity snapshot returned by `TaskCapacityControl`.
+#[repr(C, align(8))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawTaskCapacitySnapshotV1 {
+    /// Size of this record in bytes.
+    pub size: u32,
+    /// ABI version, currently one.
+    pub version: u32,
+    pub max_user_tasks: u64,
+    pub max_kernel_tasks: u64,
+    pub max_stack_bytes: u64,
+    pub active_user_tasks: u64,
+    pub active_kernel_tasks: u64,
+    pub pending_user_tasks: u64,
+    pub pending_kernel_tasks: u64,
+    pub stack_slots: u64,
+    pub used_stack_slots: u64,
+}
+const _: [(); 80] = [(); core::mem::size_of::<RawTaskCapacitySnapshotV1>()];
 
 /// AArch64 native synchronous-fault context, version 1 (304 bytes).
 /// The handler may change integer registers, SP, PC and NZCV before returning
@@ -852,6 +909,58 @@ pub enum Syscall {
     VfsViewUnmount = 527,
     VfsViewCreateDirectory = 528,
     VfsViewRoot = 529,
+    MountNamespaceCurrent = 533,
+    MountNamespaceJoin = 534,
+    MountNamespaceIdentity = 535,
+    /// Retain a live, visible descendant's mount namespace. Requires mount
+    /// management authority; capture does not change the caller's Environment.
+    MountNamespaceCaptureDescendant = 537,
+    VfsViewSetPropagation = 531,
+    VfsViewBindRecursive = 532,
+    /// Publish immutable named file capabilities under an existing directory.
+    /// (administrative View, target C string, RawFilePublication array, count).
+    /// At most 64 entries; access is 1=read, 2=write. Opens share source cursors.
+    /// Direct native mapping and execution are unsupported; names are immutable.
+    VfsViewPublishFiles = 536,
+    VfsViewMountRestricted = 530,
+    ResourceGroupCreate = 1330,
+    ResourceGroupCurrent = 1331,
+    ResourceGroupEnter = 1332,
+    ResourceGroupStatus = 1333,
+    ResourceGroupRemove = 1334,
+    ResourceGroupCpus = 1335,
+    ResourceGroupLeave = 1336,
+    ProcessScopeCreate = 1320,
+    ProcessScopeEnter = 1321,
+    ProcessScopeSetReaper = 1322,
+    ProcessScopeTerminate = 1323,
+    ProcessScopeStatus = 1324,
+    ShieldPolicyCreateExec = 1325,
+    ShieldBindFile = 1326,
+    ShieldFilePolicy = 1340,
+    ShieldCreationLabel = 1341,
+    ShieldSocketCreationLabel = 1343,
+    ShieldRelabelFile = 1342,
+    ShieldPolicyExtend = 1344,
+    ShieldPolicyGeneration = 1345,
+    /// Derive a fresh policy handle using a stable 16-byte file-label domain.
+    /// Arguments: management policy handle, pointer to `[u8; 16]`.
+    ShieldFilePersistence = 1346,
+    /// Return a close-on-exec capability to construct new Shield policies.
+    /// Requires bootstrap, existing policy administration, or factory authority.
+    /// The returned handle grants no access to any existing policy. No arguments.
+    ShieldPolicyFactory = 1347,
+    VmLayoutConfigure = 1350,
+    VmLayoutQuery = 1351,
+    ShieldPolicyCreate = 1310,
+    ShieldPolicyCurrent = 1311,
+    ShieldApply = 1312,
+    ShieldPolicyCreateWithTransitions = 1313,
+    ShieldTransition = 1314,
+    ShieldReserveExec = 1315,
+    ShieldClearExec = 1316,
+    ShieldConstrainInformation = 1318,
+    ShieldInformation = 1319,
     EnvironmentCreate = 1300,
     EnvironmentSetRoot = 1301,
     EnvironmentRemoveRoot = 1302,
@@ -907,9 +1016,19 @@ pub enum Syscall {
     /// references and UTC overflow (including the unavailable sentinel) fail.
     /// Does not change monotonic time or persist to hardware RTC.
     SetSystemTime = 52,
+    /// Query pending native wake deadlines. Arguments: writable
+    /// RawWakeDeadlineSnapshotV1 pointer and size (32). Requires resource
+    /// management authority. A software-only snapshot cannot authorize suspend.
+    WakeDeadlineQuery = 54,
     /// Copy a 24-byte RawMemoryInfo snapshot to (output, capacity).
     /// Returns 24, or usize::MAX; ignore the output on failure.
     GetMemoryInfo = 53,
+    /// Query or atomically configure bounded native task capacity. Arguments
+    /// are operation (0=query, 1=configure), record pointer, and record size
+    /// (80 for `RawTaskCapacitySnapshotV1`, 32 for `RawTaskCapacityLimitsV1`).
+    /// Configuration requires resource-management authority. Returns zero on
+    /// success or `usize::MAX` on failure.
+    TaskCapacityControl = 55,
 
     // Process information
     GetTaskInfoCount = 24,
@@ -1021,6 +1140,10 @@ pub enum Syscall {
     // Shared memory
     SharedMemoryCreate = 620,
     SharedMemoryResize = 621,
+    /// Create anonymous input endpoints: (kind, width, height, output:*mut [i32;2]).
+    /// Kind 1 is keyboard (zero dimensions); kind 4 is direct touch (2..=65536).
+    /// Returns 0 and [producer, receiver], or usize::MAX without leaking handles.
+    InputChannelCreate = 625,
 
     // Socket handle transfer
     SocketSendHandle = 630,
@@ -1080,6 +1203,9 @@ pub enum Syscall {
     NetworkClearIpv4 = 917,
     NetworkListLinksV1 = 920,
     NetworkUpdateIpv4V1 = 921,
+    NetworkTrafficConfigureV1 = 922,
+    /// Read one link's counters using its `(id, generation)` from native 920.
+    NetworkReadLinkStatisticsV1 = 923,
     /// Write the socket's local IPv4 address to an eight-byte native address buffer.
     SocketGetLocalAddress = 918,
     /// Write the socket's peer IPv4 address to an eight-byte native address buffer.
@@ -1102,4 +1228,14 @@ pub enum Syscall {
     LsmLoad = 1200,
     LsmUnload = 1201,
     LsmList = 1202,
+}
+
+/// Native 64-bit record for VfsViewPublishFiles. No ownership transfers: the
+/// kernel retains each source on success. Name is a bounded NUL-terminated string.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawFilePublication {
+    pub name: u64,
+    pub handle: u32,
+    pub access: u32,
 }

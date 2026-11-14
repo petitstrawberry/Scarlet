@@ -8,6 +8,7 @@ pub mod allocator;
 pub mod page;
 pub mod page_cache;
 pub mod pmm;
+pub mod pressure;
 
 use crate::environment::{MAX_NUM_CPUS, STACK_SIZE};
 

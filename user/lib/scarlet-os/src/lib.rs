@@ -15,6 +15,8 @@ extern crate std;
 
 pub mod environment;
 pub mod ffi;
+pub mod shield;
+pub mod vm;
 
 /// Handle ownership and capability views.
 pub mod handle;
@@ -39,6 +41,8 @@ pub mod power_supply;
 
 /// Scarlet Native process-control APIs not exposed by portable Rust `std`.
 pub mod process;
+pub mod process_scope;
+pub mod resource_group;
 
 /// Scarlet Native socket APIs.
 pub mod socket;

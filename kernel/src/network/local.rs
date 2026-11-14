@@ -17,6 +17,10 @@
 //! 3. **Listening**: Server socket accepting connections
 //! 4. **Connected**: Client socket or accepted connection
 
+#[path = "local_datagram.rs"]
+mod datagram;
+pub(crate) use datagram::MAX_MESSAGE_BYTES as MAX_DATAGRAM_BYTES;
+
 use crate::sync::IrqRwSpinLock;
 use alloc::{
     collections::VecDeque,
@@ -25,10 +29,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{
-    any::Any,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::any::Any;
 
 use crate::sched::scheduler::{current_task_id, get_task_by_id};
 
@@ -56,6 +57,9 @@ macro_rules! localsocket_log {
 /// Maximum queued byte-stream data per socket (64 KiB).
 const MAX_STREAM_BUFFER_SIZE: usize = 64 * 1024;
 
+/// A sequenced packet must fit in one stream record.
+pub(crate) const MAX_SEQPACKET_MESSAGE_SIZE: usize = MAX_STREAM_BUFFER_SIZE;
+
 /// Maximum size of one handle-and-data record.
 ///
 /// SWS permits a 1 MiB payload behind its 8-byte frame header. Keeping the
@@ -64,6 +68,9 @@ pub const MAX_HANDLE_DATA_RECORD_SIZE: usize = 1024 * 1024 + 8;
 
 /// Maximum total handle-and-data payload queued per socket.
 const MAX_HANDLE_DATA_QUEUE_SIZE: usize = MAX_HANDLE_DATA_RECORD_SIZE;
+
+/// The native timeout controls use signed millisecond values in the ABI.
+const MAX_SOCKET_TIMEOUT_MS: u64 = i32::MAX as u64;
 
 /// Maximum number of handles that can be queued for transfer
 /// This prevents unbounded memory growth from DoS attacks
@@ -89,17 +96,77 @@ fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
     }
 }
 
+pub(crate) fn datagram_source_address(name: &str) -> LocalSocketAddress {
+    local_socket_address_from_registry_name(name)
+}
+
+/// Immutable sender snapshot; receiving after exit or an identity change must
+/// not consult the sender's current task or manufacture a privileged identity.
+#[derive(Clone, Debug)]
+pub struct SocketCredentials {
+    pub process_id: usize,
+    namespace: Option<Arc<crate::task::namespace::TaskNamespace>>,
+    local_id: usize,
+    pub identity: crate::shield::identity::ActiveIdentity,
+    pub subject: Option<crate::shield::Subject>,
+}
+impl PartialEq for SocketCredentials {
+    fn eq(&self, other: &Self) -> bool {
+        self.process_id == other.process_id
+            && self.identity == other.identity
+            && self.local_id == other.local_id
+            && match (&self.subject, &other.subject) {
+                (Some(a), Some(b)) => a.same_identity(b),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (&self.namespace, &other.namespace) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+impl Eq for SocketCredentials {}
+impl SocketCredentials {
+    pub fn pid_in(&self, namespace: &Arc<crate::task::namespace::TaskNamespace>) -> usize {
+        if self
+            .namespace
+            .as_ref()
+            .is_some_and(|saved| Arc::ptr_eq(saved, namespace))
+        {
+            self.local_id
+        } else {
+            namespace.resolve_local_id(self.process_id).unwrap_or(0)
+        }
+    }
+
+    pub(crate) fn unknown() -> Self {
+        use crate::shield::identity::*;
+        Self {
+            process_id: 0,
+            subject: None,
+            namespace: None,
+            local_id: 0,
+            identity: ActiveIdentity {
+                principal: Principal(u32::MAX),
+                group: Group(u32::MAX),
+            },
+        }
+    }
+}
+
 enum SocketSegment {
     Bytes {
         data: VecDeque<u8>,
-        sender_process_id: usize,
+        sender: SocketCredentials,
     },
     Handle(KernelObject, HandleMetadata),
     HandleData {
         object: KernelObject,
         metadata: HandleMetadata,
         data: Vec<u8>,
-        sender_process_id: usize,
+        sender: SocketCredentials,
     },
 }
 
@@ -147,7 +214,7 @@ impl SocketQueue {
     fn push_bytes(
         &mut self,
         data: &[u8],
-        sender_process_id: usize,
+        sender: SocketCredentials,
         coalesce: bool,
     ) -> Result<(), StreamError> {
         if self.stream_bytes.saturating_add(data.len()) > MAX_STREAM_BUFFER_SIZE {
@@ -157,9 +224,9 @@ impl SocketQueue {
         if coalesce {
             if let Some(SocketSegment::Bytes {
                 data: bytes,
-                sender_process_id: prior,
+                sender: prior,
             }) = self.segments.back_mut()
-                && *prior == sender_process_id
+                && *prior == sender
             {
                 bytes.extend(data.iter().copied());
                 self.stream_bytes += data.len();
@@ -168,22 +235,22 @@ impl SocketQueue {
         }
         self.segments.push_back(SocketSegment::Bytes {
             data: data.iter().copied().collect(),
-            sender_process_id,
+            sender,
         });
         self.stream_bytes += data.len();
         Ok(())
     }
 
-    fn read_bytes(&mut self, output: &mut [u8]) -> Option<(usize, usize)> {
+    fn read_bytes(&mut self, output: &mut [u8]) -> Option<(usize, SocketCredentials)> {
         let SocketSegment::Bytes {
             data: bytes,
-            sender_process_id,
+            sender,
         } = self.segments.front_mut()?
         else {
             return None;
         };
 
-        let sender_process_id = *sender_process_id;
+        let sender = sender.clone();
 
         let bytes_to_read = output.len().min(bytes.len());
         for slot in output.iter_mut().take(bytes_to_read) {
@@ -196,7 +263,7 @@ impl SocketQueue {
         if bytes.is_empty() {
             self.segments.pop_front();
         }
-        Some((bytes_to_read, sender_process_id))
+        Some((bytes_to_read, sender))
     }
 
     fn push_handle(
@@ -218,7 +285,7 @@ impl SocketQueue {
         &mut self,
         mut handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
-        sender_process_id: usize,
+        sender: SocketCredentials,
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
@@ -246,7 +313,7 @@ impl SocketQueue {
             object: last_object,
             metadata: last_metadata,
             data: data.to_vec(),
-            sender_process_id,
+            sender,
         });
         self.record_bytes += data.len();
         self.handles += handle_count;
@@ -299,7 +366,14 @@ impl SocketQueue {
         &mut self,
         data_capacity: usize,
         handle_capacity: usize,
-    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>, usize), crate::ipc::IpcError> {
+    ) -> Result<
+        (
+            Vec<(KernelObject, HandleMetadata)>,
+            Vec<u8>,
+            SocketCredentials,
+        ),
+        crate::ipc::IpcError,
+    > {
         use crate::ipc::IpcError;
 
         let mut handle_count = 0;
@@ -336,7 +410,7 @@ impl SocketQueue {
             object,
             metadata,
             data,
-            sender_process_id,
+            sender,
         }) = self.segments.pop_front()
         else {
             unreachable!("checked final handle-data segment before consuming it")
@@ -344,7 +418,7 @@ impl SocketQueue {
         handles.push((object, metadata));
         self.record_bytes -= data.len();
         self.handles -= handle_count;
-        Ok((handles, data, sender_process_id))
+        Ok((handles, data, sender))
     }
 }
 
@@ -373,6 +447,7 @@ impl SocketBuffer {
 pub struct LocalSocket {
     /// Socket type (Stream, Datagram, etc.)
     socket_type: SocketType,
+    datagrams: Arc<datagram::Inbox>,
 
     /// Weak self reference (initialized when wrapped in Arc)
     ///
@@ -392,14 +467,18 @@ pub struct LocalSocket {
     /// Peer address (if connected)
     peer_addr: IrqRwSpinLock<Option<String>>,
 
+    // Socket identity is captured at creation, independently of process credentials.
+    security_label: Option<crate::shield::socket::Label>,
+    peer_security_label: IrqRwSpinLock<Option<crate::shield::socket::Label>>,
+
     /// Global thread-group leader ID whose credentials own this endpoint.
     ///
     /// For connection-oriented sockets this is captured by `listen()` or
     /// `connect()`, matching the point where Linux snapshots peer credentials.
-    owner_process_id: AtomicUsize,
+    owner_credentials: IrqRwSpinLock<Option<SocketCredentials>>,
 
     /// Global thread-group leader ID at the other end of the connection.
-    peer_process_id: AtomicUsize,
+    peer_credentials: IrqRwSpinLock<Option<SocketCredentials>>,
 
     /// Read buffer: data received from peer (shared with peer for writing)
     read_buffer: IrqRwSpinLock<Arc<SocketBuffer>>,
@@ -432,6 +511,12 @@ pub struct LocalSocket {
 
     /// Nonblocking I/O flag
     nonblocking: IrqRwSpinLock<bool>,
+
+    /// Receive timeout in milliseconds; zero waits indefinitely.
+    read_timeout_ms: IrqRwSpinLock<u64>,
+
+    /// Send timeout in milliseconds; zero waits indefinitely.
+    write_timeout_ms: IrqRwSpinLock<u64>,
 
     /// Whether recvmsg should attach the sending process credentials.
     passcred: IrqRwSpinLock<bool>,
@@ -472,15 +557,31 @@ impl LocalSocket {
     /// # Returns
     ///
     /// A new socket in the Unconnected state
+    #[cfg(test)]
     pub fn new(socket_type: SocketType, protocol: SocketProtocol) -> Self {
+        Self::new_labeled(socket_type, protocol, None)
+    }
+    pub fn try_new(socket_type: SocketType, protocol: SocketProtocol) -> Result<Self, SocketError> {
+        let label =
+            crate::shield::socket::current_label().map_err(|_| SocketError::PermissionDenied)?;
+        Ok(Self::new_labeled(socket_type, protocol, label))
+    }
+    fn new_labeled(
+        socket_type: SocketType,
+        protocol: SocketProtocol,
+        label: Option<crate::shield::Subject>,
+    ) -> Self {
         Self {
             socket_type,
+            datagrams: datagram::Inbox::new(),
             protocol,
             state: IrqRwSpinLock::new(SocketState::Unconnected),
             local_addr: IrqRwSpinLock::new(None),
             peer_addr: IrqRwSpinLock::new(None),
-            owner_process_id: AtomicUsize::new(0),
-            peer_process_id: AtomicUsize::new(0),
+            security_label: label.map(crate::shield::socket::Label::from_subject),
+            peer_security_label: IrqRwSpinLock::new(None),
+            owner_credentials: IrqRwSpinLock::new(None),
+            peer_credentials: IrqRwSpinLock::new(None),
             read_buffer: IrqRwSpinLock::new(SocketBuffer::new()),
             peer_read_buffer: IrqRwSpinLock::new(None),
             peer_socket: IrqRwSpinLock::new(None),
@@ -492,6 +593,8 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(0),
+            write_timeout_ms: IrqRwSpinLock::new(0),
             passcred: IrqRwSpinLock::new(false),
         }
     }
@@ -503,26 +606,93 @@ impl LocalSocket {
     /// The peer process ID, or `None` for a socket that has no credential
     /// snapshot yet.
     pub fn peer_process_id(&self) -> Option<usize> {
-        let process_id = self.peer_process_id.load(Ordering::Acquire);
-        (process_id != 0).then_some(process_id)
+        self.peer_credentials()
+            .map(|cred| cred.process_id)
+            .filter(|pid| *pid != 0)
+    }
+    pub fn security_label(&self) -> Option<crate::shield::Subject> {
+        self.security_label
+            .as_ref()
+            .and_then(|label| label.subject())
+    }
+    pub fn peer_security_label(&self) -> Option<crate::shield::Subject> {
+        self.peer_security_label
+            .read()
+            .as_ref()
+            .and_then(|label| label.subject())
+    }
+    pub fn peer_credentials(&self) -> Option<SocketCredentials> {
+        self.peer_credentials.read().clone()
+    }
+    fn current_credentials(active: bool) -> SocketCredentials {
+        let Some(task) = crate::task::mytask() else {
+            return SocketCredentials::unknown();
+        };
+        let creds = task.credentials.read();
+        let identity = if active {
+            creds.identity()
+        } else {
+            crate::shield::identity::ActiveIdentity {
+                principal: creds.principals().base,
+                group: creds.groups().base,
+            }
+        };
+        SocketCredentials {
+            subject: task.security_subject.read().clone(),
+            process_id: task.get_thread_group_id(),
+            local_id: task
+                .get_namespace()
+                .resolve_local_id(task.get_thread_group_id())
+                .unwrap_or(0),
+            namespace: Some(task.get_namespace()),
+            identity,
+        }
     }
 
     pub fn set_passcred(&self, enabled: bool) {
         *self.passcred.write() = enabled;
     }
 
-    pub fn passcred(&self) -> bool {
-        *self.passcred.read()
+    fn timeout_ms_to_ns(timeout_ms: u64) -> Option<u64> {
+        (timeout_ms != 0).then(|| crate::timer::ms_to_ns(timeout_ms))
     }
 
-    fn current_process_id() -> Option<usize> {
-        let cpu_id = crate::arch::get_cpu().get_cpuid();
-        let task_id = current_task_id(cpu_id)?;
-        Some(
-            get_task_by_id(task_id)
-                .map(|task| task.get_thread_group_id())
-                .unwrap_or(task_id),
-        )
+    fn read_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(*self.read_timeout_ms.read())
+    }
+
+    fn write_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(*self.write_timeout_ms.read())
+    }
+
+    fn timeout_deadline(timeout_ns: Option<u64>) -> Option<u64> {
+        timeout_ns.map(|timeout| crate::timer::get_time_ns().saturating_add(timeout))
+    }
+
+    fn remaining_timeout_ns(deadline: Option<u64>) -> Option<u64> {
+        deadline.map(|deadline| deadline.saturating_sub(crate::timer::get_time_ns()))
+    }
+
+    fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        let timeout_ms = u64::try_from(timeout_ms).map_err(|_| SocketError::InvalidArgument)?;
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.read_timeout_ms.write() = timeout_ms;
+        Ok(())
+    }
+
+    fn set_write_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        let timeout_ms = u64::try_from(timeout_ms).map_err(|_| SocketError::InvalidArgument)?;
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.write_timeout_ms.write() = timeout_ms;
+        Ok(())
+    }
+
+    pub fn passcred(&self) -> bool {
+        *self.passcred.read()
     }
 
     /// Send a KernelObject handle through this socket
@@ -542,6 +712,10 @@ impl LocalSocket {
         object: KernelObject,
         metadata: HandleMetadata,
     ) -> Result<(), crate::ipc::IpcError> {
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
+
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -620,6 +794,10 @@ impl LocalSocket {
         handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
+
         use crate::ipc::IpcError;
 
         localsocket_log!(
@@ -643,7 +821,7 @@ impl LocalSocket {
         }
         let mut peer_queue = peer_buffer.queue.write();
         let became_readable = peer_queue.is_empty();
-        peer_queue.push_handles_data(handles, data, Self::current_process_id().unwrap_or(0))?;
+        peer_queue.push_handles_data(handles, data, Self::current_credentials(false))?;
         drop(peer_queue);
         drop(peer_buffer);
 
@@ -674,6 +852,10 @@ impl LocalSocket {
         &self,
         max_data_len: usize,
     ) -> Result<(KernelObject, HandleMetadata, Vec<u8>), crate::ipc::IpcError> {
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
+
         use crate::ipc::IpcError;
 
         localsocket_log!(
@@ -707,7 +889,18 @@ impl LocalSocket {
         &self,
         max_data_len: usize,
         max_handles: usize,
-    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>, usize), crate::ipc::IpcError> {
+    ) -> Result<
+        (
+            Vec<(KernelObject, HandleMetadata)>,
+            Vec<u8>,
+            SocketCredentials,
+        ),
+        crate::ipc::IpcError,
+    > {
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
+
         use crate::ipc::IpcError;
 
         if *self.state.read() != SocketState::Connected {
@@ -726,6 +919,10 @@ impl LocalSocket {
     ///
     /// The transferred object and exact handle metadata, or an IPC error.
     pub fn recv_handle(&self) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
+        if self.is_datagram() {
+            return Err(crate::ipc::IpcError::InvalidState);
+        }
+
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -761,6 +958,7 @@ impl LocalSocket {
         task_id: usize,
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<Arc<dyn SocketObject>, SocketError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
         let state = self.state.read();
         if *state != SocketState::Listening {
             return Err(SocketError::NotListening);
@@ -781,14 +979,16 @@ impl LocalSocket {
             }
 
             // No connection available, block the task
-            if self
-                .accept_waker
-                .wait_with_condition(task_id, trapframe, None, 0, || {
-                    *self.state.read() != SocketState::Listening || !self.backlog.read().is_empty()
-                })
-                == WaitResult::Interrupted
-            {
-                return Err(SocketError::Interrupted);
+            match self.accept_waker.wait_with_condition(
+                task_id,
+                trapframe,
+                Self::remaining_timeout_ns(deadline),
+                0,
+                || *self.state.read() != SocketState::Listening || !self.backlog.read().is_empty(),
+            ) {
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
+                WaitResult::Woken => {}
             }
 
             // When we reach here, task has been woken up
@@ -808,17 +1008,42 @@ impl LocalSocket {
     /// # Returns
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
+    #[cfg(test)]
     pub fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
         Self::create_connected_pair_with_type(SocketType::Stream, local_addr, peer_addr)
     }
 
     /// Create a connected pair with the requested socket type.
+    #[cfg(test)]
     pub fn create_connected_pair_with_type(
         socket_type: SocketType,
         local_addr: String,
         peer_addr: String,
     ) -> (Arc<Self>, Arc<Self>) {
-        let owner_process_id = Self::current_process_id().unwrap_or(0);
+        Self::pair_labeled(socket_type, local_addr, peer_addr, None)
+    }
+    pub fn try_create_connected_pair_with_type(
+        socket_type: SocketType,
+        local_addr: String,
+        peer_addr: String,
+    ) -> Result<(Arc<Self>, Arc<Self>), SocketError> {
+        let label =
+            crate::shield::socket::current_label().map_err(|_| SocketError::PermissionDenied)?;
+        Ok(Self::pair_labeled(
+            socket_type,
+            local_addr,
+            peer_addr,
+            label,
+        ))
+    }
+    fn pair_labeled(
+        socket_type: SocketType,
+        local_addr: String,
+        peer_addr: String,
+        label: Option<crate::shield::Subject>,
+    ) -> (Arc<Self>, Arc<Self>) {
+        let label = label.map(crate::shield::socket::Label::from_subject);
+        let owner = Self::current_credentials(true);
         // Create shared buffers for bidirectional communication
         let local_read_buffer = SocketBuffer::new();
         let peer_read_buffer = SocketBuffer::new();
@@ -827,12 +1052,15 @@ impl LocalSocket {
         // It reads from local_read_buffer, writes to peer_read_buffer
         let local_socket = Arc::new(Self {
             socket_type,
+            datagrams: datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
             peer_addr: IrqRwSpinLock::new(Some(peer_addr.clone())),
-            owner_process_id: AtomicUsize::new(owner_process_id),
-            peer_process_id: AtomicUsize::new(owner_process_id),
+            security_label: label.clone(),
+            peer_security_label: IrqRwSpinLock::new(label.clone()),
+            owner_credentials: IrqRwSpinLock::new(Some(owner.clone())),
+            peer_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             read_buffer: IrqRwSpinLock::new(local_read_buffer.clone()),
             peer_read_buffer: IrqRwSpinLock::new(Some(peer_read_buffer.clone())),
             peer_socket: IrqRwSpinLock::new(None),
@@ -844,6 +1072,8 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(0),
+            write_timeout_ms: IrqRwSpinLock::new(0),
             passcred: IrqRwSpinLock::new(false),
         });
 
@@ -851,12 +1081,15 @@ impl LocalSocket {
         // It reads from peer_read_buffer, writes to local_read_buffer
         let peer_socket = Arc::new(Self {
             socket_type,
+            datagrams: datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(peer_addr)),
             peer_addr: IrqRwSpinLock::new(Some(local_addr)),
-            owner_process_id: AtomicUsize::new(owner_process_id),
-            peer_process_id: AtomicUsize::new(owner_process_id),
+            security_label: label.clone(),
+            peer_security_label: IrqRwSpinLock::new(label.clone()),
+            owner_credentials: IrqRwSpinLock::new(Some(owner.clone())),
+            peer_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             read_buffer: IrqRwSpinLock::new(peer_read_buffer.clone()),
             peer_read_buffer: IrqRwSpinLock::new(Some(local_read_buffer.clone())),
             peer_socket: IrqRwSpinLock::new(None),
@@ -868,6 +1101,8 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(0),
+            write_timeout_ms: IrqRwSpinLock::new(0),
             passcred: IrqRwSpinLock::new(false),
         });
 
@@ -877,6 +1112,20 @@ impl LocalSocket {
         // Set peer references
         *local_socket.peer_socket.write() = Some(Arc::downgrade(&peer_socket));
         *peer_socket.peer_socket.write() = Some(Arc::downgrade(&local_socket));
+        if socket_type == SocketType::Datagram {
+            *local_socket.local_addr.write() = None;
+            *local_socket.peer_addr.write() = None;
+            *peer_socket.local_addr.write() = None;
+            *peer_socket.peer_addr.write() = None;
+            local_socket
+                .datagrams
+                .watch(&peer_socket)
+                .expect("fresh datagram inbox");
+            peer_socket
+                .datagrams
+                .watch(&local_socket)
+                .expect("fresh datagram inbox");
+        }
 
         (local_socket, peer_socket)
     }
@@ -892,6 +1141,7 @@ impl LocalSocket {
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
 
         loop {
             // Verify socket is connected
@@ -942,12 +1192,16 @@ impl LocalSocket {
             }
 
             // No handle available, block the task
-            if self
-                .handle_waker
-                .wait_with_condition(task_id, trapframe, None, 0, || self.receive_can_progress())
-                == WaitResult::Interrupted
-            {
-                return Err(StreamError::Interrupted.into());
+            match self.handle_waker.wait_with_condition(
+                task_id,
+                trapframe,
+                Self::remaining_timeout_ns(deadline),
+                0,
+                || self.receive_can_progress(),
+            ) {
+                WaitResult::Interrupted => return Err(StreamError::Interrupted.into()),
+                WaitResult::TimedOut => return Err(IpcError::ChannelEmpty),
+                WaitResult::Woken => {}
             }
         }
     }
@@ -984,6 +1238,7 @@ impl LocalSocket {
     /// Copy the next record's prefix without consuming bytes or handles, and
     /// return its full payload length even when `output` is empty.
     pub fn peek_record(&self, output: &mut [u8]) -> Result<usize, SocketError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
         loop {
             if let Some(len) = self.read_buffer.read().queue.read().peek_record(output) {
                 return Ok(len);
@@ -1005,25 +1260,56 @@ impl LocalSocket {
                 return Err(SocketError::WouldBlock);
             }
             let task = crate::task::mytask().ok_or(SocketError::WouldBlock)?;
-            if self.read_waker.wait_with_condition(
+            match self.read_waker.wait_with_condition(
                 task.get_id(),
                 task.get_trapframe(),
-                None,
+                Self::remaining_timeout_ns(deadline),
                 0,
                 || self.receive_can_progress() || *self.nonblocking.read(),
-            ) == WaitResult::Interrupted
-            {
-                return Err(SocketError::Interrupted);
+            ) {
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
+                WaitResult::Woken => {}
             }
         }
     }
 
     /// Read bytes together with the process that wrote the first byte.
-    pub fn read_with_sender(&self, buffer: &mut [u8]) -> Result<(usize, usize), StreamError> {
-        use crate::task::mytask;
+    pub fn read_with_sender(
+        &self,
+        buffer: &mut [u8],
+    ) -> Result<(usize, SocketCredentials), StreamError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
+        self.read_with_sender_until(buffer, deadline)
+    }
 
+    /// Capture the receive deadline before a multi-step socket operation.
+    pub(crate) fn read_deadline(&self) -> Option<u64> {
+        Self::timeout_deadline(self.read_timeout_ns())
+    }
+
+    /// Read using a deadline captured by an earlier receive step.
+    pub(crate) fn read_with_sender_until(
+        &self,
+        buffer: &mut [u8],
+        deadline: Option<u64>,
+    ) -> Result<(usize, SocketCredentials), StreamError> {
+        use crate::task::mytask;
+        if self.is_datagram() {
+            let message = self
+                .receive_datagram(false, false)
+                .map_err(|error| match error {
+                    SocketError::WouldBlock => StreamError::WouldBlock,
+                    SocketError::TimedOut => StreamError::TimedOut,
+                    SocketError::Interrupted => StreamError::Interrupted,
+                    _ => StreamError::InvalidArgument,
+                })?;
+            let n = buffer.len().min(message.data.len());
+            buffer[..n].copy_from_slice(&message.data[..n]);
+            return Ok((n, message.sender));
+        }
         if buffer.is_empty() {
-            return Ok((0, 0));
+            return Ok((0, SocketCredentials::unknown()));
         }
 
         loop {
@@ -1061,7 +1347,7 @@ impl LocalSocket {
                 // non-blocking socket.
                 let my_state = *self.state.read();
                 if my_state == SocketState::Closed {
-                    return Ok((0, 0));
+                    return Ok((0, SocketCredentials::unknown()));
                 }
                 if my_state != SocketState::Connected {
                     return Err(StreamError::InvalidArgument);
@@ -1076,12 +1362,12 @@ impl LocalSocket {
                         None => true,
                     };
                     if peer_closed {
-                        return Ok((0, 0));
+                        return Ok((0, SocketCredentials::unknown()));
                     }
                 }
 
                 if *read_buf_arc.closed.read() {
-                    return Ok((0, 0));
+                    return Ok((0, SocketCredentials::unknown()));
                 }
             }
 
@@ -1090,15 +1376,16 @@ impl LocalSocket {
             }
 
             if let Some(task) = mytask() {
-                if self.read_waker.wait_with_condition(
+                match self.read_waker.wait_with_condition(
                     task.get_id(),
                     task.get_trapframe(),
-                    None,
+                    Self::remaining_timeout_ns(deadline),
                     0,
                     || self.receive_can_progress() || *self.nonblocking.read(),
-                ) == WaitResult::Interrupted
-                {
-                    return Err(StreamError::Interrupted);
+                ) {
+                    WaitResult::Interrupted => return Err(StreamError::Interrupted),
+                    WaitResult::TimedOut => return Err(StreamError::TimedOut),
+                    WaitResult::Woken => {}
                 }
             } else {
                 return Err(StreamError::WouldBlock);
@@ -1114,10 +1401,25 @@ impl StreamOps for LocalSocket {
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
         use crate::task::mytask;
-
+        if self.is_datagram() {
+            return self
+                .send_datagram(
+                    data.to_vec(),
+                    Vec::new(),
+                    &SocketAddress::Unspecified,
+                    false,
+                )
+                .map_err(|error| match error {
+                    SocketError::WouldBlock => StreamError::WouldBlock,
+                    SocketError::TimedOut => StreamError::TimedOut,
+                    SocketError::Interrupted => StreamError::Interrupted,
+                    _ => StreamError::InvalidArgument,
+                });
+        }
         if data.is_empty() {
             return Ok(0);
         }
+        let deadline = Self::timeout_deadline(self.write_timeout_ns());
 
         loop {
             if *self.state.read() == SocketState::Closed {
@@ -1145,7 +1447,7 @@ impl StreamOps for LocalSocket {
                     let became_readable = peer_queue.is_empty();
                     peer_queue.push_bytes(
                         &data[..bytes_written],
-                        Self::current_process_id().unwrap_or(0),
+                        Self::current_credentials(false),
                         self.socket_type == SocketType::Stream,
                     )?;
                     (bytes_written, became_readable)
@@ -1174,15 +1476,16 @@ impl StreamOps for LocalSocket {
             }
 
             if let Some(task) = mytask() {
-                if self.write_waker.wait_with_condition(
+                match self.write_waker.wait_with_condition(
                     task.get_id(),
                     task.get_trapframe(),
-                    None,
+                    Self::remaining_timeout_ns(deadline),
                     0,
                     || self.send_can_progress() || *self.nonblocking.read(),
-                ) == WaitResult::Interrupted
-                {
-                    return Err(StreamError::Interrupted);
+                ) {
+                    WaitResult::Interrupted => return Err(StreamError::Interrupted),
+                    WaitResult::TimedOut => return Err(StreamError::TimedOut),
+                    WaitResult::Woken => {}
                 }
             } else {
                 return Err(StreamError::WouldBlock);
@@ -1218,6 +1521,18 @@ impl LocalSocket {
     /// latter must not wait for transient `Arc` clones retained by an abandoned
     /// blocking syscall stack.
     fn close_internal(&self) {
+        if self.is_datagram() {
+            if let Some(path) = self.local_addr.read().as_ref() {
+                NetworkManager::get_manager().unregister_named_socket(path, self);
+            }
+            *self.state.write() = SocketState::Closed;
+            self.datagrams.close();
+            if let Some(peer) = self.upgrade_peer() {
+                peer.datagrams.event.wake_all();
+            }
+            NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);
+            return;
+        }
         let state = *self.state.read();
 
         if matches!(state, SocketState::Bound | SocketState::Listening)
@@ -1295,17 +1610,18 @@ impl SocketControl for LocalSocket {
     }
 
     fn listen(&self, backlog: usize) -> Result<(), SocketError> {
+        if self.is_datagram() {
+            return Err(SocketError::NotSupported);
+        }
         let mut state = self.state.write();
-        if *state != SocketState::Bound {
+        if !matches!(*state, SocketState::Bound | SocketState::Listening) {
             return Err(SocketError::InvalidOperation);
         }
 
         // Some Linux applications pass backlog=0 and still expect at least one
         // pending connection to be accepted. Keep the internal queue usable.
         *self.max_backlog.write() = backlog.max(1);
-        if let Some(process_id) = Self::current_process_id() {
-            self.owner_process_id.store(process_id, Ordering::Release);
-        }
+        *self.owner_credentials.write() = Some(Self::current_credentials(true));
         *state = SocketState::Listening;
 
         Ok(())
@@ -1328,6 +1644,9 @@ impl SocketControl for LocalSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        if self.is_datagram() {
+            return self.connect_datagram(address);
+        }
         // Validate current state
         let state = self.state.read();
         if *state != SocketState::Unconnected {
@@ -1357,8 +1676,8 @@ impl SocketControl for LocalSocket {
             Some(socket) => socket,
             None => return Err(SocketError::InvalidOperation),
         };
-        let client_process_id = Self::current_process_id().unwrap_or(0);
-        let server_process_id = server_local.owner_process_id.load(Ordering::Acquire);
+        let client_credentials = Self::current_credentials(true);
+        let server_credentials = server_local.owner_credentials.read().clone();
 
         // We need to create a proper Arc to self to be able to store a Weak reference in the peer
         // Since we're in &self, we don't have access to the Arc. We'll need to store the
@@ -1373,13 +1692,16 @@ impl SocketControl for LocalSocket {
 
         // Create server-side connection socket that will be added to backlog
         let server_conn = Arc::new(Self {
-            socket_type: SocketType::Stream,
+            socket_type: server_local.socket_type,
+            datagrams: datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(name.clone())),
             peer_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
-            owner_process_id: AtomicUsize::new(server_process_id),
-            peer_process_id: AtomicUsize::new(client_process_id),
+            security_label: server_local.security_label.clone(),
+            peer_security_label: IrqRwSpinLock::new(self.security_label.clone()),
+            owner_credentials: IrqRwSpinLock::new(server_credentials.clone()),
+            peer_credentials: IrqRwSpinLock::new(Some(client_credentials.clone())),
             read_buffer: IrqRwSpinLock::new(server_read_buffer.clone()),
             peer_read_buffer: IrqRwSpinLock::new(Some(client_read_buffer.clone())),
             peer_socket: IrqRwSpinLock::new(None), // Will be set below
@@ -1391,6 +1713,8 @@ impl SocketControl for LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(*server_local.read_timeout_ms.read()),
+            write_timeout_ms: IrqRwSpinLock::new(*server_local.write_timeout_ms.read()),
             passcred: IrqRwSpinLock::new(server_local.passcred()),
         });
 
@@ -1401,10 +1725,9 @@ impl SocketControl for LocalSocket {
         *self.peer_read_buffer.write() = Some(server_read_buffer.clone());
         *self.local_addr.write() = Some(local_addr);
         *self.peer_addr.write() = Some(name.clone());
-        self.owner_process_id
-            .store(client_process_id, Ordering::Release);
-        self.peer_process_id
-            .store(server_process_id, Ordering::Release);
+        *self.owner_credentials.write() = Some(client_credentials);
+        *self.peer_credentials.write() = server_credentials;
+        *self.peer_security_label.write() = server_local.security_label.clone();
         *self.state.write() = SocketState::Connected;
 
         // Set peer_socket references - IMPORTANT for shutdown()
@@ -1432,8 +1755,9 @@ impl SocketControl for LocalSocket {
             *self.peer_addr.write() = None;
             *self.peer_read_buffer.write() = None;
             *self.peer_socket.write() = None;
-            self.owner_process_id.store(0, Ordering::Release);
-            self.peer_process_id.store(0, Ordering::Release);
+            *self.owner_credentials.write() = None;
+            *self.peer_credentials.write() = None;
+            *self.peer_security_label.write() = None;
             return Err(SocketError::ConnectionRefused);
         }
         server_backlog.push(server_conn);
@@ -1441,11 +1765,16 @@ impl SocketControl for LocalSocket {
 
         // Wake up any task waiting in accept()
         server_local.accept_waker.wake_one();
+        // A client registered before connect can now send without blocking.
+        self.write_waker.wake_all();
 
         Ok(())
     }
 
     fn shutdown(&self, how: ShutdownHow) -> Result<(), SocketError> {
+        if self.is_datagram() {
+            return self.shutdown_datagram(how);
+        }
         if *self.state.read() != SocketState::Connected {
             return Err(SocketError::NotConnected);
         }
@@ -1510,6 +1839,9 @@ impl SocketControl for LocalSocket {
             Some(path) => Ok(SocketAddress::Local(
                 local_socket_address_from_registry_name(path),
             )),
+            None if self.is_datagram() && *self.state.read() == SocketState::Connected => {
+                Ok(SocketAddress::Local(LocalSocketAddress::unnamed()))
+            }
             None => Err(SocketError::NotConnected),
         }
     }
@@ -1520,6 +1852,7 @@ impl SocketControl for LocalSocket {
             Some(path) => Ok(SocketAddress::Local(
                 local_socket_address_from_registry_name(path),
             )),
+            None if self.is_datagram() => Ok(SocketAddress::Local(LocalSocketAddress::unnamed())),
             None => Err(SocketError::InvalidOperation),
         }
     }
@@ -1530,6 +1863,57 @@ impl SocketObject for LocalSocket {
         self.close_internal();
     }
 
+    fn sendto(
+        &self,
+        data: &[u8],
+        address: &SocketAddress,
+        flags: u32,
+    ) -> Result<usize, SocketError> {
+        if self.is_datagram() {
+            self.send_datagram(
+                data.to_vec(),
+                Vec::new(),
+                address,
+                flags & super::socket::message_flags::NONBLOCK != 0,
+            )
+        } else {
+            self.write(data)
+                .map_err(super::socket::stream_error_to_socket_error)
+        }
+    }
+    fn recvfrom(
+        &self,
+        buffer: &mut [u8],
+        flags: u32,
+    ) -> Result<(usize, SocketAddress), SocketError> {
+        if !self.is_datagram() {
+            return self
+                .read(buffer)
+                .map(|n| (n, SocketAddress::Unspecified))
+                .map_err(super::socket::stream_error_to_socket_error);
+        }
+        let message = self.receive_datagram(
+            flags & super::socket::message_flags::PEEK != 0,
+            flags & super::socket::message_flags::NONBLOCK != 0,
+        )?;
+        if message.end_of_input {
+            return Ok((0, SocketAddress::Unspecified));
+        }
+        let n = buffer.len().min(message.data.len());
+        buffer[..n].copy_from_slice(&message.data[..n]);
+        let address = message
+            .source
+            .map(|name| SocketAddress::Local(local_socket_address_from_registry_name(&name)))
+            .unwrap_or(SocketAddress::Local(LocalSocketAddress::unnamed()));
+        Ok((
+            if flags & super::socket::message_flags::FULL_LENGTH != 0 {
+                message.data.len()
+            } else {
+                n
+            },
+            address,
+        ))
+    }
     fn socket_type(&self) -> SocketType {
         self.socket_type
     }
@@ -1556,7 +1940,26 @@ impl SocketObject for LocalSocket {
 }
 
 impl Selectable for LocalSocket {
+    fn is_hung_up(&self) -> bool {
+        // A datagram peer disappearing is not a stream hangup. For connected
+        // streams/seqpackets, closure belongs to the logical peer handle, even
+        // while temporary kernel Arc references keep its allocation alive.
+        if self.is_datagram() {
+            return false;
+        }
+        let state = *self.state.read();
+        match state {
+            SocketState::Closed => true,
+            SocketState::Connected => self
+                .upgrade_peer()
+                .is_none_or(|peer| *peer.state.read() == SocketState::Closed),
+            _ => false,
+        }
+    }
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        if self.is_datagram() {
+            return self.datagram_ready(interest);
+        }
         let mut ready = ReadySet::none();
 
         let state = *self.state.read();
@@ -1597,6 +2000,33 @@ impl Selectable for LocalSocket {
         ready
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if self.is_datagram() {
+            if interest.read || interest.write {
+                return Some(alloc::vec![
+                    self.datagrams.event.subscribe_readiness(waiter)
+                ]);
+            }
+            return Some(Vec::new());
+        }
+
+        // Registrations outlive bind/listen/connect. Subscribe to the stable
+        // sources rather than choosing one from the socket's current state.
+        let mut registrations = Vec::new();
+        if interest.read {
+            registrations.push(self.accept_waker.subscribe_readiness(waiter));
+            registrations.push(self.read_waker.subscribe_readiness(waiter));
+        }
+        if interest.write {
+            registrations.push(self.write_waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
+    }
+
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,
@@ -1604,6 +2034,9 @@ impl Selectable for LocalSocket {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
+        if self.is_datagram() {
+            return self.wait_datagram(interest, trapframe, timeout_ticks, min_wait_ticks);
+        }
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
             return SelectWaitOutcome::Ready;
@@ -1637,6 +2070,12 @@ impl Selectable for LocalSocket {
 
     fn set_nonblocking(&self, enabled: bool) {
         *self.nonblocking.write() = enabled;
+        if self.is_datagram() {
+            self.datagrams.event.wake_all();
+            if let Some(peer) = self.upgrade_peer() {
+                peer.datagrams.event.wake_all();
+            }
+        }
     }
 
     fn is_nonblocking(&self) -> bool {
@@ -1656,6 +2095,22 @@ impl ControlOps for LocalSocket {
                 let is_nonblocking = self.is_nonblocking();
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS => {
+                self.set_read_timeout_ms(arg)
+                    .map_err(|_| "Invalid read timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS => {
+                self.set_write_timeout_ms(arg)
+                    .map_err(|_| "Invalid write timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS => {
+                Ok(*self.read_timeout_ms.read() as i32)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS => {
+                Ok(*self.write_timeout_ms.read() as i32)
+            }
             _ => {
                 localsocket_log!("[LocalSocket::control] Unknown command");
                 Err("Unknown control command")
@@ -1673,6 +2128,22 @@ impl ControlOps for LocalSocket {
                 crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
                 "Get non-blocking mode",
             ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                "Set read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS,
+                "Set write timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS,
+                "Get read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS,
+                "Get write timeout",
+            ),
         ]
     }
 }
@@ -1685,12 +2156,69 @@ pub fn local_socket_factory(
     socket_type: SocketType,
     protocol: SocketProtocol,
 ) -> Result<Arc<dyn SocketObject>, SocketError> {
-    Ok(Arc::new(LocalSocket::new(socket_type, protocol)))
+    let socket = Arc::new(LocalSocket::try_new(socket_type, protocol)?);
+    LocalSocket::init_self_weak(&socket);
+    Ok(socket)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::object::capability::ControlOps;
+    use core::sync::atomic::Ordering;
+
+    #[test_case]
+    fn listen_again_updates_backlog_and_preserves_pending_connections() {
+        use crate::network::socket::{SocketControl, SocketObject};
+        let socket =
+            super::LocalSocket::new(super::SocketType::Stream, super::SocketProtocol::Default);
+        *socket.state.write() = super::SocketState::Bound;
+        assert!(socket.listen(3).is_ok());
+        let queued = alloc::sync::Arc::new(super::LocalSocket::new(
+            super::SocketType::Stream,
+            super::SocketProtocol::Default,
+        ));
+        socket.backlog.write().push(queued.clone());
+        assert!(socket.listen(10).is_ok());
+        assert_eq!(*socket.max_backlog.read(), 10);
+        assert_eq!(socket.backlog.read().len(), 1);
+        assert_eq!(socket.accept().unwrap().state(), queued.state());
+        assert!(socket.backlog.read().is_empty());
+    }
     use super::*;
+
+    #[test_case]
+    fn queued_identity_preserves_reaped_pid_and_separates_identity_changes() {
+        use crate::shield::identity::{ActiveIdentity, Group, Principal};
+        let ns = crate::task::namespace::TaskNamespace::new_root("credential-snapshot".into());
+        ns.register_mapping(7, 42);
+        let first = SocketCredentials {
+            subject: None,
+            process_id: 42,
+            namespace: Some(ns.clone()),
+            local_id: 7,
+            identity: ActiveIdentity {
+                principal: Principal(12),
+                group: Group(34),
+            },
+        };
+        let mut second = first.clone();
+        second.identity.principal = Principal(56);
+        let mut queue = SocketQueue::new();
+        queue.push_bytes(b"a", first, true).unwrap();
+        queue.push_bytes(b"b", second, true).unwrap();
+        ns.unregister_mapping_for_global(42);
+        let mut output = [0; 2];
+        let (len, a) = queue.read_bytes(&mut output).unwrap();
+        assert_eq!(len, 1);
+        assert_eq!(output[0], b'a');
+        assert_eq!(a.pid_in(&ns), 7);
+        assert_eq!(a.identity.principal, Principal(12));
+        let (_, b) = queue.read_bytes(&mut output).unwrap();
+        assert_eq!(output[0], b'b');
+        assert_eq!(b.identity.principal, Principal(56));
+        let unrelated = crate::task::namespace::TaskNamespace::new_root("other".into());
+        assert_eq!(a.pid_in(&unrelated), 0);
+    }
 
     #[test_case]
     fn seqpacket_peek_preserves_payload_handles_and_next_record() {
@@ -1710,7 +2238,7 @@ mod tests {
             .send_handles_and_data(
                 alloc::vec![(
                     KernelObject::from_shared_memory_object(Arc::new(memory)),
-                    HandleMetadata::default()
+                    HandleMetadata::default(),
                 )],
                 b"packet",
             )
@@ -1733,6 +2261,25 @@ mod tests {
     }
 
     #[test_case]
+    fn readiness_registered_before_connection_tracks_all_stream_sources() {
+        let socket = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+        let waiter = Arc::new(Waker::new_interruptible("local-state-readiness"));
+        let registrations = socket
+            .subscribe_readiness(ReadyInterest::rw(), &waiter)
+            .unwrap();
+        assert_eq!(registrations.len(), 3);
+        assert!(registrations.iter().all(|r| r.generation() == 0));
+        *socket.state.write() = SocketState::Listening;
+        socket.accept_waker.wake_one();
+        assert_eq!(registrations[0].generation(), 1);
+        *socket.state.write() = SocketState::Connected;
+        socket.read_waker.wake_all();
+        socket.write_waker.wake_all();
+        assert_eq!(registrations[1].generation(), 1);
+        assert_eq!(registrations[2].generation(), 1);
+    }
+
+    #[test_case]
     fn test_socket_creation() {
         let socket = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
         assert_eq!(socket.state(), SocketState::Unconnected);
@@ -1752,6 +2299,55 @@ mod tests {
             LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
         assert_eq!(sock1.state(), SocketState::Connected);
         assert_eq!(sock2.state(), SocketState::Connected);
+    }
+
+    #[test_case]
+    fn accepted_seqpacket_preserves_type_and_write_boundaries() {
+        let listener =
+            local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
+        let name = format!(
+            "seqpacket-accept-{}",
+            listener.as_ref() as *const dyn SocketObject as *const () as usize
+        );
+        let address = SocketAddress::Local(LocalSocketAddress::from_path(name.clone()).unwrap());
+        NetworkManager::get_manager()
+            .register_named_socket(&name, Arc::clone(&listener))
+            .unwrap();
+        listener.bind(&address).unwrap();
+        listener.listen(1).unwrap();
+        use crate::network::socket::socket_ctl;
+        let listener_control = listener.as_control_ops().unwrap();
+        assert_eq!(
+            listener_control.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 7),
+            Ok(0)
+        );
+        assert_eq!(
+            listener_control.control(socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS, 9),
+            Ok(0)
+        );
+
+        let client = local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
+        client.connect(&address).unwrap();
+        let accepted = listener.accept().unwrap();
+        assert_eq!(accepted.socket_type(), SocketType::SeqPacket);
+        let accepted_control = accepted.as_control_ops().unwrap();
+        assert_eq!(
+            accepted_control.control(socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS, 0),
+            Ok(7)
+        );
+        assert_eq!(
+            accepted_control.control(socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS, 0),
+            Ok(9)
+        );
+
+        accepted.write(b"one").unwrap();
+        accepted.write(b"two").unwrap();
+        let mut packet = [0u8; 8];
+        assert_eq!(client.read(&mut packet).unwrap(), 3);
+        assert_eq!(&packet[..3], b"one");
+        assert_eq!(client.read(&mut packet).unwrap(), 3);
+        assert_eq!(&packet[..3], b"two");
+        NetworkManager::get_manager().unregister_named_socket(&name, listener.as_ref());
     }
 
     #[test_case]
@@ -1866,6 +2462,100 @@ mod tests {
     }
 
     #[test_case]
+    fn expired_receive_deadline_preserves_queued_data_and_handles() {
+        use crate::arch::Trapframe;
+        use crate::ipc::SharedMemory;
+        use crate::network::socket::socket_ctl;
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let fixture = Task::new("socket-timeout".into(), 1, TaskType::Kernel);
+        fixture.init();
+        let id = add_task(fixture, cpu);
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+
+        let (client, server) =
+            LocalSocket::create_connected_pair("timeout-client".into(), "timeout-server".into());
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 1),
+            Ok(0)
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS, 0),
+            Ok(1)
+        );
+        assert!(
+            client
+                .control(
+                    socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                    i32::MAX as usize + 1,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS, 0),
+            Ok(1)
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS, 1),
+            Ok(0)
+        );
+
+        let mut byte = [0u8; 1];
+        assert!(matches!(
+            client.read_with_sender_until(&mut byte, Some(0)),
+            Err(StreamError::TimedOut)
+        ));
+        // An expired deadline must not hide already available data.
+        server.write(b"x").unwrap();
+        assert_eq!(
+            client.read_with_sender_until(&mut byte, Some(0)).unwrap().0,
+            1
+        );
+        assert_eq!(byte, [b'x']);
+
+        let (sender, receiver) = LocalSocket::create_connected_pair_with_type(
+            SocketType::SeqPacket,
+            "timeout-packets".into(),
+            "timeout-records".into(),
+        );
+        assert_eq!(
+            receiver.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 1),
+            Ok(0)
+        );
+        let memory = SharedMemory::new(4096, 0x3).unwrap();
+        sender
+            .send_handles_and_data(
+                alloc::vec![(
+                    KernelObject::from_shared_memory_object(Arc::new(memory)),
+                    HandleMetadata::default(),
+                )],
+                b"packet",
+            )
+            .unwrap();
+        let (handles, data) = receiver.recv_handles_and_data_batch(6, 1).unwrap();
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0].0.as_shared_memory().unwrap().size(), 4096);
+        assert_eq!(data, b"packet");
+
+        drop((sender, receiver, server, client));
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
     fn test_peer_observes_close_when_socket_is_dropped() {
         let (sock1, sock2) =
             LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
@@ -1887,6 +2577,37 @@ mod tests {
         );
     }
 
+    #[test_case]
+    fn stream_hangup_follows_peer_handle_close_without_discarding_queued_data() {
+        let mut data = [0; 16];
+        for kind in [SocketType::Stream, SocketType::SeqPacket] {
+            let (client, server) = LocalSocket::create_connected_pair_with_type(
+                kind,
+                "hup-client".into(),
+                "hup-server".into(),
+            );
+            assert!(!server.is_hung_up());
+            client.write(b"queued").unwrap();
+            let retained = client.clone();
+            client.close_handle();
+            assert!(server.is_hung_up());
+            assert_eq!(retained.state(), SocketState::Closed);
+            assert_eq!(server.read(&mut data).unwrap(), 6);
+            assert_eq!(&data[..6], b"queued");
+            assert_eq!(server.read(&mut data).unwrap(), 0);
+        }
+        let (client, server) =
+            LocalSocket::create_connected_pair("half-client".into(), "half-server".into());
+        client.shutdown(ShutdownHow::Write).unwrap();
+        assert!(!server.is_hung_up());
+        assert_eq!(server.read(&mut data).unwrap(), 0);
+        server.write(b"reply").unwrap();
+        assert_eq!(client.read(&mut data).unwrap(), 5);
+        server.shutdown(ShutdownHow::Both).unwrap();
+        assert!(client.is_hung_up());
+        let listener = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+        assert!(!listener.is_hung_up());
+    }
     #[test_case]
     fn test_shutdown_write_rejects_later_writes() {
         let (sock1, sock2) =

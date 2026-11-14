@@ -307,11 +307,16 @@ pub struct Ext2FileSystem {
     next_file_id: IrqSpinLock<u64>,
     /// LRU cached inodes
     inode_cache: IrqRwSpinLock<InodeLruCache>,
+    inode_labels: IrqSpinLock<BTreeMap<u32, Arc<crate::shield::file::Labels>>>,
     /// LRU cached blocks
     block_cache: IrqRwSpinLock<BlockLruCache>,
     /// Per-inode locks serialize directory mutations and regular-file writes,
     /// size/timestamp publication, truncation, and writeback across open handles.
     inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<Mutex<()>>>>,
+    /// Per-inode-table-block locks serialize whole-block read-modify-write.
+    /// Inodes in the same table block share this lock even though their
+    /// narrower per-inode locks are independent.
+    inode_table_block_locks: IrqRwSpinLock<BTreeMap<u64, Arc<Mutex<()>>>>,
     /// Live nodes and open descriptions across aliases and mount namespaces.
     /// Their scalar guards prevent reuse of an unlinked inode while a fd, cwd,
     /// mapping, or retained directory entry can still access it.
@@ -320,6 +325,8 @@ pub struct Ext2FileSystem {
     reclaim_lock: Mutex<()>,
     #[cfg(test)]
     before_write_publish: IrqSpinLock<Option<fn(&Ext2FileSystem, u32, usize)>>,
+    #[cfg(test)]
+    before_inode_table_write: IrqSpinLock<Option<fn(&Ext2FileSystem, u64)>>,
     /// Global lock to serialize block allocation operations
     allocation_lock: Mutex<()>,
 }
@@ -341,6 +348,40 @@ impl Drop for Ext2OpenGuard {
                 counts.remove(&self.inode);
             }
         }
+    }
+}
+
+/// One decoded external EA entry. `name` is the suffix stored after
+/// `name_index`, matching the on-disk ordering used by Linux ext2.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ext2XattrRecord {
+    name_index: u8,
+    name: Vec<u8>,
+    value: Vec<u8>,
+}
+
+struct Ext2XattrBlock {
+    number: u32,
+    header: Ext2XattrHeader,
+    records: Vec<Ext2XattrRecord>,
+    data: Vec<u8>,
+}
+
+/// Decoded inode-body EA storage. `data` is the complete variable-length
+/// inode record, including fields outside the packed 128-byte `Ext2Inode`.
+struct Ext2InodeXattrBody {
+    data: Vec<u8>,
+    body_offset: usize,
+    records: Vec<Ext2XattrRecord>,
+}
+
+impl Ext2XattrRecord {
+    fn key(&self) -> (u8, &[u8]) {
+        (self.name_index, self.name.as_slice())
+    }
+
+    fn on_disk_order(&self) -> (u8, usize, &[u8]) {
+        (self.name_index, self.name.len(), self.name.as_slice())
     }
 }
 
@@ -593,8 +634,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; 1024],
         });
 
-        block_device.enqueue_request(request);
-        let results = block_device.process_requests();
+        let results = block_device.submit_requests(vec![request]);
 
         let superblock_data = if let Some(result) = results.first() {
             match &result.result {
@@ -636,13 +676,17 @@ impl Ext2FileSystem {
             name: "ext2".to_string(),
             next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
             inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
+            inode_labels: IrqSpinLock::new(BTreeMap::new()),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
+            inode_table_block_locks: IrqRwSpinLock::new(BTreeMap::new()),
             open_inodes: Arc::new(IrqSpinLock::new(BTreeMap::new())),
             unlinked_inodes: IrqSpinLock::new(BTreeMap::new()),
             reclaim_lock: Mutex::new(()),
             #[cfg(test)]
             before_write_publish: IrqSpinLock::new(None),
+            #[cfg(test)]
+            before_inode_table_write: IrqSpinLock::new(None),
             allocation_lock: Mutex::new(()),
         });
 
@@ -691,6 +735,66 @@ impl Ext2FileSystem {
 
     /// Caller holds this inode's operation lock. The token is released only
     /// after final close writeback; separate aliases share this inode key.
+    fn labels_for_inode(&self, inode: u32) -> Arc<crate::shield::file::Labels> {
+        self.inode_labels
+            .lock()
+            .entry(inode)
+            .or_insert_with(crate::shield::file::Labels::new)
+            .clone()
+    }
+    /// The parent operation lock must cover reading its directory entry through
+    /// pinning the child. Otherwise unlink can reclaim/reuse that inode between
+    /// name lookup and Ext2Node::set_filesystem acquiring its retained identity.
+    fn lookup_locked(
+        &self,
+        ext2_parent: &Ext2Node,
+        name: &str,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        // Read parent inode
+        let parent_inode = self.read_inode(ext2_parent.inode_number())?;
+
+        // Ensure parent is a directory
+        if parent_inode.mode & EXT2_S_IFMT != EXT2_S_IFDIR {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Parent is not a directory",
+            ));
+        }
+
+        // Read directory entries
+        let entries = self.read_directory_entries(&parent_inode)?;
+
+        // Find the requested entry
+        for entry in entries {
+            let entry_name = entry.name_str()?;
+            if entry_name == name {
+                // Read the inode for this entry
+                let child_inode = self.read_inode(entry.entry.inode)?;
+
+                // Use file_type_from_inode to get the correct file type including device files
+                let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
+
+                // Use inode number as stable file_id for page cache identity
+                let file_id = entry.entry.inode as u64;
+
+                // Create new node
+                let node = Ext2Node::new(entry.entry.inode, file_type, file_id);
+
+                // Set filesystem reference from parent
+                if let Some(fs_ref) = ext2_parent.filesystem() {
+                    node.set_filesystem(fs_ref);
+                }
+
+                return Ok(Arc::new(node));
+            }
+        }
+
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotFound,
+            "File not found",
+        ))
+    }
+
     fn pin_open_inode(&self, inode: u32) -> Ext2OpenGuard {
         *self.open_inodes.lock().entry(inode).or_insert(0) += 1;
         Ext2OpenGuard {
@@ -735,11 +839,27 @@ impl Ext2FileSystem {
             .clone()
     }
 
+    fn get_inode_table_block_lock(&self, block: u64) -> Arc<Mutex<()>> {
+        let mut locks = self.inode_table_block_locks.write();
+        locks
+            .entry(block)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     #[cfg(test)]
     fn observe_pending_write(&self, inode_num: u32, write_end: usize) {
         let observer = *self.before_write_publish.lock();
         if let Some(observer) = observer {
             observer(self, inode_num, write_end);
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_inode_table_write(&self, block: u64) {
+        let observer = *self.before_inode_table_write.lock();
+        if let Some(observer) = observer {
+            observer(self, block);
         }
     }
 
@@ -753,6 +873,1123 @@ impl Ext2FileSystem {
     {
         let _guard = self.allocation_lock.lock();
         f()
+    }
+
+    fn xattr_error(error: FileSystemError) -> crate::fs::vfs_v2::xattr::Error {
+        use crate::fs::vfs_v2::xattr::Error as XattrError;
+        match error.kind {
+            FileSystemErrorKind::NotFound => XattrError::Missing,
+            FileSystemErrorKind::NoSpace | FileSystemErrorKind::ValueOverflow => {
+                XattrError::NoSpace
+            }
+            FileSystemErrorKind::PermissionDenied => XattrError::PermissionDenied,
+            FileSystemErrorKind::IoError | FileSystemErrorKind::DeviceError => XattrError::Io,
+            _ => XattrError::Unsupported,
+        }
+    }
+
+    /// Split a VFS xattr name into the Linux ext2 index and on-disk suffix.
+    /// Index zero is the format's opaque-name representation.
+    fn xattr_name_parts(name: &[u8]) -> Result<(u8, &[u8]), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::{self, Error};
+        if name.is_empty() || name.len() > xattr::MAX_NAME || name.contains(&0) {
+            return Err(Error::InvalidName);
+        }
+
+        if name == b"system.posix_acl_access" {
+            Ok((EXT2_XATTR_INDEX_POSIX_ACL_ACCESS, &name[name.len()..]))
+        } else if name == b"system.posix_acl_default" {
+            Ok((EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT, &name[name.len()..]))
+        } else if let Some(suffix) = name.strip_prefix(b"user.") {
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_USER, suffix))
+            }
+        } else if let Some(suffix) = name.strip_prefix(b"trusted.") {
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_TRUSTED, suffix))
+            }
+        } else if let Some(suffix) = name.strip_prefix(b"security.") {
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_SECURITY, suffix))
+            }
+        } else if let Some(suffix) = name.strip_prefix(b"system.") {
+            if suffix.is_empty() {
+                Err(Error::InvalidName)
+            } else {
+                Ok((EXT2_XATTR_INDEX_SYSTEM, suffix))
+            }
+        } else {
+            Ok((0, name))
+        }
+    }
+
+    fn xattr_name_from_parts(
+        name_index: u8,
+        name: &[u8],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::{self, Error};
+        let prefix: &[u8] = match name_index {
+            0 => {
+                return if name.is_empty() {
+                    Err(Error::Unsupported)
+                } else {
+                    Ok(name.to_vec())
+                };
+            }
+            EXT2_XATTR_INDEX_USER => b"user.",
+            EXT2_XATTR_INDEX_POSIX_ACL_ACCESS | EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT => {
+                if !name.is_empty() {
+                    return Err(Error::Unsupported);
+                }
+                let full = if name_index == EXT2_XATTR_INDEX_POSIX_ACL_ACCESS {
+                    b"system.posix_acl_access".as_slice()
+                } else {
+                    b"system.posix_acl_default".as_slice()
+                };
+                return Ok(full.to_vec());
+            }
+            EXT2_XATTR_INDEX_TRUSTED => b"trusted.",
+            EXT2_XATTR_INDEX_SECURITY => b"security.",
+            EXT2_XATTR_INDEX_SYSTEM => b"system.",
+            _ => return Err(Error::Unsupported),
+        };
+        let total = prefix
+            .len()
+            .checked_add(name.len())
+            .ok_or(Error::Unsupported)?;
+        if name.is_empty() || total > xattr::MAX_NAME {
+            return Err(Error::Unsupported);
+        }
+        let mut full = Vec::with_capacity(total);
+        full.extend_from_slice(prefix);
+        full.extend_from_slice(name);
+        Ok(full)
+    }
+
+    fn xattr_header_valid(header: &Ext2XattrHeader) -> bool {
+        u32::from_le(header.magic) == EXT2_XATTR_MAGIC
+            && u32::from_le(header.blocks) == 1
+            && header.refcount() != 0
+            && header.refcount() <= EXT2_XATTR_REFCOUNT_MAX
+    }
+
+    fn xattr_entry_hash(record: &Ext2XattrRecord) -> u32 {
+        let mut hash = 0u32;
+        for byte in &record.name {
+            hash = hash.rotate_left(5) ^ u32::from(*byte);
+        }
+        for chunk in record.value.chunks(4) {
+            let mut word = [0u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            hash = hash.rotate_left(16) ^ u32::from_le_bytes(word);
+        }
+        hash
+    }
+
+    /// Decode a complete EA block. Any malformed header, entry, namespace,
+    /// ordering, name, or value range is rejected as unsupported.
+    fn decode_xattr_block(
+        &self,
+        data: &[u8],
+    ) -> Result<(Ext2XattrHeader, Vec<Ext2XattrRecord>), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        if data.len() != self.block_size as usize {
+            return Err(Error::Io);
+        }
+        let header = Ext2XattrHeader::from_bytes(data).map_err(Self::xattr_error)?;
+        if !Self::xattr_header_valid(&header) {
+            return Err(Error::Io);
+        }
+
+        let mut cursor = EXT2_XATTR_HEADER_SIZE;
+        let entries_end = data.len().checked_sub(4).ok_or(Error::Io)?;
+        let mut raw_entries = Vec::new();
+        loop {
+            let marker_end = cursor.checked_add(4).ok_or(Error::Io)?;
+            if marker_end > data.len() {
+                return Err(Error::Io);
+            }
+            if data[cursor..marker_end].iter().all(|byte| *byte == 0) {
+                break;
+            }
+            let entry = Ext2XattrEntry::from_bytes(&data[cursor..]).map_err(Self::xattr_error)?;
+            let name_len = entry.name_len as usize;
+            let entry_len = ext2_xattr_entry_len(name_len).ok_or(Error::Io)?;
+            let next = cursor.checked_add(entry_len).ok_or(Error::Io)?;
+            if next > entries_end {
+                return Err(Error::Io);
+            }
+            let name_start = cursor.checked_add(EXT2_XATTR_ENTRY_SIZE).ok_or(Error::Io)?;
+            let name_end = name_start.checked_add(name_len).ok_or(Error::Io)?;
+            if name_end > next {
+                return Err(Error::Io);
+            }
+            if u32::from_le(entry.value_block) != 0 {
+                return Err(Error::Io);
+            }
+            raw_entries.push((
+                entry.name_index,
+                data[name_start..name_end].to_vec(),
+                u16::from_le(entry.value_offs) as usize,
+                u32::from_le(entry.value_size),
+            ));
+            cursor = next;
+        }
+
+        let terminator_end = cursor.checked_add(4).ok_or(Error::Io)?;
+        let mut previous_key: Option<(u8, usize, Vec<u8>)> = None;
+        let mut full_names = BTreeMap::new();
+        let mut value_ranges = Vec::new();
+        let mut records = Vec::with_capacity(raw_entries.len());
+        for (name_index, name, value_offset, value_size) in raw_entries {
+            let key = (name_index, name.len(), name.clone());
+            if previous_key
+                .as_ref()
+                .is_some_and(|previous| previous >= &key)
+            {
+                return Err(Error::Io);
+            }
+            previous_key = Some(key);
+
+            let full_name = Self::xattr_name_from_parts(name_index, &name)?;
+            if full_names.insert(full_name, ()).is_some() {
+                return Err(Error::Io);
+            }
+
+            let size = usize::try_from(value_size).map_err(|_| Error::Io)?;
+            if size > data.len() {
+                return Err(Error::Io);
+            }
+            let value = if size == 0 {
+                if value_offset != 0 {
+                    return Err(Error::Io);
+                }
+                Vec::new()
+            } else {
+                let value_end = value_offset.checked_add(size).ok_or(Error::Io)?;
+                let padded_len = ext2_xattr_value_len(size).ok_or(Error::Io)?;
+                let padded_end = value_offset.checked_add(padded_len).ok_or(Error::Io)?;
+                if value_offset < terminator_end
+                    || value_end > data.len()
+                    || padded_end > data.len()
+                {
+                    return Err(Error::Io);
+                }
+                if value_ranges
+                    .iter()
+                    .any(|&(start, end): &(usize, usize)| value_offset < end && start < padded_end)
+                {
+                    return Err(Error::Io);
+                }
+                value_ranges.push((value_offset, padded_end));
+                data[value_offset..value_end].to_vec()
+            };
+            records.push(Ext2XattrRecord {
+                name_index,
+                name,
+                value,
+            });
+        }
+
+        Ok((header, records))
+    }
+
+    /// Encode one canonical external EA block. The caller supplies only
+    /// decoded records; entries and values are always rebuilt within bounds.
+    fn encode_xattr_block(
+        &self,
+        records: &[Ext2XattrRecord],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        if records.is_empty() {
+            return Err(Error::Missing);
+        }
+        let mut records = records.to_vec();
+        records.sort_by(|left, right| left.on_disk_order().cmp(&right.on_disk_order()));
+        for pair in records.windows(2) {
+            if pair[0].on_disk_order() >= pair[1].on_disk_order() {
+                return Err(Error::Unsupported);
+            }
+        }
+
+        let mut names = BTreeMap::new();
+        for record in &records {
+            let full = Self::xattr_name_from_parts(record.name_index, &record.name)?;
+            if names.insert(full, ()).is_some() {
+                return Err(Error::Unsupported);
+            }
+        }
+
+        let entries_limit = self.block_size.checked_sub(4).ok_or(Error::Unsupported)? as usize;
+        let mut cursor = EXT2_XATTR_HEADER_SIZE;
+        let mut positions = Vec::with_capacity(records.len());
+        for record in &records {
+            let entry_len = ext2_xattr_entry_len(record.name.len()).ok_or(Error::NoSpace)?;
+            let next = cursor.checked_add(entry_len).ok_or(Error::NoSpace)?;
+            if next > entries_limit {
+                return Err(Error::NoSpace);
+            }
+            positions.push(cursor);
+            cursor = next;
+        }
+
+        let mut value_end = self.block_size as usize;
+        let mut value_offsets = Vec::with_capacity(records.len());
+        for record in &records {
+            if record.value.is_empty() {
+                value_offsets.push(0usize);
+                continue;
+            }
+            let padded_len = ext2_xattr_value_len(record.value.len()).ok_or(Error::NoSpace)?;
+            value_end = value_end.checked_sub(padded_len).ok_or(Error::NoSpace)?;
+            if value_end < cursor + 4 {
+                return Err(Error::NoSpace);
+            }
+            value_offsets.push(value_end);
+        }
+
+        let mut data = vec![0u8; self.block_size as usize];
+        data[0..4].copy_from_slice(&EXT2_XATTR_MAGIC.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        data[8..12].copy_from_slice(&1u32.to_le_bytes());
+
+        let mut block_hash = 0u32;
+        let mut shareable = true;
+        for (record, (&position, &value_offset)) in records
+            .iter()
+            .zip(positions.iter().zip(value_offsets.iter()))
+        {
+            let name_end = position + EXT2_XATTR_ENTRY_SIZE + record.name.len();
+            data[position] = record.name.len() as u8;
+            data[position + 1] = record.name_index;
+            let value_offs = u16::try_from(value_offset).map_err(|_| Error::NoSpace)?;
+            data[position + 2..position + 4].copy_from_slice(&value_offs.to_le_bytes());
+            data[position + 4..position + 8].copy_from_slice(&0u32.to_le_bytes());
+            data[position + 8..position + 12]
+                .copy_from_slice(&(record.value.len() as u32).to_le_bytes());
+            data[position + EXT2_XATTR_ENTRY_SIZE..name_end].copy_from_slice(&record.name);
+
+            let entry_hash = Self::xattr_entry_hash(record);
+            data[position + 12..position + 16].copy_from_slice(&entry_hash.to_le_bytes());
+            if entry_hash == 0 {
+                shareable = false;
+            } else if shareable {
+                block_hash = block_hash.rotate_left(16) ^ entry_hash;
+            }
+
+            if !record.value.is_empty() {
+                let value_end = value_offset + record.value.len();
+                data[value_offset..value_end].copy_from_slice(&record.value);
+            }
+        }
+        if !shareable {
+            block_hash = 0;
+        }
+        data[12..16].copy_from_slice(&block_hash.to_le_bytes());
+        Ok(data)
+    }
+
+    /// Decode the optional EA area in the variable-length inode body. Values
+    /// in this area are relative to the first entry, immediately after the
+    /// four-byte inode-body magic.
+    fn decode_inode_xattr_body(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<Ext2InodeXattrBody, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        if data.len() != self.superblock.get_inode_size() as usize {
+            return Err(Error::Io);
+        }
+        if data.len() < EXT2_GOOD_OLD_INODE_SIZE {
+            return Err(Error::Io);
+        }
+        if data.len() == EXT2_GOOD_OLD_INODE_SIZE {
+            return Ok(Ext2InodeXattrBody {
+                data,
+                body_offset: EXT2_GOOD_OLD_INODE_SIZE,
+                records: Vec::new(),
+            });
+        }
+
+        let extra_isize = u16::from_le_bytes(
+            data.get(EXT2_INODE_EXTRA_ISIZE_OFFSET..EXT2_INODE_EXTRA_ISIZE_OFFSET + 2)
+                .ok_or(Error::Io)?
+                .try_into()
+                .map_err(|_| Error::Io)?,
+        ) as usize;
+        let body_offset = if extra_isize == 0 {
+            data.len()
+        } else {
+            if extra_isize < EXT2_MINIMAL_EXTRA_ISIZE
+                || extra_isize % EXT2_XATTR_PAD != 0
+                || extra_isize > data.len() - EXT2_GOOD_OLD_INODE_SIZE
+            {
+                return Err(Error::Io);
+            }
+            EXT2_GOOD_OLD_INODE_SIZE + extra_isize
+        };
+        if body_offset == data.len() || body_offset + EXT2_XATTR_IBODY_HEADER_SIZE > data.len() {
+            return Ok(Ext2InodeXattrBody {
+                data,
+                body_offset,
+                records: Vec::new(),
+            });
+        }
+        if u32::from_le_bytes(
+            data[body_offset..body_offset + EXT2_XATTR_IBODY_HEADER_SIZE]
+                .try_into()
+                .map_err(|_| Error::Io)?,
+        ) != EXT2_XATTR_MAGIC
+        {
+            return Ok(Ext2InodeXattrBody {
+                data,
+                body_offset,
+                records: Vec::new(),
+            });
+        }
+
+        let entries_start = body_offset + EXT2_XATTR_IBODY_HEADER_SIZE;
+        let entries_end = data.len().checked_sub(EXT2_XATTR_PAD).ok_or(Error::Io)?;
+        let mut cursor = entries_start;
+        let mut raw_entries = Vec::new();
+        loop {
+            let marker_end = cursor.checked_add(EXT2_XATTR_PAD).ok_or(Error::Io)?;
+            if marker_end > data.len() {
+                return Err(Error::Io);
+            }
+            if data[cursor..marker_end].iter().all(|byte| *byte == 0) {
+                break;
+            }
+            let entry = Ext2XattrEntry::from_bytes(&data[cursor..]).map_err(Self::xattr_error)?;
+            let name_len = entry.name_len as usize;
+            let entry_len = ext2_xattr_entry_len(name_len).ok_or(Error::Io)?;
+            let next = cursor.checked_add(entry_len).ok_or(Error::Io)?;
+            if next > entries_end {
+                return Err(Error::Io);
+            }
+            let name_start = cursor.checked_add(EXT2_XATTR_ENTRY_SIZE).ok_or(Error::Io)?;
+            let name_end = name_start.checked_add(name_len).ok_or(Error::Io)?;
+            if name_end > next {
+                return Err(Error::Io);
+            }
+            if u32::from_le(entry.value_block) != 0 {
+                return Err(Error::Unsupported);
+            }
+            let relative_value_offset = u16::from_le(entry.value_offs) as usize;
+            raw_entries.push((
+                entry.name_index,
+                data[name_start..name_end].to_vec(),
+                relative_value_offset,
+                u32::from_le(entry.value_size),
+            ));
+            cursor = next;
+        }
+        let terminator_end = cursor.checked_add(EXT2_XATTR_PAD).ok_or(Error::Io)?;
+
+        let mut full_names = BTreeMap::new();
+        let mut value_ranges = Vec::new();
+        let mut records = Vec::with_capacity(raw_entries.len());
+        for (name_index, name, relative_value_offset, value_size) in raw_entries {
+            // Inode-body entries need not be sorted, unlike external EA blocks.
+
+            let full_name = Self::xattr_name_from_parts(name_index, &name)?;
+            if full_names.insert(full_name, ()).is_some() {
+                return Err(Error::Io);
+            }
+
+            let size = usize::try_from(value_size).map_err(|_| Error::Io)?;
+            let value = if size == 0 {
+                if relative_value_offset != 0 {
+                    return Err(Error::Io);
+                }
+                Vec::new()
+            } else {
+                let value_offset = entries_start
+                    .checked_add(relative_value_offset)
+                    .ok_or(Error::Io)?;
+                let value_end = value_offset.checked_add(size).ok_or(Error::Io)?;
+                let padded_len = ext2_xattr_value_len(size).ok_or(Error::Io)?;
+                let padded_end = value_offset.checked_add(padded_len).ok_or(Error::Io)?;
+                if value_offset < terminator_end
+                    || value_end > data.len()
+                    || padded_end > data.len()
+                {
+                    return Err(Error::Io);
+                }
+                if value_ranges
+                    .iter()
+                    .any(|&(start, end): &(usize, usize)| value_offset < end && start < padded_end)
+                {
+                    return Err(Error::Io);
+                }
+                value_ranges.push((value_offset, padded_end));
+                data[value_offset..value_end].to_vec()
+            };
+            records.push(Ext2XattrRecord {
+                name_index,
+                name,
+                value,
+            });
+        }
+
+        Ok(Ext2InodeXattrBody {
+            data,
+            body_offset,
+            records,
+        })
+    }
+
+    /// Rebuild the inode-body EA area while retaining in the raw record both
+    /// the original 128 bytes and all extra inode fields before the EA body.
+    fn encode_inode_xattr_body(
+        &self,
+        body: &Ext2InodeXattrBody,
+        records: &[Ext2XattrRecord],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        if body.body_offset > body.data.len() {
+            return Err(Error::Unsupported);
+        }
+        let mut data = body.data.clone();
+        data[body.body_offset..].fill(0);
+        if records.is_empty() {
+            return Ok(data);
+        }
+        if body.body_offset == data.len() {
+            return Err(Error::NoSpace);
+        }
+
+        let mut records = records.to_vec();
+        records.sort_by(|left, right| left.on_disk_order().cmp(&right.on_disk_order()));
+        for pair in records.windows(2) {
+            if pair[0].on_disk_order() >= pair[1].on_disk_order() {
+                return Err(Error::Unsupported);
+            }
+        }
+        let mut names = BTreeMap::new();
+        for record in &records {
+            let full = Self::xattr_name_from_parts(record.name_index, &record.name)?;
+            if names.insert(full, ()).is_some() {
+                return Err(Error::Unsupported);
+            }
+        }
+
+        let body_len = data
+            .len()
+            .checked_sub(body.body_offset)
+            .ok_or(Error::NoSpace)?;
+        let entries_limit = body_len.checked_sub(EXT2_XATTR_PAD).ok_or(Error::NoSpace)?;
+        let mut cursor = EXT2_XATTR_IBODY_HEADER_SIZE;
+        let mut positions = Vec::with_capacity(records.len());
+        for record in &records {
+            let entry_len = ext2_xattr_entry_len(record.name.len()).ok_or(Error::NoSpace)?;
+            let next = cursor.checked_add(entry_len).ok_or(Error::NoSpace)?;
+            if next > entries_limit {
+                return Err(Error::NoSpace);
+            }
+            positions.push(cursor);
+            cursor = next;
+        }
+
+        let mut value_end = body_len
+            .checked_sub(EXT2_XATTR_IBODY_HEADER_SIZE)
+            .ok_or(Error::NoSpace)?;
+        let mut value_offsets = Vec::with_capacity(records.len());
+        for record in &records {
+            if record.value.is_empty() {
+                value_offsets.push(0usize);
+                continue;
+            }
+            let padded_len = ext2_xattr_value_len(record.value.len()).ok_or(Error::NoSpace)?;
+            value_end = value_end.checked_sub(padded_len).ok_or(Error::NoSpace)?;
+            if value_end < cursor + EXT2_XATTR_PAD {
+                return Err(Error::NoSpace);
+            }
+            value_offsets.push(value_end);
+        }
+
+        data[body.body_offset..body.body_offset + EXT2_XATTR_IBODY_HEADER_SIZE]
+            .copy_from_slice(&EXT2_XATTR_MAGIC.to_le_bytes());
+        let entries_start = body.body_offset + EXT2_XATTR_IBODY_HEADER_SIZE;
+        for (record, (&position, &value_offset)) in records
+            .iter()
+            .zip(positions.iter().zip(value_offsets.iter()))
+        {
+            let absolute_position = body.body_offset + position;
+            let name_end = absolute_position + EXT2_XATTR_ENTRY_SIZE + record.name.len();
+            data[absolute_position] = record.name.len() as u8;
+            data[absolute_position + 1] = record.name_index;
+            let value_offs = u16::try_from(value_offset).map_err(|_| Error::NoSpace)?;
+            data[absolute_position + 2..absolute_position + 4]
+                .copy_from_slice(&value_offs.to_le_bytes());
+            data[absolute_position + 4..absolute_position + 8].copy_from_slice(&0u32.to_le_bytes());
+            data[absolute_position + 8..absolute_position + 12]
+                .copy_from_slice(&(record.value.len() as u32).to_le_bytes());
+            data[absolute_position + 12..absolute_position + 16]
+                .copy_from_slice(&0u32.to_le_bytes());
+            data[absolute_position + EXT2_XATTR_ENTRY_SIZE..name_end].copy_from_slice(&record.name);
+            if !record.value.is_empty() {
+                let absolute_value = entries_start + value_offset;
+                data[absolute_value..absolute_value + record.value.len()]
+                    .copy_from_slice(&record.value);
+            }
+        }
+        Ok(data)
+    }
+
+    /// External values take precedence only when an identical key is present
+    /// in both storage locations with the same value. A differing pair is a
+    /// real ambiguity and must never be resolved silently.
+    fn merge_inode_and_external_xattrs(
+        inline: &[Ext2XattrRecord],
+        external: Option<&Ext2XattrBlock>,
+    ) -> Result<Vec<Ext2XattrRecord>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let mut records = external
+            .map(|block| block.records.clone())
+            .unwrap_or_default();
+        for record in inline {
+            if let Some(existing) = records
+                .iter()
+                .find(|existing| existing.key() == record.key())
+            {
+                if existing.value != record.value {
+                    return Err(Error::Io);
+                }
+                continue;
+            }
+            records.push(record.clone());
+        }
+        Ok(records)
+    }
+
+    fn read_inode_xattr_body(
+        &self,
+        inode_number: u32,
+    ) -> Result<Ext2InodeXattrBody, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let inode_size = self.superblock.get_inode_size() as u32;
+        if inode_size < EXT2_GOOD_OLD_INODE_SIZE as u32 || inode_size > self.block_size {
+            return Err(Error::Io);
+        }
+        let group = (inode_number - 1) / self.superblock.inodes_per_group;
+        let local_inode = (inode_number - 1) % self.superblock.inodes_per_group;
+        let bgd = self
+            .read_group_descriptor(group)
+            .map_err(Self::xattr_error)?;
+        let inode_block = bgd.get_inode_table() + (local_inode * inode_size) / self.block_size;
+        let inode_offset = (local_inode * inode_size) % self.block_size;
+        let block = self
+            .read_block_cached(u64::from(inode_block))
+            .map_err(Self::xattr_error)?;
+        let start = inode_offset as usize;
+        let end = start.checked_add(inode_size as usize).ok_or(Error::Io)?;
+        let data = block.get(start..end).ok_or(Error::Io)?.to_vec();
+        self.decode_inode_xattr_body(data)
+    }
+
+    fn read_xattr_block(
+        &self,
+        inode: &Ext2Inode,
+    ) -> Result<Option<Ext2XattrBlock>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let number = inode.get_file_acl();
+        if number == 0 {
+            return Ok(None);
+        }
+        if number < self.superblock.get_first_data_block()
+            || number >= self.superblock.get_blocks_count()
+        {
+            return Err(Error::Io);
+        }
+        let data = self
+            .read_block_cached(u64::from(number))
+            .map_err(Self::xattr_error)?;
+        let (header, records) = self.decode_xattr_block(&data)?;
+        Ok(Some(Ext2XattrBlock {
+            number,
+            header,
+            records,
+            data,
+        }))
+    }
+
+    fn get_ext2_xattr(
+        &self,
+        inode_number: u32,
+        name: &[u8],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let key = Self::xattr_name_parts(name)?;
+        let inode_lock = self.get_inode_lock(inode_number);
+        let _inode_guard = inode_lock.lock();
+        let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        let body = self.read_inode_xattr_body(inode_number)?;
+        let block = self.read_xattr_block(&inode)?;
+        Self::merge_inode_and_external_xattrs(&body.records, block.as_ref())?
+            .into_iter()
+            .find(|record| record.key() == key)
+            .map(|record| record.value)
+            .ok_or(Error::Missing)
+    }
+
+    fn list_ext2_xattrs(
+        &self,
+        inode_number: u32,
+    ) -> Result<Vec<Vec<u8>>, crate::fs::vfs_v2::xattr::Error> {
+        let inode_lock = self.get_inode_lock(inode_number);
+        let _inode_guard = inode_lock.lock();
+        let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        let body = self.read_inode_xattr_body(inode_number)?;
+        let block = self.read_xattr_block(&inode)?;
+        Self::merge_inode_and_external_xattrs(&body.records, block.as_ref())?
+            .iter()
+            .map(|record| Self::xattr_name_from_parts(record.name_index, &record.name))
+            .collect()
+    }
+
+    fn inode_record_with_xattrs(
+        &self,
+        inode: &Ext2Inode,
+        body: &Ext2InodeXattrBody,
+        inline_records: &[Ext2XattrRecord],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        let mut data = if inline_records == body.records.as_slice() {
+            body.data.clone()
+        } else {
+            self.encode_inode_xattr_body(body, inline_records)?
+        };
+        let inode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Ext2Inode as *const u8,
+                mem::size_of::<Ext2Inode>(),
+            )
+        };
+        let prefix = data
+            .get_mut(..EXT2_GOOD_OLD_INODE_SIZE)
+            .ok_or(crate::fs::vfs_v2::xattr::Error::Io)?;
+        if inode_bytes.len() != prefix.len() {
+            return Err(crate::fs::vfs_v2::xattr::Error::Io);
+        }
+        prefix.copy_from_slice(inode_bytes);
+        Ok(data)
+    }
+
+    /// Commit inline and external EA changes as one inode publication. New
+    /// external blocks are written and allocated before the inode points at
+    /// them; old blocks are released only after that publication succeeds.
+    fn commit_ext2_xattrs(
+        &self,
+        inode_number: u32,
+        mut inode: Ext2Inode,
+        body: Ext2InodeXattrBody,
+        old_block: Option<Ext2XattrBlock>,
+        mut inline_records: Vec<Ext2XattrRecord>,
+        external_records: Vec<Ext2XattrRecord>,
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let mut inline_index = 0;
+        while inline_index < inline_records.len() {
+            let inline = &inline_records[inline_index];
+            if let Some(external) = external_records
+                .iter()
+                .find(|external| external.key() == inline.key())
+            {
+                if external.value != inline.value {
+                    return Err(Error::Io);
+                }
+                inline_records.remove(inline_index);
+            } else {
+                inline_index += 1;
+            }
+        }
+        let original_inode_data = body.data.clone();
+        let inline_changed = inline_records != body.records;
+        let external_changed = old_block
+            .as_ref()
+            .map(|block| block.records != external_records)
+            .unwrap_or(!external_records.is_empty());
+        if !inline_changed && !external_changed {
+            return Ok(());
+        }
+
+        if inline_changed && !inline_records.is_empty() {
+            self.ensure_xattr_feature().map_err(Self::xattr_error)?;
+        }
+
+        if !external_changed {
+            if let Some(now) = current_timestamp() {
+                inode.ctime = now.to_le();
+            }
+            let inode_data = self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
+            return self
+                .write_inode_record_bytes(inode_number, &inode_data)
+                .map_err(Self::xattr_error);
+        }
+
+        let encoded_external = if external_records.is_empty() {
+            None
+        } else {
+            Some(self.encode_xattr_block(&external_records)?)
+        };
+
+        if let Some(old_block) = old_block {
+            if encoded_external.is_none() {
+                let sectors = self.block_size / 512;
+                inode.blocks = inode
+                    .get_blocks()
+                    .checked_sub(sectors)
+                    .ok_or(Error::Unsupported)?
+                    .to_le();
+                inode.set_file_acl(0);
+            }
+            if let Some(now) = current_timestamp() {
+                inode.ctime = now.to_le();
+            }
+            let inode_data = self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
+
+            if encoded_external.is_none() {
+                self.write_inode_record_bytes(inode_number, &inode_data)
+                    .map_err(Self::xattr_error)?;
+                if let Err(error) = self.release_xattr_block_locked(&old_block) {
+                    if old_block.header.refcount() > 1 {
+                        let _ = self.write_inode_record_bytes(inode_number, &original_inode_data);
+                    }
+                    return Err(error);
+                }
+                return Ok(());
+            }
+
+            let encoded_external = encoded_external.expect("external data exists");
+            if old_block.header.refcount() > 1 {
+                let new_number = self.allocate_block_locked().map_err(Self::xattr_error)? as u32;
+                if let Err(error) =
+                    self.write_block_cached(u64::from(new_number), &encoded_external)
+                {
+                    self.abandon_allocated_xattr_block(new_number);
+                    return Err(Self::xattr_error(error));
+                }
+                inode.set_file_acl(new_number);
+                let inode_data = match self.inode_record_with_xattrs(&inode, &body, &inline_records)
+                {
+                    Ok(data) => data,
+                    Err(error) => {
+                        self.abandon_allocated_xattr_block(new_number);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = self.write_inode_record_bytes(inode_number, &inode_data) {
+                    self.abandon_allocated_xattr_block(new_number);
+                    return Err(Self::xattr_error(error));
+                }
+                if let Err(error) = self.release_xattr_block_locked(&old_block) {
+                    if self
+                        .write_inode_record_bytes(inode_number, &original_inode_data)
+                        .is_ok()
+                    {
+                        self.abandon_allocated_xattr_block(new_number);
+                    }
+                    return Err(error);
+                }
+                return Ok(());
+            }
+
+            if let Err(error) =
+                self.write_block_cached(u64::from(old_block.number), &encoded_external)
+            {
+                return Err(Self::xattr_error(error));
+            }
+            if let Err(error) = self.write_inode_record_bytes(inode_number, &inode_data) {
+                let _ = self.write_block_cached(u64::from(old_block.number), &old_block.data);
+                return Err(Self::xattr_error(error));
+            }
+            return Ok(());
+        }
+
+        if let Some(encoded_external) = encoded_external {
+            self.ensure_xattr_feature().map_err(Self::xattr_error)?;
+            let new_number = self.allocate_block_locked().map_err(Self::xattr_error)? as u32;
+            if let Err(error) = self.write_block_cached(u64::from(new_number), &encoded_external) {
+                self.abandon_allocated_xattr_block(new_number);
+                return Err(Self::xattr_error(error));
+            }
+            if let Err(error) = self.add_inode_allocated_blocks(&mut inode, 1) {
+                self.abandon_allocated_xattr_block(new_number);
+                return Err(Self::xattr_error(error));
+            }
+            inode.set_file_acl(new_number);
+            if let Some(now) = current_timestamp() {
+                inode.ctime = now.to_le();
+            }
+            let inode_data = match self.inode_record_with_xattrs(&inode, &body, &inline_records) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.abandon_allocated_xattr_block(new_number);
+                    return Err(error);
+                }
+            };
+            if let Err(error) = self.write_inode_record_bytes(inode_number, &inode_data) {
+                self.abandon_allocated_xattr_block(new_number);
+                return Err(Self::xattr_error(error));
+            }
+            return Ok(());
+        }
+
+        if let Some(now) = current_timestamp() {
+            inode.ctime = now.to_le();
+        }
+        let inode_data = self.inode_record_with_xattrs(&inode, &body, &inline_records)?;
+        self.write_inode_record_bytes(inode_number, &inode_data)
+            .map_err(Self::xattr_error)
+    }
+
+    fn set_ext2_xattr(
+        &self,
+        inode_number: u32,
+        name: &[u8],
+        value: &[u8],
+        mode: crate::fs::vfs_v2::xattr::SetMode,
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::{self, Error, SetMode};
+        if value.len() > xattr::MAX_VALUE {
+            return Err(Error::TooLarge);
+        }
+        let (name_index, name_suffix) = Self::xattr_name_parts(name)?;
+        let inode_lock = self.get_inode_lock(inode_number);
+        let _inode_guard = inode_lock.lock();
+        let _allocation_guard = self.allocation_lock.lock();
+        let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        let body = self.read_inode_xattr_body(inode_number)?;
+        let old_block = self.read_xattr_block(&inode)?;
+        if old_block.is_some() && inode.get_blocks() < self.block_size / 512 {
+            return Err(Error::Io);
+        }
+        let existing = Self::merge_inode_and_external_xattrs(&body.records, old_block.as_ref())?;
+        let key = (name_index, name_suffix);
+        let exists = existing.iter().any(|record| record.key() == key);
+        match (mode, exists) {
+            (SetMode::Create, true) => return Err(Error::Exists),
+            (SetMode::Replace, false) => return Err(Error::Missing),
+            _ => {}
+        }
+
+        let mut inline_records = body.records.clone();
+        let mut external_records = old_block
+            .as_ref()
+            .map(|block| block.records.clone())
+            .unwrap_or_default();
+        let new_record = Ext2XattrRecord {
+            name_index,
+            name: name_suffix.to_vec(),
+            value: value.to_vec(),
+        };
+        let inline_position = inline_records.iter().position(|record| record.key() == key);
+        let external_position = external_records
+            .iter()
+            .position(|record| record.key() == key);
+
+        if let Some(ext_position) = external_position {
+            // External storage is the stable choice when both representations
+            // carry the same value. Removing the inline duplicate here also
+            // repairs the mixed-storage duplication on the first update.
+            if let Some(inline_position) = inline_position {
+                inline_records.remove(inline_position);
+            }
+            external_records[ext_position] = new_record;
+        } else if let Some(inline_position) = inline_position {
+            inline_records[inline_position] = new_record.clone();
+            match self.encode_inode_xattr_body(&body, &inline_records) {
+                Ok(_) => {}
+                Err(Error::NoSpace) => {
+                    inline_records.remove(inline_position);
+                    external_records.push(new_record);
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            inline_records.push(new_record.clone());
+            match self.encode_inode_xattr_body(&body, &inline_records) {
+                Ok(_) => {}
+                Err(Error::NoSpace) => {
+                    inline_records.pop();
+                    external_records.push(new_record);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.commit_ext2_xattrs(
+            inode_number,
+            inode,
+            body,
+            old_block,
+            inline_records,
+            external_records,
+        )
+    }
+
+    fn remove_ext2_xattr(
+        &self,
+        inode_number: u32,
+        name: &[u8],
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let key = Self::xattr_name_parts(name)?;
+        let inode_lock = self.get_inode_lock(inode_number);
+        let _inode_guard = inode_lock.lock();
+        let _allocation_guard = self.allocation_lock.lock();
+        let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        let body = self.read_inode_xattr_body(inode_number)?;
+        let old_block = self.read_xattr_block(&inode)?;
+        if old_block.is_some() && inode.get_blocks() < self.block_size / 512 {
+            return Err(Error::Io);
+        }
+        let key = (key.0, key.1);
+        Self::merge_inode_and_external_xattrs(&body.records, old_block.as_ref())?;
+        let mut inline_records = body.records.clone();
+        let inline_position = inline_records.iter().position(|record| record.key() == key);
+        let mut external_records = old_block
+            .as_ref()
+            .map(|block| block.records.clone())
+            .unwrap_or_default();
+        let external_position = external_records
+            .iter()
+            .position(|record| record.key() == key);
+        if let Some(inline_position) = inline_position {
+            inline_records.remove(inline_position);
+        }
+        if let Some(external_position) = external_position {
+            external_records.remove(external_position);
+        }
+        if inline_position.is_none() && external_position.is_none() {
+            return Err(Error::Missing);
+        }
+        self.commit_ext2_xattrs(
+            inode_number,
+            inode,
+            body,
+            old_block,
+            inline_records,
+            external_records,
+        )
+    }
+
+    /// The caller holds the allocation lock and has not published the block in
+    /// an inode. Best effort reclamation is appropriate after an I/O failure.
+    fn abandon_allocated_xattr_block(&self, block: u32) {
+        let _ = self.free_block_unlocked(block);
+        self.block_cache.write().remove(u64::from(block));
+    }
+
+    /// Release a block after the inode no longer references it. The caller
+    /// holds both the per-inode and allocation locks; I/O never runs under an
+    /// IRQ spinlock.
+    fn release_xattr_block_locked(
+        &self,
+        block: &Ext2XattrBlock,
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        if block.header.refcount() == 1 {
+            self.free_block_unlocked(block.number)
+                .map_err(Self::xattr_error)?;
+            self.block_cache.write().remove(u64::from(block.number));
+        } else {
+            let mut data = block.data.clone();
+            let refcount = block
+                .header
+                .refcount()
+                .checked_sub(1)
+                .ok_or(Error::Unsupported)?;
+            data[4..8].copy_from_slice(&refcount.to_le_bytes());
+            self.write_block_cached(u64::from(block.number), &data)
+                .map_err(Self::xattr_error)?;
+        }
+        Ok(())
+    }
+
+    fn reclaim_xattr_block_for_inode_locked(
+        &self,
+        inode: &Ext2Inode,
+    ) -> Result<(), FileSystemError> {
+        let block = self.read_xattr_block(inode).map_err(|error| {
+            FileSystemError::new(
+                if error == crate::fs::vfs_v2::xattr::Error::Unsupported {
+                    FileSystemErrorKind::InvalidData
+                } else {
+                    FileSystemErrorKind::IoError
+                },
+                "Failed to validate ext2 xattr block during inode reclamation",
+            )
+        })?;
+        if let Some(block) = block {
+            self.release_xattr_block_locked(&block).map_err(|error| {
+                FileSystemError::new(
+                    if error == crate::fs::vfs_v2::xattr::Error::Unsupported {
+                        FileSystemErrorKind::InvalidData
+                    } else {
+                        FileSystemErrorKind::IoError
+                    },
+                    "Failed to release ext2 xattr block during inode reclamation",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// ext2 keeps the compatible EXT_ATTR feature bit set once an external EA
+    /// block has ever been allocated. This runs under the allocation lock.
+    fn ensure_xattr_feature(&self) -> Result<(), FileSystemError> {
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: 2,
+            sector_count: 2,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; 1024],
+        });
+        let results = self.block_device.submit_requests(vec![request]);
+        let mut superblock_data = results
+            .first()
+            .and_then(|result| result.result.is_ok().then(|| result.request.buffer.clone()))
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read superblock for ext2 xattr feature update",
+                )
+            })?;
+        if superblock_data.len() < 96 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Short ext2 superblock while enabling xattrs",
+            ));
+        }
+        let feature_compat = u32::from_le_bytes(superblock_data[92..96].try_into().unwrap());
+        if feature_compat & EXT2_FEATURE_COMPAT_EXT_ATTR != 0 {
+            return Ok(());
+        }
+        superblock_data[92..96]
+            .copy_from_slice(&(feature_compat | EXT2_FEATURE_COMPAT_EXT_ATTR).to_le_bytes());
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: 2,
+            sector_count: 2,
+            head: 0,
+            cylinder: 0,
+            buffer: superblock_data,
+        });
+        let results = self.block_device.submit_requests(vec![request]);
+        match results.first() {
+            Some(result) if result.result.is_ok() => Ok(()),
+            _ => Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "Failed to enable ext2 xattr feature bit",
+            )),
+        }
     }
 
     /// Read an inode from disk
@@ -1591,6 +2828,52 @@ impl Ext2FileSystem {
     }
 
     /// Persist selected times without losing cached writes or a later fsync.
+    fn set_inode_owner(
+        &self,
+        inode_num: u32,
+        principal: Option<crate::shield::identity::Principal>,
+        group: Option<crate::shield::identity::Group>,
+    ) -> Result<(), FileSystemError> {
+        if u32::from_le(self.superblock.creator_os) != 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Unknown ext2 ownership format",
+            ));
+        }
+        let task = crate::task::mytask().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "Owner authority required",
+            )
+        })?;
+        let inode_lock = self.get_inode_lock(inode_num);
+        let _guard = inode_lock.lock();
+        let mut inode = self.read_inode(inode_num)?;
+        let mut owner = inode.native_owner();
+        if !task
+            .credentials
+            .read()
+            .permits_owner_change(owner, principal, group)
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::PermissionDenied,
+                "Owner change denied",
+            ));
+        }
+        if let Some(principal) = principal {
+            owner.principal = principal;
+        }
+        if let Some(group) = group {
+            owner.group = group;
+        }
+        inode.set_native_owner(owner);
+        if let Some(now) = current_timestamp() {
+            inode.ctime = now.to_le();
+        }
+        self.write_inode(inode_num, &inode)?;
+        self.inode_cache.write().insert(inode_num, inode);
+        Ok(())
+    }
     fn set_inode_times(
         &self,
         inode_num: u32,
@@ -1641,7 +2924,53 @@ impl Ext2FileSystem {
 
     /// Write an inode to disk
     fn write_inode(&self, inode_number: u32, inode: &Ext2Inode) -> Result<(), FileSystemError> {
+        let inode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Ext2Inode as *const u8,
+                core::mem::size_of::<Ext2Inode>(),
+            )
+        };
+        self.write_inode_record_bytes(inode_number, inode_bytes)
+    }
+
+    /// Initialize the complete record when allocating a new inode identity.
+    /// Ordinary updates preserve its tail; creation must discard the previous
+    /// identity's extra fields and inode-body attributes, including labels.
+    fn write_new_inode(&self, inode_number: u32, inode: &Ext2Inode) -> Result<(), FileSystemError> {
+        let mut record = vec![0; self.superblock.get_inode_size() as usize];
+        let prefix = record
+            .get_mut(..mem::size_of::<Ext2Inode>())
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::InvalidData, "Short ext2 inode record")
+            })?;
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Ext2Inode as *const u8,
+                mem::size_of::<Ext2Inode>(),
+            )
+        };
+        prefix.copy_from_slice(bytes);
+        self.write_inode_record_bytes(inode_number, &record)
+    }
+
+    /// Publish the original fields and an optional inode-body EA area in one
+    /// read-modify-write of the shared inode-table block.
+    fn write_inode_record_bytes(
+        &self,
+        inode_number: u32,
+        inode_bytes: &[u8],
+    ) -> Result<(), FileSystemError> {
         profile_scope!("ext2::write_inode");
+        let configured_inode_size = self.superblock.get_inode_size() as usize;
+        if inode_bytes.len() < mem::size_of::<Ext2Inode>()
+            || inode_bytes.len() > configured_inode_size
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid ext2 inode record length",
+            ));
+        }
+        let inode = Ext2Inode::from_bytes(inode_bytes)?;
         // Calculate which block group contains this inode
         let inodes_per_group = self.superblock.inodes_per_group;
         let group_number = (inode_number - 1) / inodes_per_group;
@@ -1659,6 +2988,12 @@ impl Ext2FileSystem {
         let target_block = inode_table_block + block_offset;
         let target_sector = self.block_to_sector(target_block as u64);
 
+        // Different inodes commonly share one inode-table block. Their per-inode
+        // locks do not prevent one inode's whole-block RMW from replacing a
+        // neighbor's concurrently committed bytes or 256-byte inode tail.
+        let table_block_lock = self.get_inode_table_block_lock(target_block as u64);
+        let _table_block_guard = table_block_lock.lock();
+
         // Read the current block containing the inode
         let read_request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -1669,8 +3004,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(read_request);
-        let read_results = self.block_device.process_requests();
+        let read_results = self.block_device.submit_requests(vec![read_request]);
 
         let mut block_data = if let Some(result) = read_results.first() {
             match &result.result {
@@ -1689,14 +3023,10 @@ impl Ext2FileSystem {
             ));
         };
 
-        // Write the inode data into the block
-        let inode_bytes = unsafe {
-            core::slice::from_raw_parts(
-                inode as *const Ext2Inode as *const u8,
-                core::mem::size_of::<Ext2Inode>(),
-            )
-        };
+        #[cfg(test)]
+        self.observe_inode_table_write(target_block as u64);
 
+        // Write the inode data into the block
         let start_offset = inode_offset_in_block as usize;
         let end_offset = start_offset + inode_bytes.len();
 
@@ -1719,8 +3049,7 @@ impl Ext2FileSystem {
             buffer: block_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(result) = write_results.first() {
             match &result.result {
@@ -1758,55 +3087,58 @@ impl Ext2FileSystem {
     fn allocate_block(&self) -> Result<u64, FileSystemError> {
         profile_scope!("ext2::allocate_block");
 
-        self.with_allocation_lock(|| {
-            // Try to allocate from any available group
-            let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group
-                - 1)
-                / self.superblock.blocks_per_group;
+        self.with_allocation_lock(|| self.allocate_block_locked())
+    }
 
+    /// Allocate a block while the caller already serializes allocator state
+    /// through `allocation_lock`. The sleepable mutex is not re-entrant.
+    fn allocate_block_locked(&self) -> Result<u64, FileSystemError> {
+        // Try to allocate from any available group
+        let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1)
+            / self.superblock.blocks_per_group;
+
+        #[cfg(test)]
+        {
+            let blocks_count = self.superblock.blocks_count;
+            let blocks_per_group = self.superblock.blocks_per_group;
+
+            crate::println!(
+                "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
+                total_groups,
+                blocks_count,
+                blocks_per_group
+            );
+        }
+
+        for group in 0..total_groups {
             #[cfg(test)]
-            {
-                let blocks_count = self.superblock.blocks_count;
-                let blocks_per_group = self.superblock.blocks_per_group;
+            crate::println!("[ext2] allocate_block: trying group {}", group);
 
-                crate::println!(
-                    "[ext2] allocate_block: total_groups={}, blocks_count={}, blocks_per_group={}",
-                    total_groups,
-                    blocks_count,
-                    blocks_per_group
-                );
-            }
-
-            for group in 0..total_groups {
-                #[cfg(test)]
-                crate::println!("[ext2] allocate_block: trying group {}", group);
-
-                match self.allocate_block_in_group(group) {
-                    Ok(block_num) => {
-                        return Ok(block_num);
-                    }
-                    Err(FileSystemError {
-                        kind: FileSystemErrorKind::NoSpace,
-                        ..
-                    }) => {
-                        // Try next group
-                        #[cfg(test)]
-                        crate::println!("[ext2] allocate_block: group {} full, trying next", group);
-                        continue;
-                    }
-                    Err(e) => {
-                        #[cfg(test)]
-                        crate::println!("[ext2] allocate_block: group {} error: {:?}", group, e);
-                        return Err(e);
-                    }
+            match self.allocate_block_in_group(group) {
+                Ok(block_num) => {
+                    return Ok(block_num);
+                }
+                Err(FileSystemError {
+                    kind: FileSystemErrorKind::NoSpace,
+                    ..
+                }) => {
+                    // Try next group
+                    #[cfg(test)]
+                    crate::println!("[ext2] allocate_block: group {} full, trying next", group);
+                    continue;
+                }
+                Err(e) => {
+                    #[cfg(test)]
+                    crate::println!("[ext2] allocate_block: group {} error: {:?}", group, e);
+                    return Err(e);
                 }
             }
+        }
 
-            Err(FileSystemError::new(
-                FileSystemErrorKind::NoSpace,
-                "No free blocks available in any group",
-            ))
-        })
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NoSpace,
+            "No free blocks available in any group",
+        ))
     }
 
     /// Allocate a block in a specific group - OPTIMIZED VERSION  
@@ -1835,8 +3167,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -1883,8 +3214,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
@@ -1972,8 +3302,6 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: bitmap_data,
                 });
-                self.block_device.enqueue_request(bitmap_write);
-
                 // Prepare BGD update
                 let mut updated_bgd_data = bgd_data.clone();
                 let mut bgd_update =
@@ -1991,14 +3319,14 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: updated_bgd_data,
                 });
-                self.block_device.enqueue_request(bgd_write);
-
                 // Process both writes in one batch
                 // crate::println!(
                 //     "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
                 //     block_num
                 // );
-                let write_results = self.block_device.process_requests();
+                let write_results = self
+                    .block_device
+                    .submit_requests(vec![bitmap_write, bgd_write]);
                 // crate::println!(
                 //     "[ext2] allocate_block_in_group: Processed {} requests",
                 //     write_results.len()
@@ -2091,8 +3419,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -2137,8 +3464,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
@@ -2226,8 +3552,6 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: bitmap_data,
                 });
-                self.block_device.enqueue_request(bitmap_write);
-
                 // Prepare BGD update (reduce free_blocks_count by count)
                 let mut updated_bgd_data = bgd_data.clone();
                 let mut bgd_update =
@@ -2246,15 +3570,15 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: updated_bgd_data,
                 });
-                self.block_device.enqueue_request(bgd_write);
-
                 // Process both writes in one batch
                 #[cfg(test)]
                 crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Processing 2 writes in batch for {} blocks",
                     count
                 );
-                let write_results = self.block_device.process_requests();
+                let write_results = self
+                    .block_device
+                    .submit_requests(vec![bitmap_write, bgd_write]);
 
                 if write_results.len() != 2 || write_results.iter().any(|r| r.result.is_err()) {
                     return Err(FileSystemError::new(
@@ -2743,6 +4067,46 @@ impl Ext2FileSystem {
         Ok(())
     }
 
+    /// Prepare an in-place '..' rewrite without changing record lengths or
+    /// reallocating the directory. The caller holds the moved inode's lock.
+    fn directory_parent_update(
+        &self,
+        inode_number: u32,
+        old_parent: u32,
+        new_parent: u32,
+    ) -> Result<(u64, Vec<u8>), FileSystemError> {
+        let inode = self.read_inode(inode_number)?;
+        let block = self.get_inode_block(&inode, 0)?;
+        if block != 0 {
+            let mut data = self.read_block_cached(block)?;
+            let mut offset = 0;
+            while offset + 8 <= data.len() {
+                let entry = Ext2DirectoryEntryRaw::from_bytes(&data[offset..])?;
+                let length = usize::from(entry.get_rec_len());
+                let name_len = usize::from(entry.get_name_len());
+                if length < 8
+                    || length & 3 != 0
+                    || offset + length > data.len()
+                    || name_len > length - 8
+                {
+                    break;
+                }
+                if entry.get_inode() == old_parent
+                    && name_len == 2
+                    && &data[offset + 8..offset + 10] == b".."
+                {
+                    data[offset..offset + 4].copy_from_slice(&new_parent.to_le_bytes());
+                    return Ok((block, data));
+                }
+                offset += length;
+            }
+        }
+        Err(FileSystemError::new(
+            FileSystemErrorKind::InvalidData,
+            "Moved ext2 directory has no matching '..' entry",
+        ))
+    }
+
     /// Remove a directory entry from a parent directory
     fn remove_directory_entry(
         &self,
@@ -2836,10 +4200,26 @@ impl Ext2FileSystem {
 
     /// Free an inode and update bitmaps and metadata
     fn free_inode(&self, inode_number: u32) -> Result<(), FileSystemError> {
+        self.free_inode_with_dir_accounting(inode_number, true)
+    }
+
+    /// `created` inodes have not contributed to the directory count yet. Failed
+    /// label initialization must discard their inode, xattr block, and data
+    /// blocks without undoing another directory's accounting.
+    fn discard_created_inode(&self, inode_number: u32) -> Result<(), FileSystemError> {
+        self.free_inode_with_dir_accounting(inode_number, false)
+    }
+
+    fn free_inode_with_dir_accounting(
+        &self,
+        inode_number: u32,
+        account_used_directory: bool,
+    ) -> Result<(), FileSystemError> {
         self.with_allocation_lock(|| {
             // Read the inode first to get its data blocks and determine if it's a directory
             let inode = self.read_inode(inode_number)?;
             let is_directory = inode.is_dir();
+            self.reclaim_xattr_block_for_inode_locked(&inode)?;
             // Truncation may retain blocks beyond EOF. Visit the complete
             // allocated tree, freeing data and its indirect tables post-order.
             self.walk_inode_allocated_blocks(&inode, &mut |_, block, _| {
@@ -2865,8 +4245,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut bgd_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -2902,8 +4281,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut bitmap_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -2946,8 +4324,7 @@ impl Ext2FileSystem {
                 buffer: bitmap_data,
             });
 
-            self.block_device.enqueue_request(write_request);
-            let write_results = self.block_device.process_requests();
+            let write_results = self.block_device.submit_requests(vec![write_request]);
 
             if let Some(write_result) = write_results.first() {
                 match &write_result.result {
@@ -2971,7 +4348,7 @@ impl Ext2FileSystem {
 
             // Update block group descriptor statistics
             bgd.set_free_inodes_count(bgd.get_free_inodes_count() + 1);
-            if is_directory {
+            if is_directory && account_used_directory {
                 bgd.set_used_dirs_count(bgd.get_used_dirs_count().saturating_sub(1));
             }
 
@@ -2986,8 +4363,7 @@ impl Ext2FileSystem {
                 buffer: bgd_data,
             });
 
-            self.block_device.enqueue_request(write_bgd_request);
-            let bgd_write_results = self.block_device.process_requests();
+            let bgd_write_results = self.block_device.submit_requests(vec![write_bgd_request]);
 
             if let Some(bgd_write_result) = bgd_write_results.first() {
                 match &bgd_write_result.result {
@@ -3010,6 +4386,7 @@ impl Ext2FileSystem {
             self.block_cache.write().remove(bgd_block as u64);
 
             self.clear_inode_on_disk(inode_number)?;
+            self.inode_labels.lock().remove(&inode_number);
 
             // Update superblock statistics
             self.update_superblock_free_counts(0, 1)?;
@@ -3247,19 +4624,19 @@ impl Ext2FileSystem {
             self.write_blocks_cached(&write_blocks)?;
         }
 
-        if u64::from(content_size) < old_size {
-            self.zero_retained_file_tail(&inode, u64::from(content_size), old_size)?;
-        }
-
         // Update inode size, block count, and modification time
-        inode.size = content_size;
+        inode.size = content_size.to_le();
         if let Some(time) = current_timestamp() {
             inode.mtime = time.to_le();
             inode.ctime = time.to_le();
         }
 
         // Write updated inode to disk
-        self.write_inode(inode_num, &inode)?;
+        if u64::from(content_size) < old_size {
+            self.write_inode_reclaiming_tail(inode_num, &mut inode)?;
+        } else {
+            self.write_inode(inode_num, &inode)?;
+        }
 
         // Update inode cache with LRU eviction
         {
@@ -3290,7 +4667,7 @@ impl Ext2FileSystem {
 
     /// Finish a truncate under the inode operation lock. Data writes and tail
     /// zeroing are not transactional on I/O errors, but EOF is published last.
-    /// Allocation is retained until final unlink; growing a hole allocates none.
+    /// Shrinking releases whole blocks beyond EOF; growing a hole allocates none.
     fn truncate_inode_locked(
         &self,
         inode_num: u32,
@@ -3305,10 +4682,12 @@ impl Ext2FileSystem {
         })?;
         let mut inode = self.read_inode(inode_num)?;
         if new_size < old_size {
+            // Only the surviving partial block needs zeroing. Whole blocks
+            // beyond EOF must be detached, not retained as ext2 preallocation.
             self.zero_allocated_file_range(
                 &inode,
                 new_size as u64,
-                (old_size as u64).max(u64::from(inode.get_size())),
+                (new_size as u64).div_ceil(u64::from(self.block_size)) * u64::from(self.block_size),
             )?;
         } else {
             self.zero_allocated_file_range(&inode, old_size as u64, new_size as u64)?;
@@ -3318,23 +4697,110 @@ impl Ext2FileSystem {
             inode.mtime = now.to_le();
             inode.ctime = now.to_le();
         }
-        self.write_inode(inode_num, &inode)?;
+        if new_size < old_size {
+            self.write_inode_reclaiming_tail(inode_num, &mut inode)?;
+        } else {
+            self.write_inode(inode_num, &inode)?;
+        }
         self.inode_cache.write().insert(inode_num, inode);
         Ok(())
     }
 
-    /// The full-content writer already zero-pads its partial final block.
-    fn zero_retained_file_tail(
+    /// Publish removed pointers before returning their blocks to the allocator.
+    /// The caller holds the inode operation lock; allocation stays serialized
+    /// until all data and now-empty indirect tables have been freed.
+    /// Partial metadata I/O failure may leak detached allocation, but no bitmap
+    /// bit is cleared until every surviving pointer and the inode are written.
+    fn write_inode_reclaiming_tail(
         &self,
-        inode: &Ext2Inode,
-        new_size: u64,
-        old_size: u64,
+        inode_num: u32,
+        inode: &mut Ext2Inode,
     ) -> Result<(), FileSystemError> {
-        self.zero_allocated_file_range(
-            inode,
-            new_size.div_ceil(u64::from(self.block_size)) * u64::from(self.block_size),
-            old_size,
-        )
+        self.with_allocation_lock(|| {
+            let keep = u64::from(inode.get_size()).div_ceil(u64::from(self.block_size));
+            let mut released = Vec::new();
+            for logical in 0..12 {
+                inode.block[logical] = self.prune_inode_subtree(
+                    inode.block[logical],
+                    logical as u64,
+                    0,
+                    keep,
+                    &mut released,
+                )?;
+            }
+            let pointers = u64::from(self.block_size / 4);
+            let mut logical = 12;
+            for depth in 1..=3 {
+                let index = 11 + depth as usize;
+                inode.block[index] = self.prune_inode_subtree(
+                    inode.block[index],
+                    logical,
+                    depth,
+                    keep,
+                    &mut released,
+                )?;
+                logical += pointers.pow(u32::from(depth));
+            }
+            let sectors = (released.len() as u32)
+                .checked_mul(self.block_size / 512)
+                .and_then(|removed| inode.get_blocks().checked_sub(removed))
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid ext2 allocated sector count",
+                    )
+                })?;
+            inode.blocks = sectors.to_le();
+            self.write_inode(inode_num, inode)?;
+            for block in released {
+                self.free_block_unlocked(block)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Return the surviving on-disk pointer, collecting removed blocks in
+    /// post-order. Only the subtree crossing EOF requires pointer-block writes.
+    fn prune_inode_subtree(
+        &self,
+        pointer: u32,
+        logical: u64,
+        depth: u8,
+        keep: u64,
+        released: &mut Vec<u32>,
+    ) -> Result<u32, FileSystemError> {
+        let block = u32::from_le(pointer);
+        let pointers = u64::from(self.block_size / 4);
+        if block == 0 || logical + pointers.pow(u32::from(depth)) <= keep {
+            return Ok(pointer);
+        }
+        if logical >= keep {
+            self.walk_allocated_subtree(pointer, logical, depth, &mut |_, block, _| {
+                released.push(block);
+                Ok(())
+            })?;
+            return Ok(0);
+        }
+        let mut data = self.read_block_cached(u64::from(block))?;
+        let span = pointers.pow(u32::from(depth - 1));
+        for (index, bytes) in data.chunks_exact_mut(4).enumerate() {
+            let child = u32::from_le_bytes(bytes.try_into().unwrap()).to_le();
+            let retained = self.prune_inode_subtree(
+                child,
+                logical + index as u64 * span,
+                depth - 1,
+                keep,
+                released,
+            )?;
+            bytes.copy_from_slice(&u32::from_le(retained).to_le_bytes());
+        }
+        if data.iter().all(|byte| *byte == 0) {
+            released.push(block);
+            Ok(0)
+        } else {
+            self.write_block_cached(u64::from(block), &data)?;
+            Ok(pointer)
+        }
     }
 
     /// Zero only allocated bytes in a range. Walk allocated subtrees rather
@@ -3399,7 +4865,7 @@ impl Ext2FileSystem {
     {
         let kind = inode.get_mode() & EXT2_S_IFMT;
         if !matches!(kind, EXT2_S_IFREG | EXT2_S_IFDIR | EXT2_S_IFLNK)
-            || (kind == EXT2_S_IFLNK && inode.get_size() <= 60)
+            || inode.is_fast_symlink(self.block_size)
         {
             return Ok(());
         }
@@ -3471,7 +4937,13 @@ impl Ext2FileSystem {
                 // For symlinks, we need to read the target path
                 let size = inode.get_size() as usize;
 
-                if size <= 60 {
+                if inode.is_fast_symlink(self.block_size) {
+                    if size > 60 {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "Inline symlink target exceeds inode storage",
+                        ));
+                    }
                     // Fast symlink: target stored in inode.block array
                     // Use safe byte-level access to read the block data
                     let inode_bytes = unsafe {
@@ -3582,8 +5054,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -3618,8 +5089,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
@@ -3662,8 +5132,7 @@ impl Ext2FileSystem {
             buffer: bitmap_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
@@ -3699,8 +5168,7 @@ impl Ext2FileSystem {
             buffer: bgd_data,
         });
 
-        self.block_device.enqueue_request(write_bgd_request);
-        let bgd_write_results = self.block_device.process_requests();
+        let bgd_write_results = self.block_device.submit_requests(vec![write_bgd_request]);
 
         if let Some(bgd_write_result) = bgd_write_results.first() {
             match &bgd_write_result.result {
@@ -3799,8 +5267,7 @@ impl Ext2FileSystem {
                     buffer: clear_data,
                 });
 
-                self.block_device.enqueue_request(clear_request);
-                let _results = self.block_device.process_requests();
+                let _results = self.block_device.submit_requests(vec![clear_request]);
             }
 
             let double_indirect_block = inode.block[13];
@@ -3816,8 +5283,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut double_indirect_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -3863,8 +5329,7 @@ impl Ext2FileSystem {
                     buffer: double_indirect_data.clone(),
                 });
 
-                self.block_device.enqueue_request(write_request);
-                let write_results = self.block_device.process_requests();
+                let write_results = self.block_device.submit_requests(vec![write_request]);
 
                 if let Some(write_result) = write_results.first() {
                     match &write_result.result {
@@ -3894,8 +5359,7 @@ impl Ext2FileSystem {
                     buffer: clear_data,
                 });
 
-                self.block_device.enqueue_request(clear_request);
-                let _results = self.block_device.process_requests();
+                let _results = self.block_device.submit_requests(vec![clear_request]);
             }
 
             // Read the first level indirect block
@@ -3909,8 +5373,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut first_indirect_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -3944,8 +5407,7 @@ impl Ext2FileSystem {
                 buffer: first_indirect_data,
             });
 
-            self.block_device.enqueue_request(write_request);
-            let write_results = self.block_device.process_requests();
+            let write_results = self.block_device.submit_requests(vec![write_request]);
 
             if let Some(write_result) = write_results.first() {
                 match &write_result.result {
@@ -4315,8 +5777,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -4348,8 +5809,7 @@ impl Ext2FileSystem {
             buffer: bgd_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
@@ -4384,8 +5844,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; 1024],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut superblock_data = if let Some(result) = results.first() {
             match &result.result {
@@ -4455,8 +5914,7 @@ impl Ext2FileSystem {
             buffer: superblock_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
@@ -4874,7 +6332,7 @@ impl Ext2FileSystem {
 }
 
 impl FileSystemOperations for Ext2FileSystem {
-    fn supports_advisory_locks(&self) -> bool {
+    fn supports_retained_node_identity(&self) -> bool {
         true
     }
 
@@ -4895,49 +6353,9 @@ impl FileSystemOperations for Ext2FileSystem {
             )
         })?;
 
-        // Read parent inode
-        let parent_inode = self.read_inode(ext2_parent.inode_number())?;
-
-        // Ensure parent is a directory
-        if parent_inode.mode & EXT2_S_IFMT != EXT2_S_IFDIR {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotADirectory,
-                "Parent is not a directory",
-            ));
-        }
-
-        // Read directory entries
-        let entries = self.read_directory_entries(&parent_inode)?;
-
-        // Find the requested entry
-        for entry in entries {
-            let entry_name = entry.name_str()?;
-            if entry_name == *name {
-                // Read the inode for this entry
-                let child_inode = self.read_inode(entry.entry.inode)?;
-
-                // Use file_type_from_inode to get the correct file type including device files
-                let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
-
-                // Use inode number as stable file_id for page cache identity
-                let file_id = entry.entry.inode as u64;
-
-                // Create new node
-                let node = Ext2Node::new(entry.entry.inode, file_type, file_id);
-
-                // Set filesystem reference from parent
-                if let Some(fs_ref) = ext2_parent.filesystem() {
-                    node.set_filesystem(fs_ref);
-                }
-
-                return Ok(Arc::new(node));
-            }
-        }
-
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotFound,
-            "File not found",
-        ))
+        let parent_lock = self.get_inode_lock(ext2_parent.inode_number());
+        let _parent_guard = parent_lock.lock();
+        self.lookup_locked(ext2_parent, name)
     }
 
     fn readdir(
@@ -5099,6 +6517,16 @@ impl FileSystemOperations for Ext2FileSystem {
         file_type: FileType,
         _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.create_labeled(parent, name, file_type, _mode, None)
+    }
+    fn create_labeled(
+        &self,
+        parent: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
+        _mode: u32,
+        label: Option<&crate::shield::file::CreateContext>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let ext2_parent = parent.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -5194,7 +6622,7 @@ impl FileSystemOperations for Ext2FileSystem {
             let target_bytes = target_path.as_bytes();
             new_inode.size = (target_bytes.len() as u32).to_le();
 
-            if target_bytes.len() <= 60 {
+            if target_bytes.len() < 60 {
                 // Fast symlink: store target path directly in inode.block array
                 // Clear the block array first
                 new_inode.block = [0u32; 15];
@@ -5231,8 +6659,7 @@ impl FileSystemOperations for Ext2FileSystem {
                     buffer: block_data,
                 });
 
-                self.block_device.enqueue_request(write_request);
-                let write_results = self.block_device.process_requests();
+                let write_results = self.block_device.submit_requests(vec![write_request]);
 
                 if let Some(write_result) = write_results.first() {
                     match &write_result.result {
@@ -5253,6 +6680,11 @@ impl FileSystemOperations for Ext2FileSystem {
             }
         }
 
+        if u32::from_le(self.superblock.creator_os) == 0 {
+            if let Some(task) = crate::task::mytask() {
+                new_inode.set_native_owner(task.credentials.read().identity());
+            }
+        }
         // Handle device file information storage
         if let FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) = &file_type {
             // Store device major/minor numbers in the first direct block pointer
@@ -5318,31 +6750,9 @@ impl FileSystemOperations for Ext2FileSystem {
         }
 
         // Write the inode to disk (now with correct block pointer if directory)
-        self.write_inode(new_inode_number, &new_inode)?;
+        self.write_new_inode(new_inode_number, &new_inode)?;
 
         // Add directory entry to parent directory
-        self.add_directory_entry(
-            ext2_parent.inode_number(),
-            name,
-            new_inode_number,
-            file_type.clone(),
-        )?;
-
-        if matches!(file_type, FileType::Directory) {
-            // Update parent directory's nlinks count (removing ".." entry)
-            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
-            parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
-            self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
-
-            // The new inode can live in a different group from its parent.
-            self.with_allocation_lock(|| {
-                let group = (new_inode_number - 1) / self.superblock.get_inodes_per_group();
-                let mut bgd = self.read_group_descriptor(group)?;
-                bgd.used_dirs_count = u16::from_le(bgd.used_dirs_count).saturating_add(1).to_le();
-                self.update_group_descriptor(group, &bgd)
-            })?;
-        }
-
         // Create new node
         let new_node = match &file_type {
             FileType::RegularFile => Arc::new(Ext2Node::new(
@@ -5381,6 +6791,46 @@ impl FileSystemOperations for Ext2FileSystem {
             new_node.set_filesystem(fs_ref);
         }
 
+        if let Some(label) = label {
+            if let Err(reason) = label.initialize(new_node.as_ref()) {
+                drop(new_node);
+                self.discard_created_inode(new_inode_number).map_err(|cleanup| {
+                    FileSystemError::new(
+                        cleanup.kind,
+                        format!(
+                            "Label initialization failed ({}); failed to release created inode {}: {}",
+                            reason, new_inode_number, cleanup.message
+                        ),
+                    )
+                })?;
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::PermissionDenied,
+                    reason,
+                ));
+            }
+        }
+        self.add_directory_entry(
+            ext2_parent.inode_number(),
+            name,
+            new_inode_number,
+            file_type.clone(),
+        )?;
+
+        if matches!(file_type, FileType::Directory) {
+            // Update parent directory's nlinks count (removing ".." entry)
+            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
+            parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
+            self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
+
+            // The new inode can live in a different group from its parent.
+            self.with_allocation_lock(|| {
+                let group = (new_inode_number - 1) / self.superblock.get_inodes_per_group();
+                let mut bgd = self.read_group_descriptor(group)?;
+                bgd.used_dirs_count = u16::from_le(bgd.used_dirs_count).saturating_add(1).to_le();
+                self.update_group_descriptor(group, &bgd)
+            })?;
+        }
+
         Ok(new_node)
     }
 
@@ -5417,7 +6867,7 @@ impl FileSystemOperations for Ext2FileSystem {
         let _guard = inode_lock.lock();
 
         // Try to lookup the file to ensure it exists and get its inode number
-        let node = self.lookup(parent, name)?;
+        let node = self.lookup_locked(ext2_parent, name)?;
         let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -5531,7 +6981,7 @@ impl FileSystemOperations for Ext2FileSystem {
                 "Link parent was removed",
             ));
         }
-        match self.lookup(link_parent, link_name) {
+        match self.lookup_locked(parent, link_name) {
             Ok(_) => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::FileExists,
@@ -5695,15 +7145,33 @@ impl FileSystemOperations for Ext2FileSystem {
             }
         }
 
+        // VFS still serializes rename validation with other namespace changes.
+        // Directory readers now use these per-inode locks independently: keep
+        // both parents stable while publishing the move, in inode order.
+        let first_parent = self.get_inode_lock(old_parent_ino.min(new_parent_ino));
+        let second_parent =
+            (!same_parent).then(|| self.get_inode_lock(old_parent_ino.max(new_parent_ino)));
+        let _first_guard = first_parent.lock();
+        let _second_guard = second_parent.as_ref().map(|lock| lock.lock());
+
+        let source_lock = (src_is_dir && !same_parent).then(|| self.get_inode_lock(src_inode_num));
+        let _source_guard = source_lock.as_ref().map(|lock| lock.lock());
+        let parent_update = if src_is_dir && !same_parent {
+            Some(self.directory_parent_update(src_inode_num, old_parent_ino, new_parent_ino)?)
+        } else {
+            None
+        };
+
         // Add new directory entry in new_parent pointing to the source inode
         self.add_directory_entry(new_parent_ino, new_name, src_inode_num, src_file_type)?;
 
         // Remove old directory entry from old_parent (without freeing the inode)
         self.remove_directory_entry(old_parent_ino, old_name)?;
 
-        // If source is a directory and parents differ, update link counts:
-        // The ".." entry inside src_inode now points to new_parent instead of old_parent.
-        if src_is_dir && !same_parent {
+        // The moved directory's '..' and both link counts must describe the
+        // same parent. Updating counts alone leaves a stale on-disk back-reference.
+        if let Some((block, data)) = parent_update {
+            self.write_block_cached(block, &data)?;
             // Decrement old_parent link count (losing one ".." back-reference)
             let mut old_parent_inode = self.read_inode(old_parent_ino)?;
             let links = u16::from_le(old_parent_inode.links_count);

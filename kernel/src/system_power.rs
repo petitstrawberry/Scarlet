@@ -7,6 +7,8 @@
 use alloc::sync::Arc;
 use core::convert::Infallible;
 
+pub mod wake;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     PowerOff,

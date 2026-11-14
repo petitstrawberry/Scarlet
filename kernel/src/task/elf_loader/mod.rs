@@ -128,6 +128,7 @@ pub const AT_EGID: u64 = 14; // Effective gid
 pub const AT_PLATFORM: u64 = 15; // String identifying platform
 pub const AT_HWCAP: u64 = 16; // Machine dependent hints about processor capabilities
 pub const AT_CLKTCK: u64 = 17; // Frequency of times()
+pub const AT_SECURE: u64 = 23; // Whether exec changed security credentials
 pub const AT_RANDOM: u64 = 25; // Address of 16 random bytes
 pub const AT_HWCAP2: u64 = 26; // Second hardware capability word
 pub const AT_EXECFN: u64 = 31; // Executable pathname in the process filesystem view
@@ -582,6 +583,9 @@ pub fn analyze_and_load_elf_with_strategy(
     task: &Task,
     strategy: &LoadStrategy,
 ) -> Result<LoadElfResult, ElfLoaderError> {
+    if !file_obj.allows_execution() {
+        return Err(elf_error("execution disabled on mount"));
+    }
     let header = read_elf_header(file_obj)?;
     let interpreter = match find_interpreter_path(&header, file_obj)? {
         Some(path) => Some(
@@ -747,6 +751,9 @@ fn load_interpreter(interpreter_path: &str, task: &Task) -> Result<(u64, u64), E
     };
 
     let file_object: &dyn crate::fs::FileObject = file_arc.as_ref();
+    if !file_object.allows_execution() {
+        return Err(elf_error("interpreter execution disabled on mount"));
+    }
 
     // Step 2: Read ELF header data from file
     file_object
@@ -1080,6 +1087,7 @@ fn map_elf_segment(
             ),
             vm_start: vmarea.start,
             mapping_origin,
+            maximum_permissions: usize::MAX,
             permissions,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -1142,6 +1150,10 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     auxv.push(AuxVec::new(AT_EUID, 0)); // Effective user ID
     auxv.push(AuxVec::new(AT_GID, 0)); // Real group ID
     auxv.push(AuxVec::new(AT_EGID, 0)); // Effective group ID
+    // Exec currently performs no set-ID/capability privilege transition. Bionic
+    // requires this entry to exist, even when its value is zero; omission makes
+    // libc abort before main. Revisit alongside credential-changing exec.
+    auxv.push(AuxVec::new(AT_SECURE, 0));
 
     // TODO: Add more auxiliary vector entries as needed:
     // AT_RANDOM storage is added by the Linux ABI's exec-stack builder.
@@ -1233,7 +1245,12 @@ pub(crate) fn setup_native_exec_stack(
     } else {
         None
     };
-    let result = setup_native_stack(task, argv, envp, top, &auxv, execfn.as_deref());
+    let result = setup_native_stack(task, argv, envp, top, &auxv, execfn.as_deref()).and_then(
+        |(sp, argv)| {
+            task.vm_manager.record_process_entry_stack(sp)?;
+            Ok((sp, argv))
+        },
+    );
     if result.is_err() {
         if let Some(handle) = handle {
             drop(task.handle_table.remove(handle));

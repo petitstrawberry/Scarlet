@@ -1,3 +1,8 @@
+#[path = "local_datagram.rs"]
+mod datagram;
+pub(crate) mod netlink;
+pub(crate) mod uevent;
+
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
@@ -8,11 +13,10 @@ use crate::{
     library::std::usercopy::{copy_from_user, copy_to_user},
     network::{
         NetworkManager, SocketDomain, SocketError, SocketProtocol, SocketType,
-        local::{LocalSocket, MAX_HANDLE_QUEUE_SIZE},
+        local::{LocalSocket, MAX_HANDLE_QUEUE_SIZE, MAX_SEQPACKET_MESSAGE_SIZE},
     },
     object::KernelObject,
     object::capability::selectable::Selectable,
-    sched::scheduler::schedule,
     task::mytask,
 };
 use alloc::string::String;
@@ -79,6 +83,8 @@ pub const SOCK_TYPE_MASK: i32 = 0xF;
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_TYPE: i32 = 3;
 pub const SO_ERROR: i32 = 4;
+pub const SO_RCVTIMEO: i32 = 20;
+pub const SO_SNDTIMEO: i32 = 21;
 pub const SCM_RIGHTS: i32 = 1;
 pub const SCM_CREDENTIALS: i32 = 2;
 pub const SO_PASSCRED: i32 = 16;
@@ -89,6 +95,43 @@ pub const MSG_TRUNC: u32 = 0x20;
 
 // Enable only while tracing Mozc's Linux IPC compatibility path.
 const MOZC_IPC_TRACE_ENABLED: bool = false;
+
+const MICROSECONDS_PER_SECOND: u128 = 1_000_000;
+const NANOSECONDS_PER_MILLISECOND: u128 = 1_000_000;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinuxTimeval64 {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+fn linux_timeval64_timeout_ms(timeval: LinuxTimeval64) -> Result<usize, usize> {
+    if timeval.tv_sec < 0
+        || timeval.tv_usec < 0
+        || timeval.tv_usec as u128 >= MICROSECONDS_PER_SECOND
+    {
+        return Err(errno::EINVAL);
+    }
+
+    let nanoseconds = (timeval.tv_sec as u128)
+        .saturating_mul(1_000_000_000)
+        .saturating_add((timeval.tv_usec as u128).saturating_mul(1_000));
+    let milliseconds =
+        nanoseconds.saturating_add(NANOSECONDS_PER_MILLISECOND - 1) / NANOSECONDS_PER_MILLISECOND;
+    if milliseconds > i32::MAX as u128 {
+        return Err(errno::EINVAL);
+    }
+    Ok(milliseconds as usize)
+}
+
+fn timeout_ms_to_linux_timeval64(timeout_ms: usize) -> LinuxTimeval64 {
+    let timeout_ms = timeout_ms as u64;
+    LinuxTimeval64 {
+        tv_sec: (timeout_ms / 1_000) as i64,
+        tv_usec: ((timeout_ms % 1_000) * 1_000) as i64,
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -112,6 +155,11 @@ fn is_mozc_server_task(task: &crate::task::Task) -> bool {
 
 fn socket_error_to_errno(error: SocketError) -> usize {
     match error {
+        SocketError::PermissionDenied => errno::EACCES,
+        SocketError::DestinationRequired => errno::EDESTADDRREQ,
+        SocketError::MessageTooLarge => errno::EMSGSIZE,
+        SocketError::ProtocolMismatch => errno::EPROTOTYPE,
+        SocketError::BrokenPipe => errno::EPIPE,
         SocketError::InvalidAddress | SocketError::InvalidArgument => errno::EINVAL,
         SocketError::AddressInUse => errno::EADDRINUSE,
         SocketError::AddressNotAvailable => errno::EADDRNOTAVAIL,
@@ -131,6 +179,14 @@ fn socket_error_to_errno(error: SocketError) -> usize {
         SocketError::NoRoute => errno::ENETUNREACH,
         SocketError::ProtocolNotSupported => errno::EPROTONOSUPPORT,
         SocketError::InvalidPacket | SocketError::Other(_) => errno::EIO,
+    }
+}
+
+fn socket_io_error_to_errno(error: SocketError) -> usize {
+    match error {
+        SocketError::TimedOut | SocketError::WouldBlock => errno::EAGAIN,
+        SocketError::Interrupted => errno::EINTR,
+        error => socket_error_to_errno(error),
     }
 }
 
@@ -423,6 +479,58 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
+    // Android uses a close-only PF_KEY socket as an RCU quiescence barrier
+    // after swapping BPF maps. Scarlet's map state is synchronously visible,
+    // so provide the required socket lifetime without emulating PF_KEY data.
+    if domain == 15 && _protocol == 2 && socket_base_type == SOCK_RAW {
+        let socket: Arc<dyn crate::network::SocketObject> =
+            match LocalSocket::try_new(SocketType::Datagram, SocketProtocol::Default) {
+                Ok(socket) => {
+                    let socket = Arc::new(socket);
+                    LocalSocket::init_self_weak(&socket);
+                    socket
+                }
+                Err(error) => return errno::to_result(socket_error_to_errno(error)),
+            };
+        let _ = NetworkManager::get_manager().allocate_socket_id(Arc::clone(&socket));
+        let handle = match task
+            .handle_table
+            .insert(KernelObject::from_socket_object(socket))
+        {
+            Ok(handle) => handle,
+            Err(_) => return errno::to_result(errno::EMFILE),
+        };
+        let fd = match abi.allocate_fd(handle) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = task.handle_table.remove(handle);
+                return errno::to_result(errno::EMFILE);
+            }
+        };
+        if set_cloexec {
+            let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+        }
+        if set_nonblock {
+            let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
+        }
+        return fd;
+    }
+
+    if domain == 16 {
+        return match _protocol {
+            15 => uevent::create(abi, &task, socket_base_type, socket_flags, _protocol),
+            0 | 12 => netlink::create(abi, &task, socket_base_type, socket_flags, _protocol),
+            _ => errno::to_result(errno::EPROTONOSUPPORT),
+        };
+    }
+
+    // The native INET stack currently exposes IPv4 only. Reject IPv6 up front
+    // so callers can fall back instead of receiving an IPv4-backed socket that
+    // later fails when bound or connected as AF_INET6.
+    if domain == AF_INET6 {
+        return errno::to_result(errno::EAFNOSUPPORT);
+    }
+
     // Map Linux socket domain to Scarlet domain
     let scarlet_domain = match domain {
         AF_UNIX => SocketDomain::Local,
@@ -462,7 +570,10 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let socket_obj: Arc<dyn crate::network::SocketObject> = match scarlet_domain {
         SocketDomain::Local => {
-            let local_socket = Arc::new(LocalSocket::new(scarlet_type, SocketProtocol::Default));
+            let local_socket = match LocalSocket::try_new(scarlet_type, SocketProtocol::Default) {
+                Ok(socket) => Arc::new(socket),
+                Err(error) => return errno::to_result(socket_error_to_errno(error)),
+            };
             LocalSocket::init_self_weak(&local_socket);
             local_socket as Arc<dyn crate::network::SocketObject>
         }
@@ -587,6 +698,17 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    if let Some(object) = abi
+        .get_handle(sockfd as usize)
+        .and_then(|handle| task.handle_table.get(handle))
+    {
+        if let Some(socket) = uevent::from_object(&object) {
+            return socket.bind(&task, addr_ptr, addrlen as usize);
+        }
+        if let Some(socket) = netlink::from_object(&object) {
+            return socket.bind(&task, addr_ptr, addrlen as usize);
+        }
+    }
 
     // Get the file descriptor handle
     let handle_id = match abi.get_handle(sockfd as usize) {
@@ -832,9 +954,9 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
 
     let accepted_socket = match accepted_socket {
         Ok(socket) => socket,
-        Err(_) => {
+        Err(error) => {
             crate::println!("[linux socket] accept_blocking failed");
-            return usize::MAX;
+            return errno::to_result(socket_io_error_to_errno(error));
         }
     };
 
@@ -950,6 +1072,16 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     unsafe {
         let sa_family = *(addr_paddr as *const u16);
         match sa_family {
+            0 if LocalSocket::from_socket_object(socket_arc.as_ref())
+                .is_some_and(|local| local.is_datagram()) =>
+            {
+                return socket_arc
+                    .connect(&crate::network::SocketAddress::Unspecified)
+                    .map_or_else(
+                        |error| errno::to_result(socket_error_to_errno(error)),
+                        |_| 0,
+                    );
+            }
             AF_UNIX_U16 => {
                 let path_start = (addr_paddr + 2) as *const u8;
                 let max_path_len = (addrlen - 2) as usize;
@@ -1162,8 +1294,8 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 /// Linux sys_getsockopt implementation
 ///
-/// Gets socket options. Currently implements `SO_PEERCRED` for Unix-domain
-/// sockets and falls back to a small generic integer value for other options.
+/// Gets socket options, including credentials and socket I/O timeouts, and
+/// retains the compatibility fallback for unrelated options.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -1191,6 +1323,17 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    if let Some(object) = abi
+        .get_handle(sockfd as usize)
+        .and_then(|handle| task.handle_table.get(handle))
+    {
+        if let Some(socket) = uevent::from_object(&object) {
+            return socket.get_option(&task, level, optname, optval_ptr, optlen_ptr);
+        }
+        if let Some(socket) = netlink::from_object(&object) {
+            return socket.get_option(&task, level, optname, optval_ptr, optlen_ptr);
+        }
+    }
 
     let mut optlen_bytes = [0u8; size_of::<u32>()];
     if copy_from_user(&task, optlen_ptr, &mut optlen_bytes).is_err() {
@@ -1255,6 +1398,36 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
+    if level == SOL_SOCKET && optname == 31 {
+        // SO_PEERSEC
+        let result = (|| {
+            let handle = abi.get_handle(sockfd as usize).ok_or(errno::EBADF)?;
+            let socket = task
+                .handle_table
+                .get(handle)
+                .and_then(KernelObject::into_socket_arc)
+                .ok_or(errno::ENOTSOCK)?;
+            let local =
+                LocalSocket::from_socket_object(socket.as_ref()).ok_or(errno::ENOPROTOOPT)?;
+            if local.peer_credentials().is_none() {
+                return Err(errno::ENOTCONN);
+            }
+            let subject = local.peer_security_label().ok_or(errno::ENODATA)?;
+            let bytes = abi
+                .extensions
+                .peer_security_context(&task, &subject)
+                .ok_or(errno::ENOPROTOOPT)??;
+            copy_to_user(&task, optlen_ptr, &(bytes.len() as u32).to_ne_bytes())
+                .map_err(|_| errno::EFAULT)?;
+            if (optlen as usize) < bytes.len() {
+                return Err(errno::ERANGE);
+            }
+            copy_to_user(&task, optval_ptr, &bytes).map_err(|_| errno::EFAULT)?;
+            Ok(0)
+        })();
+        return result.unwrap_or_else(errno::to_result);
+    }
+
     if level == SOL_SOCKET && optname == SO_PEERCRED {
         if optlen < size_of::<LinuxUcred>() as u32 {
             return errno::to_result(errno::EINVAL);
@@ -1275,18 +1448,15 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Some(socket) => socket,
             None => return errno::to_result(errno::ENOPROTOOPT),
         };
-        let peer_process_id = match local_socket.peer_process_id() {
-            Some(process_id) => process_id,
+        let peer_credentials = match local_socket.peer_credentials() {
+            Some(credentials) => credentials,
             None => return errno::to_result(errno::ENOTCONN),
         };
-        let pid = match task.get_namespace().resolve_local_id(peer_process_id) {
-            Some(pid) => pid,
-            None => return errno::to_result(errno::ESRCH),
-        };
+        let pid = peer_credentials.pid_in(&task.get_namespace());
         let cred = LinuxUcred {
             pid: pid as i32,
-            uid: 0,
-            gid: 0,
+            uid: peer_credentials.identity.principal.0,
+            gid: peer_credentials.identity.group.0,
         };
         if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
             crate::println!(
@@ -1319,6 +1489,52 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
+    if level == SOL_SOCKET && matches!(optname, SO_RCVTIMEO | SO_SNDTIMEO) {
+        let timeval_size = size_of::<LinuxTimeval64>();
+        if optlen < timeval_size as u32 {
+            return errno::to_result(errno::EINVAL);
+        }
+        let handle = match abi.get_handle(sockfd as usize) {
+            Some(handle) => handle,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let socket = match task
+            .handle_table
+            .get(handle)
+            .and_then(KernelObject::into_socket_arc)
+        {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let control = match socket.as_control_ops() {
+            Some(control) => control,
+            None => return errno::to_result(errno::ENOPROTOOPT),
+        };
+        let command = if optname == SO_RCVTIMEO {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS
+        } else {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS
+        };
+        let timeout_ms = match control.control(command, 0) {
+            Ok(timeout_ms) if timeout_ms >= 0 => timeout_ms as usize,
+            Ok(_) => return errno::to_result(errno::EINVAL),
+            Err(_) => return errno::to_result(errno::ENOPROTOOPT),
+        };
+        if timeout_ms > i32::MAX as usize {
+            return errno::to_result(errno::EINVAL);
+        }
+        let timeval = timeout_ms_to_linux_timeval64(timeout_ms);
+        let mut bytes = [0u8; size_of::<LinuxTimeval64>()];
+        bytes[..8].copy_from_slice(&timeval.tv_sec.to_ne_bytes());
+        bytes[8..].copy_from_slice(&timeval.tv_usec.to_ne_bytes());
+        if copy_to_user(&task, optval_ptr, &bytes).is_err()
+            || copy_to_user(&task, optlen_ptr, &(timeval_size as u32).to_ne_bytes()).is_err()
+        {
+            return errno::to_result(errno::EFAULT);
+        }
+        return 0;
+    }
+
     // Fallback for options that are not semantically important yet.
     if optlen >= 4 && optval_ptr != 0 {
         if copy_to_user(&task, optval_ptr, &1u32.to_ne_bytes()).is_err()
@@ -1332,8 +1548,8 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 /// Linux sys_setsockopt implementation.
 ///
-/// Implements SO_PASSCRED for local sockets. Other options retain the
-/// compatibility fallback until their behavior is implemented.
+/// Implements SO_PASSCRED plus SO_RCVTIMEO/SO_SNDTIMEO through the native
+/// millisecond controls. Other options retain their compatibility fallback.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -1361,6 +1577,17 @@ pub fn sys_setsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    if let Some(object) = abi
+        .get_handle(sockfd as usize)
+        .and_then(|handle| task.handle_table.get(handle))
+    {
+        if let Some(socket) = uevent::from_object(&object) {
+            return socket.set_option(&task, level, optname, optval_ptr, optlen as usize);
+        }
+        if let Some(socket) = netlink::from_object(&object) {
+            return socket.set_option(&task, level, optname, optval_ptr, optlen as usize);
+        }
+    }
 
     if level == SOL_SOCKET && optname == SO_PASSCRED {
         if optlen != size_of::<i32>() as u32 {
@@ -1388,6 +1615,51 @@ pub fn sys_setsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         };
         local_socket.set_passcred(i32::from_ne_bytes(value) != 0);
         return 0;
+    }
+
+    if level == SOL_SOCKET && matches!(optname, SO_RCVTIMEO | SO_SNDTIMEO) {
+        let timeval_size = size_of::<LinuxTimeval64>();
+        if optlen < timeval_size as u32 {
+            return errno::to_result(errno::EINVAL);
+        }
+        let mut bytes = [0u8; size_of::<LinuxTimeval64>()];
+        if copy_from_user(&task, optval_ptr, &mut bytes).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let timeval = LinuxTimeval64 {
+            tv_sec: i64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+            tv_usec: i64::from_ne_bytes(bytes[8..].try_into().unwrap()),
+        };
+        let timeout_ms = match linux_timeval64_timeout_ms(timeval) {
+            Ok(timeout_ms) => timeout_ms,
+            Err(error) => return errno::to_result(error),
+        };
+        let handle = match abi.get_handle(sockfd as usize) {
+            Some(handle) => handle,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let socket = match task
+            .handle_table
+            .get(handle)
+            .and_then(KernelObject::into_socket_arc)
+        {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let control = match socket.as_control_ops() {
+            Some(control) => control,
+            None => return errno::to_result(errno::ENOPROTOOPT),
+        };
+        let command = if optname == SO_RCVTIMEO {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS
+        } else {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS
+        };
+        return match control.control(command, timeout_ms) {
+            Ok(0) => 0,
+            Ok(_) => errno::to_result(errno::EINVAL),
+            Err(_) => errno::to_result(errno::ENOPROTOOPT),
+        };
     }
 
     // Mock implementation - always succeed
@@ -1453,7 +1725,12 @@ fn sendmsg_for_task(
         Err(error) => return errno::to_result(error),
     };
     let iovcnt = msg.msg_iovlen as usize;
-    if iovcnt == 0 {
+    if iovcnt == 0
+        && !kernel_obj
+            .as_socket()
+            .and_then(LocalSocket::from_socket_object)
+            .is_some_and(|local| local.is_datagram())
+    {
         return 0;
     }
 
@@ -1467,6 +1744,22 @@ fn sendmsg_for_task(
         Err(error) => return errno::to_result(error),
     };
 
+    if let Some(local) = kernel_obj
+        .as_socket()
+        .and_then(LocalSocket::from_socket_object)
+        .filter(|local| local.is_datagram())
+    {
+        let flags = flags
+            | if abi
+                .get_file_status_flags(sockfd)
+                .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0)
+            {
+                MSG_DONTWAIT
+            } else {
+                0
+            };
+        return datagram::send(abi, task, local, &msg, &iovecs, flags);
+    }
     let mut attached_handles = Vec::new();
     if msg.msg_control != 0 && msg.msg_controllen as usize >= size_of::<LinuxCmsghdr>() {
         let socket = match kernel_obj.as_socket() {
@@ -1485,12 +1778,12 @@ fn sendmsg_for_task(
                 unsafe { core::ptr::read_unaligned(cmsg_bytes.as_ptr() as *const LinuxCmsghdr) };
             if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
                 if cmsg.cmsg_len > msg.msg_controllen as usize
-                    || cmsg.cmsg_len < size_of::<LinuxCmsghdr>() + size_of::<i32>()
+                    || cmsg.cmsg_len < size_of::<LinuxCmsghdr>()
                 {
                     return errno::to_result(errno::EINVAL);
                 }
                 let data_len = cmsg.cmsg_len.saturating_sub(size_of::<LinuxCmsghdr>());
-                if data_len == 0 || !data_len.is_multiple_of(size_of::<i32>()) {
+                if !data_len.is_multiple_of(size_of::<i32>()) {
                     return errno::to_result(errno::EINVAL);
                 }
                 let fd_count = data_len / size_of::<i32>();
@@ -1534,7 +1827,6 @@ fn sendmsg_for_task(
         }
     }
 
-    let mut total_written = 0usize;
     struct NonblockGuard<'a> {
         sel: Option<&'a dyn Selectable>,
         prev: bool,
@@ -1608,55 +1900,63 @@ fn sendmsg_for_task(
         };
     }
 
-    for iovec in iovecs {
-        if iovec.iov_len == 0 {
-            continue;
+    // One sendmsg is one stream operation. Gather a bounded prefix so writes
+    // to message-oriented local sockets retain a single record boundary and
+    // blocking streams observe one deadline instead of one per iovec.
+    const MAX_SENDMSG_PREFIX: usize = 1024 * 1024;
+    let total_len = match iovecs
+        .iter()
+        .try_fold(0usize, |total, iovec| total.checked_add(iovec.iov_len))
+    {
+        Some(total) => total,
+        None => return errno::to_result(errno::EMSGSIZE),
+    };
+    let seqpacket = kernel_obj
+        .as_socket()
+        .is_some_and(|socket| socket.socket_type() == SocketType::SeqPacket);
+    if seqpacket && total_len > MAX_SEQPACKET_MESSAGE_SIZE {
+        return errno::to_result(errno::EMSGSIZE);
+    }
+    let transfer_len = if seqpacket {
+        total_len
+    } else {
+        total_len.min(MAX_SENDMSG_PREFIX)
+    };
+    if transfer_len == 0 {
+        return 0;
+    }
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(transfer_len).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(transfer_len, 0);
+    let mut copied = 0usize;
+    for iovec in &iovecs {
+        let part = iovec.iov_len.min(transfer_len - copied);
+        if part != 0 {
+            if copy_from_user(
+                &task,
+                iovec.iov_base as usize,
+                &mut buffer[copied..copied + part],
+            )
+            .is_err()
+            {
+                return errno::to_result(errno::EFAULT);
+            }
+            copied += part;
         }
-
-        let mut buffer = Vec::new();
-        buffer.resize(iovec.iov_len, 0);
-        if copy_from_user(&task, iovec.iov_base as usize, &mut buffer).is_err() {
-            crate::println!(
-                "[linux socket] sendmsg bad buf ptr {:x}",
-                iovec.iov_base as usize
-            );
-            return errno::to_result(errno::EFAULT);
-        }
-
-        match stream.write(&buffer) {
-            Ok(n) => {
-                total_written = total_written.saturating_add(n);
-                if n < iovec.iov_len {
-                    break;
-                }
-            }
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    crate::println!("[linux socket] sendmsg would block");
-                    return if total_written == 0 {
-                        errno::to_result(errno::EAGAIN)
-                    } else {
-                        total_written
-                    };
-                }
-                schedule(trapframe);
-                return usize::MAX;
-            }
-            Err(StreamError::Interrupted) => {
-                return if total_written == 0 {
-                    errno::to_result(errno::EINTR)
-                } else {
-                    total_written
-                };
-            }
-            Err(_) => {
-                crate::println!("[linux socket] sendmsg write error");
-                return errno::to_result(errno::EIO);
-            }
+        if copied == transfer_len {
+            break;
         }
     }
 
-    total_written
+    match stream.write(&buffer[..copied]) {
+        Ok(n) if n <= copied => n,
+        Ok(_) => errno::to_result(errno::EIO),
+        Err(StreamError::WouldBlock | StreamError::TimedOut) => errno::to_result(errno::EAGAIN),
+        Err(StreamError::Interrupted) => errno::to_result(errno::EINTR),
+        Err(_) => errno::to_result(errno::EIO),
+    }
 }
 
 /// Send a batch of messages, recording each successful message's byte count.
@@ -1728,6 +2028,17 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // );
 
     trapframe.increment_pc_next(&task);
+    if let Some(object) = abi
+        .get_handle(sockfd as usize)
+        .and_then(|handle| task.handle_table.get(handle))
+    {
+        if let Some(socket) = uevent::from_object(&object) {
+            return socket.receive_message(&task, msg_ptr, flags);
+        }
+        if let Some(socket) = netlink::from_object(&object) {
+            return socket.receive_message(&task, msg_ptr, flags);
+        }
+    }
 
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,
@@ -1747,6 +2058,13 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
+    if let Some(local) = kernel_obj
+        .as_socket()
+        .and_then(LocalSocket::from_socket_object)
+        .filter(|local| local.is_datagram())
+    {
+        return datagram::receive(abi, &task, local, sockfd, msg_ptr, flags);
+    }
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => {
@@ -1791,6 +2109,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let local_socket = kernel_obj
         .as_socket()
         .and_then(LocalSocket::from_socket_object);
+    let local_read_deadline = local_socket.and_then(|socket| socket.read_deadline());
     let wants_credentials = local_socket.is_some_and(LocalSocket::passcred);
     let mut sender_process_id = None;
     let mut pending_fds: Vec<i32> = Vec::new();
@@ -1951,11 +2270,14 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
             buffer.resize(length, 0);
             let read_result = match local_socket {
-                Some(socket) => socket.read_with_sender(&mut buffer),
-                None => stream.read(&mut buffer).map(|count| (count, 0)),
+                Some(socket) => socket.read_with_sender_until(&mut buffer, local_read_deadline),
+                None => stream
+                    .read(&mut buffer)
+                    .map(|count| (count, crate::network::local::SocketCredentials::unknown())),
             };
             let (amount, sender) = match read_result {
                 Ok(result) => result,
+                Err(StreamError::TimedOut) => return errno::to_result(errno::EAGAIN),
                 Err(StreamError::WouldBlock) => {
                     if can_receive_handle && !retried_atomic_after_stream_wake {
                         retried_atomic_after_stream_wake = true;
@@ -1964,7 +2286,9 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return errno::to_result(errno::EAGAIN);
                 }
                 Err(StreamError::Interrupted) => return errno::to_result(errno::EINTR),
-                Err(StreamError::EndOfStream) => (0, 0),
+                Err(StreamError::EndOfStream) => {
+                    (0, crate::network::local::SocketCredentials::unknown())
+                }
                 Err(_) => return errno::to_result(errno::EIO),
             };
             if amount > buffer.len() {
@@ -2028,9 +2352,9 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 cmsg_type: SCM_CREDENTIALS,
             };
             let cred = LinuxUcred {
-                pid: task.get_namespace().resolve_local_id(sender).unwrap_or(0) as i32,
-                uid: 0,
-                gid: 0,
+                pid: sender.pid_in(&task.get_namespace()) as i32,
+                uid: sender.identity.principal.0,
+                gid: sender.identity.group.0,
             };
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -2109,6 +2433,12 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::EBADF),
     };
 
+    if let Some(object) = task.handle_table.get(handle) {
+        if let Some(socket) = netlink::from_object(&object) {
+            return socket.send_message(&task, buf_ptr, len, dest_addr_ptr, addrlen as usize);
+        }
+    }
+
     // Get socket object
     let socket = match task
         .handle_table
@@ -2119,6 +2449,11 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::ENOTSOCK),
     };
 
+    if LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local| local.is_datagram())
+        && len > crate::network::local::MAX_DATAGRAM_BYTES
+    {
+        return errno::to_result(errno::EMSGSIZE);
+    }
     let mut data = Vec::new();
     if data.try_reserve_exact(len).is_err() {
         return errno::to_result(errno::ENOMEM);
@@ -2152,8 +2487,15 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 crate::network::SocketAddress::Inet(sockaddr.to_inet())
             }
             AF_UNIX_U16 => {
-                // Unix domain socket sendto - usually not used for stream sockets
-                crate::network::SocketAddress::Unspecified
+                match linux_local_sockaddr_from_user(
+                    &task,
+                    (addr_kaddr + 2) as *const u8,
+                    addrlen as usize - 2,
+                    false,
+                ) {
+                    Ok((address, _, _)) => address,
+                    Err(error) => return errno::to_result(error),
+                }
             }
             _ => return errno::to_result(errno::EAFNOSUPPORT),
         }
@@ -2163,7 +2505,21 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Send data
-    let result = socket.sendto(&data, &dest_addr, flags);
+    let datagram =
+        LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local| local.is_datagram());
+    if datagram && flags & !((MSG_DONTWAIT as u32) | 0x4000) != 0 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
+    let native_flags = if datagram {
+        if flags & MSG_DONTWAIT as u32 != 0 {
+            crate::network::socket::message_flags::NONBLOCK
+        } else {
+            0
+        }
+    } else {
+        flags
+    };
+    let result = socket.sendto(&data, &dest_addr, native_flags);
     if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
         match &result {
             Ok(written) => crate::println!(
@@ -2186,11 +2542,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
     match result {
         Ok(n) => n,
-        Err(crate::network::socket::SocketError::WouldBlock) => errno::to_result(errno::EAGAIN),
-        Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
-        Err(crate::network::socket::SocketError::NoRoute) => errno::to_result(errno::ENETUNREACH),
-        Err(crate::network::socket::SocketError::InvalidAddress) => errno::to_result(errno::EINVAL),
-        Err(_) => errno::to_result(errno::EIO),
+        Err(error) => errno::to_result(socket_io_error_to_errno(error)),
     }
 }
 
@@ -2257,16 +2609,24 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // MSG_DONTWAIT affects this receive only. Preserve the socket's existing
     // mode, including when another descriptor shares the same socket.
-    let previous_nonblocking = socket.as_selectable().map(|selectable| {
-        let previous = selectable.is_nonblocking();
-        if nonblocking && !previous {
-            selectable.set_nonblocking(true);
-        }
-        previous
-    });
+    let datagram =
+        LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local| local.is_datagram());
+    let previous_nonblocking = socket
+        .as_selectable()
+        .filter(|_| !datagram)
+        .map(|selectable| {
+            let previous = selectable.is_nonblocking();
+            if nonblocking && !previous {
+                selectable.set_nonblocking(true);
+            }
+            previous
+        });
 
     // Receive data
-    let result = if flags & MSG_PEEK != 0 {
+    let result = if flags & MSG_PEEK != 0
+        && !LocalSocket::from_socket_object(socket.as_ref())
+            .is_some_and(|local| local.is_datagram())
+    {
         match LocalSocket::from_socket_object(socket.as_ref()) {
             Some(local) => local.peek_record(&mut buffer).map(|record_len| {
                 let count =
@@ -2280,7 +2640,26 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             None => Err(SocketError::NotSupported),
         }
     } else {
-        socket.recvfrom(&mut buffer, flags)
+        if datagram {
+            use crate::network::socket::message_flags as native;
+            if flags & !((MSG_DONTWAIT as u32) | MSG_PEEK | MSG_TRUNC | 0x100) != 0 {
+                return errno::to_result(errno::EOPNOTSUPP);
+            }
+            let options = if nonblocking { native::NONBLOCK } else { 0 }
+                | if flags & MSG_PEEK != 0 {
+                    native::PEEK
+                } else {
+                    0
+                }
+                | if flags & MSG_TRUNC != 0 {
+                    native::FULL_LENGTH
+                } else {
+                    0
+                };
+            socket.recvfrom(&mut buffer, options)
+        } else {
+            socket.recvfrom(&mut buffer, flags)
+        }
     };
 
     if nonblocking && previous_nonblocking == Some(false) {
@@ -2340,6 +2719,26 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             addrlen_bytes = (size_of::<SockaddrIn>() as u32).to_ne_bytes();
                         }
                     }
+                    crate::network::SocketAddress::Local(address) => {
+                        let mut bytes = Vec::from(AF_UNIX_U16.to_ne_bytes());
+                        if address.is_abstract() {
+                            bytes.push(0);
+                            bytes.extend_from_slice(address.path().as_bytes());
+                        } else if !address.path().is_empty() {
+                            bytes.extend_from_slice(address.path().as_bytes());
+                            bytes.push(0);
+                        }
+                        if copy_to_user(
+                            &task,
+                            src_addr_ptr,
+                            &bytes[..bytes.len().min(provided_len as usize)],
+                        )
+                        .is_err()
+                        {
+                            return errno::to_result(errno::EFAULT);
+                        }
+                        addrlen_bytes = (bytes.len() as u32).to_ne_bytes();
+                    }
                     _ => addrlen_bytes = 0u32.to_ne_bytes(),
                 }
                 if copy_to_user(&task, addrlen_ptr, &addrlen_bytes).is_err() {
@@ -2348,7 +2747,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
             n
         }
-        Err(error) => errno::to_result(socket_error_to_errno(error)),
+        Err(error) => errno::to_result(socket_io_error_to_errno(error)),
     }
 }
 
@@ -2406,11 +2805,14 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Create connected socket pair
-    let (socket1, socket2) = LocalSocket::create_connected_pair_with_type(
+    let (socket1, socket2) = match LocalSocket::try_create_connected_pair_with_type(
         local_type,
         alloc::string::String::from("socketpair:0"),
         alloc::string::String::from("socketpair:1"),
-    );
+    ) {
+        Ok(pair) => pair,
+        Err(error) => return errno::to_result(socket_error_to_errno(error)),
+    };
 
     // Set non-blocking mode if requested
     if nonblocking {
@@ -2544,6 +2946,7 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::scheduler::get_task_by_id;
 
     #[cfg(target_arch = "aarch64")]
     #[test_case]
@@ -2658,5 +3061,371 @@ mod tests {
             socket_error_to_errno(SocketError::WouldBlock),
             errno::EAGAIN
         );
+        assert_eq!(
+            socket_error_to_errno(SocketError::TimedOut),
+            errno::ETIMEDOUT
+        );
+        assert_eq!(
+            socket_io_error_to_errno(SocketError::TimedOut),
+            errno::EAGAIN
+        );
+    }
+
+    #[test_case]
+    fn ipv6_socket_creation_fails_before_allocating_ipv4_backed_state() {
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(Task::new("ipv6-unsupported".into(), 1, TaskType::User), cpu);
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, AF_INET6 as usize);
+        frame.set_arg(1, SOCK_STREAM as usize);
+        frame.set_arg(2, 0);
+        assert_eq!(
+            sys_socket(&mut abi, &mut frame),
+            errno::to_result(errno::EAFNOSUPPORT)
+        );
+        assert!(abi.get_handle(0).is_none());
+        assert!(task.handle_table.get(0).is_none());
+
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn so_timeout_syscalls_validate_and_round_trip_for_local_sockets() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(Task::new("socket-timeval".into(), 1, TaskType::User), cpu);
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        let base = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+
+        let socket = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+        let handle = task
+            .handle_table
+            .insert(KernelObject::from_socket_object(arc_for_test(socket)))
+            .unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let value_ptr = base + 256;
+        let length_ptr = value_ptr + size_of::<LinuxTimeval64>();
+        let mut frame = Trapframe::new();
+
+        assert_so_timeout_round_trip(
+            &mut abi,
+            &task,
+            &mut frame,
+            fd,
+            SO_RCVTIMEO,
+            value_ptr,
+            length_ptr,
+            LinuxTimeval64 {
+                tv_sec: 1,
+                tv_usec: 250_000,
+            },
+            LinuxTimeval64 {
+                tv_sec: 1,
+                tv_usec: 250_000,
+            },
+        );
+        assert_so_timeout_round_trip(
+            &mut abi,
+            &task,
+            &mut frame,
+            fd,
+            SO_RCVTIMEO,
+            value_ptr,
+            length_ptr,
+            LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: 1,
+            },
+            LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: 1_000,
+            },
+        );
+        assert_so_timeout_round_trip(
+            &mut abi,
+            &task,
+            &mut frame,
+            fd,
+            SO_RCVTIMEO,
+            value_ptr,
+            length_ptr,
+            LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        );
+        assert_eq!(
+            set_so_timeout_test(
+                &mut abi,
+                &task,
+                &mut frame,
+                fd,
+                SO_RCVTIMEO,
+                value_ptr,
+                LinuxTimeval64 {
+                    tv_sec: 0,
+                    tv_usec: 1_000_000,
+                },
+            ),
+            errno::to_result(errno::EINVAL)
+        );
+        assert_so_timeout_round_trip(
+            &mut abi,
+            &task,
+            &mut frame,
+            fd,
+            SO_SNDTIMEO,
+            value_ptr,
+            length_ptr,
+            LinuxTimeval64 {
+                tv_sec: 2,
+                tv_usec: 500_000,
+            },
+            LinuxTimeval64 {
+                tv_sec: 2,
+                tv_usec: 500_000,
+            },
+        );
+
+        abi.remove_fd(fd);
+        task.handle_table.remove(handle).unwrap();
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn seqpacket_sendmsg_gathers_multiple_iovecs_into_one_record() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::object::capability::{Selectable, StreamOps};
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(
+            Task::new("sendmsg-seqpacket".into(), 1, TaskType::User),
+            cpu,
+        );
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        let base = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+
+        let (sender, receiver) = LocalSocket::create_connected_pair_with_type(
+            SocketType::SeqPacket,
+            "sendmsg-sender".into(),
+            "sendmsg-receiver".into(),
+        );
+        let handle = task
+            .handle_table
+            .insert(KernelObject::from_socket_object(sender))
+            .unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        copy_to_user(&task, base + 256, b"abc").unwrap();
+        copy_to_user(&task, base + 260, b"def").unwrap();
+        let mut vectors = [0u8; 32];
+        vectors[..8].copy_from_slice(&((base + 256) as u64).to_ne_bytes());
+        vectors[8..16].copy_from_slice(&3u64.to_ne_bytes());
+        vectors[16..24].copy_from_slice(&((base + 260) as u64).to_ne_bytes());
+        vectors[24..32].copy_from_slice(&3u64.to_ne_bytes());
+        copy_to_user(&task, base + 128, &vectors).unwrap();
+        let mut header = [0u8; size_of::<LinuxMsghdr>()];
+        header[16..24].copy_from_slice(&((base + 128) as u64).to_ne_bytes());
+        header[24..32].copy_from_slice(&2u64.to_ne_bytes());
+        copy_to_user(&task, base, &header).unwrap();
+
+        let mut frame = Trapframe::new();
+        assert_eq!(
+            sendmsg_for_task(&mut abi, &mut frame, &task, fd, base, 0),
+            6
+        );
+        let mut packet = [0u8; 16];
+        assert_eq!(receiver.read(&mut packet).unwrap(), 6);
+        assert_eq!(&packet[..6], b"abcdef");
+        receiver.set_nonblocking(true);
+        assert!(matches!(
+            receiver.read(&mut packet),
+            Err(StreamError::WouldBlock)
+        ));
+
+        abi.remove_fd(fd);
+        task.handle_table.remove(handle).unwrap();
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    fn assert_so_timeout_round_trip(
+        abi: &mut LinuxAbi,
+        task: &crate::task::Task,
+        frame: &mut Trapframe,
+        fd: usize,
+        optname: i32,
+        value_ptr: usize,
+        length_ptr: usize,
+        set: LinuxTimeval64,
+        expected: LinuxTimeval64,
+    ) {
+        assert_eq!(
+            set_so_timeout_test(abi, task, frame, fd, optname, value_ptr, set),
+            0
+        );
+        assert_eq!(
+            get_so_timeout_test(abi, task, frame, fd, optname, value_ptr, length_ptr),
+            expected
+        );
+    }
+
+    fn set_so_timeout_test(
+        abi: &mut LinuxAbi,
+        task: &crate::task::Task,
+        frame: &mut Trapframe,
+        fd: usize,
+        optname: i32,
+        value_ptr: usize,
+        timeval: LinuxTimeval64,
+    ) -> usize {
+        let mut bytes = [0u8; size_of::<LinuxTimeval64>()];
+        bytes[..8].copy_from_slice(&timeval.tv_sec.to_ne_bytes());
+        bytes[8..].copy_from_slice(&timeval.tv_usec.to_ne_bytes());
+        copy_to_user(task, value_ptr, &bytes).unwrap();
+        frame.set_arg(0, fd);
+        frame.set_arg(1, SOL_SOCKET as usize);
+        frame.set_arg(2, optname as usize);
+        frame.set_arg(3, value_ptr);
+        frame.set_arg(4, size_of::<LinuxTimeval64>());
+        sys_setsockopt(abi, frame)
+    }
+
+    fn get_so_timeout_test(
+        abi: &mut LinuxAbi,
+        task: &crate::task::Task,
+        frame: &mut Trapframe,
+        fd: usize,
+        optname: i32,
+        value_ptr: usize,
+        length_ptr: usize,
+    ) -> LinuxTimeval64 {
+        copy_to_user(
+            task,
+            length_ptr,
+            &(size_of::<LinuxTimeval64>() as u32).to_ne_bytes(),
+        )
+        .unwrap();
+        frame.set_arg(0, fd);
+        frame.set_arg(1, SOL_SOCKET as usize);
+        frame.set_arg(2, optname as usize);
+        frame.set_arg(3, value_ptr);
+        frame.set_arg(4, length_ptr);
+        assert_eq!(sys_getsockopt(abi, frame), 0);
+        let mut length = [0u8; size_of::<u32>()];
+        copy_from_user(task, length_ptr, &mut length).unwrap();
+        assert_eq!(
+            u32::from_ne_bytes(length) as usize,
+            size_of::<LinuxTimeval64>()
+        );
+        let mut bytes = [0u8; size_of::<LinuxTimeval64>()];
+        copy_from_user(task, value_ptr, &mut bytes).unwrap();
+        LinuxTimeval64 {
+            tv_sec: i64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+            tv_usec: i64::from_ne_bytes(bytes[8..].try_into().unwrap()),
+        }
+    }
+
+    fn arc_for_test(socket: LocalSocket) -> Arc<dyn crate::network::SocketObject> {
+        let socket = Arc::new(socket);
+        LocalSocket::init_self_weak(&socket);
+        socket
+    }
+
+    #[test_case]
+    fn socket_timeval64_validation_and_round_trip_use_native_milliseconds() {
+        assert_eq!(size_of::<LinuxTimeval64>(), 16);
+        for timeout_ms in [0usize, 1, 999, 1_000, 1_500, i32::MAX as usize] {
+            assert_eq!(
+                linux_timeval64_timeout_ms(timeout_ms_to_linux_timeval64(timeout_ms)),
+                Ok(timeout_ms)
+            );
+        }
+        assert_eq!(
+            linux_timeval64_timeout_ms(LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: 1,
+            }),
+            Ok(1),
+            "sub-millisecond timeouts must round up"
+        );
+
+        for invalid in [
+            LinuxTimeval64 {
+                tv_sec: -1,
+                tv_usec: 0,
+            },
+            LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
+            LinuxTimeval64 {
+                tv_sec: 0,
+                tv_usec: 1_000_000,
+            },
+            LinuxTimeval64 {
+                tv_sec: i32::MAX as i64 / 1_000 + 1,
+                tv_usec: 0,
+            },
+        ] {
+            assert_eq!(linux_timeval64_timeout_ms(invalid), Err(errno::EINVAL));
+        }
     }
 }

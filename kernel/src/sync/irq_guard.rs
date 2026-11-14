@@ -9,10 +9,13 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::arch::try_get_cpuid;
 use crate::environment::MAX_NUM_CPUS;
+use crate::sync::cache_padded::CachePadded;
 use crate::sync::preempt::{PreemptGuard, PreemptSourceKind};
 
-static IRQ_DEPTH: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
-static SAVED_IRQ_STATE: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static IRQ_DEPTH: [CachePadded<AtomicU32>; MAX_NUM_CPUS] =
+    [const { CachePadded::new(AtomicU32::new(0)) }; MAX_NUM_CPUS];
+static SAVED_IRQ_STATE: [CachePadded<AtomicUsize>; MAX_NUM_CPUS] =
+    [const { CachePadded::new(AtomicUsize::new(0)) }; MAX_NUM_CPUS];
 
 /// RAII token that masks local interrupts and disables preemption.
 ///
