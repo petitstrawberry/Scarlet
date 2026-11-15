@@ -3,13 +3,18 @@
 //! The worker calls the existing synchronous display ABI. Its reply therefore
 //! proves that the old front has retired; queue admission alone never does.
 
+#[cfg(target_os = "scarlet")]
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
+#[cfg(target_os = "scarlet")]
 use scarlet_os::handle::Handle;
 use std::io::{BufWriter, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use super::PresentationProgress;
+
+#[cfg(target_os = "scarlet")]
 struct Present {
     sequence: u64,
     slot: usize,
@@ -17,14 +22,16 @@ struct Present {
     queued_at: Option<Instant>,
 }
 
+#[cfg(target_os = "scarlet")]
 pub(super) struct PresentationQueue {
     sender: Option<SyncSender<Present>>,
     retired: Receiver<Result<u64, &'static str>>,
     worker: Option<JoinHandle<()>>,
-    completed: u64,
+    progress: PresentationProgress,
     profiling: bool,
 }
 
+#[cfg(target_os = "scarlet")]
 impl PresentationQueue {
     pub(super) fn new(display: &DisplaySurface, images: Vec<Handle>) -> Result<Self, &'static str> {
         let presenter = display
@@ -32,7 +39,10 @@ impl PresentationQueue {
             .map_err(|_| "Failed to retain display presenter")?;
         // One armed flip plus one queued image. The third swapchain slot may
         // be rendered only after a later completed flip released its old use.
-        let (sender, jobs) = mpsc::sync_channel::<Present>(1);
+        // The two-entry channel also holds both admitted frames before the
+        // worker first runs. Progress, rather than thread scheduling, bounds
+        // the total armed + queued count to two.
+        let (sender, jobs) = mpsc::sync_channel::<Present>(PresentationProgress::CAPACITY);
         let (responses, retired) = mpsc::sync_channel(3);
         let profiling = std::env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1")
             || std::env::args().any(|arg| arg == "--profile-frames");
@@ -96,7 +106,7 @@ impl PresentationQueue {
             sender: Some(sender),
             retired,
             worker: Some(worker),
-            completed: 0,
+            progress: PresentationProgress::default(),
             profiling,
         })
     }
@@ -109,8 +119,9 @@ impl PresentationQueue {
     ) -> Result<(), &'static str> {
         self.poll()?;
         let sender = self.sender.as_ref().ok_or("Display presentation stopped")?;
+        self.progress.submit(sequence)?;
         let result = sender
-            .send(Present {
+            .try_send(Present {
                 sequence,
                 slot,
                 region,
@@ -124,25 +135,22 @@ impl PresentationQueue {
         loop {
             let result = self.retired.try_recv();
             match result {
-                Ok(result) => self.completed = result?,
+                Ok(result) => self.progress.retire(result?)?,
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => return Err("Display presentation stopped"),
             }
         }
     }
 
-    /// An image last presented at N is writable only after another image at
-    /// N+1 (or later) has actually reached scanout. Its own fence is not enough.
-    pub(super) fn wait_after(&mut self, sequence: u64) -> Result<(), &'static str> {
+    /// An image last presented at N is writable only after a later completed
+    /// flip. Queue admission and that image's own flip are not retirement.
+    pub(super) fn ready(&mut self, last_present: Option<u64>) -> Result<bool, &'static str> {
         self.poll()?;
-        while self.completed <= sequence {
-            let result = self.retired.recv();
-            self.completed = result.map_err(|_| "Display presentation stopped")??;
-        }
-        Ok(())
+        Ok(self.progress.ready(last_present))
     }
 }
 
+#[cfg(target_os = "scarlet")]
 impl Drop for PresentationQueue {
     fn drop(&mut self) {
         // Drain already accepted flips before releasing session images or
@@ -152,5 +160,293 @@ impl Drop for PresentationQueue {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Only owned ABI receipts cross threads. Session, resource table and leases
+/// remain on the compositor thread until this owner reports proven retirement.
+pub(super) struct GpuCompletionQueue<S: sgfx::backend::Completion + Send + 'static> {
+    sender: Option<SyncSender<(u64, Vec<S>, Instant)>>,
+    completed: Receiver<(u64, Result<std::time::Duration, &'static str>)>,
+    worker: Option<JoinHandle<()>>,
+    sequence: u64,
+    pending: Option<u64>,
+}
+
+impl<S: sgfx::backend::Completion + Send + 'static> GpuCompletionQueue<S> {
+    pub(super) fn new(wake: fn()) -> Result<Self, &'static str> {
+        let (sender, jobs) = mpsc::sync_channel::<(u64, Vec<S>, Instant)>(1);
+        let (results, completed) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("sws-gpu-wait".into())
+            .spawn(move || {
+                use sgfx::backend::{Completion, CompletionStatus};
+                while let Ok((sequence, receipts, started)) = jobs.recv() {
+                    let mut result = Ok(());
+                    for receipt in receipts {
+                        match receipt.wait(None) {
+                            Ok(CompletionStatus::Complete) => {}
+                            Ok(_) => {
+                                result = Err("GPU completion did not prove retirement");
+                                break;
+                            }
+                            Err(_) => {
+                                result = Err("GPU composition completion failed");
+                                break;
+                            }
+                        }
+                    }
+                    let failed = result.is_err();
+                    // Publish before waking: a final static frame must retire even
+                    // if no more input or client commits ever arrive.
+                    if results
+                        .send((sequence, result.map(|()| started.elapsed())))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    wake();
+                    if failed {
+                        break;
+                    }
+                }
+            })
+            .map_err(|_| "Failed to start GPU completion worker")?;
+        Ok(Self {
+            sender: Some(sender),
+            completed,
+            worker: Some(worker),
+            sequence: 0,
+            pending: None,
+        })
+    }
+
+    pub(super) fn submit(&mut self, receipts: Vec<S>) -> Result<(), &'static str> {
+        if self.pending.is_some() {
+            return Self::reject_handoff(receipts, "GPU composition already pending");
+        }
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            return Self::reject_handoff(receipts, "GPU frame sequence exhausted");
+        };
+        let Some(sender) = self.sender.as_ref() else {
+            return Self::reject_handoff(receipts, "GPU completion worker stopped");
+        };
+        if let Err(error) = sender.try_send((sequence, receipts, Instant::now())) {
+            let (_, receipts, _) = match error {
+                mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => job,
+            };
+            return Self::reject_handoff(receipts, "GPU completion worker handoff failed");
+        }
+
+        self.sequence = sequence;
+        self.pending = Some(sequence);
+        Ok(())
+    }
+
+    pub(super) fn submit_to(
+        worker: Option<&mut Self>,
+        receipts: Vec<S>,
+    ) -> Result<(), &'static str> {
+        match worker {
+            Some(worker) => worker.submit(receipts),
+            None => Self::reject_handoff(receipts, "GPU completion worker unavailable"),
+        }
+    }
+
+    fn reject_handoff(receipts: Vec<S>, reason: &'static str) -> Result<(), &'static str> {
+        // These receipts already own accepted GPU work. Even an invariant or
+        // shutdown error cannot turn that work into a side-effect-free Busy.
+        use sgfx::backend::CompletionStatus;
+        for receipt in receipts {
+            if !matches!(receipt.wait(None), Ok(CompletionStatus::Complete)) {
+                return Err("GPU handoff failure did not prove retirement");
+            }
+        }
+        Err(reason)
+    }
+
+    pub(super) fn poll(&mut self) -> Result<Option<std::time::Duration>, &'static str> {
+        let Some(expected) = self.pending else {
+            return Ok(None);
+        };
+        match self.completed.try_recv() {
+            Ok((sequence, result)) => {
+                if sequence != expected {
+                    return Err("Invalid GPU completion sequence");
+                }
+                let elapsed = result?;
+                self.pending = None;
+                Ok(Some(elapsed))
+            }
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err("GPU completion worker stopped"),
+        }
+    }
+}
+
+impl<S: sgfx::backend::Completion + Send + 'static> Drop for GpuCompletionQueue<S> {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod gpu_completion_tests {
+    use super::*;
+    use sgfx::backend::{Completion, CompletionStatus};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    static WAKE: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+    fn wake() {
+        if let Some(sender) = WAKE.lock().unwrap().as_ref() {
+            let _ = sender.send(());
+        }
+    }
+    struct Receipt(
+        Arc<(Mutex<Option<bool>>, Condvar)>,
+        Arc<core::sync::atomic::AtomicUsize>,
+    );
+    impl Completion for Receipt {
+        type Error = &'static str;
+        fn poll(&self) -> Result<CompletionStatus, Self::Error> {
+            match *self.0.0.lock().unwrap() {
+                Some(true) => Ok(CompletionStatus::Complete),
+                Some(false) => Err("GPU fault"),
+                None => Ok(CompletionStatus::Pending),
+            }
+        }
+        fn wait(&self, _: Option<Duration>) -> Result<CompletionStatus, Self::Error> {
+            self.1.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            let mut state = self.0.0.lock().unwrap();
+            while state.is_none() {
+                state = self.0.1.wait(state).unwrap();
+            }
+            if state.unwrap() {
+                Ok(CompletionStatus::Complete)
+            } else {
+                Err("GPU fault")
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_worker_drains_old_receipts_and_missing_worker_never_drops_accepted_work() {
+        struct GatedReceipt {
+            entered: mpsc::Sender<()>,
+            finish: Mutex<mpsc::Receiver<()>>,
+        }
+        impl Completion for GatedReceipt {
+            type Error = &'static str;
+            fn poll(&self) -> Result<CompletionStatus, Self::Error> {
+                Ok(CompletionStatus::Pending)
+            }
+            fn wait(&self, _: Option<Duration>) -> Result<CompletionStatus, Self::Error> {
+                self.entered.send(()).unwrap();
+                self.finish.lock().unwrap().recv().unwrap();
+                Ok(CompletionStatus::Complete)
+            }
+        }
+        fn gated() -> (GatedReceipt, mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (entered, waiting) = mpsc::channel();
+            let (complete, finish) = mpsc::channel();
+            (
+                GatedReceipt {
+                    entered,
+                    finish: Mutex::new(finish),
+                },
+                waiting,
+                complete,
+            )
+        }
+        let (receipt, waiting, complete) = gated();
+        let mut old = GpuCompletionQueue::new(|| {}).unwrap();
+        GpuCompletionQueue::submit_to(Some(&mut old), vec![receipt]).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Production target construction creates a NEW queue before replacing
+        // the old target. Dropping the old queue must still join accepted work.
+        let mut replacement = GpuCompletionQueue::new(|| {}).unwrap();
+        let (retired, retirement) = mpsc::channel();
+        let dropping = thread::spawn(move || {
+            drop(old);
+            retired.send(()).unwrap();
+        });
+        assert!(matches!(retirement.try_recv(), Err(TryRecvError::Empty)));
+        complete.send(()).unwrap();
+        retirement.recv_timeout(Duration::from_secs(2)).unwrap();
+        dropping.join().unwrap();
+        let (receipt, waiting, complete) = gated();
+        GpuCompletionQueue::submit_to(Some(&mut replacement), vec![receipt]).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(replacement.poll().unwrap().is_none());
+        complete.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while replacement.poll().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        drop(replacement);
+        // The exact journal failure used to drop these accepted receipts via
+        // Option::ok_or before the worker handoff. Its rejection must retire
+        // them too, rather than report a side-effect-free admission failure.
+        let (receipt, waiting, complete) = gated();
+        let (rejected, rejection) = mpsc::channel();
+        let handoff = thread::spawn(move || {
+            rejected
+                .send(GpuCompletionQueue::submit_to(None, vec![receipt]))
+                .unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(rejection.try_recv(), Err(TryRecvError::Empty)));
+        complete.send(()).unwrap();
+        assert_eq!(
+            rejection.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err("GPU completion worker unavailable")
+        );
+        handoff.join().unwrap();
+    }
+
+    #[test]
+    fn owned_receipt_wait_is_nonblocking_and_wakes_without_new_input_even_on_fault() {
+        let (sender, receiver) = mpsc::channel();
+        *WAKE.lock().unwrap() = Some(sender);
+        let pending = Arc::new((Mutex::new(None), Condvar::new()));
+        let complete = Arc::new((Mutex::new(Some(true)), Condvar::new()));
+        let mut queue = GpuCompletionQueue::<Receipt>::new(wake).unwrap();
+        let waits = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        queue
+            .submit(vec![
+                Receipt(pending.clone(), waits.clone()),
+                Receipt(complete, waits.clone()),
+            ])
+            .unwrap();
+        let rejected_waits = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        assert!(
+            queue
+                .submit(vec![Receipt(
+                    Arc::new((Mutex::new(Some(true)), Condvar::new())),
+                    rejected_waits.clone()
+                )])
+                .is_err()
+        );
+        assert_eq!(rejected_waits.load(core::sync::atomic::Ordering::SeqCst), 1);
+        assert!(queue.poll().unwrap().is_none());
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        // The caller can dispatch input instead of waiting for the first fence.
+        let dispatched_input = 1;
+        *pending.0.lock().unwrap() = Some(true);
+        pending.1.notify_all();
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(queue.poll().unwrap().is_some());
+        assert_eq!(dispatched_input, 1);
+        let fault = Arc::new((Mutex::new(Some(false)), Condvar::new()));
+        queue.submit(vec![Receipt(fault, waits)]).unwrap();
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(queue.poll().is_err());
+        drop(queue);
+        *WAKE.lock().unwrap() = None;
     }
 }

@@ -1,7 +1,7 @@
 //! Optional GPU-backed scene composition for SWS.
 
 use super::cursor::Cursor;
-use super::status_backdrop::{BackdropDamage, BackdropGeometry, backdrop_refreshes, expand_damage};
+use super::status_backdrop::{BackdropDamage, BackdropGeometry, backdrop_refreshes};
 use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_rect_row_span};
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use gpu_raw::{Gpu, GpuContext, GpuImage, GpuImageBgraRect};
@@ -16,13 +16,28 @@ use std::time::Instant;
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    BackdropPass, BackdropTextures, CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError,
-    SampledRect, TextureUpload, define_bgra_texture, define_scene_texture, upload_bgra,
+    BackdropPass, BackdropTextures, CopiedRect, MappedTarget, MaterialDamage, Quad, QuadRenderer,
+    QuadSubmitError, SampledRect, TextureUpload, define_bgra_texture, define_scene_texture,
+    retarget_backdrops, upload_bgra,
 };
+
+use crate::sgfx_ir_support::clipped_scaled_image as clipped_scaled_rect;
 
 use super::surface_scene::{SceneView, source_uv};
 
 type DamageRect = (u32, u32, u32, u32);
+
+/// Every composition target, including resource-table/extent replacements,
+/// must own its receipt worker BEFORE any final asynchronous frame is admitted.
+/// Target drop still joins that worker before releasing images/session state.
+fn open_composition_target(width: u32, height: u32) -> Result<MappedTarget, &'static str> {
+    let mut target = MappedTarget::open_swapchain(width, height)
+        .map_err(|_| "Failed to create mapped GPU swapchain")?;
+    if target.supports_tracked_submission() {
+        target.prepare_gpu_completion(super::ipc::wake_compositor)?;
+    }
+    Ok(target)
+}
 
 /// Damage is expressed in pixels of the registered image, not the window.
 pub(super) struct SharedFrameDamage {
@@ -33,7 +48,11 @@ pub(super) struct SharedFrameDamage {
 /// Scope of one failed GPU-composition frame.
 #[derive(Debug)]
 pub(super) enum GpuCompositionError {
-    /// Temporary admission pressure, with the discarded prefix fully retired.
+    /// Display capacity unavailable before any frame construction or GPU work.
+    DisplayBusy,
+    /// One fully admitted frame is waiting for proven GPU retirement.
+    Pending,
+    /// Temporary GPU admission pressure, with the discarded prefix retired.
     Busy,
     /// Frame construction failed before valid work reached the backend.
     Frame(&'static str),
@@ -76,6 +95,8 @@ impl From<QuadSubmitError> for GpuCompositionError {
 impl fmt::Display for GpuCompositionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Pending => formatter.write_str("GPU composition pending"),
+            Self::DisplayBusy => formatter.write_str("Display admission is temporarily busy"),
             Self::Busy => formatter.write_str("GPU admission is temporarily busy"),
             Self::Frame(error) | Self::Backend(error) => formatter.write_str(error),
             Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
@@ -259,6 +280,7 @@ struct SharedWindowTexture {
     handle: Handle,
 }
 
+#[derive(Clone)]
 struct SharedWindowState {
     window_id: WindowId,
     latest_generation: u32,
@@ -274,10 +296,31 @@ struct CursorTextureSet {
     frames: Vec<TextureId>,
 }
 
+struct ScenePublication {
+    window_id: WindowId,
+    texture: TextureId,
+    serial: u64,
+    buffers: Vec<Option<u32>>,
+}
+
+struct PendingComposition {
+    region: Option<DisplayPresentRegion>,
+    logical_damage: DamageRect,
+    shared: Vec<SharedWindowState>,
+    backdrops: Vec<(usize, BackdropGeometry)>,
+    scenes: Vec<ScenePublication>,
+    profile: [Option<Instant>; 4],
+    quads: usize,
+    damage_pixels: u64,
+}
+
 /// GPU resources and texture cache used by the internal SWS compositor.
 pub(super) struct GpuCompositor {
     operations: RefCell<Vec<Quad>>,
     frame_profile: Option<super::trace::FrameProfile>,
+    pending_frame: Option<PendingComposition>,
+    deferred_window_removals: Vec<WindowId>,
+    deferred_texture_removals: Vec<WindowId>,
     target: MappedTarget,
     quad_renderer: QuadRenderer,
     cursor_images: Vec<CursorTextureSet>,
@@ -295,6 +338,23 @@ pub(super) struct GpuCompositor {
 }
 
 impl GpuCompositor {
+    pub(super) fn has_pending_frame(&self) -> bool { self.pending_frame.is_some() }
+
+    pub(super) fn pending_logical_damage(&self) -> Option<DamageRect> {
+        self.pending_frame
+            .as_ref()
+            .map(|frame| frame.logical_damage)
+    }
+
+    pub(super) fn retire_pending_frame(&mut self, display: &DisplaySurface)
+        -> Result<Option<Vec<SgfxCommitToken>>, GpuCompositionError>
+    {
+        if self.pending_frame.is_none() { return Ok(None); }
+        if !self.target.poll_gpu_completion().map_err(GpuCompositionError::Backend)? { return Ok(None); }
+        let frame = self.pending_frame.take().unwrap();
+        self.publish_completed_frame(display, frame).map(Some)
+    }
+
     pub(super) fn is_accelerated(&self) -> bool {
         // A requested SWS/SGFX backend is not evidence of acceleration. Read
         // the selected target, including after a session rebuild. Unknown
@@ -304,8 +364,7 @@ impl GpuCompositor {
 
     /// Create the optional GPU compositor after confirming required capabilities.
     pub(super) fn new(width: u32, height: u32, cursor: &Cursor) -> Result<Self, &'static str> {
-        let mut target = MappedTarget::open_swapchain(width, height)
-            .map_err(|_| "Failed to create mapped GPU swapchain")?;
+        let mut target = open_composition_target(width, height)?;
         let quad_renderer =
             QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
                 .map_err(|_| "Failed to define GPU composition resources")?;
@@ -337,6 +396,9 @@ impl GpuCompositor {
         Ok(Self {
             operations: RefCell::new(Vec::with_capacity(COMPOSITION_QUAD_CAPACITY)),
             target,
+            pending_frame: None,
+            deferred_window_removals: Vec::new(),
+            deferred_texture_removals: Vec::new(),
             frame_profile: super::trace::FrameProfile::open(),
             quad_renderer,
             cursor_images,
@@ -854,6 +916,12 @@ impl GpuCompositor {
         &mut self,
         window_id: WindowId,
     ) -> Result<(), &'static str> {
+        if self.has_pending_frame() {
+            if !self.deferred_texture_removals.contains(&window_id) {
+                self.deferred_texture_removals.push(window_id);
+            }
+            return Ok(());
+        }
         if let Some(texture) = self
             .textures
             .iter_mut()
@@ -868,6 +936,10 @@ impl GpuCompositor {
 
     /// Retire all GPU resources after the window itself is closed.
     pub(super) fn remove_window(&mut self, window_id: WindowId) -> Result<(), &'static str> {
+        if self.has_pending_frame() {
+            if !self.deferred_window_removals.contains(&window_id) { self.deferred_window_removals.push(window_id); }
+            return Ok(());
+        }
         self.remove_window_texture(window_id)?;
         while let Some(index) = self
             .shared_textures
@@ -1181,23 +1253,39 @@ impl GpuCompositor {
         damage: Option<DamageRect>,
         scene_damage: Option<&[BackdropDamage]>,
         backdrops: &[(WindowId, BackdropGeometry)],
-    ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
+    ) -> Result<(Vec<SgfxCommitToken>, DamageRect), GpuCompositionError> {
+        if self.has_pending_frame() { return Err(GpuCompositionError::Pending); }
         let profiling = super::trace::profile_enabled() || self.frame_profile.is_some();
         let profile_start = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
-        // ResourceTable slots live for the session. Rebuild before changing
-        // material extents instead of leaking retired textures on each resize.
-        if !self.backdrops.is_empty()
-            && (backdrops.iter().any(|(id, geometry)| {
-                !self
-                    .backdrops
-                    .iter()
-                    .any(|(cached_id, cached, _)| id == cached_id && geometry == cached)
-            }) || self
-                .backdrops
-                .iter()
-                .any(|(id, _, _)| !windows.iter().any(|w| w.id == *id)))
+        // Reject before uploads, cache publication or GPU admission. Do not
+        // spend a vblank inside present() before returning completed client
+        // leases; the normal retry path keeps input handling and credits live.
+        if !self
+            .target
+            .try_acquire_render_target()
+            .map_err(GpuCompositionError::Backend)?
         {
+            return Err(GpuCompositionError::DisplayBusy);
+        }
+        // Match individual material allocations, not absolute screen geometry.
+        // A window may own several regions with identical extents: consume each
+        // cached allocation once. Moving a region only invalidates its content;
+        // it must not drain presentation, rebuild the context/cursor atlas and
+        // reimport every client image on every animation frame.
+        if self.backdrops.iter()
+            .any(|(owner, old, _)| !backdrops.contains(&(*owner, *old)))
+        {
+            // Keep the old rebuild's conservative invalidation for changed
+            // placement/rounding and overlapping upper materials. Only the
+            // expensive allocation/context reset is removed.
+            self.force_full_repaint = true;
+        }
+        // The table is append-only. Retire incompatible/removed allocations
+        // through the existing bounded rebuild; new regions can append below.
+        if retarget_backdrops(&mut self.backdrops, backdrops, |geometry| {
+            (geometry.source.2, geometry.source.3, geometry.radius)
+        }) {
             self.rebuild_pending = true;
         }
         // Retire changed layouts with the same bounded resource-table rebuild
@@ -1215,6 +1303,36 @@ impl GpuCompositor {
         let mut texture_uploads = Vec::new();
         self.prepare_scene_textures(scenes, windows, &mut texture_uploads)?;
         self.transfer_visible_imported_shm(windows)?;
+        for &(id, geometry) in backdrops {
+            if !self
+                .backdrops
+                .iter()
+                .any(|(cached_id, cached, _)| *cached_id == id && *cached == geometry)
+            {
+                let textures = BackdropTextures::define(
+                    self.target.resources.as_ref(),
+                    geometry.source.2,
+                    geometry.source.3,
+                    geometry.radius,
+                )
+                .map_err(|_| "Failed to define backdrop textures")?;
+                self.backdrops.push((id, geometry, textures));
+            }
+        }
+        // A newly allocated/invalid lower cache can change its output even
+        // without a new foreground commit. Include that dependency before
+        // deciding whether an upper material's background remains reusable.
+        let mut capture_damage = scene_damage.map(|damage| damage.to_vec());
+        if let Some(damage) = &mut capture_damage {
+            for (id, geometry, textures) in &self.backdrops {
+                if !textures.valid && backdrops.contains(&(*id, *geometry)) {
+                    damage.push(BackdropDamage {
+                        rect: geometry.output,
+                        foreground: Some(*id),
+                    });
+                }
+            }
+        }
         // Preserve native content ownership when deciding whether background
         // pixels changed. Presentation repair/halo expansion below remains
         // conservative, but must not force a fresh capture of unchanged glass.
@@ -1222,8 +1340,11 @@ impl GpuCompositor {
             Vec::new()
         } else {
             let window_order: Vec<_> = windows.iter().map(|window| window.id).collect();
-            backdrop_refreshes(backdrops, &window_order,
-                if self.force_full_repaint { None } else { scene_damage })
+            backdrop_refreshes(
+                backdrops,
+                &window_order,
+                if self.force_full_repaint { None } else { capture_damage.as_deref() },
+            )
         };
         for (id, geometry, textures) in &mut self.backdrops {
             if backdrops.iter().zip(&refresh)
@@ -1232,6 +1353,29 @@ impl GpuCompositor {
                 textures.valid = false;
             }
         }
+        let materials = self
+            .backdrops
+            .iter()
+            .filter(|(id, geometry, _)| backdrops.contains(&(*id, *geometry)))
+            .map(|(_, geometry, textures)| {
+                Ok(MaterialDamage {
+                    source: PixelRect::new(
+                        geometry.source.0 as u32,
+                        geometry.source.1 as u32,
+                        geometry.source.2,
+                        geometry.source.3,
+                    )?,
+                    output: PixelRect::new(
+                        geometry.output.0 as u32,
+                        geometry.output.1 as u32,
+                        geometry.output.2,
+                        geometry.output.3,
+                    )?,
+                    refresh: !textures.valid,
+                })
+            })
+            .collect::<Result<Vec<_>, sgfx::ir::Error>>()
+            .map_err(|_| "Invalid backdrop damage geometry")?;
         let force_full_repaint = self.force_full_repaint;
         let damage = if force_full_repaint { None } else { damage };
         let mut uploaded_texture_indices = Vec::new();
@@ -1264,52 +1408,17 @@ impl GpuCompositor {
             .map_err(|_| "Invalid GPU composition damage")?;
         let full_area = PixelRect::new(0, 0, self.target.width, self.target.height)
             .map_err(|_| "Invalid GPU composition target area")?;
-        let mut render_area = self
+        // Only changed filter OUTPUT enters swapchain age history and capture
+        // damage. A read halo is temporary coverage for rebuilding that cache.
+        let logical_area =
+            MaterialDamage::logical_region(requested_clip.unwrap_or(full_area), &materials)
+                .map_err(|_| "Invalid backdrop logical damage")?;
+        let aged_area = self
             .target
-            .prepare_render_area(requested_clip.unwrap_or(full_area))
+            .prepare_render_area(logical_area)
             .map_err(|_| "Failed to prepare GPU swapchain damage")?;
-        let (render_area, repair) = if backdrops.is_empty() {
-            (
-                render_area,
-                (
-                    render_area.x() as i32,
-                    render_area.y() as i32,
-                    render_area.width(),
-                    render_area.height(),
-                ),
-            )
-        } else {
-            // Buffer-age repair can touch a material independently of this
-            // frame's logical damage. Expand repair only, not damage history.
-            let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
-            let mut repair = vec![(
-                render_area.x() as i32,
-                render_area.y() as i32,
-                render_area.width(),
-                render_area.height(),
-            )];
-            expand_damage(&geometries, &mut repair);
-            let repair = repair[0];
-            render_area = PixelRect::new(repair.0 as u32, repair.1 as u32, repair.2, repair.3)
-                .map_err(|_| "Invalid backdrop repair damage")?;
-            (render_area, repair)
-        };
-        for &(id, geometry) in backdrops {
-            if !self
-                .backdrops
-                .iter()
-                .any(|(cached_id, cached, _)| *cached_id == id && *cached == geometry)
-            {
-                let textures = BackdropTextures::define(
-                    self.target.resources.as_ref(),
-                    geometry.source.2,
-                    geometry.source.3,
-                    geometry.radius,
-                )
-                .map_err(|_| "Failed to define backdrop textures")?;
-                self.backdrops.push((id, geometry, textures));
-            }
-        }
+        let render_area = MaterialDamage::repair_region(aged_area, &materials)
+            .map_err(|_| "Invalid backdrop repair damage")?;
         let damage_clip = (render_area != full_area).then_some(render_area);
         let mut operations = self.operations.borrow_mut();
         operations.clear();
@@ -1344,7 +1453,15 @@ impl GpuCompositor {
             for (index, (id, geometry, _)) in self.backdrops.iter().enumerate() {
                 if *id == window.id
                     && backdrops.contains(&(*id, *geometry))
-                    && geometry.intersects_source(repair)
+                    && intersect_pixel_rects(
+                        PixelRect::new(
+                            geometry.output.0 as u32,
+                            geometry.output.1 as u32,
+                            geometry.output.2,
+                            geometry.output.3,
+                        ).map_err(|_| "Invalid backdrop output")?,
+                        render_area,
+                    ).is_some()
                 {
                     backdrop_splits.push((index, operations.len()));
                 }
@@ -1472,7 +1589,25 @@ impl GpuCompositor {
             });
         }
         let profile_encoded = profiling.then(Instant::now);
-        if self.target.supports_tracked_submission() {
+        let mut publication = PendingComposition {
+            logical_damage: (logical_area.x(), logical_area.y(), logical_area.width(), logical_area.height()),
+            region: (render_area != full_area).then_some(DisplayPresentRegion {
+                x: render_area.x(), y: render_area.y(), width: render_area.width(), height: render_area.height(),
+            }),
+            shared: self.shared_windows.iter().filter(|state| !windows.iter().any(|window|
+                window.id == state.window_id && window.retains_native_transition_frame())).cloned().collect(),
+            backdrops: backdrop_splits.iter().map(|&(index, _)| (index, self.backdrops[index].1)).collect(),
+            scenes: scenes.iter().filter_map(|view| {
+                let entry = self.scene_textures.iter().find(|entry| entry.window_id == view.scene.window_id && entry.direct)?;
+                if !windows.iter().any(|window| window.id == entry.window_id && window.is_presented()) { return None; }
+                Some(ScenePublication { window_id: entry.window_id, texture: entry.texture,
+                    serial: view.scene.serial, buffers: view.scene.layers.iter().zip(&view.sources)
+                        .map(|(layer, source)| source.gpu_buffer.is_none().then_some(layer.buffer_id)).collect() })
+            }).collect(),
+            profile: [profile_start, profile_synced, profile_encoded, None],
+            quads: operations.len(), damage_pixels: u64::from(render_area.width()) * u64::from(render_area.height()),
+        };
+        let receipts = if self.target.supports_tracked_submission() {
             self.quad_renderer
                 .submit_region_with_uploads_tracked(
                     &mut self.target,
@@ -1491,7 +1626,7 @@ impl GpuCompositor {
                     QuadSubmitError::Execution(error) => {
                         GpuCompositionError::TrackedExecution(error)
                     }
-                })?;
+                })?
         } else {
             // Older backends without negotiated asynchronous admission use
             // synchronous execution with the same presentation contract.
@@ -1503,107 +1638,76 @@ impl GpuCompositor {
                 &operations,
                 &backdrop_passes,
             )?;
-        }
+            Vec::new()
+        };
         for texture_index in uploaded_texture_indices {
             self.textures[texture_index].pending_damage = None;
         }
+        publication.profile[3] = profiling.then(Instant::now);
+        drop(backdrop_passes);
+        drop(operations);
+        if self.target.supports_tracked_submission() {
+            self.target.queue_gpu_completion(receipts).map_err(GpuCompositionError::Backend)?;
+            self.pending_frame = Some(publication);
+            return Err(GpuCompositionError::Pending);
+        }
+        let logical_damage = publication.logical_damage;
+        self.publish_completed_frame(display, publication)
+            .map(|releases| (releases, logical_damage))
+    }
+
+    fn publish_completed_frame(&mut self, display: &DisplaySurface, frame: PendingComposition)
+        -> Result<Vec<SgfxCommitToken>, GpuCompositionError>
+    {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
-        let profile_submitted = profiling.then(Instant::now);
-        let region = (render_area != full_area).then_some(DisplayPresentRegion {
-            x: render_area.x(),
-            y: render_area.y(),
-            width: render_area.width(),
-            height: render_area.height(),
-        });
-        self.target
-            .present(display, region)
-            .map_err(GpuCompositionError::Backend)?;
-        let profile_presented = profiling.then(Instant::now);
-        if super::trace::profile_enabled() {
-            if let (Some(start), Some(synced), Some(encoded), Some(submitted)) = (
-                profile_start,
-                profile_synced,
-                profile_encoded,
-                profile_submitted,
-            ) {
-                std::println!(
-                    "[SWS_PROFILE] {}x{} damage={}x{} blur={} blur_refresh={} quads={} sync_us={} encode_us={} submit_us={} present_us={}",
-                    self.target.width,
-                    self.target.height,
-                    render_area.width(),
-                    render_area.height(),
-                    backdrop_passes.len(),
-                    backdrop_passes.iter().filter(|pass| pass.refresh).count(),
-                    operations.len(),
-                    synced.duration_since(start).as_micros(),
-                    encoded.duration_since(synced).as_micros(),
-                    submitted.duration_since(encoded).as_micros(),
-                    submitted.elapsed().as_micros(),
-                );
+        // Preserve the existing stage-file wall intervals: submit spans fence
+        // retirement (now overlapped with input), present measures enqueue only.
+        let gpu_retired = frame.profile[3].map(|_| Instant::now());
+        self.target.present(display, frame.region).map_err(GpuCompositionError::Backend)?;
+        let presented = self.frame_profile.as_ref().map(|_| Instant::now());
+        for (index, geometry) in frame.backdrops {
+            if let Some((_, current, textures)) = self.backdrops.get_mut(index) {
+                if *current == geometry { textures.valid = true; }
             }
         }
-        // Only a successfully published frame certifies the completed background
-        // material for reuse. Failed submissions stay cold.
-        drop(backdrop_passes);
-        for (index, _) in backdrop_splits {
-            self.backdrops[index].2.valid = true;
-        }
-        // Publish the direct-scene cache only after successful GPU submission
-        // and presentation. Busy/error retries must retain pending SHM uploads.
-        for view in scenes {
-            if windows
-                .iter()
-                .any(|window| window.id == view.scene.window_id && window.is_presented())
-                && let Some(entry) = self
-                    .scene_textures
-                    .iter_mut()
-                    .find(|entry| entry.window_id == view.scene.window_id && entry.direct)
+        for update in frame.scenes {
+            if let Some(entry) = self.scene_textures.iter_mut().find(|entry|
+                entry.window_id == update.window_id && entry.texture == update.texture && entry.direct)
             {
-                entry.serial = Some(view.scene.serial);
-                for ((cached, layer), source) in entry
-                    .uploaded_source_buffers
-                    .iter_mut()
-                    .zip(&view.scene.layers)
-                    .zip(&view.sources)
-                {
-                    *cached = source.gpu_buffer.is_none().then_some(layer.buffer_id);
-                }
+                entry.serial = Some(update.serial);
+                entry.uploaded_source_buffers = update.buffers;
             }
         }
         self.force_full_repaint = false;
-        super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
-        let quad_count = operations.len();
-        drop(operations);
-        let releases = self.take_presented_releases(windows);
-        if let (
-            Some(profile),
-            Some(start),
-            Some(synced),
-            Some(encoded),
-            Some(submitted),
-            Some(presented),
-            Some(timings),
-        ) = (
-            &mut self.frame_profile,
-            profile_start,
-            profile_synced,
-            profile_encoded,
-            profile_submitted,
-            profile_presented,
-            &self.target.frame_timings,
-        ) {
-            if profile
-                .record(
-                    [start, synced, encoded, submitted, presented, Instant::now()],
-                    timings,
-                    quad_count,
-                    u64::from(render_area.width()) * u64::from(render_area.height()),
-                )
-                .is_err()
-            {
+        let mut releases = Vec::new();
+        for snapshot in frame.shared {
+            if let Some(state) = self.shared_windows.iter_mut().find(|state| state.window_id == snapshot.window_id) {
+                releases.extend(promote_completed_shared_frame(state, &snapshot)
+                    .map_err(GpuCompositionError::Backend)?.into_iter().flatten());
+            }
+        }
+        for texture in &mut self.textures {
+            if texture.window_id.is_some_and(|id| self.shared_windows.iter()
+                .any(|state| state.window_id == id && state.presented.is_some())) {
+                texture.window_id = None;
+                texture.pending_damage = None;
+            }
+        }
+        self.schedule_retired_texture_rebuild();
+        let [start, synced, encoded, _admitted] = frame.profile;
+        let submitted = gpu_retired;
+        if let (Some(profile), Some(start), Some(synced), Some(encoded), Some(submitted), Some(presented), Some(timings)) =
+            (&mut self.frame_profile, start, synced, encoded, submitted, presented, &self.target.frame_timings) {
+            if profile.record([start, synced, encoded, submitted, presented, Instant::now()], timings, frame.quads, frame.damage_pixels).is_err() {
                 self.frame_profile = None;
                 std::println!("[SWS_PROFILE] frame file write failed; profiling disabled");
             }
+        }
+        for window in core::mem::take(&mut self.deferred_texture_removals) {
+            self.remove_window_texture(window).map_err(GpuCompositionError::Backend)?;
+        }
+        for window in core::mem::take(&mut self.deferred_window_removals) {
+            self.remove_window(window).map_err(GpuCompositionError::Backend)?;
         }
         Ok(releases)
     }
@@ -1629,38 +1733,6 @@ impl GpuCompositor {
             .iter()
             .find(|entry| entry.identity == identity)
             .map(|entry| (entry.texture, entry.width, entry.height))
-    }
-
-    fn take_presented_releases(&mut self, windows: &[Window]) -> Vec<SgfxCommitToken> {
-        let mut releases = Vec::new();
-        for state in &mut self.shared_windows {
-            if windows.iter().any(|window| {
-                window.id == state.window_id && window.retains_native_transition_frame()
-            }) {
-                continue;
-            }
-            releases.extend(promote_pending_shared_frame(state).into_iter().flatten());
-        }
-        // Once a shared image has reached the display, the CPU-upload cache
-        // for that window is redundant. Keep its physical image as a reusable
-        // same-size slot instead of retaining one private copy per SGFX
-        // window. If the shared path is later removed, `sync_window_texture`
-        // transparently claims a compatible slot and uploads the SHM backing.
-        for texture in &mut self.textures {
-            let Some(window_id) = texture.window_id else {
-                continue;
-            };
-            if self
-                .shared_windows
-                .iter()
-                .any(|state| state.window_id == window_id && state.presented.is_some())
-            {
-                texture.window_id = None;
-                texture.pending_damage = None;
-            }
-        }
-        self.schedule_retired_texture_rebuild();
-        releases
     }
 
     /// Keep the latest offscreen shell image without filling the client's pool.
@@ -2017,15 +2089,18 @@ impl GpuCompositor {
                     })
                 })
         });
-        if !self.rebuild_pending && !cursor_layout_changed && !texture_extent_changed {
+        if !self.rebuild_pending
+            && !cursor_layout_changed
+            && !texture_extent_changed
+            && !self.target.retired_imports_need_rebuild()
+        {
             return Ok(());
         }
 
         let (width, height) = self
             .rebuild_extent
             .unwrap_or((self.target.width, self.target.height));
-        let mut target = MappedTarget::open_swapchain(width, height)
-            .map_err(|_| "Failed to rebuild mapped GPU swapchain")?;
+        let mut target = open_composition_target(width, height)?;
         let quad_renderer =
             QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
                 .map_err(|_| "Failed to redefine GPU composition resources")?;
@@ -2122,6 +2197,18 @@ fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCo
         state.presented.replace(pending),
         state.retire_after_present.take(),
     ]
+}
+
+fn promote_completed_shared_frame(state: &mut SharedWindowState, submitted: &SharedWindowState)
+    -> Result<[Option<SgfxCommitToken>; 2], &'static str>
+{
+    if state.compositor_epoch != submitted.compositor_epoch { return Err("Shared frame epoch changed before completion"); }
+    let (current, released) = crate::sgfx_ir_support::retire_shared_snapshot(
+        [state.presented, state.pending, state.retire_after_present],
+        [submitted.presented, submitted.pending, submitted.retire_after_present],
+    )?;
+    [state.presented, state.pending, state.retire_after_present] = current;
+    Ok(released)
 }
 
 #[cfg(test)]
@@ -2266,61 +2353,6 @@ fn clipped_rect(
     Some((
         PixelRect::new(left as u32, top as u32, width, height).ok()?,
         PixelRect::new((left - x) as u32, (top - y) as u32, width, height).ok()?,
-    ))
-}
-
-fn clipped_scaled_rect(
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    source_width: u32,
-    source_height: u32,
-    target_width: u32,
-    target_height: u32,
-) -> Option<(PixelRect, PixelRect)> {
-    if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
-        return None;
-    }
-    let right = x.checked_add(width as i32)?;
-    let bottom = y.checked_add(height as i32)?;
-    let left = x.max(0).min(target_width as i32);
-    let top = y.max(0).min(target_height as i32);
-    let right = right.max(0).min(target_width as i32);
-    let bottom = bottom.max(0).min(target_height as i32);
-    if right <= left || bottom <= top {
-        return None;
-    }
-
-    let source_left = ((i64::from(left - x) * i64::from(source_width)) / i64::from(width)) as u32;
-    let source_top = ((i64::from(top - y) * i64::from(source_height)) / i64::from(height)) as u32;
-    let source_right = ((i64::from(right - x) * i64::from(source_width)
-        + i64::from(width.saturating_sub(1)))
-        / i64::from(width)) as u32;
-    let source_bottom = ((i64::from(bottom - y) * i64::from(source_height)
-        + i64::from(height.saturating_sub(1)))
-        / i64::from(height)) as u32;
-    Some((
-        PixelRect::new(
-            left as u32,
-            top as u32,
-            (right - left) as u32,
-            (bottom - top) as u32,
-        )
-        .ok()?,
-        PixelRect::new(
-            source_left.min(source_width.saturating_sub(1)),
-            source_top.min(source_height.saturating_sub(1)),
-            source_right
-                .min(source_width)
-                .saturating_sub(source_left)
-                .max(1),
-            source_bottom
-                .min(source_height)
-                .saturating_sub(source_top)
-                .max(1),
-        )
-        .ok()?,
     ))
 }
 

@@ -24,11 +24,10 @@ use sgfx::ir::{
 #[cfg(target_os = "scarlet")]
 use sgfx::{Context, Instance, MappedTargetSession};
 
-#[cfg(target_os = "scarlet")]
 #[path = "sgfx_presentation.rs"]
 mod presentation;
 #[cfg(target_os = "scarlet")]
-use presentation::PresentationQueue;
+use presentation::{GpuCompletionQueue, PresentationQueue};
 
 const QUAD_VERTEX_STRIDE: u32 = 24;
 const QUAD_VERTEX_COUNT: usize = 6;
@@ -70,12 +69,66 @@ impl fmt::Display for Error {
 
 impl error::Error for Error {}
 
+/// Apply only the exact commit sampled by a completed frame. A newer commit
+/// remains pending; absence of a submitted commit never acknowledges new work.
+pub(crate) fn retire_shared_snapshot<T: Copy + Eq>(
+    mut current: [Option<T>; 3], submitted: [Option<T>; 3],
+) -> Result<([Option<T>; 3], [Option<T>; 2]), &'static str> {
+    let Some(commit) = submitted[1] else { return Ok((current, [None, None])); };
+    if current[0] != submitted[0] { return Err("Presented commit changed before completion"); }
+    if current[1] == Some(commit) { current[1] = None; }
+    else if current[2] == Some(commit) { current[2] = None; }
+    else { return Err("Submitted commit lost its lease"); }
+    if current[2] == submitted[2] { current[2] = None; }
+    let old = current[0].replace(commit);
+    Ok((current, [old, submitted[2]]))
+}
+
 /// One directly selected frontend context with a mapped presentation target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReusableImport {
     texture: TextureId,
     width: u32,
     height: u32,
+}
+
+const MAX_RETIRED_IMPORT_SLOTS: usize = 16;
+
+fn retired_imports_need_rebuild(imports: &[ReusableImport]) -> bool {
+    imports.len() > MAX_RETIRED_IMPORT_SLOTS
+}
+
+/// One armed flip and one queued frame, independent of worker scheduling.
+/// Completion of N makes N the front; only completion of N+1 retires N.
+#[derive(Default)]
+pub(super) struct PresentationProgress {
+    submitted: u64,
+    completed: u64,
+}
+
+impl PresentationProgress {
+    pub(super) const CAPACITY: usize = 2;
+
+    pub(super) fn ready(&self, last_present: Option<u64>) -> bool {
+        self.submitted - self.completed < Self::CAPACITY as u64
+            && last_present.is_none_or(|sequence| self.completed > sequence)
+    }
+
+    pub(super) fn submit(&mut self, sequence: u64) -> Result<(), &'static str> {
+        if !self.ready(None) || self.submitted.checked_add(1) != Some(sequence) {
+            return Err("Invalid or full display presentation sequence");
+        }
+        self.submitted = sequence;
+        Ok(())
+    }
+
+    pub(super) fn retire(&mut self, sequence: u64) -> Result<(), &'static str> {
+        if self.completed.checked_add(1) != Some(sequence) || sequence > self.submitted {
+            return Err("Invalid display presentation completion");
+        }
+        self.completed = sequence;
+        Ok(())
+    }
 }
 
 fn take_reusable_import(
@@ -110,6 +163,7 @@ pub(crate) struct MappedTarget {
     current_slot: usize,
     present_sequence: u64,
     presentation: Option<PresentationQueue>,
+    gpu_completion: Option<GpuCompletionQueue<sgfx::Submission>>,
     pending_damage: Option<PixelRect>,
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
@@ -129,8 +183,45 @@ pub(crate) struct FrameTimings {
 
 #[cfg(target_os = "scarlet")]
 impl MappedTarget {
+    pub(crate) fn prepare_gpu_completion(&mut self, wake: fn()) -> Result<(), &'static str> {
+        if self.gpu_completion.is_none() { self.gpu_completion = Some(GpuCompletionQueue::new(wake)?); }
+        Ok(())
+    }
+
+    pub(crate) fn queue_gpu_completion(
+        &mut self,
+        receipts: Vec<sgfx::Submission>,
+    ) -> Result<(), &'static str> {
+        GpuCompletionQueue::submit_to(self.gpu_completion.as_mut(), receipts)
+    }
+
+    pub(crate) fn poll_gpu_completion(&mut self) -> Result<bool, &'static str> {
+        let elapsed = self.gpu_completion.as_mut().ok_or("GPU completion worker unavailable")?.poll()?;
+        if let Some(elapsed) = elapsed {
+            if let Some(timings) = &mut self.frame_timings { timings.gpu_wait_ns += elapsed.as_nanos(); }
+            Ok(true)
+        } else { Ok(false) }
+    }
+
     pub(crate) fn supports_tracked_submission(&self) -> bool {
         self.tracked_submission
+    }
+
+    /// Test display capacity and exact image retirement before constructing
+    /// another frame. A busy display must not hold the compositor/input loop.
+    pub(crate) fn try_acquire_render_target(&mut self) -> Result<bool, &'static str> {
+        let previous = self.slots[self.current_slot].last_present;
+        match self.presentation.as_mut() {
+            Some(presentation) => presentation.ready(previous),
+            None => Ok(true),
+        }
+    }
+
+    /// Released images are unmapped, but their logical table slots persist.
+    /// Rebuild the bounded private table instead of accumulating every old
+    /// client/window extent for the entire desktop session.
+    pub(crate) fn retired_imports_need_rebuild(&self) -> bool {
+        retired_imports_need_rebuild(&self.reusable_imports)
     }
 
     pub(crate) fn open(width: u32, height: u32) -> Result<Self, Error> {
@@ -219,6 +310,7 @@ impl MappedTarget {
             current_slot: 0,
             present_sequence: 0,
             presentation: None,
+            gpu_completion: None,
             pending_damage: None,
             session,
             reusable_imports: Vec::new(),
@@ -363,18 +455,9 @@ impl MappedTarget {
             self.finish_present(sequence)
                 .map_err(|_| "Failed to track SGFX swapchain damage")?;
             let next = (self.current_slot + 1) % self.slots.len();
-            if let Some(previous) = self.slots[next].last_present {
-                // Completing image N's flip makes it the front. It is released
-                // only when a LATER image has actually replaced it at scanout.
-                let wait_start = self
-                    .frame_timings
-                    .as_ref()
-                    .map(|_| std::time::Instant::now());
-                self.presentation.as_mut().unwrap().wait_after(previous)?;
-                if let (Some(start), Some(timings)) = (wait_start, &mut self.frame_timings) {
-                    timings.image_reuse_wait_ns += start.elapsed().as_nanos();
-                }
-            }
+            // Acquiring the next image belongs to the NEXT frame. GPU reads
+            // for this frame already retired, so its client releases must not
+            // be delayed by an unrelated future scanout fence.
             self.current_slot = next;
             self.texture = self.slots[next].texture;
         } else {
@@ -416,6 +499,7 @@ impl Drop for MappedTarget {
     fn drop(&mut self) {
         // Join accepted display flips before releasing session images or
         // replacing this compositor with CPU composition after an error.
+        self.gpu_completion.take();
         self.presentation.take();
     }
 }
@@ -504,6 +588,7 @@ pub(crate) struct TextureUpload<'a> {
 /// targets stay separate from sampled textures: native Maxwell uses tiled render
 /// targets and the proven tiled-to-linear copy path for subsequent sampling.
 pub(crate) struct BackdropTextures {
+    radius: u32,
     levels: Vec<(TextureId, u32, u32)>,
     reduction_targets: Vec<(TextureId, u32)>,
     filter_target: TextureId,
@@ -554,6 +639,7 @@ impl BackdropTextures {
             factor *= reduction;
         }
         Ok(Self {
+            radius: radius.clamp(1, 64),
             levels,
             reduction_targets,
             filter_target: render_target(w, h)?,
@@ -563,6 +649,230 @@ impl BackdropTextures {
             valid: false,
         })
     }
+
+    /// Screen position and corner masks do not change texture allocation.
+    /// Their cached CONTENT must still be refreshed when geometry changes.
+    pub(crate) fn allocation_matches(&self, width: u32, height: u32, radius: u32) -> bool {
+        self.levels.first().is_some_and(|&(_, w, h)| w == width && h == height)
+            && self.radius == radius.clamp(1, 64)
+    }
+}
+
+/// Clip the sampled projection once, including the integer UV crop used by
+/// the renderer. Damage projection must use this SAME crop: projecting through
+/// the unclipped rectangle can miss edge pixels after fractional scaling.
+pub(crate) fn clipped_scaled_image(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Option<(PixelRect, PixelRect)> {
+    if width == 0 || height == 0 || source_width == 0 || source_height == 0 {
+        return None;
+    }
+    let right = x.checked_add(width as i32)?;
+    let bottom = y.checked_add(height as i32)?;
+    let left = x.max(0).min(target_width as i32);
+    let top = y.max(0).min(target_height as i32);
+    let right = right.max(0).min(target_width as i32);
+    let bottom = bottom.max(0).min(target_height as i32);
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    let source_left = ((i64::from(left - x) * i64::from(source_width)) / i64::from(width)) as u32;
+    let source_top = ((i64::from(top - y) * i64::from(source_height)) / i64::from(height)) as u32;
+    let source_right = ((i64::from(right - x) * i64::from(source_width)
+        + i64::from(width.saturating_sub(1)))
+        / i64::from(width)) as u32;
+    let source_bottom = ((i64::from(bottom - y) * i64::from(source_height)
+        + i64::from(height.saturating_sub(1)))
+        / i64::from(height)) as u32;
+    Some((
+        PixelRect::new(
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
+        .ok()?,
+        PixelRect::new(
+            source_left.min(source_width.saturating_sub(1)),
+            source_top.min(source_height.saturating_sub(1)),
+            source_right
+                .min(source_width)
+                .saturating_sub(source_left)
+                .max(1),
+            source_bottom
+                .min(source_height)
+                .saturating_sub(source_top)
+                .max(1),
+        )
+        .ok()?,
+    ))
+}
+
+/// Map native commit damage through the exact sampled destination/UV crop.
+/// Conservatively include the linear sampler's neighboring texel footprint
+/// before outward-rounded projection, including integer-size projections.
+/// Clipping only
+/// reduces coverage, while geometry/opacity changes have separate scene damage.
+pub(crate) fn projected_image_damage(
+    image_extent: (u32, u32),
+    geometry: (i32, i32, u32, u32),
+    clip: Option<(i32, i32, u32, u32)>,
+    output_extent: (u32, u32),
+    rects: &[(u32, u32, u32, u32)],
+) -> Vec<(i32, i32, u32, u32)> {
+    let Some((destination, source)) = clipped_scaled_image(
+        geometry.0,
+        geometry.1,
+        geometry.2,
+        geometry.3,
+        image_extent.0,
+        image_extent.1,
+        output_extent.0,
+        output_extent.1,
+    ) else {
+        return Vec::new();
+    };
+    let scissor = if let Some((x, y, width, height)) = clip {
+        let Some((clip, _)) = clipped_scaled_image(
+            x,
+            y,
+            width,
+            height,
+            width,
+            height,
+            output_extent.0,
+            output_extent.1,
+        ) else {
+            return Vec::new();
+        };
+        let Ok(Some(clip)) = intersect_pixel_rect(destination, clip) else {
+            return Vec::new();
+        };
+        clip
+    } else {
+        destination
+    };
+    let project_axis = |first: u32, last: u32, origin: u32, extent: u32, target: u32, size: u32| {
+        let first = first.saturating_sub(1).max(origin);
+        let last = last.saturating_add(1).min(origin + extent);
+        if last <= first {
+            return None;
+        }
+        let start = u64::from(first - origin) * u64::from(size) / u64::from(extent);
+        let end = (u64::from(last - origin) * u64::from(size)).div_ceil(u64::from(extent));
+        Some((target + start as u32, (end - start) as u32))
+    };
+    rects
+        .iter()
+        .filter_map(|&(x, y, width, height)| {
+            if width == 0 || height == 0 {
+                return None;
+            }
+            let (x, width) = project_axis(
+                x,
+                x.saturating_add(width),
+                source.x(),
+                source.width(),
+                destination.x(),
+                destination.width(),
+            )?;
+            let (y, height) = project_axis(
+                y,
+                y.saturating_add(height),
+                source.y(),
+                source.height(),
+                destination.y(),
+                destination.height(),
+            )?;
+            let rect = PixelRect::new(x, y, width, height).ok()?;
+            let rect = intersect_pixel_rect(rect, scissor).ok()??;
+            Some((
+                rect.x() as i32,
+                rect.y() as i32,
+                rect.width(),
+                rect.height(),
+            ))
+        })
+        .collect()
+}
+
+/// Filter output changes are logical damage; sampling halos are read/repair
+/// coverage only. An unchanged completed material needs neither expansion.
+pub(crate) struct MaterialDamage {
+    pub(crate) source: PixelRect,
+    pub(crate) output: PixelRect,
+    pub(crate) refresh: bool,
+}
+
+impl MaterialDamage {
+    pub(crate) fn logical_region(
+        requested: PixelRect,
+        materials: &[Self],
+    ) -> Result<PixelRect, ir::Error> {
+        materials
+            .iter()
+            .filter(|material| material.refresh)
+            .try_fold(requested, |area, material| {
+                union_pixel_rect(area, material.output)
+            })
+    }
+
+    pub(crate) fn repair_region(
+        aged: PixelRect,
+        materials: &[Self],
+    ) -> Result<PixelRect, ir::Error> {
+        materials
+            .iter()
+            .filter(|material| material.refresh)
+            .try_fold(aged, |area, material| {
+                union_pixel_rect(area, material.source)
+            })
+    }
+}
+
+/// Reconcile material placement without replacing its GPU allocation. Return
+/// true only when a previous allocation has no compatible owner/extent left.
+/// Each window may own several materials; never assign one allocation twice.
+pub(crate) fn retarget_backdrops<G: Copy + PartialEq>(
+    cached: &mut [(u32, G, BackdropTextures)],
+    requested: &[(u32, G)],
+    allocation: impl Fn(G) -> (u32, u32, u32),
+) -> bool {
+    let mut retained = vec![false; cached.len()];
+    for &(owner, geometry) in requested {
+        let exact = cached
+            .iter()
+            .enumerate()
+            .position(|(index, (id, old, _))| !retained[index] && *id == owner && *old == geometry);
+        let (width, height, radius) = allocation(geometry);
+        let index = exact.or_else(|| {
+            cached
+                .iter()
+                .enumerate()
+                .position(|(index, (id, _, textures))| {
+                    !retained[index]
+                        && *id == owner
+                        && textures.allocation_matches(width, height, radius)
+                })
+        });
+        if let Some(index) = index {
+            retained[index] = true;
+            let (_, old, textures) = &mut cached[index];
+            if *old != geometry {
+                *old = geometry;
+                textures.valid = false;
+            }
+        }
+    }
+    retained.iter().any(|used| !used)
 }
 
 pub(crate) struct BackdropPass<'a> {
@@ -801,10 +1111,10 @@ impl QuadRenderer {
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
         backdrops: &[BackdropPass<'_>],
-    ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+    ) -> Result<Vec<sgfx::Submission>, QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
         let texture = target.texture;
         let extent = (target.width, target.height);
-        self.submit_texture_with_uploads_tracked(
+        self.enqueue_texture_with_uploads_tracked(
             target, texture, extent, area, load, uploads, operations, backdrops,
         )
     }
@@ -823,6 +1133,31 @@ impl QuadRenderer {
         operations: &[Quad],
         backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+        use sgfx::backend::Completion;
+        let receipts = self.enqueue_texture_with_uploads_tracked(target, texture, extent, area, load, uploads, operations, backdrops)?;
+        let started = std::time::Instant::now();
+        for receipt in receipts {
+            match receipt.wait(None).map_err(|error| QuadSubmitError::Execution(FrameSubmissionError::Completion(error)))? {
+                CompletionStatus::Complete => {}
+                _ => return Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
+            }
+        }
+        if let Some(timings) = &mut target.frame_timings { timings.gpu_wait_ns += started.elapsed().as_nanos(); }
+        Ok(())
+    }
+
+    #[cfg(target_os = "scarlet")]
+    pub(crate) fn enqueue_texture_with_uploads_tracked(
+        &self,
+        target: &mut MappedTarget,
+        texture: TextureId,
+        extent: (u32, u32),
+        area: PixelRect,
+        load: LoadOp,
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+        backdrops: &[BackdropPass<'_>],
+    ) -> Result<Vec<sgfx::Submission>, QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
         let encode_start = target
             .frame_timings
             .as_ref()
@@ -865,19 +1200,7 @@ impl QuadRenderer {
         if let (Some(start), Some(timings)) = (encode_start, &mut target.frame_timings) {
             timings.encode_submit_ns += start.elapsed().as_nanos();
         }
-        let wait_start = target
-            .frame_timings
-            .as_ref()
-            .map(|_| std::time::Instant::now());
-        let result = executor.wait();
-        if let (Some(start), Some(timings)) = (wait_start, &mut target.frame_timings) {
-            timings.gpu_wait_ns += start.elapsed().as_nanos();
-        }
-        match result {
-            Ok(CompletionStatus::Complete) => Ok(()),
-            Ok(_) => Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
-            Err(error) => Err(QuadSubmitError::Execution(error)),
-        }
+        executor.into_submissions().map_err(QuadSubmitError::Execution)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1205,23 +1528,25 @@ impl QuadRenderer {
                 }
                 // Foreground-only and cursor updates reuse the completed material:
                 // one sample, with no repeated five-tap filter or corner restoration.
-                region(
-                    texture,
-                    width,
-                    height,
-                    backdrop.output,
-                    LoadOp::Load,
-                    &[Quad::Sampled(SampledRect {
-                        texture: backdrop.textures.finished,
-                        texture_width: sw,
-                        texture_height: sh,
-                        destination: backdrop.source,
-                        source: local,
-                        tint: white,
-                        ignore_source_alpha: true,
-                        clip: Some(backdrop.output),
-                    })],
-                )?;
+                if let Some(output) = intersect_pixel_rect(backdrop.output, area)? {
+                    region(
+                        texture,
+                        width,
+                        height,
+                        output,
+                        LoadOp::Load,
+                        &[Quad::Sampled(SampledRect {
+                            texture: backdrop.textures.finished,
+                            texture_width: sw,
+                            texture_height: sh,
+                            destination: backdrop.source,
+                            source: local,
+                            tint: white,
+                            ignore_source_alpha: true,
+                            clip: Some(output),
+                        })],
+                    )?;
+                }
             }
             previous_split = split;
             first = end;
@@ -1873,6 +2198,363 @@ mod tests {
     use sgfx::ir::{Extent2D, ResourceTable, TextureDesc, TextureFormat, TextureUsage};
 
     #[test]
+    fn async_snapshot_promotes_submitted_b_and_preserves_newer_c() {
+        let (state, released) = super::retire_shared_snapshot([Some(1), Some(3), Some(2)], [Some(1), Some(2), None]).unwrap();
+        assert_eq!(state, [Some(2), Some(3), None]);
+        assert_eq!(released, [Some(1), None]);
+        let (state, released) = super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), None, None]).unwrap();
+        assert_eq!(state, [Some(1), Some(3), None]);
+        assert_eq!(released, [None, None]);
+    }
+
+    #[test]
+    fn async_snapshot_rejects_missing_or_replaced_generation() {
+        assert!(super::retire_shared_snapshot([Some(4), Some(2), None], [Some(1), Some(2), None]).is_err());
+        assert!(super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), Some(2), None]).is_err());
+        let (state, released) = super::retire_shared_snapshot([Some(1), Some(2), Some(0)], [Some(1), Some(2), Some(0)]).unwrap();
+        assert_eq!(state, [Some(2), None, None]);
+        assert_eq!(released, [Some(1), Some(0)]);
+    }
+
+    #[test]
+    fn display_admission_is_bounded_even_before_worker_runs() {
+        let mut progress = super::PresentationProgress::default();
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel(super::PresentationProgress::CAPACITY);
+        for sequence in 1..=2 {
+            assert!(progress.ready(None));
+            progress.submit(sequence).unwrap();
+            sender.try_send(sequence).unwrap();
+        }
+        assert!(!progress.ready(None));
+        assert!(progress.submit(3).is_err());
+        assert_eq!(receiver.try_recv().unwrap(), 1);
+        assert_eq!(receiver.try_recv().unwrap(), 2);
+        // Dequeuing a flip or admitting GPU work is not display retirement.
+        assert!(!progress.ready(None));
+        progress.retire(1).unwrap();
+        assert!(progress.ready(None));
+    }
+
+    #[test]
+    fn displayed_image_requires_a_strictly_later_completed_flip() {
+        let mut progress = super::PresentationProgress::default();
+        progress.submit(1).unwrap();
+        progress.submit(2).unwrap();
+        progress.retire(1).unwrap();
+        assert!(!progress.ready(Some(1)));
+        progress.retire(2).unwrap();
+        assert!(progress.ready(Some(1)));
+        assert!(!progress.ready(Some(2)));
+        progress.submit(3).unwrap();
+        assert!(!progress.ready(Some(2)));
+        progress.retire(3).unwrap();
+        assert!(progress.ready(Some(2)));
+    }
+
+    #[test]
+    fn invalid_display_completions_never_return_capacity_or_image_ownership() {
+        let mut progress = super::PresentationProgress::default();
+        progress.submit(1).unwrap();
+        progress.submit(2).unwrap();
+        for sequence in [0, 2, 3] {
+            assert!(progress.retire(sequence).is_err());
+            assert!(!progress.ready(None));
+            assert!(!progress.ready(Some(1)));
+        }
+        progress.retire(1).unwrap();
+        assert!(progress.retire(1).is_err());
+        assert!(!progress.ready(Some(1)));
+        assert!(progress.submit(4).is_err());
+        progress.submit(3).unwrap();
+        assert!(!progress.ready(None));
+    }
+
+    #[test]
+    fn moving_multiple_materials_reuses_allocations_but_invalidates_captured_content() {
+        use super::*;
+        let resources = ResourceTable::new();
+        let mut cached = vec![
+            (
+                7,
+                (10, 20, 64, 32, 16),
+                BackdropTextures::define(&resources, 64, 32, 16).unwrap(),
+            ),
+            (
+                7,
+                (90, 20, 64, 32, 16),
+                BackdropTextures::define(&resources, 64, 32, 16).unwrap(),
+            ),
+        ];
+        let allocation = |geometry: (i32, i32, u32, u32, u32)| (geometry.2, geometry.3, geometry.4);
+        let capture_ids: Vec<_> = cached
+            .iter()
+            .map(|(_, _, textures)| textures.levels[0].0)
+            .collect();
+        assert_ne!(capture_ids[0], capture_ids[1]);
+        for step in 1..=1024 {
+            for (_, _, textures) in &mut cached {
+                textures.valid = true;
+            }
+            let requested = [
+                (7, (10 + step, 20, 64, 32, 16)),
+                (7, (90 + step, 20, 64, 32, 16)),
+            ];
+            assert!(!retarget_backdrops(&mut cached, &requested, allocation));
+            for (index, (_, geometry, textures)) in cached.iter().enumerate() {
+                assert_eq!(*geometry, requested[index].1);
+                assert_eq!(textures.levels[0].0, capture_ids[index]);
+                assert!(!textures.valid);
+            }
+        }
+        for (_, _, textures) in &mut cached {
+            textures.valid = true;
+        }
+        let unchanged: Vec<_> = cached
+            .iter()
+            .map(|(owner, geometry, _)| (*owner, *geometry))
+            .collect();
+        assert!(!retarget_backdrops(&mut cached, &unchanged, allocation));
+        assert!(cached.iter().all(|(_, _, textures)| textures.valid));
+        let mut resized = unchanged.clone();
+        resized[0].1.2 += 1;
+        assert!(retarget_backdrops(&mut cached, &resized, allocation));
+        assert!(retarget_backdrops(&mut cached, &[], allocation));
+    }
+
+    #[test]
+    fn retired_import_budget_bounds_varied_window_lifetimes() {
+        use super::*;
+        let mut imports = Vec::new();
+        let resources = ResourceTable::new();
+        for extent in 1..=MAX_RETIRED_IMPORT_SLOTS + 1 {
+            let texture = resources
+                .define_texture(
+                    TextureDesc::new(
+                        TextureFormat::Bgra8Unorm,
+                        Extent2D::new(extent as u32, 1).unwrap(),
+                        TextureUsage::SAMPLED | TextureUsage::COPY_SRC,
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .id();
+            imports.push(ReusableImport {
+                texture,
+                width: extent as u32,
+                height: 1,
+            });
+            assert_eq!(
+                retired_imports_need_rebuild(&imports),
+                extent > MAX_RETIRED_IMPORT_SLOTS
+            );
+        }
+        assert!(retired_imports_need_rebuild(&imports));
+        assert!(take_reusable_import(&mut imports, 1, 1).is_some());
+        assert!(!retired_imports_need_rebuild(&imports));
+    }
+
+    #[test]
+    fn native_commit_keeps_a_slider_strip_small_in_each_projection() {
+        let damage = [(20, 500, 1000, 25)];
+        let pane = super::projected_image_damage(
+            (1076, 1360),
+            (1084, 80, 1076, 1360),
+            None,
+            (2160, 1440),
+            &damage,
+        );
+        assert_eq!(pane, [(1103, 579, 1002, 27)]);
+        // A second projection has its own geometry/clip, not the primary
+        // rectangle. Equal geometry/extent still includes only a texel halo.
+        let instance = super::projected_image_damage(
+            (1076, 1360),
+            (0, 80, 1076, 1360),
+            Some((0, 580, 1076, 25)),
+            (2160, 1440),
+            &damage,
+        );
+        assert_eq!(instance, [(19, 580, 1002, 25)]);
+        assert!(
+            super::projected_image_damage(
+                (1076, 1360),
+                (1084, 80, 1076, 1360),
+                Some((0, 0, 5, 5)),
+                (2160, 1440),
+                &damage,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::projected_image_damage(
+                (1076, 1360),
+                (1084, 80, 1076, 1360),
+                None,
+                (2160, 1440),
+                &[(0, 0, 1076, 1360)],
+            ),
+            [(1084, 80, 1076, 1360)]
+        );
+    }
+
+    #[test]
+    fn projected_native_damage_covers_every_changed_bilinear_sample() {
+        use super::*;
+        let output = (19, 15);
+        for image in [(1, 1), (3, 2), (7, 5)] {
+            for size in [image, (2, 3), (15, 11), (1, 1)] {
+                for origin in [(-3, -2), (0, 0), (2, 3), (17, 13)] {
+                    let geometry = (origin.0, origin.1, size.0, size.1);
+                    let Some((destination, source)) = clipped_scaled_image(
+                        origin.0, origin.1, size.0, size.1, image.0, image.1, output.0, output.1,
+                    ) else {
+                        continue;
+                    };
+                    for clip in [
+                        None,
+                        Some((3, 2, 5, 4)),
+                        Some((-2, -3, 6, 7)),
+                        Some((18, 14, 1, 1)),
+                    ] {
+                        for cy in 0..image.1 {
+                            for cx in 0..image.0 {
+                                let projected = projected_image_damage(
+                                    image,
+                                    geometry,
+                                    clip,
+                                    output,
+                                    &[(cx, cy, 1, 1)],
+                                );
+                                for y in 0..output.1 {
+                                    for x in 0..output.0 {
+                                        let inside = x >= destination.x()
+                                            && x < destination.x() + destination.width()
+                                            && y >= destination.y()
+                                            && y < destination.y() + destination.height()
+                                            && clip.is_none_or(|(a, b, w, h)| {
+                                                i64::from(x) >= i64::from(a)
+                                                    && i64::from(x) < i64::from(a) + i64::from(w)
+                                                    && i64::from(y) >= i64::from(b)
+                                                    && i64::from(y) < i64::from(b) + i64::from(h)
+                                            });
+                                        let covered = projected.iter().any(|&(a, b, w, h)| {
+                                            x >= a as u32
+                                                && x < a as u32 + w
+                                                && y >= b as u32
+                                                && y < b as u32 + h
+                                        });
+                                        if !inside {
+                                            assert!(!covered);
+                                            continue;
+                                        }
+                                        // Independent pixel oracle: change one source texel
+                                        // from0 to1, then evaluate bilinear/clamp sampling.
+                                        let sx = f64::from(source.x())
+                                            + (f64::from(x - destination.x()) + 0.5)
+                                                * f64::from(source.width())
+                                                / f64::from(destination.width())
+                                            - 0.5;
+                                        let sy = f64::from(source.y())
+                                            + (f64::from(y - destination.y()) + 0.5)
+                                                * f64::from(source.height())
+                                                / f64::from(destination.height())
+                                            - 0.5;
+                                        let mut changed = 0.0;
+                                        for (ix, wx) in [
+                                            (sx.floor(), 1.0 - sx.fract().rem_euclid(1.0)),
+                                            (sx.floor() + 1.0, sx.fract().rem_euclid(1.0)),
+                                        ] {
+                                            for (iy, wy) in [
+                                                (sy.floor(), 1.0 - sy.fract().rem_euclid(1.0)),
+                                                (sy.floor() + 1.0, sy.fract().rem_euclid(1.0)),
+                                            ] {
+                                                if ix.clamp(0.0, f64::from(image.0 - 1)) as u32
+                                                    == cx
+                                                    && iy.clamp(0.0, f64::from(image.1 - 1)) as u32
+                                                        == cy
+                                                {
+                                                    changed += wx * wy;
+                                                }
+                                            }
+                                        }
+                                        if changed > 1e-10 {
+                                            assert!(
+                                                covered,
+                                                "missed sample ({x},{y}) image={image:?} geometry={geometry:?} clip={clip:?} texel=({cx},{cy})"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn material_output_damage_and_read_halo_have_separate_age_coverage() {
+        use super::*;
+        let source = PixelRect::new(10, 10, 80, 80).unwrap();
+        let output = PixelRect::new(30, 30, 40, 40).unwrap();
+        let mut materials = [MaterialDamage {
+            source,
+            output,
+            refresh: false,
+        }];
+        let foreground = PixelRect::new(40, 40, 2, 2).unwrap();
+        assert_eq!(
+            MaterialDamage::logical_region(foreground, &materials).unwrap(),
+            foreground
+        );
+        assert_eq!(
+            MaterialDamage::repair_region(foreground, &materials).unwrap(),
+            foreground
+        );
+        // A changed background just OUTSIDE the material output affects the
+        // filter. Its complete output changes, and capture requires all halo
+        // pixels; only the former belongs in the next image's damage history.
+        materials[0].refresh = true;
+        let background = PixelRect::new(20, 40, 2, 2).unwrap();
+        let logical = MaterialDamage::logical_region(background, &materials).unwrap();
+        let repair = MaterialDamage::repair_region(logical, &materials).unwrap();
+        assert_eq!(logical, PixelRect::new(20, 30, 50, 40).unwrap());
+        assert_eq!(repair, source);
+        materials[0].refresh = false;
+        let next_foreground = PixelRect::new(75, 40, 2, 2).unwrap();
+        let aged = union_pixel_rect(logical, next_foreground).unwrap();
+        assert_eq!(aged, PixelRect::new(20, 30, 57, 40).unwrap());
+        let next_repair = MaterialDamage::repair_region(aged, &materials).unwrap();
+        assert_eq!(next_repair, aged);
+        let uninitialized = PixelRect::new(0, 0, 100, 100).unwrap();
+        assert_eq!(
+            MaterialDamage::repair_region(uninitialized, &materials).unwrap(),
+            uninitialized
+        );
+        assert_ne!(
+            logical, source,
+            "previous capture halo must not poison image-age damage"
+        );
+        // Check each pixel: all changed output is repaired, but halo-only
+        // pixels do not become logical damage on the following buffer.
+        for y in 0..100 {
+            for x in 0..100 {
+                let inside = |r: PixelRect| {
+                    x >= r.x() && x < r.x() + r.width() && y >= r.y() && y < r.y() + r.height()
+                };
+                if inside(background) || inside(output) {
+                    assert!(inside(logical));
+                }
+                if inside(source) {
+                    assert!(inside(repair));
+                }
+                assert_eq!(inside(next_repair), (20..77).contains(&x) && (30..70).contains(&y));
+            }
+        }
+    }
+
+    #[test]
     fn backdrop_graph_captures_overlapping_sources_before_filtering_in_one_stream() {
         use super::*;
         struct Inspect {
@@ -1882,6 +2564,7 @@ mod tests {
             captures_before_first_filter: Option<usize>,
             draws: usize,
             scene: TextureId,
+            scene_areas: Vec<PixelRect>,
         }
         impl CommandExecutor for Inspect {
             type Error = &'static str;
@@ -1901,6 +2584,9 @@ mod tests {
                             self.copies.push((source.id(), destination.id()));
                         }
                         ir::Command::BeginRenderPass(pass) => {
+                            if pass.color_attachments().next().unwrap().target().id() == self.scene {
+                                self.scene_areas.push(pass.area());
+                            }
                             if pass.color_attachments().next().unwrap().target().id() != self.scene
                             {
                                 self.captures_before_first_filter.get_or_insert(
@@ -1952,6 +2638,7 @@ mod tests {
             captures_before_first_filter: None,
             draws: 0,
             scene,
+            scene_areas: Vec::new(),
         };
         renderer
             .encode_scene_with_uploads(
@@ -2011,6 +2698,50 @@ mod tests {
             inspect.draws, 2,
             "one completed-material sample per backdrop"
         );
+        // A small foreground/cursor repair intersects BOTH cached materials.
+        // Restoring their complete output would erase foreground outside the
+        // repaired area, where its clipped redraw cannot restore it.
+        let repair = PixelRect::new(40, 40, 16, 16).unwrap();
+        inspect.scene_areas.clear();
+        inspect.copies.clear();
+        renderer
+            .encode_scene_with_uploads(
+                &mut inspect,
+                resources.clone(),
+                scene,
+                128,
+                128,
+                repair,
+                LoadOp::Load,
+                &[],
+                &[],
+                &passes,
+            )
+            .unwrap();
+        assert!(
+            inspect.copies.is_empty(),
+            "valid caches never recapture their source halos"
+        );
+        assert_eq!(
+            inspect.scene_areas,
+            [
+                PixelRect::new(40, 40, 8, 8).unwrap(),
+                PixelRect::new(48, 48, 8, 8).unwrap(),
+            ]
+        );
+        for y in 0..128 {
+            for x in 0..128 {
+                let inside = |r: PixelRect| {
+                    x >= r.x() && x < r.x() + r.width() && y >= r.y() && y < r.y() + r.height()
+                };
+                let restored = inspect.scene_areas.iter().any(|&r| inside(r));
+                assert_eq!(
+                    restored,
+                    inside(repair) && (inside(output_a) || inside(output_b)),
+                    "cached material coverage at ({x},{y})"
+                );
+            }
+        }
         // A changed source refreshes that material while the other cache remains reusable.
         passes[0].refresh = true;
         inspect.copies.clear();
