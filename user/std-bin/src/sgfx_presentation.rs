@@ -9,22 +9,37 @@ use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
 use std::io::{BufWriter, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use super::PresentationProgress;
 
-#[cfg(target_os = "scarlet")]
-struct Present {
+/// A target keeps this shared hook so a presentation worker created before
+/// completion preparation also receives the compositor's eventual wake callback.
+#[derive(Clone, Default)]
+pub(super) struct CompletionWake(Arc<Mutex<Option<fn()>>>);
+impl CompletionWake {
+    pub(super) fn set(&self, wake: fn()) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
+    }
+    fn signal(&self) {
+        let wake = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+}
+
+struct Present<R> {
     sequence: u64,
     slot: usize,
-    region: Option<DisplayPresentRegion>,
+    region: Option<R>,
     queued_at: Option<Instant>,
 }
 
-#[cfg(target_os = "scarlet")]
-pub(super) struct PresentationQueue {
-    sender: Option<SyncSender<Present>>,
+pub(super) struct PresentationQueue<R> {
+    sender: Option<SyncSender<Present<R>>>,
     retired: Receiver<Result<u64, &'static str>>,
     worker: Option<JoinHandle<()>>,
     progress: PresentationProgress,
@@ -32,20 +47,39 @@ pub(super) struct PresentationQueue {
 }
 
 #[cfg(target_os = "scarlet")]
-impl PresentationQueue {
-    pub(super) fn new(display: &DisplaySurface, images: Vec<Handle>) -> Result<Self, &'static str> {
+impl PresentationQueue<DisplayPresentRegion> {
+    pub(super) fn new(
+        display: &DisplaySurface,
+        images: Vec<Handle>,
+        wake: CompletionWake,
+    ) -> Result<Self, &'static str> {
         let presenter = display
             .presenter()
             .map_err(|_| "Failed to retain display presenter")?;
+        let profiling = std::env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1")
+            || std::env::args().any(|arg| arg == "--profile-frames");
+        Self::with_presenter(wake, profiling, move |slot, region| {
+            let image = images.get(slot).ok_or("Invalid presentation slot")?;
+            presenter
+                .present_completed_swapchain_image(image, region)
+                .map_err(|_| "Display page flip failed")
+        })
+    }
+}
+
+impl<R: Send + 'static> PresentationQueue<R> {
+    fn with_presenter(
+        wake: CompletionWake,
+        profiling: bool,
+        mut present: impl FnMut(usize, Option<R>) -> Result<(), &'static str> + Send + 'static,
+    ) -> Result<Self, &'static str> {
         // One armed flip plus one queued image. The third swapchain slot may
         // be rendered only after a later completed flip released its old use.
         // The two-entry channel also holds both admitted frames before the
         // worker first runs. Progress, rather than thread scheduling, bounds
         // the total armed + queued count to two.
-        let (sender, jobs) = mpsc::sync_channel::<Present>(PresentationProgress::CAPACITY);
+        let (sender, jobs) = mpsc::sync_channel::<Present<R>>(PresentationProgress::CAPACITY);
         let (responses, retired) = mpsc::sync_channel(3);
-        let profiling = std::env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1")
-            || std::env::args().any(|arg| arg == "--profile-frames");
         let worker = thread::Builder::new()
             .name("sws-present".into())
             .spawn(move || {
@@ -68,18 +102,15 @@ impl PresentationQueue {
                         break;
                     };
                     let started = job.queued_at.map(|_| Instant::now());
-                    let result = images
-                        .get(job.slot)
-                        .ok_or("Invalid presentation slot")
-                        .and_then(|image| {
-                            let result =
-                                presenter.present_completed_swapchain_image(image, job.region);
-                            result.map_err(|_| "Display page flip failed")
-                        })
-                        .map(|()| job.sequence);
+                    let result = present(job.slot, job.region).map(|()| job.sequence);
                     let failed = result.is_err();
                     let finished = started.map(|_| Instant::now());
+                    // Publish the completion/failure before waking. The owner
+                    // must poll exact progress; a wake itself never retires an image.
                     let reply = responses.send(result);
+                    if reply.is_ok() {
+                        wake.signal();
+                    }
                     if let (Some(file), Some(queued), Some(start), Some(end)) =
                         (&mut profile, job.queued_at, started, finished)
                     {
@@ -115,7 +146,7 @@ impl PresentationQueue {
         &mut self,
         sequence: u64,
         slot: usize,
-        region: Option<DisplayPresentRegion>,
+        region: Option<R>,
     ) -> Result<(), &'static str> {
         self.poll()?;
         let sender = self.sender.as_ref().ok_or("Display presentation stopped")?;
@@ -150,8 +181,7 @@ impl PresentationQueue {
     }
 }
 
-#[cfg(target_os = "scarlet")]
-impl Drop for PresentationQueue {
+impl<R> Drop for PresentationQueue<R> {
     fn drop(&mut self) {
         // Drain already accepted flips before releasing session images or
         // installing a replacement compositor. At most two replies remain,
@@ -290,6 +320,76 @@ impl<S: sgfx::backend::Completion + Send + 'static> Drop for GpuCompletionQueue<
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod display_completion_tests {
+    use super::*;
+    use std::time::Duration;
+
+    static WAKE: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+    fn wake() {
+        if let Some(sender) = WAKE.lock().unwrap().as_ref() {
+            let _ = sender.send(());
+        }
+    }
+
+    #[test]
+    fn completed_flip_wakes_after_reply_without_releasing_its_own_front() {
+        let (wakes, awake) = mpsc::channel();
+        *WAKE.lock().unwrap() = Some(wakes);
+        let hook = CompletionWake::default();
+        let (entered, worker_entered) = mpsc::channel();
+        let (finish, worker_finish) = mpsc::channel::<bool>();
+        let mut queue =
+            PresentationQueue::<()>::with_presenter(hook.clone(), false, move |slot, _| {
+                entered.send(slot).unwrap();
+                if worker_finish.recv().unwrap() {
+                    Ok(())
+                } else {
+                    Err("test display failure")
+                }
+            })
+            .unwrap();
+        // Prepare may run after worker construction. Its shared hook must reach
+        // that already-created worker, without recreating the display queue.
+        hook.set(wake);
+        queue.present(1, 0, None).unwrap();
+        worker_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        queue.present(2, 1, None).unwrap();
+        assert!(
+            !queue.ready(None).unwrap(),
+            "armed plus queued capacity stays two"
+        );
+        assert!(
+            queue.present(3, 2, None).is_err(),
+            "a full queue cannot admit a third flip"
+        );
+        assert!(matches!(awake.try_recv(), Err(TryRecvError::Empty)));
+        finish.send(true).unwrap();
+        awake.recv_timeout(Duration::from_secs(2)).unwrap();
+        // No new input, frame grant, polling loop or timer was required. Seeing
+        // this wake must already make the completion available to ready().
+        assert!(queue.ready(None).unwrap());
+        assert!(
+            !queue.ready(Some(1)).unwrap(),
+            "N's own flip does not retire image N"
+        );
+        worker_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        finish.send(true).unwrap();
+        awake.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            queue.ready(Some(1)).unwrap(),
+            "only N+1 completion frees image N"
+        );
+        queue.present(3, 2, None).unwrap();
+        worker_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        finish.send(false).unwrap();
+        awake.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(queue.ready(None), Err("test display failure"));
+        drop(queue);
+        *WAKE.lock().unwrap() = None;
     }
 }
 

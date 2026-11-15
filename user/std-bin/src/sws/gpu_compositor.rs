@@ -33,6 +33,8 @@ type DamageRect = (u32, u32, u32, u32);
 fn open_composition_target(width: u32, height: u32) -> Result<MappedTarget, &'static str> {
     let mut target = MappedTarget::open_swapchain(width, height)
         .map_err(|_| "Failed to create mapped GPU swapchain")?;
+    // Synchronous GPU executors still hand flips to the display worker.
+    target.prepare_display_completion(super::ipc::wake_compositor);
     if target.supports_tracked_submission() {
         target.prepare_gpu_completion(super::ipc::wake_compositor)?;
     }
@@ -703,6 +705,11 @@ impl GpuCompositor {
             handle,
         });
         Ok(())
+    }
+
+    /// Poll proven display progress without constructing or admitting GPU work.
+    pub(super) fn render_target_ready(&mut self) -> Result<bool, &'static str> {
+        self.target.try_acquire_render_target()
     }
 
     /// Atomically publish a registered buffer and bounded damage list.

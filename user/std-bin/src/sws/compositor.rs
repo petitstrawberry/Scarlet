@@ -4557,7 +4557,7 @@ impl Compositor {
                 // ordinary scanout backpressure into a full-screen repaint
                 // and invalidate otherwise reusable backdrop materials.
                 self.gpu_admission_retry
-                    .defer(monotonic_time_ns(), FRAME_BATCH_INTERVAL_NS);
+                    .defer_display();
                 Ok(GpuPresentResult::Retry)
             }
             Err(super::gpu_compositor::GpuCompositionError::Busy) => {
@@ -7896,6 +7896,20 @@ impl Compositor {
         // Grant due encode credits before the compositor's own GPU wait.
         self.grant_pending_frame_callbacks();
         super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
+        if self.gpu_admission_retry.waiting_for_display() {
+            // Completion wakes are hints. Poll the current target and its exact
+            // N+1 image lifetime before lifting ONLY the display admission gate.
+            let ready = match self.gpu_compositor.as_mut() {
+                Some(gpu) => gpu.render_target_ready(),
+                None => Ok(true),
+            };
+            match ready {
+                Ok(true) => self.gpu_admission_retry.display_ready(),
+                Ok(false) => {}
+                Err(_) => self.disable_gpu_after_runtime_failure(
+                    "SWS_BACKEND=sgfx display completion failed")?,
+            }
+        }
         if self.gpu_frame_pending() {
             // Drain an already-coalesced wake before checking receipts again.
             // A completion racing the check publishes a fresh wake byte.
@@ -7912,10 +7926,8 @@ impl Compositor {
         }
         if self.gpu_compositor.is_some()
             && self.has_pending_redraw()
-            && self
-                .gpu_admission_retry
-                .remaining_ns(monotonic_time_ns())
-                .is_some()
+            && (self.gpu_admission_retry.waiting_for_display()
+                || self.gpu_admission_retry.remaining_ns(monotonic_time_ns()).is_some())
         {
             // Input/IPC wakes still reach process_pending_events above. They
             // must not bypass admission backoff and encode the same frame

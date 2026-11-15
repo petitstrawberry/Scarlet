@@ -27,7 +27,7 @@ use sgfx::{Context, Instance, MappedTargetSession};
 #[path = "sgfx_presentation.rs"]
 mod presentation;
 #[cfg(target_os = "scarlet")]
-use presentation::{GpuCompletionQueue, PresentationQueue};
+use presentation::{CompletionWake, GpuCompletionQueue, PresentationQueue};
 
 const QUAD_VERTEX_STRIDE: u32 = 24;
 const QUAD_VERTEX_COUNT: usize = 6;
@@ -208,7 +208,8 @@ pub(crate) struct MappedTarget {
     slots: Vec<TargetSlot>,
     current_slot: usize,
     present_sequence: u64,
-    presentation: Option<PresentationQueue>,
+    presentation: Option<PresentationQueue<DisplayPresentRegion>>,
+    display_completion_wake: CompletionWake,
     gpu_completion: Option<GpuCompletionQueue<sgfx::Submission>>,
     pending_damage: Option<PixelRect>,
     session: MappedTargetSession,
@@ -232,7 +233,12 @@ pub(crate) struct FrameTimings {
 
 #[cfg(target_os = "scarlet")]
 impl MappedTarget {
+    pub(crate) fn prepare_display_completion(&self, wake: fn()) {
+        self.display_completion_wake.set(wake);
+    }
+
     pub(crate) fn prepare_gpu_completion(&mut self, wake: fn()) -> Result<(), &'static str> {
+        self.prepare_display_completion(wake);
         if self.gpu_completion.is_none() { self.gpu_completion = Some(GpuCompletionQueue::new(wake)?); }
         Ok(())
     }
@@ -359,6 +365,7 @@ impl MappedTarget {
             current_slot: 0,
             present_sequence: 0,
             presentation: None,
+            display_completion_wake: CompletionWake::default(),
             gpu_completion: None,
             pending_damage: None,
             session,
@@ -487,7 +494,7 @@ impl MappedTarget {
                             .map_err(|_| "Failed to retain SGFX swapchain image")?,
                     );
                 }
-                self.presentation = Some(PresentationQueue::new(display, images)?);
+                self.presentation = Some(PresentationQueue::new(display, images, self.display_completion_wake.clone())?);
                 println!(
                     "sgfx: asynchronous display presentation with {} images",
                     self.slots.len()
