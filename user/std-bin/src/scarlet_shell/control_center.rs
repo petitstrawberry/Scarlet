@@ -195,6 +195,37 @@ impl Default for ControlCenterSnapshot {
     }
 }
 
+/// One requested opening and its completed provider sample. A cancelled
+/// opening cannot publish an in-flight sample into a later opening.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ControlCenterSession {
+    pub open: bool,
+    pub snapshot: Option<ControlCenterSnapshot>,
+    generation: u64,
+}
+
+impl ControlCenterSession {
+    pub fn request_open(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.snapshot = None;
+        self.open = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn publish(&mut self, generation: u64, snapshot: ControlCenterSnapshot) {
+        if self.open && self.generation == generation {
+            self.snapshot = Some(snapshot);
+        }
+    }
+}
+
 /// Settings destination requested by Control Center.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlCenterSettingsLink {
@@ -271,8 +302,6 @@ impl ControlCenterMetrics {
         };
         let output_rows = if output_count > 1 {
             output_count as u32
-        } else if output_count == 0 {
-            1
         } else {
             0
         };
@@ -364,7 +393,9 @@ pub fn build_control_center_view(
     let control_slider_width = control_row_width - control_label_width - metrics.gap as f32;
 
     let mute_action = action.clone();
-    let mute = Button::new(if snapshot.audio.muted == Some(true) {
+    let mute = Button::new(if snapshot.audio.volume_percent.is_none() {
+        "Unavailable"
+    } else if snapshot.audio.muted == Some(true) {
         "Muted"
     } else {
         "Volume"
@@ -399,14 +430,7 @@ pub fn build_control_center_view(
         .alignment(Alignment::Center)
         .frame(control_row_width, target_height),
     )];
-    if snapshot.audio.outputs.is_empty() {
-        audio_rows.push(boxed(
-            Text::new("Audio output unavailable")
-                .font_size(detail_size)
-                .color(palette.text_secondary())
-                .frame(control_row_width, target_height),
-        ));
-    } else if snapshot.audio.outputs.len() > 1 {
+    if snapshot.audio.outputs.len() > 1 {
         for output in &snapshot.audio.outputs {
             let selected = snapshot.audio.current_output_id.as_ref() == Some(&output.id);
             let mut label = output.name.clone();
@@ -1113,12 +1137,37 @@ mod tests {
     }
 
     #[test]
-    fn one_audio_output_does_not_consume_a_selector_row() {
-        let none = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 0);
-        let one = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 1);
-        let two = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 2);
-        assert_eq!(none.height - one.height, one.target_height + one.gap);
-        assert_eq!(two.height - one.height, 2 * (one.target_height + one.gap));
+    fn unavailable_audio_does_not_reserve_a_temporary_selector_row() {
+        for presentation in [
+            ControlCenterPresentation::LaptopPopover,
+            ControlCenterPresentation::TabletSheet,
+        ] {
+            let none = ControlCenterMetrics::resolve(presentation, 0);
+            let one = ControlCenterMetrics::resolve(presentation, 1);
+            let two = ControlCenterMetrics::resolve(presentation, 2);
+            assert_eq!(none.height, one.height);
+            assert_eq!(two.height - one.height, 2 * (one.target_height + one.gap));
+        }
+    }
+
+    #[test]
+    fn opening_requires_its_own_completed_sample_including_unavailable_results() {
+        let mut session = ControlCenterSession::default();
+        session.request_open();
+        let cancelled = session.generation();
+        assert!(session.open && session.snapshot.is_none());
+        session.close();
+        session.publish(cancelled, ControlCenterSnapshot::unavailable());
+        assert!(session.snapshot.is_none(), "a closed request cannot publish");
+
+        session.request_open();
+        session.publish(cancelled, ControlCenterSnapshot::unavailable());
+        assert!(session.snapshot.is_none(), "old IPC cannot complete a reopen");
+        session.publish(session.generation(), ControlCenterSnapshot::unavailable());
+        assert!(session.snapshot.is_some(), "unavailable is a completed sample");
+        session.close();
+        session.request_open();
+        assert!(session.snapshot.is_none(), "reopen samples fresh topology");
     }
 
     #[test]
