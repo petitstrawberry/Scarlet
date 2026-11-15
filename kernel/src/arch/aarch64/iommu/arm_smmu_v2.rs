@@ -396,6 +396,7 @@ impl SmmuHardware {
                 println!("[arm-smmu-v2] context lease stage=quarantined CB {}: reuse {:?}", index, reason);
                 continue;
             }
+            #[cfg(debug_assertions)]
             println!(
                 "[arm-smmu-v2] context lease stage=reserved CB {}: cbar={:#010x} cba2r={:#010x} sctlr={:#010x}",
                 index, snapshot.cbar, snapshot.cba2r, snapshot.sctlr,
@@ -453,6 +454,7 @@ impl SmmuHardware {
         self.context_write(context, CONTEXT_CONTROL, lease.snapshot.sctlr);
         arch::io_wmb();
         self.allocated_contexts.lock()[context] = false;
+        #[cfg(debug_assertions)]
         println!(
             "[arm-smmu-v2] context lease stage=released CB {}: firmware snapshot restored",
             context,
@@ -764,6 +766,7 @@ impl SmmuHardware {
         arch::io_wmb();
         claimed_streams.insert(stream_id, group);
 
+        #[cfg(debug_assertions)]
         println!(
             "[arm-smmu-v2] SID {:#x} routed by SMR {}: smr={:#010x} s2cr={:#010x}",
             stream_id,
@@ -1505,6 +1508,7 @@ impl IommuController for ArmSmmuV2 {
 
     fn alloc_domain(&self, config: IommuDomainConfig) -> Result<Arc<dyn IommuDomain>, IommuError> {
         if config.domain_type == IommuDomainType::Dma {
+            #[cfg(debug_assertions)]
             println!(
                 "[arm-smmu-v2] domain alloc begin type=DMA iova={:#x} size={:#x} table-limit={:#x} output-limit={:#x}",
                 config.iova_base,
@@ -1553,6 +1557,7 @@ impl IommuController for ArmSmmuV2 {
                 }
                 return Err(error);
             }
+            #[cfg(debug_assertions)]
             println!(
                 "[arm-smmu-v2] domain alloc complete type=DMA CB {} root={:#x} iova={}b",
                 context.index, tables.root, iova_address_bits,
