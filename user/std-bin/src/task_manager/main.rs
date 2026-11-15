@@ -1381,6 +1381,8 @@ impl View for UsageGraph {
                 revision: 0,
                 size: Size::ZERO,
                 prepared_size: Size::ZERO,
+                #[cfg(test)]
+                layout_calls: 0,
                 dirty: true,
                 fallback: None,
                 canvas,
@@ -1400,6 +1402,8 @@ struct UsageGraphRenderObject {
     revision: u64,
     size: Size,
     prepared_size: Size,
+    #[cfg(test)]
+    layout_calls: usize,
     dirty: bool,
     fallback: Option<Arc<DisplayList>>,
     // An inert paint delegate: all layout and invalidation belongs to this
@@ -1409,6 +1413,10 @@ struct UsageGraphRenderObject {
 
 impl ElementRenderObject for UsageGraphRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        #[cfg(test)]
+        {
+            self.layout_calls += 1;
+        }
         // Stacks measure children more than once. Only remember the final
         // viewport here; prepare its mesh after the entire layout pass.
         let finite = |axis: f32| if axis.is_finite() { axis.max(0.0) } else { 0.0 };
@@ -1421,6 +1429,10 @@ impl ElementRenderObject for UsageGraphRenderObject {
     }
 
     fn flush_layout_notifications(&mut self) {
+        self.prepare_paint();
+    }
+
+    fn prepare_paint(&mut self) {
         let size = self.size;
         if (self.dirty || size != self.prepared_size) && size.width >= 1.0 && size.height >= 1.0 {
             self.revision = self.revision.wrapping_add(1);
@@ -1509,7 +1521,8 @@ impl ElementRenderObject for UsageGraphRenderObject {
     }
 
     fn update_needs_layout(&self) -> bool {
-        true
+        // History and colors affect paint, not the size offered by the parent.
+        false
     }
 
     fn update(&mut self, view: &dyn View) -> UpdateResult {
@@ -1916,6 +1929,49 @@ mod tests {
     }
 
     #[test]
+    fn graph_sample_updates_prepare_paint_without_layout_on_both_backends() {
+        use scarlet_ui::element::ElementTree;
+        use scarlet_ui::pipeline::PipelineOwner;
+
+        for legacy in [false, true] {
+            let mut tree = ElementTree::new();
+            let mut owner = PipelineOwner::with_pipeline_id(tree.pipeline_id());
+            tree.set_root(
+                UsageGraph::new(vec![0, 500, 1_000], Color::BLACK, Color::WHITE).create_element(),
+            );
+            let size = Size::new(600., 170.);
+            tree.layout(LayoutConstraints::tight(size.width, size.height));
+            let id = tree.root().unwrap().id();
+            owner.mark_needs_paint(id);
+            owner.flush_with_legacy_paint(&mut tree, size, legacy);
+            let before = graph_render(tree.root().unwrap());
+            let layout_calls = before.layout_calls;
+            let handle = before.handle;
+            let mesh_handle = before.mesh_handle;
+            let mut revision = before.revision;
+            let mut fallback = Arc::clone(before.fallback.as_ref().unwrap());
+            for history in [vec![0, 500, 750], vec![1_000, 500, 0]] {
+                let view = UsageGraph::new(history, Color::BLACK, Color::WHITE);
+                tree.find_element_mut(id).unwrap().update(&view);
+                owner.flush_with_legacy_paint(&mut tree, size, legacy);
+                let graph = graph_render(tree.root().unwrap());
+                revision += 1;
+                assert_eq!(graph.revision, revision);
+                assert_eq!(graph.layout_calls, layout_calls);
+                assert_eq!(graph.size, size);
+                assert_eq!(graph.prepared_size, size);
+                assert_eq!(graph.handle, handle);
+                assert_eq!(graph.mesh_handle, mesh_handle);
+                assert!(!Arc::ptr_eq(&fallback, graph.fallback.as_ref().unwrap()));
+                fallback = Arc::clone(graph.fallback.as_ref().unwrap());
+                tree.find_element_mut(id).unwrap().update(&view);
+                owner.flush_with_legacy_paint(&mut tree, size, legacy);
+                assert_eq!(graph_render(tree.root().unwrap()).revision, revision);
+            }
+        }
+    }
+
+    #[test]
     fn graph_cpu_renderer_paints_grid_stroke_and_area_before_unsupported_extension() {
         use scarlet_ui::renderer::{CpuPaintRenderer, PaintCommand};
 
@@ -1961,9 +2017,23 @@ mod tests {
                 })
                 .count()
         };
+        // A one-pixel diagonal is antialiased. Integrate its red coverage
+        // above the translucent area's maximum red (29), rather than requiring
+        // 100 almost-opaque pixels and rejecting a correctly covered stroke.
+        let stroke_coverage: u64 = pixels
+            .iter()
+            .map(|pixel| {
+                let [b, g, r, _] = pixel.to_le_bytes();
+                if g == 0 && b == 0 {
+                    u64::from(r.saturating_sub(32))
+                } else {
+                    0
+                }
+            })
+            .sum();
         assert!(
-            count(|r, g, b| r >= 200 && g == 0 && b == 0) > 100,
-            "missing stroke"
+            stroke_coverage > (240 - 32) * 100,
+            "missing stroke coverage: {stroke_coverage}"
         );
         assert!(
             count(|r, g, b| r == 0 && g > 0 && b == 0) > 100,

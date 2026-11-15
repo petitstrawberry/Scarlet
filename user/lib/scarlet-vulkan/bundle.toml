@@ -11,7 +11,7 @@ to = "/lib/libsws_client_c.so"
 # Standard Window chrome for native hosts with externally rendered content.
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "86177dfa9f41b616d010fe03545269bd2f67747d" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "5ec2a1eb4062786b8fd94c1096618d3c948c794b" }
 package = "scarlet-ui-window-c"
 lib = "scarlet_ui_window"
 architectures = ["aarch64"]

@@ -8,8 +8,8 @@ publish = false
 
 [dependencies]
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "86177dfa9f41b616d010fe03545269bd2f67747d", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "86177dfa9f41b616d010fe03545269bd2f67747d" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "5ec2a1eb4062786b8fd94c1096618d3c948c794b", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "5ec2a1eb4062786b8fd94c1096618d3c948c794b" }
 scarlet-std = { path = "../../user/lib/std" }
 scarlet-os = { path = "../../user/lib/scarlet-os" }
 framebuffer = { path = "../../user/lib/framebuffer" }

@@ -78,7 +78,8 @@ use control_center::{
     ArmedPowerAction, AudioOutputSnapshot, AudioSnapshot, ControlCenterAction,
     ControlCenterMetrics, ControlCenterPresentation, ControlCenterSession, ControlCenterSettingsLink,
     ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot, NetworkInterfaceSnapshot,
-    NetworkInterfaceState, NetworkSnapshot, SystemSnapshot, boxed, build_control_center_view,
+    NetworkInterfaceState, NetworkSnapshot, PercentWriteState, SystemSnapshot, boxed,
+    build_control_center_view,
 };
 use home_catalog::{ApplicationEntry, HomeApplication};
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
@@ -1457,7 +1458,7 @@ fn update_shared_audio_status(
     status: &State<StatusProviderSnapshot>,
     control_center_volume: &State<f32>,
     state: sas_protocol::ControlState,
-) {
+) -> u8 {
     let volume = ((state.master_volume_q16 as u64 * 100 + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
         / MASTER_VOLUME_UNITY_Q16 as u64)
         .min(100) as u8;
@@ -1479,6 +1480,7 @@ fn update_shared_audio_status(
     {
         set_state_if_changed(control_center_volume, volume as f32);
     }
+    volume
 }
 
 fn apply_control_center_action(
@@ -1489,9 +1491,16 @@ fn apply_control_center_action(
     display: &mut Option<DisplayControl>,
     display_brightness_percent: &State<Option<u8>>,
     control_center_session: &State<ControlCenterSession>,
+    brightness_write: &mut PercentWriteState,
+    volume_write: &mut PercentWriteState,
 ) {
     match action {
         ControlCenterAction::SetBrightness(percent) => {
+            if display.is_some()
+                && !brightness_write.needs_write(percent, display_brightness_percent.get())
+            {
+                return;
+            }
             if display.is_none() {
                 *display = DisplayControl::open_primary().ok();
             }
@@ -1500,8 +1509,10 @@ fn apply_control_center_action(
                 display.get_brightness_percent().ok()
             });
             if let Some(applied) = result {
+                brightness_write.complete(percent, Some(applied));
                 set_state_if_changed(display_brightness_percent, Some(applied));
             } else {
+                brightness_write.complete(percent, None);
                 println!(
                     "[ControlCenter] failed to set display brightness to {}%",
                     percent
@@ -1518,6 +1529,11 @@ fn apply_control_center_action(
             }
         }
         ControlCenterAction::SetVolume(percent) => {
+            if audio_client.is_some()
+                && !volume_write.needs_write(percent, status.get().audio_volume_percent)
+            {
+                return;
+            }
             if audio_client.is_none() {
                 *audio_client = SasClient::connect().ok();
             }
@@ -1527,8 +1543,10 @@ fn apply_control_center_action(
                 client.set_master_volume_q16(q16).ok()
             });
             if let Some(state) = result {
-                update_shared_audio_status(status, control_center_volume, state);
+                let applied = update_shared_audio_status(status, control_center_volume, state);
+                volume_write.complete(percent, Some(applied));
             } else {
+                volume_write.complete(percent, None);
                 *audio_client = None;
             }
         }
@@ -1547,6 +1565,9 @@ fn apply_control_center_action(
             }
         }
         ControlCenterAction::SelectOutput(id) => {
+            // A different output may have different gain/quantization even
+            // when its current percentage happens to match the old output.
+            *volume_write = PercentWriteState::default();
             let request = id
                 .strip_prefix("path:")
                 .and_then(|value| OutputRequest::new(OUTPUT_PREFERENCE_PATH, value))
@@ -4190,6 +4211,8 @@ impl ShellApp {
         std::thread::spawn(move || {
             let mut audio_client: Option<SasClient> = None;
             let mut display = None;
+            let mut brightness_write = PercentWriteState::default();
+            let mut volume_write = PercentWriteState::default();
             let mut next_display_poll = std::time::Instant::now();
             let mut next_snapshot_poll = std::time::Instant::now();
             loop {
@@ -4212,6 +4235,8 @@ impl ShellApp {
                             &mut display,
                             &display_brightness_percent,
                             &control_center_session,
+                            &mut brightness_write,
+                            &mut volume_write,
                         );
                     }
                     let status = control_center_status.get();

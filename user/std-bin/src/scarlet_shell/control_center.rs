@@ -258,6 +258,27 @@ pub enum ControlCenterAction {
     ConfirmReboot,
 }
 
+/// Suppress repeated integer writes only while their acknowledged provider
+/// value remains current. Keep this in the provider worker, not the Slider:
+/// input remains continuous and a failed request can be retried unchanged.
+#[derive(Default)]
+pub(super) struct PercentWriteState {
+    acknowledged: Option<(u8, u8)>,
+}
+
+impl PercentWriteState {
+    pub fn needs_write(&self, requested: u8, observed: Option<u8>) -> bool {
+        let Some(actual) = observed else {
+            return true;
+        };
+        self.acknowledged != Some((requested, actual))
+    }
+
+    pub fn complete(&mut self, requested: u8, applied: Option<u8>) {
+        self.acknowledged = applied.map(|actual| (requested, actual));
+    }
+}
+
 /// Power action awaiting a confirming second press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArmedPowerAction {
@@ -855,6 +876,23 @@ mod tests {
     use scarlet_ui::element::RenderElement;
     use scarlet_ui::state::StateId;
     use scarlet_ui::views::SliderRenderObject;
+
+    #[test]
+    fn percent_writes_deduplicate_acks_but_keep_changes_retries_and_final_targets() {
+        let mut writes = PercentWriteState::default();
+        assert!(writes.needs_write(42, Some(42)), "initial input still writes");
+        writes.complete(42, Some(41));
+        assert!(!writes.needs_write(42, Some(41)), "rounded hardware ack may differ");
+        assert!(writes.needs_write(42, Some(20)), "external change permits same request");
+        assert!(writes.needs_write(42, None), "unknown provider cannot suppress writes");
+        assert!(writes.needs_write(43, Some(41)), "new final percentage must be sent");
+        writes.complete(43, None);
+        assert!(writes.needs_write(43, Some(41)), "failure permits identical retry");
+        assert!(writes.needs_write(42, Some(41)), "failure also clears the old ack");
+        writes.complete(43, Some(43));
+        assert!(!writes.needs_write(43, Some(43)));
+        assert!(writes.needs_write(42, Some(43)), "reversing a drag must write again");
+    }
 
     fn brightness_slider(element: &dyn Element, id: StateId) -> Option<&Slider> {
         if let Some(slider) = element
