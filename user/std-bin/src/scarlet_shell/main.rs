@@ -3691,6 +3691,10 @@ impl Application for ShellApp {
             self.control_center_window_id
                 .set(Some(ctx.platform_window_id as u32));
             let _ = window.set_opaque(false);
+            let _ = window.set_surface_regions(
+                true,
+                &[control_center::backdrop_region(window.managed_size())],
+            );
         } else if ctx.scene_key.as_str() == OVERVIEW_DRAWER_SCENE_KEY {
             let _ = window.set_opaque(false);
         } else if ctx.scene_key.as_str() == HOME_BACKDROP_SCENE_KEY {
@@ -3800,6 +3804,10 @@ impl Application for ShellApp {
             if status_bar_resize_needed(window.managed_size(), desired) {
                 let _ = window.resize_managed(desired.width as u32, desired.height as u32);
             }
+            let _ = window.set_surface_regions(
+                true,
+                &[control_center::backdrop_region(window.managed_size())],
+            );
             return;
         }
         if ctx.scene_key.as_str() == OVERVIEW_DRAWER_SCENE_KEY {

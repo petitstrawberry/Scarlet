@@ -11,13 +11,13 @@ use alloc::vec::Vec;
 
 use scarlet_ui::color::{Color, ColorPalette};
 use scarlet_ui::element::{ComponentElement, Element};
-use scarlet_ui::geometry::{Alignment, Size};
+use scarlet_ui::geometry::{Alignment, Point, Rect, Size};
 use scarlet_ui::state::State;
 use scarlet_ui::view::{View, ViewExt};
 use scarlet_ui::views::containers::ViewTuple;
 use scarlet_ui::views::{
-    Button, Divider, GlassMaterial, HStack, HeaderBar, Slider, Spacer, Surface, SurfaceRole,
-    SurfaceStyle, Text, TextStyle, VStack,
+    Button, Divider, ElevationRole, GlassMaterial, HStack, HeaderBar, Slider, Spacer, Surface,
+    SurfaceRole, SurfaceStyle, Text, TextStyle, VStack,
 };
 use scarlet_ui::{Icon, IconSize};
 
@@ -190,7 +190,9 @@ impl ControlCenterSnapshot {
 }
 
 impl Default for ControlCenterSnapshot {
-    fn default() -> Self { Self::unavailable() }
+    fn default() -> Self {
+        Self::unavailable()
+    }
 }
 
 /// Settings destination requested by Control Center.
@@ -297,6 +299,30 @@ impl ControlCenterMetrics {
     /// semantic shadow surface outside this rectangle.
     pub const fn body_size(&self) -> Size {
         Size::new(self.width as f32, self.height as f32)
+    }
+}
+
+/// Reading material shared by the native backdrop and the in-app glass tint.
+/// A menu's denser wash keeps secondary text legible over arbitrary desktops.
+fn panel_material() -> GlassMaterial {
+    GlassMaterial::menu()
+}
+
+/// One desktop backdrop for the managed body, excluding the window shadow.
+/// ScarletUI platform coordinates include the floating paint outsets; SWS
+/// converts logical dimensions and radius to physical pixels once and caches
+/// unchanged region metadata. Foreground labels and controls stay sharp.
+pub(super) fn backdrop_region(body: Size) -> scarlet_ui::platform::SurfaceRegion {
+    let outsets = ElevationRole::Floating.paint_outsets();
+    scarlet_ui::platform::SurfaceRegion {
+        rect: Rect::new(Point::new(outsets.left, outsets.top), body),
+        corner_radius: ControlCenterMetrics::CORNER_RADIUS,
+        blur_radius: if scarlet_ui::glass_quality() == scarlet_ui::GlassQuality::TintOnly {
+            0.0
+        } else {
+            panel_material().blur_radius
+        },
+        accepts_input: true,
     }
 }
 
@@ -593,9 +619,11 @@ pub fn build_control_center_view(
     .padding(metrics.margin as f32);
 
     Surface::new(content, SurfaceRole::Floating)
-        // The managed Window owns the floating shadow. One material plane
-        // serves all sections; the transparent header adds no second capture.
-        .surface_style(SurfaceStyle::bubble_glass().material(GlassMaterial::floating()))
+        // The managed Window owns the shadow and SWS filters the desktop
+        // behind this body once. Keep the shared tint/rim here, but do not blur
+        // the empty in-app background again. Slider thumbs still sample this
+        // already painted surface through their ordinary local materials.
+        .surface_style(SurfaceStyle::bubble_glass().material(panel_material().blur_radius(0.0)))
         .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
         .frame(metrics.width as f32, metrics.height as f32)
 }
@@ -1054,6 +1082,14 @@ mod tests {
 
         assert_eq!(body.width, metrics.width as f32);
         assert_eq!(body.height, metrics.height as f32);
+        let region = backdrop_region(body);
+        let outsets = ElevationRole::Floating.paint_outsets();
+        assert_eq!(region.rect.origin, Point::new(outsets.left, outsets.top));
+        assert_eq!(region.rect.size, body);
+        assert_eq!(region.corner_radius, ControlCenterMetrics::CORNER_RADIUS);
+        assert!(region.accepts_input);
+        assert!(region.rect.origin.x + body.width <= body.width + outsets.left + outsets.right);
+        assert!(region.rect.origin.y + body.height <= body.height + outsets.top + outsets.bottom);
     }
 
     #[test]
