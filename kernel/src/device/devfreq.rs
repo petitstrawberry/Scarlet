@@ -607,7 +607,11 @@ pub fn snapshots() -> Vec<DeviceFrequencySnapshot> {
     policies
         .iter()
         .map(|policy| {
-            let state = policy.state.lock();
+            // Drivers may serialize live queries with device execution. Never
+            // hold the policy mutex across that query: work retirement and new
+            // demand must not queue behind a telemetry reader waiting for DMA.
+            let state = *policy.state.lock();
+            let current_khz = policy.driver.current_frequency_khz().ok();
             DeviceFrequencySnapshot {
                 name: policy.name,
                 governor: state.governor,
@@ -616,7 +620,7 @@ pub fn snapshots() -> Vec<DeviceFrequencySnapshot> {
                 thermal_max_khz: state.thermal_max_khz,
                 requested_khz: state.requested_khz,
                 target_khz: state.target_khz,
-                current_khz: policy.driver.current_frequency_khz().ok(),
+                current_khz,
                 utilization_pct: state.utilization_pct,
                 sample_count: state.sample_count,
                 failed_samples: state.failed_samples,
@@ -716,10 +720,17 @@ mod activity_tests {
         frequency: AtomicU64,
         busy: AtomicU32,
         reject: AtomicBool,
+        check_policy_unlocked: AtomicBool,
     }
 
     impl DeviceFrequencyDriver for Driver {
         fn current_frequency_khz(&self) -> Result<u64, &'static str> {
+            if self.check_policy_unlocked.load(Ordering::Relaxed) {
+                assert!(
+                    find("activity-test").unwrap().state.try_lock().is_some(),
+                    "telemetry holds policy lock during driver query"
+                );
+            }
             Ok(self.frequency.load(Ordering::Relaxed))
         }
         fn set_frequency_khz(&self, frequency: u64) -> Result<(), &'static str> {
@@ -730,6 +741,12 @@ mod activity_tests {
             Ok(())
         }
         fn sample_utilization(&self) -> Result<DeviceFrequencyUtilization, &'static str> {
+            if self.check_policy_unlocked.load(Ordering::Relaxed) {
+                assert!(
+                    find("activity-test").unwrap().state.try_lock().is_some(),
+                    "poll holds policy lock while sampling driver"
+                );
+            }
             Ok(DeviceFrequencyUtilization {
                 busy: self.busy.load(Ordering::Relaxed),
                 total: 100,
@@ -742,6 +759,7 @@ mod activity_tests {
             frequency: AtomicU64::new(180_000),
             busy: AtomicU32::new(45),
             reject: AtomicBool::new(false),
+            check_policy_unlocked: AtomicBool::new(false),
         });
         let policy = Arc::new(Policy {
             index: 0,
@@ -1087,5 +1105,64 @@ mod activity_tests {
         assert!(!policy.state.lock().work.valid);
         drop(acquire_adaptive_activity("activity-test", 0).unwrap());
         assert_eq!(driver.frequency.load(Ordering::Relaxed), 800_000);
+    }
+
+    #[test]
+    fn telemetry_and_sampling_release_policy_before_driver_queries() {
+        let _serial = SERIAL.lock().unwrap();
+        let (policy, driver) = setup();
+        {
+            let mut state = policy.state.lock();
+            state.requested_khz = 800_000;
+            state.thermal_max_khz = 180_000;
+        }
+        driver.check_policy_unlocked.store(true, Ordering::Relaxed);
+        let snapshot = snapshots()[0];
+        assert_eq!(snapshot.requested_khz, 800_000);
+        assert_eq!(snapshot.thermal_max_khz, 180_000);
+        assert_eq!(
+            snapshot.current_khz,
+            Some(180_000),
+            "publish the ACKed rate, not the request"
+        );
+        // At45% the governor retains the capped rate; sampling itself must not
+        // take the policy lock before calling the hardware counter provider.
+        poll(&policy);
+        assert_eq!(policy.state.lock().utilization_pct, Some(45));
+    }
+
+    #[test]
+    fn stable_adaptive_floor_does_not_oscillate_with_legacy_high_busy_request() {
+        let _serial = SERIAL.lock().unwrap();
+        let (policy, driver) = setup();
+        policy.state.lock().work = WorkDemand {
+            valid: true,
+            floor_khz: 430_000,
+            estimated_work: 3_000_000_000_000,
+            job_work: 300_000_000_000,
+            ..WorkDemand::default()
+        };
+        driver.busy.store(60, Ordering::Relaxed);
+        let mut guard = acquire_adaptive_activity("activity-test", 0).unwrap();
+        for _ in 0..8 {
+            poll(&policy);
+            assert_eq!(policy.state.lock().requested_khz, 800_000);
+            assert_eq!(driver.frequency.load(Ordering::Relaxed), 430_000);
+            assert_eq!(policy.state.lock().utilization_pct, Some(60));
+        }
+        guard.record_work(DeviceFrequencyWork {
+            busy_ns: 5_000_000,
+            frequency_khz: 430_000,
+            completed_ns: crate::time::current_time_ns(),
+        });
+        drop(guard);
+        for _ in 0..4 {
+            poll(&policy);
+            assert_eq!(
+                driver.frequency.load(Ordering::Relaxed),
+                430_000,
+                "grace also uses adaptive floor exclusively"
+            );
+        }
     }
 }
