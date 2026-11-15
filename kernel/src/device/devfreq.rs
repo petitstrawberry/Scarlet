@@ -75,6 +75,21 @@ pub trait DeviceFrequencyDriver: Send + Sync {
     }
 }
 
+/// Elapsed time of actual driver frequency-change calls, including any driver
+/// serialization and firmware ACK wait. This is not GPU execution time or an
+/// isolated PLL/firmware latency measurement. Failed calls are counted too.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeviceFrequencyTransitions {
+    pub attempts: u64,
+    pub failures: u64,
+    pub last_call_ns: u64,
+    pub max_call_ns: u64,
+    pub total_call_ns: u64,
+    pub last_completed_ns: u64,
+    pub last_from_khz: u64,
+    pub last_to_khz: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceFrequencySnapshot {
     pub name: &'static str,
@@ -88,6 +103,7 @@ pub struct DeviceFrequencySnapshot {
     pub utilization_pct: Option<u32>,
     pub sample_count: u64,
     pub failed_samples: u64,
+    pub transitions: DeviceFrequencyTransitions,
     pub ondemand: SimpleOndemandConfig,
 }
 
@@ -100,6 +116,7 @@ struct PolicyState {
     utilization_pct: Option<u32>,
     sample_count: u64,
     failed_samples: u64,
+    transitions: DeviceFrequencyTransitions,
     down_samples: u8,
     ondemand: SimpleOndemandConfig,
     active_jobs: u32,
@@ -283,13 +300,29 @@ fn target(policy: &Policy, state: &PolicyState) -> u64 {
         .freq_khz
 }
 
-fn apply(policy: &Policy, state: &mut PolicyState, next: PolicyState) -> Result<(), &'static str> {
+fn apply(policy: &Policy, state: &mut PolicyState, mut next: PolicyState) -> Result<(), &'static str> {
     if policy.driver.current_frequency_khz()? != state.target_khz {
         return Err("devfreq: hardware rate differs from policy target");
     }
     let frequency = target(policy, &next);
     if frequency != state.target_khz {
-        policy.driver.set_frequency_khz(frequency)?;
+        let started = crate::time::current_time_ns();
+        let result = policy.driver.set_frequency_khz(frequency);
+        let completed = crate::time::current_time_ns();
+        let elapsed = completed.saturating_sub(started);
+        let transitions = &mut state.transitions;
+        transitions.attempts = transitions.attempts.saturating_add(1);
+        transitions.failures = transitions.failures.saturating_add(u64::from(result.is_err()));
+        transitions.last_call_ns = elapsed;
+        transitions.max_call_ns = transitions.max_call_ns.max(elapsed);
+        transitions.total_call_ns = transitions.total_call_ns.saturating_add(elapsed);
+        transitions.last_completed_ns = completed;
+        transitions.last_from_khz = state.target_khz;
+        transitions.last_to_khz = frequency;
+        // Preserve diagnostic evidence even when the requested policy cannot
+        // be committed. A failed call still leaves governor/target unchanged.
+        next.transitions = *transitions;
+        result?;
     }
     *state = PolicyState {
         target_khz: frequency,
@@ -480,6 +513,7 @@ fn register_policy(
             utilization_pct: None,
             sample_count: 0,
             failed_samples: 0,
+            transitions: DeviceFrequencyTransitions::default(),
             down_samples: 0,
             ondemand: SimpleOndemandConfig::default(),
             active_jobs: 0,
@@ -624,6 +658,7 @@ pub fn snapshots() -> Vec<DeviceFrequencySnapshot> {
                 utilization_pct: state.utilization_pct,
                 sample_count: state.sample_count,
                 failed_samples: state.failed_samples,
+                transitions: state.transitions,
                 ondemand: state.ondemand,
             }
         })
@@ -779,6 +814,7 @@ mod activity_tests {
                 utilization_pct: None,
                 sample_count: 0,
                 failed_samples: 0,
+                transitions: DeviceFrequencyTransitions::default(),
                 down_samples: 0,
                 ondemand: SimpleOndemandConfig {
                     upthreshold_pct: 50,
@@ -883,9 +919,17 @@ mod activity_tests {
         assert!(acquire_activity("activity-test").is_err());
         assert_eq!(policy.state.lock().active_jobs, 0);
         assert_eq!(policy.state.lock().target_khz, 180_000);
+        let failed = snapshots()[0].transitions;
+        assert_eq!((failed.attempts, failed.failures), (1, 1));
+        assert_eq!((failed.last_from_khz, failed.last_to_khz), (180_000, 800_000));
         driver.reject.store(false, Ordering::Relaxed);
         drop(acquire_activity("activity-test").unwrap());
         assert_eq!(policy.state.lock().active_jobs, 0);
+        let mut state = policy.state.lock();
+        assert_eq!((state.transitions.attempts, state.transitions.failures), (2, 1));
+        let unchanged = *state;
+        apply(&policy, &mut state, unchanged).unwrap();
+        assert_eq!(state.transitions.attempts, 2, "unchanged rates make no driver call");
     }
 
     #[test]

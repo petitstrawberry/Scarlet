@@ -57,6 +57,15 @@ impl DeviceFrequencyDevice {
                 "sample_count={} failed_samples={}",
                 policy.sample_count, policy.failed_samples
             );
+            let transitions = policy.transitions;
+            let _ = writeln!(
+                output,
+                "transition_attempts={} transition_failures={} transition_last_call_ns={} transition_max_call_ns={} transition_total_call_ns={} transition_last_completed_ns={} transition_last_from_khz={} transition_last_to_khz={}",
+                transitions.attempts, transitions.failures,
+                transitions.last_call_ns, transitions.max_call_ns,
+                transitions.total_call_ns, transitions.last_completed_ns,
+                transitions.last_from_khz, transitions.last_to_khz,
+            );
             let _ = writeln!(
                 output,
                 "upthreshold_pct={} downdifferential_pct={}",

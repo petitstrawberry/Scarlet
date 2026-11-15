@@ -252,6 +252,14 @@ pub trait IommuDomain: Send + Sync {
         Err(IommuError::NotSupported)
     }
 
+    /// Acquire a context if one is available. `Ok(false)` certifies that no
+    /// lease was acquired and no domain configuration changed; callers may
+    /// release an independently idle lease before retrying. Every uncertain
+    /// configuration or synchronization failure must return `Err`, not false.
+    fn try_resume(&self) -> Result<bool, IommuError> {
+        self.resume().map(|()| true)
+    }
+
     /// Capture the current hardware fault state for this domain.
     ///
     /// # Returns
@@ -289,6 +297,16 @@ pub trait IommuController: Send + Sync {
     ///
     /// A reference-counted domain on success.
     fn alloc_domain(&self, config: IommuDomainConfig) -> Result<Arc<dyn IommuDomain>, IommuError>;
+
+    /// Allocate owned page tables without reserving a hardware context. The
+    /// domain starts detached and requires successful `try_resume` before any
+    /// stream may attach. Controllers with inseparable tables reject this.
+    fn alloc_parked_domain(
+        &self,
+        _config: IommuDomainConfig,
+    ) -> Result<Arc<dyn IommuDomain>, IommuError> {
+        Err(IommuError::NotSupported)
+    }
 
     /// Decode firmware specifier cells into stream IDs.
     ///
