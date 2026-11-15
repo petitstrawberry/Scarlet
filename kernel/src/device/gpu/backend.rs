@@ -1,5 +1,7 @@
 //! Backend-neutral GPU information model.
 
+use super::GpuBackingPin;
+
 use alloc::{boxed::Box, sync::Arc};
 
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
@@ -883,6 +885,16 @@ pub trait GpuBackendContext: Send + Sync {
     /// A backend queue whose commands execute in this context.
     fn create_queue(&self) -> Result<Arc<dyn GpuBackendQueue>, &'static str>;
 
+    /// Attach with a real generic backing owner for persistent VM mappings.
+    /// Legacy backends may ignore the pin and use their existing attach path.
+    fn attach_image_pinned(
+        &self,
+        image: &dyn GpuBackendImage,
+        _backing: GpuBackingPin,
+    ) -> Result<u64, &'static str> {
+        self.attach_image(image)
+    }
+
     /// Attach an image so opaque commands in this context may reference it.
     ///
     /// # Arguments
@@ -1037,6 +1049,15 @@ pub trait GpuBackendContext: Send + Sync {
         _readback: GpuImageUploadInfo,
     ) -> Result<(), &'static str> {
         Err("GPU backend context does not support image readback")
+    }
+
+    /// Buffer counterpart of `attach_image_pinned` with the same lifetime rule.
+    fn attach_buffer_pinned(
+        &self,
+        buffer: &dyn GpuBackendBuffer,
+        _backing: GpuBackingPin,
+    ) -> Result<u64, &'static str> {
+        self.attach_buffer(buffer)
     }
 
     /// Attach a buffer so opaque commands in this context may reference it.

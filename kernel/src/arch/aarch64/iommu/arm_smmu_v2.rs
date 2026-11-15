@@ -1221,7 +1221,9 @@ impl Drop for DmaPageTables {
 
 struct DmaDomain {
     hardware: Arc<SmmuHardware>,
-    context: ContextLease,
+    // Lock order: context, then streams/tables, then hardware.
+    context: IrqSpinLock<Option<ContextLease>>,
+    iova_address_bits: u32,
     iova_base: Iova,
     iova_size: u64,
     iova_address_limit: u64,
@@ -1244,6 +1246,8 @@ impl DmaDomain {
 
 impl IommuDomain for DmaDomain {
     fn attach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
+        let context = self.context.lock();
+        let context = context.as_ref().ok_or(IommuError::AttachFailed)?;
         if stream.substream_id.is_some() {
             return Err(IommuError::NotSupported);
         }
@@ -1253,12 +1257,13 @@ impl IommuDomain for DmaDomain {
         }
         let group = self
             .hardware
-            .attach_stream(Some(self.context.index), stream.id, true)?;
+            .attach_stream(Some(context.index), stream.id, true)?;
         streams.insert(stream, group);
         Ok(())
     }
 
     fn detach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
+        let _context = self.context.lock();
         let mut streams = self.streams.lock();
         let route = *streams.get(&stream).ok_or(IommuError::AttachFailed)?;
         self.hardware.detach_stream(route, stream.id)?;
@@ -1318,6 +1323,7 @@ impl IommuDomain for DmaDomain {
             );
             return Err(IommuError::MapFailed);
         }
+        let context = self.context.lock();
         let mut tables = self.tables.lock();
         let tables = tables.as_mut().ok_or(IommuError::MapFailed)?;
         for offset in (0..len).step_by(PAGE_SIZE) {
@@ -1348,21 +1354,26 @@ impl IommuDomain for DmaDomain {
                     );
                 }
                 tables.sync_dirty();
-                let _ = self
-                    .hardware
-                    .invalidate_context(self.context.index, context_asid(self.context.index));
+                if let Some(context) = context.as_ref() {
+                    let _ = self.hardware.invalidate_context(context.index, context_asid(context.index));
+                }
                 return Err(error);
             }
             mapped += PAGE_SIZE;
         }
         tables.sync_dirty();
-        self.hardware
-            .invalidate_context(self.context.index, context_asid(self.context.index))
+        match context.as_ref() {
+            Some(context) => self
+                .hardware
+                .invalidate_context(context.index, context_asid(context.index)),
+            None => Ok(()), // Retained tables are synchronized again on resume.
+        }
     }
 
     fn unmap(&self, iova: Iova, len: usize) -> Result<(), IommuError> {
         self.validate_range(iova, len)
             .map_err(|_| IommuError::UnmapFailed)?;
+        let context = self.context.lock();
         let mut tables = self.tables.lock();
         let tables = tables.as_mut().ok_or(IommuError::UnmapFailed)?;
         for offset in (0..len).step_by(PAGE_SIZE) {
@@ -1383,8 +1394,12 @@ impl IommuDomain for DmaDomain {
             )?;
         }
         tables.sync_dirty();
-        self.hardware
-            .invalidate_context(self.context.index, context_asid(self.context.index))
+        match context.as_ref() {
+            Some(context) => self
+                .hardware
+                .invalidate_context(context.index, context_asid(context.index)),
+            None => Ok(()), // Retained tables are synchronized again on resume.
+        }
     }
 
     fn iova_to_phys(&self, iova: Iova) -> Option<PhysAddr> {
@@ -1399,35 +1414,95 @@ impl IommuDomain for DmaDomain {
     }
 
     fn flush(&self) -> Result<(), IommuError> {
-        self.hardware
-            .invalidate_context(self.context.index, context_asid(self.context.index))
+        let context = self.context.lock();
+        match context.as_ref() {
+            Some(context) => self
+                .hardware
+                .invalidate_context(context.index, context_asid(context.index)),
+            None => Ok(()), // Retained tables are synchronized again on resume.
+        }
+    }
+
+    fn suspend(&self) -> Result<(), IommuError> {
+        let mut context = self.context.lock();
+        let Some(lease) = context.as_ref() else {
+            return Ok(());
+        };
+        if !self.streams.lock().is_empty() {
+            return Err(IommuError::AttachFailed);
+        }
+        // Never acknowledge or recycle a fault to make another client runnable.
+        if fault::pending(
+            self.hardware
+                .context_read(lease.index, CONTEXT_FAULT_STATUS),
+        ) {
+            return Err(IommuError::UnmapFailed);
+        }
+        if !self.hardware.release_context(lease) {
+            return Err(IommuError::UnmapFailed);
+        }
+        *context = None;
+        Ok(())
+    }
+
+    fn resume(&self) -> Result<(), IommuError> {
+        let mut context = self.context.lock();
+        if context.is_some() {
+            return Ok(());
+        }
+        let tables = self.tables.lock();
+        let tables = tables.as_ref().ok_or(IommuError::MapFailed)?;
+        let lease = self.hardware.reserve_context()?;
+        if let Err(error) =
+            self.hardware
+                .configure_dma_context(&lease, tables.root, self.iova_address_bits)
+        {
+            // Keep a failed lease owned if release cannot prove synchronization.
+            if !self.hardware.release_context(&lease) {
+                *context = Some(lease);
+            }
+            return Err(error);
+        }
+        *context = Some(lease);
+        Ok(())
     }
 
     fn fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
-        let context_status = self.hardware.context_read(self.context.index, CONTEXT_FAULT_STATUS);
+        let context = self.context.lock();
+        let context = context.as_ref()?;
+        let context_status = self
+            .hardware
+            .context_read(context.index, CONTEXT_FAULT_STATUS);
         Some(IommuFaultSnapshot {
             context_fault_pending: fault::pending(context_status),
             global_status: self.hardware.registers.read(GLOBAL_FAULT_STATUS),
             context_status,
             fault_address: self
                 .hardware
-                .context_read64(self.context.index, CONTEXT_FAULT_ADDRESS),
+                .context_read64(context.index, CONTEXT_FAULT_ADDRESS),
             syndrome0: self
                 .hardware
-                .context_read(self.context.index, CONTEXT_FAULT_SYNDROME_0),
+                .context_read(context.index, CONTEXT_FAULT_SYNDROME_0),
             syndrome1: self
                 .hardware
-                .context_read(self.context.index, CONTEXT_FAULT_SYNDROME_1),
+                .context_read(context.index, CONTEXT_FAULT_SYNDROME_1),
         })
     }
 
     fn pending_context_fault(&self) -> Option<bool> {
-        Some(fault::pending(self.hardware.context_read(self.context.index, CONTEXT_FAULT_STATUS)))
+        let context = self.context.lock();
+        Some(context.as_ref().is_some_and(|context| {
+            fault::pending(
+                self.hardware
+                    .context_read(context.index, CONTEXT_FAULT_STATUS),
+            )
+        }))
     }
 }
 
 impl Drop for DmaDomain {
     fn drop(&mut self) {
+        let context = self.context.lock().take();
         let streams = core::mem::take(&mut *self.streams.lock());
         let mut restored_all = true;
         for (stream, route) in streams {
@@ -1439,7 +1514,10 @@ impl Drop for DmaDomain {
                 );
             }
         }
-        let released = restored_all && self.hardware.release_context(&self.context);
+        let released = restored_all
+            && context
+                .as_ref()
+                .is_none_or(|lease| self.hardware.release_context(lease));
         if !released {
             // A route may still point at this context, or a global TLB
             // invalidation may still be outstanding.  Leaking one failed
@@ -1450,7 +1528,7 @@ impl Drop for DmaDomain {
             }
             println!(
                 "[arm-smmu-v2] retaining translated CB {} and page tables after teardown or restore failure",
-                self.context.index,
+                context.as_ref().map(|lease| lease.index).unwrap_or(usize::MAX),
             );
         }
     }
@@ -1564,7 +1642,8 @@ impl IommuController for ArmSmmuV2 {
             );
             return Ok(Arc::new(DmaDomain {
                 hardware: Arc::clone(&self.hardware),
-                context,
+                context: IrqSpinLock::new(Some(context)),
+                iova_address_bits,
                 iova_base: config.iova_base,
                 iova_size: config.iova_size,
                 iova_address_limit,

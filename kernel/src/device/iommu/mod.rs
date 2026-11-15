@@ -237,6 +237,21 @@ pub trait IommuDomain: Send + Sync {
     /// `Ok(())` when hardware-visible state is synchronized.
     fn flush(&self) -> Result<(), IommuError>;
 
+    /// Release a detached, fault-free hardware context while retaining tables.
+    /// The caller must stop DMA and detach every stream first. Failure must be
+    /// treated as uncertain hardware ownership; never retry on another bank.
+    /// Providers without separable page tables reject this operation.
+    fn suspend(&self) -> Result<(), IommuError> {
+        Err(IommuError::NotSupported)
+    }
+
+    /// Acquire/configure a hardware context for retained tables and synchronize
+    /// its translations before attaching streams. No stream may be attached
+    /// until this succeeds. Idle domains need not retain finite hardware banks.
+    fn resume(&self) -> Result<(), IommuError> {
+        Err(IommuError::NotSupported)
+    }
+
     /// Capture the current hardware fault state for this domain.
     ///
     /// # Returns

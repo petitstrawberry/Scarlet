@@ -10,6 +10,7 @@
 mod abi;
 mod async_abi;
 mod backend;
+mod backing_pin;
 mod completion;
 pub(crate) mod connection;
 mod execution;
@@ -711,3 +712,5 @@ mod tests {
 }
 
 pub use abi::{GPU_IMAGE_FORMAT_NV12, GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImage};
+
+pub use backing_pin::GpuBackingPin;

@@ -1004,6 +1004,12 @@ pub(crate) enum GpuImageBacking {
 }
 
 impl GpuImageBacking {
+    /// Imported storage is a consumer lease; TRANSFER_DST describes the CPU
+    /// publication callback and does not grant shaders a physical write mapping.
+    pub(super) fn allows_gpu_write(&self) -> bool {
+        matches!(self, Self::Private(_))
+    }
+
     fn private(layout: GpuBackendImageLayout, allow_segmented: bool) -> Result<Self, &'static str> {
         Ok(Self::Private(GpuPrivateImageBacking::new(
             layout,

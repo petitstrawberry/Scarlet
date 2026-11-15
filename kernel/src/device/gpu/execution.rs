@@ -187,7 +187,13 @@ impl GpuContext {
         attached_images
             .try_reserve(1)
             .map_err(|_| "Failed to retain GPU image for context lifetime")?;
-        let token = self.backend_context.attach_image(backend_image.as_ref())?;
+        let token = self.backend_context.attach_image_pinned(
+            backend_image.as_ref(),
+            super::GpuBackingPin {
+                gpu_writable: image.backing().allows_gpu_write(),
+                _owner: image.backing(),
+            },
+        )?;
         if token == 0 {
             let _ = self.backend_context.detach_image(backend_image.as_ref());
             return Err("GPU backend returned an invalid image attachment token");
@@ -263,7 +269,7 @@ impl GpuContext {
             .map_err(|_| "Failed to retain GPU buffer for context lifetime")?;
         let token = self
             .backend_context
-            .attach_buffer(backend_buffer.as_ref())?;
+            .attach_buffer_pinned(backend_buffer.as_ref(), super::GpuBackingPin { _owner: Arc::clone(&backing) as Arc<dyn Send + Sync>, gpu_writable: true })?;
         if token == 0 {
             let _ = self.backend_context.detach_buffer(backend_buffer.as_ref());
             return Err("GPU backend returned an invalid buffer attachment token");
