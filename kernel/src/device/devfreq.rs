@@ -102,6 +102,8 @@ struct PolicyState {
     failed_samples: u64,
     down_samples: u8,
     ondemand: SimpleOndemandConfig,
+    active_jobs: u32,
+    activity_idle_until_ns: u64,
 }
 
 struct Policy {
@@ -129,6 +131,12 @@ fn target(policy: &Policy, state: &PolicyState) -> u64 {
         DeviceFrequencyGovernor::Performance => state.thermal_max_khz,
         DeviceFrequencyGovernor::Powersave => policy.opps[0].freq_khz,
         DeviceFrequencyGovernor::Userspace => state.requested_khz,
+        DeviceFrequencyGovernor::SimpleOndemand
+            if state.active_jobs != 0
+                || crate::time::current_time_ns() < state.activity_idle_until_ns =>
+        {
+            state.thermal_max_khz
+        }
         DeviceFrequencyGovernor::SimpleOndemand => state.requested_khz,
     };
     policy
@@ -153,6 +161,56 @@ fn apply(policy: &Policy, state: &mut PolicyState, next: PolicyState) -> Result<
         ..next
     };
     Ok(())
+}
+
+/// An actual device-work lifetime, separate from measured utilization.
+///
+/// Acquire before any driver execution/mapping/hardware locks. The automatic
+/// governor raises a thermal-capped floor before the first command executes.
+/// Drop only after DMA retirement is proven and those locks are released. A
+/// driver that cannot prove retirement must retain the guard with its DMA pins.
+pub struct DeviceFrequencyActivityGuard {
+    policy: Arc<Policy>,
+}
+
+const ACTIVITY_IDLE_GRACE_NS: u64 = 100_000_000;
+
+pub fn acquire_activity(name: &str) -> Result<DeviceFrequencyActivityGuard, &'static str> {
+    let policy = find(name)?;
+    {
+        let mut state = policy.state.lock();
+        let next = PolicyState {
+            active_jobs: state
+                .active_jobs
+                .checked_add(1)
+                .ok_or("devfreq: activity count overflow")?,
+            activity_idle_until_ns: 0,
+            down_samples: 0,
+            ..*state
+        };
+        if target(&policy, &next) != state.target_khz {
+            apply(&policy, &mut state, next)?;
+        } else {
+            *state = next;
+        }
+    }
+    Ok(DeviceFrequencyActivityGuard { policy })
+}
+
+impl Drop for DeviceFrequencyActivityGuard {
+    fn drop(&mut self) {
+        let mut state = self.policy.state.lock();
+        debug_assert!(state.active_jobs != 0);
+        state.active_jobs -= 1;
+        if state.active_jobs == 0 {
+            // Avoid clock changes between adjacent frames or queued jobs. The
+            // existing worker releases the floor and downscales normally once
+            // the grace expires; this path never takes a driver lock.
+            state.activity_idle_until_ns =
+                crate::time::current_time_ns().saturating_add(ACTIVITY_IDLE_GRACE_NS);
+            state.down_samples = 0;
+        }
+    }
 }
 
 /// Register one clock domain after the driver has completed hardware bring-up.
@@ -226,6 +284,8 @@ fn register_policy(
             failed_samples: 0,
             down_samples: 0,
             ondemand: SimpleOndemandConfig::default(),
+            active_jobs: 0,
+            activity_idle_until_ns: 0,
         }),
         worker_started: AtomicBool::new(true),
     }));
@@ -441,4 +501,168 @@ pub fn set_thermal_max_frequency(name: &str, max_khz: u64) -> Result<(), &'stati
         ..*state
     };
     apply(&policy, &mut state, next)
+}
+
+#[cfg(test)]
+mod activity_tests {
+    extern crate std;
+    use super::*;
+    use core::sync::atomic::{AtomicU32, AtomicU64};
+
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct Driver {
+        frequency: AtomicU64,
+        busy: AtomicU32,
+        reject: AtomicBool,
+    }
+
+    impl DeviceFrequencyDriver for Driver {
+        fn current_frequency_khz(&self) -> Result<u64, &'static str> {
+            Ok(self.frequency.load(Ordering::Relaxed))
+        }
+        fn set_frequency_khz(&self, frequency: u64) -> Result<(), &'static str> {
+            if self.reject.load(Ordering::Relaxed) {
+                return Err("test: rejected vote");
+            }
+            self.frequency.store(frequency, Ordering::Relaxed);
+            Ok(())
+        }
+        fn sample_utilization(&self) -> Result<DeviceFrequencyUtilization, &'static str> {
+            Ok(DeviceFrequencyUtilization {
+                busy: self.busy.load(Ordering::Relaxed),
+                total: 100,
+            })
+        }
+    }
+
+    fn setup() -> (Arc<Policy>, Arc<Driver>) {
+        let driver = Arc::new(Driver {
+            frequency: AtomicU64::new(180_000),
+            busy: AtomicU32::new(45),
+            reject: AtomicBool::new(false),
+        });
+        let policy = Arc::new(Policy {
+            index: 0,
+            name: "activity-test",
+            opps: [180_000, 430_000, 800_000]
+                .map(|freq_khz| DeviceFrequencyOpp {
+                    freq_khz,
+                    min_uv: 0,
+                })
+                .to_vec(),
+            driver: driver.clone(),
+            state: Mutex::new(PolicyState {
+                governor: DeviceFrequencyGovernor::SimpleOndemand,
+                requested_khz: 180_000,
+                target_khz: 180_000,
+                thermal_max_khz: 800_000,
+                utilization_pct: None,
+                sample_count: 0,
+                failed_samples: 0,
+                down_samples: 0,
+                ondemand: SimpleOndemandConfig {
+                    upthreshold_pct: 50,
+                    downdifferential_pct: 10,
+                },
+                active_jobs: 0,
+                activity_idle_until_ns: 0,
+            }),
+            worker_started: AtomicBool::new(true),
+        });
+        let mut policies = POLICIES.lock();
+        policies.clear();
+        policies.push(policy.clone());
+        (policy, driver)
+    }
+
+    #[test]
+    fn cold_work_boosts_before_sampling_without_faking_busy() {
+        let _serial = SERIAL.lock().unwrap();
+        let (policy, driver) = setup();
+        poll(&policy);
+        assert_eq!(
+            driver.frequency.load(Ordering::Relaxed),
+            180_000,
+            "45% alone is sticky"
+        );
+        let guard = acquire_activity("activity-test").unwrap();
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 800_000);
+        poll(&policy);
+        assert_eq!(policy.state.lock().utilization_pct, Some(45));
+        drop(guard);
+    }
+
+    #[test]
+    fn retirement_grace_then_normal_four_low_samples_restore_idle_clock() {
+        let _serial = SERIAL.lock().unwrap();
+        let (policy, driver) = setup();
+        let guard = acquire_activity("activity-test").unwrap();
+        driver.busy.store(0, Ordering::Relaxed);
+        drop(guard);
+        let deadline = policy.state.lock().activity_idle_until_ns;
+        assert!(deadline > crate::time::current_time_ns());
+        assert!(deadline <= crate::time::current_time_ns() + ACTIVITY_IDLE_GRACE_NS);
+        for _ in 0..4 {
+            poll(&policy);
+        }
+        assert_eq!(
+            driver.frequency.load(Ordering::Relaxed),
+            800_000,
+            "idle grace holds the floor"
+        );
+        policy.state.lock().activity_idle_until_ns = 0;
+        for _ in 0..3 {
+            poll(&policy);
+        }
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 800_000);
+        poll(&policy);
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 180_000);
+        assert_eq!(policy.state.lock().utilization_pct, Some(0));
+    }
+
+    #[test]
+    fn explicit_governors_and_thermal_cap_override_activity() {
+        let _serial = SERIAL.lock().unwrap();
+        let (_policy, driver) = setup();
+        let guard = acquire_activity("activity-test").unwrap();
+        set_thermal_max_frequency("activity-test", 430_000).unwrap();
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 430_000);
+        set_governor("activity-test", DeviceFrequencyGovernor::Powersave).unwrap();
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 180_000);
+        set_userspace_frequency("activity-test", 430_000).unwrap();
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 430_000);
+        set_governor("activity-test", DeviceFrequencyGovernor::Performance).unwrap();
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 430_000);
+        set_governor("activity-test", DeviceFrequencyGovernor::SimpleOndemand).unwrap();
+        assert_eq!(driver.frequency.load(Ordering::Relaxed), 430_000);
+        drop(guard);
+    }
+
+    #[test]
+    fn nested_jobs_start_grace_only_after_last_retirement() {
+        let _serial = SERIAL.lock().unwrap();
+        let (policy, _driver) = setup();
+        let first = acquire_activity("activity-test").unwrap();
+        let second = acquire_activity("activity-test").unwrap();
+        drop(first);
+        assert_eq!(policy.state.lock().active_jobs, 1);
+        assert_eq!(policy.state.lock().activity_idle_until_ns, 0);
+        drop(second);
+        assert_eq!(policy.state.lock().active_jobs, 0);
+        assert!(policy.state.lock().activity_idle_until_ns > 0);
+    }
+
+    #[test]
+    fn rejected_boost_does_not_leak_activity_or_publish_a_rate() {
+        let _serial = SERIAL.lock().unwrap();
+        let (policy, driver) = setup();
+        driver.reject.store(true, Ordering::Relaxed);
+        assert!(acquire_activity("activity-test").is_err());
+        assert_eq!(policy.state.lock().active_jobs, 0);
+        assert_eq!(policy.state.lock().target_khz, 180_000);
+        driver.reject.store(false, Ordering::Relaxed);
+        drop(acquire_activity("activity-test").unwrap());
+        assert_eq!(policy.state.lock().active_jobs, 0);
+    }
 }
