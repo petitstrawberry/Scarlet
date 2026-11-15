@@ -88,6 +88,81 @@ fn eval_poll_handle(pfd: &mut PollHandle, task: &crate::task::Task) -> (bool, bo
     (pfd.revents != 0, selectable)
 }
 
+/// Wait for any selected object without serializing notifications behind a
+/// timer. The subscription set lives across the scan and registered sleep.
+/// Unsupported sources retain the old bounded recheck, not all descriptors.
+fn wait_for_multiple(
+    task: &crate::task::Task,
+    trapframe: &mut Trapframe,
+    fds: &mut [PollHandle],
+    deadline: Option<u64>,
+) {
+    use alloc::{sync::Arc, vec::Vec};
+    use crate::sync::{Waker, waker::WaitResult};
+    use crate::timer::{TimerPrecision, get_time_ns};
+
+    let waiter = Arc::new(Waker::new_interruptible("native-poll"));
+    loop {
+        if task.has_pending_process_control() {
+            break;
+        }
+        // Shared handle tables can close/reuse an FD while poll sleeps. Watch
+        // removal before resolving objects, and rebuild subscriptions on wake.
+        let table_change = task.handle_table.subscribe_removals(&waiter);
+        let table_generation = table_change.generation();
+        let mut subscriptions = Vec::new();
+        let mut needs_recheck = false;
+        for pfd in fds.iter() {
+            let Some(object) = task.handle_table.get(pfd.handle) else { continue };
+            let Some(selectable) = object.as_selectable() else { continue };
+            let interest = ReadyInterest {
+                read: pfd.events & POLLIN != 0,
+                write: pfd.events & POLLOUT != 0,
+                except: pfd.events & POLLPRI != 0,
+            };
+            match selectable.subscribe_readiness(interest, &waiter) {
+                Some(registrations) if !registrations.is_empty() => subscriptions.extend(registrations),
+                // An empty set cannot wake for terminal events either.
+                _ => needs_recheck = true,
+            }
+        }
+        let mut scan = || {
+            let mut ready = false;
+            for pfd in fds.iter_mut() {
+                ready |= eval_poll_handle(pfd, task).0;
+            }
+            ready
+        };
+        // Covers readiness published before/during subscription installation.
+        if scan() {
+            break;
+        }
+        let now = get_time_ns();
+        if deadline.is_some_and(|end| now >= end) {
+            break;
+        }
+        let timeout = if needs_recheck {
+            super::multi_readiness_recheck_delay(deadline, now)
+        } else {
+            deadline.map(|end| end.saturating_sub(now))
+        };
+        // Register the task first, then scan again before scheduling. A source
+        // notification after this final scan wakes the registered task; an
+        // earlier notification also remains in the private Waker's latch.
+        let result = waiter.wait_with_timeout_precision_until(
+            task.get_id(), trapframe, timeout, TimerPrecision::Exact,
+            || scan() || task.has_pending_process_control()
+                || table_change.generation() != table_generation,
+        );
+        if result == WaitResult::Interrupted {
+            break;
+        }
+        // Spurious wakes do not imply readiness or restart the original
+        // timeout. Rebuild also follows a concurrently recycled descriptor.
+        drop(subscriptions);
+    }
+}
+
 pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
@@ -174,68 +249,9 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
         let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
             if selectable_count > 1 {
-                use crate::object::capability::selectable::multi_readiness_recheck_delay;
-                use crate::timer::get_time_ns;
-
-                let deadline =
-                    timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
-                loop {
-                    // Process-control events (Kill, Interrupt, ...) are only
-                    // processed at the user-space return boundary. Break the
-                    // loop so they can be delivered instead of starving them
-                    // behind kernel-space readiness rechecks.
-                    if task.has_pending_process_control() {
-                        break;
-                    }
-
-                    let Some(recheck_delay_ns) =
-                        multi_readiness_recheck_delay(deadline, get_time_ns())
-                    else {
-                        break;
-                    };
-
-                    // Multi-object registration is not available yet, but a
-                    // pure timer sleep also means activity on every watched
-                    // object must wait for that timer. Anchor the bounded wait
-                    // to the first selectable object so its readiness wakes us
-                    // immediately, while the timeout still guarantees that all
-                    // other objects are rescanned.
-                    let wait_idx = first_selectable_idx
-                        .expect("multiple selectable handles must have a first handle");
-                    let pfd = &fds[wait_idx];
-                    if let Some(kobj) = task.handle_table.get(pfd.handle)
-                        && let Some(sel) = kobj.as_selectable()
-                    {
-                        let _ = sel.wait_until_ready(
-                            ReadyInterest {
-                                read: (pfd.events & POLLIN) != 0,
-                                write: (pfd.events & POLLOUT) != 0,
-                                except: (pfd.events & POLLPRI) != 0,
-                            },
-                            trapframe,
-                            Some(recheck_delay_ns),
-                            0,
-                        );
-                    } else {
-                        task.sleep_with_precision(
-                            trapframe,
-                            recheck_delay_ns,
-                            crate::timer::TimerPrecision::Exact,
-                        );
-                    }
-
-                    any_ready = false;
-                    for pfd in fds.iter_mut() {
-                        let (ready, _) = eval_poll_handle(pfd, &task);
-                        if ready {
-                            any_ready = true;
-                        }
-                    }
-
-                    if any_ready {
-                        break;
-                    }
-                }
+                let deadline = timeout_ns.map(|duration_ns|
+                    crate::timer::get_time_ns().saturating_add(duration_ns));
+                wait_for_multiple(&task, trapframe, fds, deadline);
             } else if let Some(wait_idx) = first_selectable_idx {
                 use crate::timer::get_time_ns;
 

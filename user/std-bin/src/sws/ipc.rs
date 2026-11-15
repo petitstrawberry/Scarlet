@@ -2847,24 +2847,21 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                         } else {
                             0
                         };
-                    // Scarlet's multi-object poll currently performs bounded
-                    // readiness scans. Polling both the socket and wake pipe
-                    // together therefore wakes every millisecond even while a
-                    // client is idle. With several desktop clients that turns
-                    // otherwise sleeping SWS threads into a material CPU load.
-                    //
-                    // Incoming client traffic is latency-sensitive, so block
-                    // on the socket directly. Server-to-client notifications
-                    // still use the wake pipe, which is sampled after this
-                    // short bounded wait. Its worst-case latency remains the
-                    // existing eight-millisecond client poll interval.
-                    let mut socket_handle =
-                        PollHandle::new(socket.as_raw() as u32, socket_interest);
+                    // Both socket traffic and server notifications wake this
+                    // single subscription-backed wait. No periodic timeout is
+                    // needed when the notification pipe exists.
+                    let mut handles = [
+                        PollHandle::new(socket.as_raw() as u32, socket_interest),
+                        PollHandle::new(wake_read.as_ref().map_or(0, |wake| wake.as_raw() as u32), POLLIN),
+                    ];
+                    let (count, timeout) = if wake_read.is_some() {
+                        (2, -1)
+                    } else {
+                        // Pipe creation failed: outgoing work has no notifier.
+                        (1, CLIENT_POLL_TIMEOUT_NS)
+                    };
                     super::trace::ipc_poll();
-                    let mut ready = match poll(
-                        core::slice::from_mut(&mut socket_handle),
-                        CLIENT_POLL_TIMEOUT_NS,
-                    ) {
+                    let ready = match poll(&mut handles[..count], timeout) {
                         Ok(ready) => ready,
                         Err(error) => {
                             println!("[ClientThread {}] poll failed: {:?}", client_id, error);
@@ -2872,23 +2869,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             continue;
                         }
                     };
-                    let socket_revents = socket_handle.revents;
-                    let mut wake_revents = 0;
-                    if let Some(wake) = wake_read.as_ref() {
-                        let mut wake_handle = PollHandle::new(wake.as_raw() as u32, POLLIN);
-                        match poll(core::slice::from_mut(&mut wake_handle), 0) {
-                            Ok(wake_ready) => ready = ready.saturating_add(wake_ready),
-                            Err(error) => {
-                                println!(
-                                    "[ClientThread {}] wake poll failed: {:?}",
-                                    client_id, error
-                                );
-                                thread::sleep(core::time::Duration::from_millis(10));
-                                continue;
-                            }
-                        }
-                        wake_revents = wake_handle.revents;
-                    }
+                    let socket_revents = handles[0].revents;
+                    let wake_revents = if count == 2 { handles[1].revents } else { 0 };
                     if ready > 0 {
                         super::trace::ipc_poll_ready();
                     }

@@ -720,3 +720,21 @@ fn gpu_capabilities_above_legacy_fd_count_survive_clone_and_reuse() {
     assert_eq!(table.insert(KernelObject::Gpu(object)).unwrap(), 1099);
     assert_eq!(table.open_count(), 1100);
 }
+
+#[test_case]
+fn shared_handle_close_notifies_poll_but_independent_clone_does_not() {
+    let table = HandleTable::new();
+    let handle = table.insert(KernelObject::File(Arc::new(MockFileObject::new(b"watched".to_vec())))).unwrap();
+    let waiter = Arc::new(crate::sync::Waker::new_interruptible("table-poll-test"));
+    let registration = table.subscribe_removals(&waiter);
+    let independent = table.deep_clone();
+    drop(independent.remove(handle));
+    assert_eq!(registration.generation(), 0);
+    drop(table.clone().remove(handle));
+    assert_eq!(registration.generation(), 1);
+    assert!(table.get(handle).is_none());
+    let reused = table.insert(KernelObject::File(Arc::new(MockFileObject::new(b"new".to_vec())))).unwrap();
+    assert_eq!(reused, handle);
+    table.close_all();
+    assert_eq!(registration.generation(), 2);
+}

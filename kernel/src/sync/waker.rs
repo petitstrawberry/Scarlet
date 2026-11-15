@@ -918,7 +918,7 @@ impl Waker {
         self.wait_with_timeout_precision_until(task_id, trapframe, timeout_ns, precision, || false)
     }
 
-    fn wait_with_timeout_precision_until(
+    pub(crate) fn wait_with_timeout_precision_until(
         &self,
         task_id: usize,
         trapframe: &mut Trapframe,
