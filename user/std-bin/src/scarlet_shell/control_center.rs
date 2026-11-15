@@ -16,7 +16,7 @@ use scarlet_ui::state::State;
 use scarlet_ui::view::{View, ViewExt};
 use scarlet_ui::views::containers::ViewTuple;
 use scarlet_ui::views::{
-    Button, Divider, ElevationRole, GlassMaterial, HStack, HeaderBar, Slider, Spacer, Surface,
+    Button, Divider, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface,
     SurfaceRole, SurfaceStyle, Text, TextStyle, VStack,
 };
 use scarlet_ui::{Icon, IconSize};
@@ -266,8 +266,8 @@ impl ControlCenterMetrics {
     /// Presentation-specific dimensions for pointer and touch targets.
     pub fn resolve(presentation: ControlCenterPresentation, output_count: usize) -> Self {
         let (width, margin, gap, target_height, details_height) = match presentation {
-            ControlCenterPresentation::LaptopPopover => (304, 12, 12, 36, 108),
-            ControlCenterPresentation::TabletSheet => (392, 16, 12, 44, 128),
+            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 84),
+            ControlCenterPresentation::TabletSheet => (392, 10, 6, 44, 96),
         };
         let output_rows = if output_count > 1 {
             output_count as u32
@@ -277,9 +277,9 @@ impl ControlCenterMetrics {
             0
         };
         let controls_height = (2 + output_rows) * target_height + (1 + output_rows) * gap;
-        // Standard header (48), two dividers (1 each), and stack spacing.
-        let height =
-            margin * 2 + 48 + controls_height + details_height + target_height + gap * 5 + 2;
+        // Five compact sections, including two one-pixel dividers. The
+        // controls identify the panel without an extra title/header row.
+        let height = margin * 2 + controls_height + details_height + target_height + gap * 4 + 2;
         Self {
             width,
             height,
@@ -434,8 +434,8 @@ pub fn build_control_center_view(
     }
 
     let brightness_row = if snapshot.brightness_percent.is_some() {
-        // Only this small component rebuilds its value label during a drag.
-        // Standard Slider retains pointer/touch capture and keyboard handling.
+        // Only the percentage text rebuilds during a drag. The row and the
+        // independently subscribed Slider keep their elements and capture.
         boxed(BrightnessRow {
             value: brightness,
             action: action.clone(),
@@ -603,11 +603,6 @@ pub fn build_control_center_view(
     .frame(content_width, target_height);
 
     let content = VStack::new(DynamicViews::new(vec![
-        boxed(
-            HeaderBar::new(Text::new("Control Center").text_style(TextStyle::Headline))
-                .surface(Color::TRANSPARENT)
-                .frame_width(content_width),
-        ),
         controls,
         boxed(Divider::new().frame_width(content_width)),
         boxed(details),
@@ -660,12 +655,7 @@ impl BrightnessRow {
         HStack::new((
             VStack::new((
                 Text::new("Brightness").text_style(TextStyle::Caption),
-                Text::new(alloc::format!(
-                    "{}%",
-                    self.value.get().clamp(0.0, 100.0).round() as u8
-                ))
-                .font_size(10.0)
-                .color(ColorPalette::default().text_secondary()),
+                BrightnessValueLabel(self.value.clone()),
             ))
             .spacing(0.0)
             .alignment(Alignment::Leading)
@@ -697,8 +687,31 @@ impl View for BrightnessRow {
             boxed(row.content())
         }))
     }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+/// Keep continuous slider updates out of the row's structural reconciliation.
+/// Slider already subscribes to the same value to update its own render object.
+#[derive(Clone)]
+struct BrightnessValueLabel(State<f32>);
+
+impl View for BrightnessValueLabel {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(ComponentElement::new_with_builder(self.clone(), |label| {
+            boxed(
+                Text::new(alloc::format!(
+                    "{}%",
+                    label.0.get().clamp(0.0, 100.0).round() as u8
+                ))
+                .font_size(10.0)
+                .color(ColorPalette::default().text_secondary()),
+            )
+        }))
+    }
     fn listenables(&self) -> Vec<&dyn scarlet_ui::state::Listenable> {
-        vec![&self.value]
+        vec![&self.0]
     }
     fn as_any(&self) -> &dyn core::any::Any {
         self
@@ -1008,8 +1021,8 @@ mod tests {
                 }
                 assert_eq!(
                     captures(element.as_ref()),
-                    3,
-                    "one panel plane plus two standard slider thumbs"
+                    2,
+                    "only the two standard slider thumbs read local backdrop"
                 );
                 let mut rects = Vec::new();
                 collect(element.as_ref(), Point::ZERO, &mut rects);
