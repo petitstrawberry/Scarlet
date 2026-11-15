@@ -1,7 +1,7 @@
 //! Optional GPU-backed scene composition for SWS.
 
 use super::cursor::Cursor;
-use super::status_backdrop::{BackdropGeometry, expand_damage};
+use super::status_backdrop::{BackdropDamage, BackdropGeometry, backdrop_refreshes, expand_damage};
 use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_rect_row_span};
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use gpu_raw::{Gpu, GpuContext, GpuImage, GpuImageBgraRect};
@@ -1179,7 +1179,7 @@ impl GpuCompositor {
         navigation_indicator: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         damage: Option<DamageRect>,
-        scene_damage: Option<&[(i32, i32, u32, u32)]>,
+        scene_damage: Option<&[BackdropDamage]>,
         backdrops: &[(WindowId, BackdropGeometry)],
     ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
         let profiling = super::trace::profile_enabled() || self.frame_profile.is_some();
@@ -1215,24 +1215,20 @@ impl GpuCompositor {
         let mut texture_uploads = Vec::new();
         self.prepare_scene_textures(scenes, windows, &mut texture_uploads)?;
         self.transfer_visible_imported_shm(windows)?;
-        // Propagate damage through overlapping sampling halos. Repairing an
-        // old swapchain image or moving the cursor does not change the clean
-        // scene captured by these materials.
-        let mut source_damage = if backdrops.is_empty() {
-            None
+        // Preserve native content ownership when deciding whether background
+        // pixels changed. Presentation repair/halo expansion below remains
+        // conservative, but must not force a fresh capture of unchanged glass.
+        let refresh = if backdrops.is_empty() {
+            Vec::new()
         } else {
-            scene_damage.map(<[_]>::to_vec)
+            let window_order: Vec<_> = windows.iter().map(|window| window.id).collect();
+            backdrop_refreshes(backdrops, &window_order,
+                if self.force_full_repaint { None } else { scene_damage })
         };
-        if let Some(rects) = source_damage.as_mut() {
-            let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
-            expand_damage(&geometries, rects);
-        }
-        for (_, geometry, textures) in &mut self.backdrops {
-            if self.force_full_repaint
-                || source_damage
-                    .as_ref()
-                    .is_none_or(|rects| rects.iter().any(|&rect| geometry.intersects_source(rect)))
-            {
+        for (id, geometry, textures) in &mut self.backdrops {
+            if backdrops.iter().zip(&refresh)
+                .find(|((owner, current), _)| id == owner && geometry == current)
+                .is_none_or(|(_, refresh)| *refresh) {
                 textures.valid = false;
             }
         }

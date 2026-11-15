@@ -22,7 +22,7 @@ use super::pointer_lock::{
 };
 use super::remote::capture::CaptureSession;
 use super::remote::server::{RemoteEvent, RemoteServer};
-use super::status_backdrop::{BackdropGeometry, CpuBackdrop, expand_damage};
+use super::status_backdrop::{BackdropDamage, BackdropGeometry, CpuBackdrop, expand_damage};
 use super::window::{
     PresentationInstance, PresentationTransform, WindowManager, WindowType, maximized_geometry_for,
     rounded_rect_contains_point, rounded_rect_row_span,
@@ -2420,6 +2420,7 @@ pub struct Compositor {
     backdrops: Vec<(u32, CpuBackdrop)>,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
+    pending_backdrop_damage: Vec<BackdropDamage>,
     presented_damage: Vec<PresentDamage>,
     event_counter: u64,
     pending_frame_callbacks: Vec<PendingFrameCallback>,
@@ -2927,6 +2928,7 @@ impl Compositor {
             backdrops: Vec::new(),
             full_redraw_needed: true,
             pending_damage: Vec::new(),
+            pending_backdrop_damage: Vec::new(),
             presented_damage: Vec::new(),
             event_counter: 0,
             pending_frame_callbacks: Vec::new(),
@@ -3675,6 +3677,7 @@ impl Compositor {
         self.refresh_input_panel();
         self.full_redraw_needed = true;
         self.pending_damage.clear();
+        self.pending_backdrop_damage.clear();
         Ok(true)
     }
 
@@ -3955,6 +3958,14 @@ impl Compositor {
     }
 
     fn add_pending_damage(&mut self, rect: (i32, i32, u32, u32)) {
+        self.add_damage_from(rect, None);
+    }
+
+    fn add_window_content_damage(&mut self, window_id: u32, rect: (i32, i32, u32, u32)) {
+        self.add_damage_from(rect, Some(window_id));
+    }
+
+    fn add_damage_from(&mut self, rect: (i32, i32, u32, u32), foreground: Option<u32>) {
         if !ENABLE_DIRTY_RECT {
             self.full_redraw_needed = true;
             return;
@@ -3965,6 +3976,14 @@ impl Compositor {
         };
 
         Self::push_damage_rect(&mut self.pending_damage, (sx0, sy0, w, h));
+        BackdropDamage::push_bounded(
+            &mut self.pending_backdrop_damage,
+            BackdropDamage {
+                rect: (sx0, sy0, w, h),
+                foreground,
+            },
+            MAX_PENDING_DAMAGE_RECTS,
+        );
     }
 
     fn window_order(&self) -> Vec<u32> {
@@ -4151,6 +4170,7 @@ impl Compositor {
         self.cursor.mark_drawn();
         self.full_redraw_needed = false;
         self.pending_damage.clear();
+        self.pending_backdrop_damage.clear();
         Ok(())
     }
 
@@ -4325,6 +4345,7 @@ impl Compositor {
         self.gpu_admission_retry.clear();
         self.full_redraw_needed = true;
         self.pending_damage.clear();
+        self.pending_backdrop_damage.clear();
         self.presented_damage.clear();
         super::ipc::notify_sgfx_backend_lost();
         if self.backend == SwsBackend::Sgfx {
@@ -4393,7 +4414,8 @@ impl Compositor {
         let damage = self.gpu_present_damage();
         // Keep source damage separate from cursor and swapchain repair damage.
         // Materials only need a fresh capture when their sampling halo changes.
-        let scene_damage = (!self.full_redraw_needed).then_some(self.pending_damage.as_slice());
+        let scene_damage =
+            (!self.full_redraw_needed).then_some(self.pending_backdrop_damage.as_slice());
         let backdrops = self.window_backdrops();
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
@@ -4458,6 +4480,7 @@ impl Compositor {
                 self.cursor.mark_drawn();
                 self.full_redraw_needed = false;
                 self.pending_damage.clear();
+                self.pending_backdrop_damage.clear();
                 self.presented_damage.clear();
                 Ok(GpuPresentResult::Presented)
             }
@@ -12412,7 +12435,7 @@ impl Compositor {
                         transform.height,
                     ));
                 } else {
-                    self.add_pending_damage((sx0, sy0, w, h));
+                    self.add_window_content_damage(window_id, (sx0, sy0, w, h));
                 }
                 for transform in presentation_instances {
                     self.add_pending_damage((
@@ -12607,7 +12630,7 @@ impl Compositor {
                                 for rect in
                                     shared_frame_damage(damage.extent, geometry, &damage.rects)
                                 {
-                                    self.add_pending_damage(rect);
+                                    self.add_window_content_damage(window_id, rect);
                                 }
                             }
                             for instance in instances {
