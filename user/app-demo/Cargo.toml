@@ -12,7 +12,7 @@ path = "src/main.rs"
 toml = "0.8"
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "5ec2a1eb4062786b8fd94c1096618d3c948c794b", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1a8acc746b87a99dd18ebdc1b306de556d9893de", default-features = false, features = ["std", "platform-sws"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "5ec2a1eb4062786b8fd94c1096618d3c948c794b", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1a8acc746b87a99dd18ebdc1b306de556d9893de", default-features = false, features = ["std", "platform-winit"] }
