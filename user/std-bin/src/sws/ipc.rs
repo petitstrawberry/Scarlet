@@ -4070,10 +4070,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 });
             }
             Ok(ClientMessageRef::GetWindowList {}) => {
-                println!(
-                    "[ClientThread {}] GetWindowList: requesting window list",
-                    client_id
-                );
+                if is_sws_debug_enabled() {
+                    println!(
+                        "[ClientThread {}] GetWindowList: requesting window list",
+                        client_id
+                    );
+                }
                 push_ipc_event(IpcEvent::GetWindowList {
                     client_id,
                     request_id,

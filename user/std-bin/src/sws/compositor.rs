@@ -14129,7 +14129,7 @@ impl Compositor {
                 client_id,
                 request_id,
             } => {
-                println!(
+                sws_debug!(
                     "[Compositor] GetWindowList request from client {}",
                     client_id
                 );
@@ -14164,7 +14164,7 @@ impl Compositor {
                     request_id,
                     payload,
                 );
-                println!(
+                sws_debug!(
                     "[Compositor] Sent WINDOW_LIST: {} windows to client {}",
                     entries.len(),
                     client_id
