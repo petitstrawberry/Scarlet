@@ -577,9 +577,13 @@ pub(crate) fn image_upload_native_layout(
     })
 }
 
-/// Validated layout for one image-to-userspace BGRA readback.
+#[path = "resource/readback_spans.rs"]
+mod readback_spans;
+
+/// Validated layout for one image-to-userspace native readback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GpuImageReadbackLayout {
+    backend_spans: bool,
     destination_stride: usize,
     destination_row_bytes: usize,
     destination_offset: usize,
@@ -616,6 +620,15 @@ pub(crate) fn image_readback_native_layout(
     image: super::GpuBackendImageInfo,
     layout: GpuBackendImageLayout,
 ) -> Result<GpuImageReadbackLayout, &'static str> {
+    image_readback_layout_impl(request, image, layout, false)
+}
+
+fn image_readback_layout_impl(
+    request: &GpuContextReadbackImageBgra,
+    image: super::GpuBackendImageInfo,
+    layout: GpuBackendImageLayout,
+    backend_spans: bool,
+) -> Result<GpuImageReadbackLayout, &'static str> {
     let bytes = match image.format {
         GPU_IMAGE_FORMAT_BGRA8_UNORM | super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT => 4,
         super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
@@ -632,12 +645,14 @@ pub(crate) fn image_readback_native_layout(
         || image.array_layers != 1
         || image.cube
         || image.usage & super::GPU_IMAGE_USAGE_TRANSFER_SRC == 0
-        || !matches!(
-            layout.modifier,
-            super::GPU_IMAGE_MODIFIER_LINEAR
-                | super::GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4
-        )
-        || (image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || (!backend_spans
+            && !matches!(
+                layout.modifier,
+                super::GPU_IMAGE_MODIFIER_LINEAR
+                    | super::GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4
+            ))
+        || (!backend_spans
+            && image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
             && layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR)
         || layout.plane_count != 1
     {
@@ -750,6 +765,7 @@ pub(crate) fn image_readback_native_layout(
     }
 
     Ok(GpuImageReadbackLayout {
+        backend_spans,
         destination_stride,
         destination_row_bytes,
         destination_offset,
@@ -988,6 +1004,12 @@ pub(crate) enum GpuImageBacking {
 }
 
 impl GpuImageBacking {
+    /// Imported storage is a consumer lease; TRANSFER_DST describes the CPU
+    /// publication callback and does not grant shaders a physical write mapping.
+    pub(super) fn allows_gpu_write(&self) -> bool {
+        matches!(self, Self::Private(_))
+    }
+
     fn private(layout: GpuBackendImageLayout, allow_segmented: bool) -> Result<Self, &'static str> {
         Ok(Self::Private(GpuPrivateImageBacking::new(
             layout,
@@ -1176,6 +1198,23 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
+    pub(crate) fn validate_readback(
+        &self,
+        request: &GpuContextReadbackImageBgra,
+        native: bool,
+    ) -> Result<GpuImageReadbackLayout, &'static str> {
+        if native {
+            image_readback_layout_impl(
+                request,
+                self.query_info(),
+                self.layout(),
+                self.backend_image.supports_native_readback_spans(),
+            )
+        } else {
+            image_readback_layout(request, self.query_info(), self.layout())
+        }
+    }
+
     pub(crate) fn new_shared(
         backend: Arc<dyn GpuBackend>,
         image: Arc<crate::device::graphics::shared_image::SharedImage>,
@@ -1460,6 +1499,49 @@ impl GpuImage {
         let backing = self.backing.private_backing()?;
         let _cpu_access = CpuAccess::image(context, self.backend_image.as_ref())?;
         context.readback_image(self.backend_image.as_ref(), layout.transfer)?;
+        if layout.backend_spans {
+            let mut row_bytes = Vec::new();
+            row_bytes
+                .try_reserve_exact(layout.destination_row_bytes)
+                .map_err(|_| "GPU readback row allocation failed")?;
+            row_bytes.resize(layout.destination_row_bytes, 0);
+            let texel_bytes = layout.destination_row_bytes / layout.transfer.width as usize;
+            for row in 0..layout.height {
+                readback_spans::pack_row(
+                    layout.transfer.dst_x,
+                    layout.transfer.dst_y + row as u32,
+                    layout.transfer.width,
+                    texel_bytes,
+                    self.layout.total_size,
+                    &mut row_bytes,
+                    |x, y, width| self.backend_image.native_readback_span(x, y, width),
+                    |offset, destination| {
+                        let offset =
+                            usize::try_from(offset).map_err(|_| "GPU readback offset overflows")?;
+                        let mut copied = 0;
+                        backing.for_each_range(offset, destination.len(), |source, part_length| {
+                            crate::arch::invalidate_dcache_to_poc_range(source, part_length);
+                            // SAFETY: this image retains the backing, for_each_range
+                            // bounds the slice, and CPU access excludes GPU writers.
+                            let source = unsafe {
+                                core::slice::from_raw_parts(source as *const u8, part_length)
+                            };
+                            destination[copied..copied + part_length].copy_from_slice(source);
+                            copied += part_length;
+                            Ok(())
+                        })
+                    },
+                )?;
+                let destination = row
+                    .checked_mul(layout.destination_stride)
+                    .and_then(|offset| offset.checked_add(layout.destination_offset))
+                    .and_then(|offset| destination_ptr.checked_add(offset))
+                    .ok_or("GPU readback destination address overflows")?;
+                copy_to_user(task, destination, &row_bytes)
+                    .map_err(|_| "Failed to copy GPU image pixels to user")?;
+            }
+            return Ok(());
+        }
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)

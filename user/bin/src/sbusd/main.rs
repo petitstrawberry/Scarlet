@@ -23,6 +23,34 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::vec::Vec;
 
+// Follow the daemon log-level convention: routine traffic is opt-in. Cache
+// the environment lookup so disabled logging does not allocate per message.
+fn is_sbus_debug_enabled() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
+    let cached = LOG_CACHE.load(Ordering::Relaxed);
+    if cached != u8::MAX {
+        return cached != 0;
+    }
+    let enabled = std::env::var("SBUSD_LOG").is_some_and(|value| {
+        matches!(
+            value.as_str(),
+            "debug" | "DEBUG" | "3" | "trace" | "TRACE" | "4"
+        )
+    });
+    LOG_CACHE.store(enabled as u8, Ordering::Relaxed);
+    enabled
+}
+
+macro_rules! sbus_debug {
+    ($($arg:tt)*) => {
+        if is_sbus_debug_enabled() {
+            println!($($arg)*);
+        }
+    };
+}
+
 /// Service registry
 static SERVICES: Mutex<BTreeMap<String, ServiceInfo>> = Mutex::new(BTreeMap::new());
 
@@ -102,7 +130,7 @@ fn main() -> i32 {
                 let client_id = client_id_counter;
                 client_id_counter += 1;
 
-                println!("sbusd: Accepted client {}", client_id);
+                sbus_debug!("sbusd: Accepted client {}", client_id);
 
                 if let Err(error) = client_socket.set_nonblocking(true) {
                     println!(
@@ -165,7 +193,7 @@ fn main() -> i32 {
 }
 
 fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mutex<Socket>>) {
-    println!("[Client {}] Handler started (non-blocking mode)", client_id);
+    sbus_debug!("[Client {}] Handler started (non-blocking mode)", client_id);
 
     let mut buffer = [0u8; 4096];
     let mut read_buffer = Vec::new();
@@ -191,10 +219,12 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
                 // data. Attempt a read in every case and let the read result
                 // decide whether the connection is truly gone.
                 if revents & POLLIN == 0 && revents & (POLLHUP | POLLERR) != 0 {
-                    println!(
-                        "[Client {}] Poll reported terminal socket event: {:#x}",
-                        client_id, revents
-                    );
+                    if revents & POLLERR != 0 || is_sbus_debug_enabled() {
+                        println!(
+                            "[Client {}] Poll reported terminal socket event: {:#x}",
+                            client_id, revents
+                        );
+                    }
                     break;
                 }
                 revents
@@ -209,7 +239,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
 
         match read_result {
             Ok(0) => {
-                println!("[Client {}] Connection closed (read returned 0)", client_id);
+                sbus_debug!("[Client {}] Connection closed (read returned 0)", client_id);
                 break;
             }
             Ok(n) => {
@@ -252,10 +282,12 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if revents & (POLLHUP | POLLERR) != 0 {
-                    println!(
-                        "[Client {}] Closing after terminal poll event returned WouldBlock: {:#x}",
-                        client_id, revents
-                    );
+                    if revents & POLLERR != 0 || is_sbus_debug_enabled() {
+                        println!(
+                            "[Client {}] Closing after terminal poll event returned WouldBlock: {:#x}",
+                            client_id, revents
+                        );
+                    }
                     break;
                 }
 
@@ -298,7 +330,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
         to_remove
     };
     for bus_name in &removed_services {
-        println!("[Client {}] Unregistering service: {}", client_id, bus_name);
+        sbus_debug!("[Client {}] Unregistering service: {}", client_id, bus_name);
     }
 
     // Remove client from registry
@@ -306,7 +338,7 @@ fn handle_client(client_id: usize, mut read_socket: Socket, write_socket: Arc<Mu
         let mut clients = CLIENTS.lock();
         clients.remove(&client_id);
     }
-    println!("[Client {}] Removed from client registry", client_id);
+    sbus_debug!("[Client {}] Removed from client registry", client_id);
 
     // Broadcast ServiceUnregistered for each removed service so callers
     // waiting on them can abort their wait instead of hanging forever.
@@ -333,11 +365,11 @@ fn handle_message(
 ) -> Result<(), &'static str> {
     match msg {
         Message::Hello { client_name } => {
-            println!("[Client {}] Hello: {}", client_id, client_name);
+            sbus_debug!("[Client {}] Hello: {}", client_id, client_name);
             Ok(())
         }
         Message::RegisterService { bus_name } => {
-            println!("[Client {}] Registering service: {}", client_id, bus_name);
+            sbus_debug!("[Client {}] Registering service: {}", client_id, bus_name);
 
             let name_taken_by_other = {
                 let services = SERVICES.lock();
@@ -374,9 +406,10 @@ fn handle_message(
                 services.insert(bus_name.clone(), service_info);
             }
 
-            println!(
+            sbus_debug!(
                 "sbusd: Service registered: {} (client {})",
-                bus_name, client_id
+                bus_name,
+                client_id
             );
 
             // Send acknowledgment
@@ -391,7 +424,7 @@ fn handle_message(
             method: _,
             args: _,
         } => {
-            println!("[Client {}] CallMethod: {}", client_id, destination);
+            sbus_debug!("[Client {}] CallMethod: {}", client_id, destination);
 
             // Snapshot routing information under short, non-nested registry
             // locks. No global registry lock may be held across socket I/O.
@@ -400,9 +433,10 @@ fn handle_message(
                 services.get(destination).map(|service| service.client_id)
             };
             if let Some(destination_client_id) = destination_client_id {
-                println!(
+                sbus_debug!(
                     "sbusd: Routing to service {} (client {})",
-                    destination, destination_client_id
+                    destination,
+                    destination_client_id
                 );
 
                 if let Some(dest_socket) = get_client_socket(destination_client_id) {
@@ -414,7 +448,7 @@ fn handle_message(
                     let msg_bytes = msg.to_bytes()?;
 
                     // Forward the message to the destination service
-                    println!(
+                    sbus_debug!(
                         "sbusd: Forwarding CALL_METHOD to client {}",
                         destination_client_id
                     );
@@ -453,7 +487,7 @@ fn handle_message(
 
                     // Don't send response yet - wait for the actual response from the service
                     // The response will be handled when we receive MethodReturn or MethodError
-                    println!("sbusd: Call forwarded, waiting for response");
+                    sbus_debug!("sbusd: Call forwarded, waiting for response");
                     return Ok(()); // Don't send anything to the caller yet
                 } else {
                     println!(
@@ -482,9 +516,9 @@ fn handle_message(
                     message: error_string,
                 };
 
-                println!("[Client {}] Sending MethodError...", client_id);
+                sbus_debug!("[Client {}] Sending MethodError...", client_id);
                 match send_message(socket, &reply) {
-                    Ok(_) => println!("[Client {}] MethodError sent successfully", client_id),
+                    Ok(_) => sbus_debug!("[Client {}] MethodError sent successfully", client_id),
                     Err(e) => {
                         println!("[Client {}] Failed to send MethodError: {:?}", client_id, e)
                     }
@@ -494,7 +528,7 @@ fn handle_message(
             Ok(())
         }
         Message::MethodReturn { serial, result } => {
-            println!(
+            sbus_debug!(
                 "[Client {}] MethodReturn: serial={}, result len={}",
                 client_id,
                 serial,
@@ -504,14 +538,15 @@ fn handle_message(
             let pending = take_pending_call(client_id);
 
             if let Some(pending) = pending {
-                println!(
+                sbus_debug!(
                     "sbusd: Found pending call: caller={}, destination={}",
-                    pending.caller_client_id, pending.destination
+                    pending.caller_client_id,
+                    pending.destination
                 );
 
                 if let Some(caller_socket) = get_client_socket(pending.caller_client_id) {
                     // Forward the MethodReturn back to the caller
-                    println!(
+                    sbus_debug!(
                         "sbusd: Forwarding MethodReturn to caller {}",
                         pending.caller_client_id
                     );
@@ -551,14 +586,15 @@ fn handle_message(
             let pending = take_pending_call(client_id);
 
             if let Some(pending) = pending {
-                println!(
+                sbus_debug!(
                     "sbusd: Found pending call: caller={}, destination={}",
-                    pending.caller_client_id, pending.destination
+                    pending.caller_client_id,
+                    pending.destination
                 );
 
                 if let Some(caller_socket) = get_client_socket(pending.caller_client_id) {
                     // Forward the MethodError back to the caller
-                    println!(
+                    sbus_debug!(
                         "sbusd: Forwarding MethodError to caller {}",
                         pending.caller_client_id
                     );
@@ -773,12 +809,12 @@ fn send_ok(socket: &Arc<Mutex<Socket>>) -> Result<(), &'static str> {
 
 fn send_message(socket: &Arc<Mutex<Socket>>, msg: &Message) -> Result<(), &'static str> {
     let bytes = msg.to_bytes()?;
-    println!("[send_message] Sending {} bytes", bytes.len());
+    sbus_debug!("[send_message] Sending {} bytes", bytes.len());
 
     let mut sock = socket.lock();
     write_all(&mut sock, &bytes)?;
 
-    println!("[send_message] Successfully sent all {} bytes", bytes.len());
+    sbus_debug!("[send_message] Successfully sent all {} bytes", bytes.len());
     Ok(())
 }
 
@@ -826,7 +862,7 @@ fn write_all_inner(
             Ok(n) => {
                 written += n;
                 stall_deadline_ns = monotonic_time_ns().saturating_add(CLIENT_WRITE_TIMEOUT_NS);
-                println!("[write_all] Wrote {} bytes (total: {})", n, written);
+                sbus_debug!("[write_all] Wrote {} bytes (total: {})", n, written);
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 let now_ns = monotonic_time_ns();

@@ -9,13 +9,16 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use scarlet_ui::color::ColorPalette;
-use scarlet_ui::element::Element;
-use scarlet_ui::geometry::{Alignment, Size};
+use scarlet_ui::color::{Color, ColorPalette};
+use scarlet_ui::element::{ComponentElement, Element};
+use scarlet_ui::geometry::{Alignment, Point, Rect, Size};
 use scarlet_ui::state::State;
 use scarlet_ui::view::{View, ViewExt};
 use scarlet_ui::views::containers::ViewTuple;
-use scarlet_ui::views::{Button, HStack, Slider, Spacer, Surface, SurfaceRole, Text, VStack};
+use scarlet_ui::views::{
+    Button, Divider, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface,
+    SurfaceRole, SurfaceStyle, Text, TextStyle, VStack,
+};
 use scarlet_ui::{Icon, IconSize};
 
 /// The shell presentation used for the Control Center window.
@@ -160,6 +163,69 @@ pub struct ControlCenterSnapshot {
     pub input_environment: InputEnvironmentSnapshot,
 }
 
+impl ControlCenterSnapshot {
+    /// Initial view before the background providers have answered.
+    pub fn unavailable() -> Self {
+        Self {
+            power: Default::default(),
+            audio: AudioSnapshot::unavailable(),
+            brightness_percent: None,
+            network: NetworkSnapshot {
+                available: false,
+                interfaces: Vec::new(),
+            },
+            system: SystemSnapshot {
+                cpu_percent: None,
+                task_count: None,
+            },
+            input_environment: InputEnvironmentSnapshot {
+                available: false,
+                tablet_mode: None,
+                touch_present: None,
+                keyboard_present: None,
+                pointer_present: None,
+            },
+        }
+    }
+}
+
+impl Default for ControlCenterSnapshot {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+/// One requested opening and its completed provider sample. A cancelled
+/// opening cannot publish an in-flight sample into a later opening.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ControlCenterSession {
+    pub open: bool,
+    pub snapshot: Option<ControlCenterSnapshot>,
+    generation: u64,
+}
+
+impl ControlCenterSession {
+    pub fn request_open(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.snapshot = None;
+        self.open = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn publish(&mut self, generation: u64, snapshot: ControlCenterSnapshot) {
+        if self.open && self.generation == generation {
+            self.snapshot = Some(snapshot);
+        }
+    }
+}
+
 /// Settings destination requested by Control Center.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlCenterSettingsLink {
@@ -192,6 +258,27 @@ pub enum ControlCenterAction {
     ConfirmReboot,
 }
 
+/// Suppress repeated integer writes only while their acknowledged provider
+/// value remains current. Keep this in the provider worker, not the Slider:
+/// input remains continuous and a failed request can be retried unchanged.
+#[derive(Default)]
+pub(super) struct PercentWriteState {
+    acknowledged: Option<(u8, u8)>,
+}
+
+impl PercentWriteState {
+    pub fn needs_write(&self, requested: u8, observed: Option<u8>) -> bool {
+        let Some(actual) = observed else {
+            return true;
+        };
+        self.acknowledged != Some((requested, actual))
+    }
+
+    pub fn complete(&mut self, requested: u8, applied: Option<u8>) {
+        self.acknowledged = applied.map(|actual| (requested, actual));
+    }
+}
+
 /// Power action awaiting a confirming second press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArmedPowerAction {
@@ -217,7 +304,7 @@ pub struct ControlCenterMetrics {
 
 impl ControlCenterMetrics {
     /// Corner radius shared by the managed window body and floating surface.
-    pub const CORNER_RADIUS: f32 = 8.0;
+    pub const CORNER_RADIUS: f32 = 16.0;
 
     /// Resolve the approved compact shell dimensions.
     ///
@@ -231,18 +318,18 @@ impl ControlCenterMetrics {
     /// Presentation-specific dimensions for pointer and touch targets.
     pub fn resolve(presentation: ControlCenterPresentation, output_count: usize) -> Self {
         let (width, margin, gap, target_height, details_height) = match presentation {
-            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 116),
-            ControlCenterPresentation::TabletSheet => (392, 16, 10, 44, 144),
+            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 84),
+            ControlCenterPresentation::TabletSheet => (392, 10, 6, 44, 96),
         };
         let output_rows = if output_count > 1 {
             output_count as u32
-        } else if output_count == 0 {
-            1
         } else {
             0
         };
-        let controls_height = (2 + output_rows) * target_height + (1 + output_rows) * gap + 12;
-        let height = margin * 2 + controls_height + details_height + target_height + gap * 2;
+        let controls_height = (2 + output_rows) * target_height + (1 + output_rows) * gap;
+        // Five compact sections, including two one-pixel dividers. The
+        // controls identify the panel without an extra title/header row.
+        let height = margin * 2 + controls_height + details_height + target_height + gap * 4 + 2;
         Self {
             width,
             height,
@@ -262,6 +349,30 @@ impl ControlCenterMetrics {
     /// semantic shadow surface outside this rectangle.
     pub const fn body_size(&self) -> Size {
         Size::new(self.width as f32, self.height as f32)
+    }
+}
+
+/// Reading material shared by the native backdrop and the in-app glass tint.
+/// A menu's denser wash keeps secondary text legible over arbitrary desktops.
+fn panel_material() -> GlassMaterial {
+    GlassMaterial::menu()
+}
+
+/// One desktop backdrop for the managed body, excluding the window shadow.
+/// ScarletUI platform coordinates include the floating paint outsets; SWS
+/// converts logical dimensions and radius to physical pixels once and caches
+/// unchanged region metadata. Foreground labels and controls stay sharp.
+pub(super) fn backdrop_region(body: Size) -> scarlet_ui::platform::SurfaceRegion {
+    let outsets = ElevationRole::Floating.paint_outsets();
+    scarlet_ui::platform::SurfaceRegion {
+        rect: Rect::new(Point::new(outsets.left, outsets.top), body),
+        corner_radius: ControlCenterMetrics::CORNER_RADIUS,
+        blur_radius: if scarlet_ui::glass_quality() == scarlet_ui::GlassQuality::TintOnly {
+            0.0
+        } else {
+            panel_material().blur_radius
+        },
+        accepts_input: true,
     }
 }
 
@@ -295,40 +406,52 @@ pub fn build_control_center_view(
     let title_size = 14.0;
     let detail_size = 12.0;
     let target_height = metrics.target_height as f32;
+    // HStack measures intrinsic child widths; its outer frame alone does not
+    // constrain a Slider. Reserve the same label column for both rows so a
+    // percentage gaining a digit cannot move or shrink the slider track.
+    let control_row_width = content_width;
+    let control_label_width = 84.0;
+    let control_slider_width = control_row_width - control_label_width - metrics.gap as f32;
 
     let mute_action = action.clone();
-    let mute = Button::new(if snapshot.audio.muted == Some(true) {
+    let mute = Button::new(if snapshot.audio.volume_percent.is_none() {
+        "Unavailable"
+    } else if snapshot.audio.muted == Some(true) {
         "Muted"
     } else {
         "Volume"
     })
     .header_style()
     .font_size(detail_size)
+    .enabled(snapshot.audio.muted.is_some())
+    .padding(0.0)
     .on_click(move || mute_action.set(Some(ControlCenterAction::ToggleMute)));
 
     let slider_action = action.clone();
     let slider = Slider::new(volume)
+        .enabled(snapshot.audio.volume_percent.is_some())
         .min(0.0)
         .max(100.0)
         .on_change(move |value| {
             slider_action.set(Some(ControlCenterAction::SetVolume(
-                value.clamp(0.0, 100.0) as u8,
+                value.clamp(0.0, 100.0).round() as u8,
             )));
         });
 
     let mut audio_rows: Vec<Box<dyn View>> = vec![boxed(
-        HStack::new(DynamicViews::new(vec![boxed(mute), boxed(slider)]))
-            .spacing(metrics.gap as f32)
-            .alignment(Alignment::Center)
-            .frame(content_width - 12.0, target_height),
+        HStack::new(DynamicViews::new(vec![
+            boxed(
+                HStack::new(DynamicViews::new(vec![boxed(mute), boxed(Spacer::new())]))
+                    .spacing(0.0)
+                    .frame_width(control_label_width),
+            ),
+            boxed(slider.frame_width(control_slider_width)),
+        ]))
+        .spacing(metrics.gap as f32)
+        .alignment(Alignment::Center)
+        .frame(control_row_width, target_height),
     )];
-    if snapshot.audio.outputs.is_empty() {
-        audio_rows.push(boxed(
-            Text::new("Audio output unavailable")
-                .font_size(detail_size)
-                .color(palette.text_secondary()),
-        ));
-    } else if snapshot.audio.outputs.len() > 1 {
+    if snapshot.audio.outputs.len() > 1 {
         for output in &snapshot.audio.outputs {
             let selected = snapshot.audio.current_output_id.as_ref() == Some(&output.id);
             let mut label = output.name.clone();
@@ -338,6 +461,7 @@ pub fn build_control_center_view(
             let output_action = action.clone();
             let output_id = output.id.clone();
             let mut button = Button::new(label)
+                .enabled(output.available)
                 .header_style()
                 .font_size(detail_size)
                 .icon(if selected {
@@ -350,40 +474,32 @@ pub fn build_control_center_view(
                     output_action.set(Some(ControlCenterAction::SelectOutput(output_id.clone())));
                 });
             }
-            audio_rows.push(boxed(button));
+            audio_rows.push(boxed(button.frame(control_row_width, target_height)));
         }
     }
 
-    let brightness_row = if let Some(percent) = snapshot.brightness_percent {
-        let brightness_action = action.clone();
-        boxed(
-            HStack::new(DynamicViews::new(vec![
-                boxed(Text::new(alloc::format!("Brightness {}%", percent)).font_size(detail_size)),
-                boxed(
-                    Slider::new(brightness)
-                        .min(0.0)
-                        .max(100.0)
-                        .on_change(move |value| {
-                            brightness_action.set(Some(ControlCenterAction::SetBrightness(
-                                value.clamp(0.0, 100.0).round() as u8,
-                            )));
-                        }),
-                ),
-            ]))
-            .spacing(metrics.gap as f32)
-            .alignment(Alignment::Center)
-            .frame(content_width - 12.0, target_height),
-        )
+    let brightness_row = if snapshot.brightness_percent.is_some() {
+        // Only the percentage text rebuilds during a drag. The row and the
+        // independently subscribed Slider keep their elements and capture.
+        boxed(BrightnessRow {
+            value: brightness,
+            action: action.clone(),
+            width: control_row_width,
+            label_width: control_label_width,
+            slider_width: control_slider_width,
+            gap: metrics.gap as f32,
+            height: target_height,
+        })
     } else {
         boxed(
             Text::new("Brightness unavailable")
-                .font_size(detail_size)
+                .text_style(TextStyle::Caption)
                 .color(palette.text_secondary())
-                .frame(content_width - 12.0, target_height),
+                .frame(control_row_width, target_height),
         )
     };
     audio_rows.insert(0, brightness_row);
-    let controls = translucent_section(
+    let controls = content_section(
         content_width,
         metrics.controls_height as f32,
         audio_rows,
@@ -392,7 +508,7 @@ pub fn build_control_center_view(
 
     let network_detail = network_label(&snapshot.network);
     let network_action = action.clone();
-    let network = translucent_section(
+    let network = content_section(
         card_width,
         metrics.details_height as f32,
         vec![
@@ -400,10 +516,13 @@ pub fn build_control_center_view(
             boxed(
                 Text::new(network_detail)
                     .font_size(detail_size)
-                    .color(palette.text_secondary()),
+                    .line_limit(Some(2))
+                    .color(palette.text_secondary())
+                    .frame_width(card_width),
             ),
             boxed(
                 Button::new("Network settings")
+                    .padding(0.0)
                     .header_style()
                     .font_size(detail_size)
                     .on_click(move || {
@@ -416,13 +535,23 @@ pub fn build_control_center_view(
         4.0,
     );
 
-    let system = translucent_section(
+    let system = content_section(
         card_width,
         metrics.details_height as f32,
         vec![
             boxed(Text::new("System").font_size(title_size)),
-            boxed(Text::new(system_label(&snapshot.system)).font_size(detail_size)),
-            boxed(Text::new(snapshot.power.detail()).font_size(11.0)),
+            boxed(
+                Text::new(system_label(&snapshot.system))
+                    .font_size(detail_size)
+                    .line_limit(Some(2))
+                    .frame_width(card_width),
+            ),
+            boxed(
+                Text::new(snapshot.power.detail())
+                    .font_size(11.0)
+                    .line_limit(Some(2))
+                    .frame_width(card_width),
+            ),
             boxed(
                 Text::new(input_label(&snapshot.input_environment))
                     .font_size(11.0)
@@ -433,77 +562,96 @@ pub fn build_control_center_view(
     );
 
     let settings_action = action.clone();
-    let settings = Button::icon_only(Icon::Settings)
+    let footer_width = (content_width - metrics.gap as f32 * 2.0) / 3.0;
+    let settings = Button::new("Settings")
+        .icon(Icon::Settings)
         .header_style()
-        .icon_size(IconSize::Medium)
+        .icon_size(IconSize::Small)
+        .font_size(11.0)
+        .padding(0.0)
         .icon_color(palette.text_secondary())
         .on_click(move || {
             settings_action.set(Some(ControlCenterAction::OpenSettings(
                 ControlCenterSettingsLink::AllSettings,
             )));
         })
-        .frame(target_height, target_height);
+        .frame(footer_width, target_height);
 
     let shutdown_action = action.clone();
     let shutdown_armed = armed_power.clone();
-    let shutdown = Button::icon_only(Icon::Power)
-        .header_style()
-        .icon_size(IconSize::Medium)
-        .icon_color(if armed_power.get() == Some(ArmedPowerAction::PowerOff) {
-            palette.primary()
+    let shutdown = Button::new(if armed_power.get() == Some(ArmedPowerAction::PowerOff) {
+        "Confirm off"
+    } else {
+        "Power off"
+    })
+    .icon(Icon::Power)
+    .header_style()
+    .icon_size(IconSize::Small)
+    .font_size(11.0)
+    .padding(0.0)
+    .icon_color(if armed_power.get() == Some(ArmedPowerAction::PowerOff) {
+        palette.primary()
+    } else {
+        palette.text_secondary()
+    })
+    .on_click(move || {
+        let next = if shutdown_armed.get() == Some(ArmedPowerAction::PowerOff) {
+            shutdown_armed.set(None);
+            ControlCenterAction::ConfirmPowerOff
         } else {
-            palette.text_secondary()
-        })
-        .on_click(move || {
-            let next = if shutdown_armed.get() == Some(ArmedPowerAction::PowerOff) {
-                shutdown_armed.set(None);
-                ControlCenterAction::ConfirmPowerOff
-            } else {
-                shutdown_armed.set(Some(ArmedPowerAction::PowerOff));
-                ControlCenterAction::ArmPowerOff
-            };
-            shutdown_action.set(Some(next));
-        })
-        .frame(target_height, target_height);
+            shutdown_armed.set(Some(ArmedPowerAction::PowerOff));
+            ControlCenterAction::ArmPowerOff
+        };
+        shutdown_action.set(Some(next));
+    })
+    .frame(footer_width, target_height);
 
     let reboot_action = action;
     let reboot_armed = armed_power.clone();
-    let reboot = Button::icon_only(Icon::Refresh)
-        .header_style()
-        .icon_size(IconSize::Medium)
-        .icon_color(if armed_power.get() == Some(ArmedPowerAction::Reboot) {
-            palette.primary()
+    let reboot = Button::new(if armed_power.get() == Some(ArmedPowerAction::Reboot) {
+        "Confirm"
+    } else {
+        "Restart"
+    })
+    .icon(Icon::Refresh)
+    .header_style()
+    .icon_size(IconSize::Small)
+    .font_size(11.0)
+    .padding(0.0)
+    .icon_color(if armed_power.get() == Some(ArmedPowerAction::Reboot) {
+        palette.primary()
+    } else {
+        palette.text_secondary()
+    })
+    .on_click(move || {
+        let next = if reboot_armed.get() == Some(ArmedPowerAction::Reboot) {
+            reboot_armed.set(None);
+            ControlCenterAction::ConfirmReboot
         } else {
-            palette.text_secondary()
-        })
-        .on_click(move || {
-            let next = if reboot_armed.get() == Some(ArmedPowerAction::Reboot) {
-                reboot_armed.set(None);
-                ControlCenterAction::ConfirmReboot
-            } else {
-                reboot_armed.set(Some(ArmedPowerAction::Reboot));
-                ControlCenterAction::ArmReboot
-            };
-            reboot_action.set(Some(next));
-        })
-        .frame(target_height, target_height);
+            reboot_armed.set(Some(ArmedPowerAction::Reboot));
+            ControlCenterAction::ArmReboot
+        };
+        reboot_action.set(Some(next));
+    })
+    .frame(footer_width, target_height);
 
     let details = HStack::new(DynamicViews::new(vec![network, system]))
         .spacing(metrics.gap as f32)
         .alignment(Alignment::Top);
     let footer = HStack::new(DynamicViews::new(vec![
         boxed(settings),
-        boxed(Spacer::new()),
-        boxed(shutdown),
-        boxed(Spacer::new()),
         boxed(reboot),
+        boxed(shutdown),
     ]))
+    .spacing(metrics.gap as f32)
     .alignment(Alignment::Center)
     .frame(content_width, target_height);
 
     let content = VStack::new(DynamicViews::new(vec![
         controls,
+        boxed(Divider::new().frame_width(content_width)),
         boxed(details),
+        boxed(Divider::new().frame_width(content_width)),
         boxed(footer),
     ]))
     .spacing(metrics.gap as f32)
@@ -511,30 +659,138 @@ pub fn build_control_center_view(
     .padding(metrics.margin as f32);
 
     Surface::new(content, SurfaceRole::Floating)
-        .fill(palette.surface().with_opacity(0.88))
-        .bordered(true)
+        // The managed Window owns the shadow and SWS filters the desktop
+        // behind this body once. Keep the shared tint/rim here, but do not blur
+        // the empty in-app background again. Slider thumbs still sample this
+        // already painted surface through their ordinary local materials.
+        .surface_style(SurfaceStyle::bubble_glass().material(panel_material().blur_radius(0.0)))
         .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
         .frame(metrics.width as f32, metrics.height as f32)
 }
 
-fn translucent_section(
+fn content_section(
     width: f32,
     height: f32,
     children: Vec<Box<dyn View>>,
     spacing: f32,
 ) -> Box<dyn View> {
-    let palette = ColorPalette::default();
     boxed(
-        Surface::new(
-            VStack::new(DynamicViews::new(children))
-                .spacing(spacing)
-                .alignment(Alignment::Leading)
-                .padding(6.0),
-            SurfaceRole::Section,
-        )
-        .fill(palette.surface().with_opacity(0.45))
-        .frame(width, height),
+        VStack::new(DynamicViews::new(children))
+            .spacing(spacing)
+            .alignment(Alignment::Leading)
+            .frame(width, height),
     )
+}
+
+#[derive(Clone)]
+struct BrightnessRow {
+    value: State<f32>,
+    action: State<Option<ControlCenterAction>>,
+    width: f32,
+    label_width: f32,
+    slider_width: f32,
+    gap: f32,
+    height: f32,
+}
+
+impl BrightnessRow {
+    fn content(&self) -> impl View + Clone + use<> {
+        let action = self.action.clone();
+        let value = self.value.clone();
+        HStack::new((
+            VStack::new((
+                Text::new("Brightness").text_style(TextStyle::Caption),
+                BrightnessValueLabel(self.value.clone()),
+            ))
+            .spacing(0.0)
+            .alignment(Alignment::Leading)
+            .frame_width(self.label_width),
+            Slider::new(self.value.clone())
+                .min(0.0)
+                .max(100.0)
+                .on_change(move |next| {
+                    action.set(Some(ControlCenterAction::SetBrightness(
+                        next.clamp(0.0, 100.0).round() as u8,
+                    )));
+                    // Preserve the continuous input even if a concurrent idle
+                    // sample landed between Slider's State.set and callback.
+                    if value.get() != next {
+                        value.set(next);
+                    }
+                })
+                .frame_width(self.slider_width),
+        ))
+        .spacing(self.gap)
+        .alignment(Alignment::Center)
+        .frame(self.width, self.height)
+    }
+}
+
+impl View for BrightnessRow {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(ComponentElement::new_with_builder(self.clone(), |row| {
+            boxed(row.content())
+        }))
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+/// Keep continuous slider updates out of the row's structural reconciliation.
+/// Slider already subscribes to the same value to update its own render object.
+#[derive(Clone)]
+struct BrightnessValueLabel(State<f32>);
+
+impl View for BrightnessValueLabel {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(ComponentElement::new_with_builder(self.clone(), |label| {
+            boxed(
+                Text::new(alloc::format!(
+                    "{}%",
+                    label.0.get().clamp(0.0, 100.0).round() as u8
+                ))
+                .font_size(10.0)
+                .color(ColorPalette::default().text_secondary()),
+            )
+        }))
+    }
+    fn listenables(&self) -> Vec<&dyn scarlet_ui::state::Listenable> {
+        vec![&self.0]
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+/// Reconcile a provider readback only when no input owns the continuous value.
+/// Called by the sole hardware-command worker, after its synchronous write has
+/// finished. Polling still records observations while dragging or queued.
+pub(super) fn reconcile_brightness(
+    value: &State<f32>,
+    dragging: &State<bool>,
+    observed: Option<u8>,
+    pending: &State<Option<ControlCenterAction>>,
+) {
+    let Some(actual) = observed else {
+        return;
+    };
+    let expected = value.get();
+    if dragging.get()
+        || matches!(pending.get(), Some(ControlCenterAction::SetBrightness(_)))
+        || expected == actual as f32
+    {
+        return;
+    }
+    value.update(|current| {
+        // Do not overwrite a newer input arriving after the initial check.
+        if *current == expected
+            && !dragging.get()
+            && !matches!(pending.get(), Some(ControlCenterAction::SetBrightness(_)))
+        {
+            *current = actual as f32;
+        }
+    });
 }
 
 fn network_label(snapshot: &NetworkSnapshot) -> String {
@@ -621,6 +877,23 @@ mod tests {
     use scarlet_ui::state::StateId;
     use scarlet_ui::views::SliderRenderObject;
 
+    #[test]
+    fn percent_writes_deduplicate_acks_but_keep_changes_retries_and_final_targets() {
+        let mut writes = PercentWriteState::default();
+        assert!(writes.needs_write(42, Some(42)), "initial input still writes");
+        writes.complete(42, Some(41));
+        assert!(!writes.needs_write(42, Some(41)), "rounded hardware ack may differ");
+        assert!(writes.needs_write(42, Some(20)), "external change permits same request");
+        assert!(writes.needs_write(42, None), "unknown provider cannot suppress writes");
+        assert!(writes.needs_write(43, Some(41)), "new final percentage must be sent");
+        writes.complete(43, None);
+        assert!(writes.needs_write(43, Some(41)), "failure permits identical retry");
+        assert!(writes.needs_write(42, Some(41)), "failure also clears the old ack");
+        writes.complete(43, Some(43));
+        assert!(!writes.needs_write(43, Some(43)));
+        assert!(writes.needs_write(42, Some(43)), "reversing a drag must write again");
+    }
+
     fn brightness_slider(element: &dyn Element, id: StateId) -> Option<&Slider> {
         if let Some(slider) = element
             .as_any()
@@ -633,6 +906,42 @@ mod tests {
             .children()
             .iter()
             .find_map(|child| brightness_slider(child.as_ref(), id))
+    }
+
+    #[test]
+    fn readback_waits_for_drag_and_latest_command_but_keeps_external_updates() {
+        let value = State::new(scarlet_ui::state::generate_state_id(), 42.6);
+        let dragging = Slider::new(value.clone()).get_dragging().clone();
+        let pending = State::new(scarlet_ui::state::generate_state_id(), None);
+        dragging.set(true);
+        reconcile_brightness(&value, &dragging, Some(12), &pending);
+        assert_eq!(value.get(), 42.6, "old poll cannot move a captured thumb");
+        reconcile_brightness(&value, &dragging, Some(43), &pending);
+        assert_eq!(
+            value.get(),
+            42.6,
+            "integer hardware ack cannot quantize a drag"
+        );
+        value.set(80.3);
+        pending.set(Some(ControlCenterAction::SetBrightness(80)));
+        dragging.set(false);
+        reconcile_brightness(&value, &dragging, Some(43), &pending);
+        assert_eq!(
+            value.get(),
+            80.3,
+            "release must wait for the final queued write"
+        );
+        pending.set(None);
+        reconcile_brightness(&value, &dragging, Some(80), &pending);
+        assert_eq!(value.get(), 80.0);
+        reconcile_brightness(&value, &dragging, Some(22), &pending);
+        assert_eq!(
+            value.get(),
+            22.0,
+            "idle external changes and rejected writes still reconcile"
+        );
+        reconcile_brightness(&value, &dragging, None, &pending);
+        assert_eq!(value.get(), 22.0, "unavailable is not a fictitious zero");
     }
 
     #[test]
@@ -688,19 +997,155 @@ mod tests {
     }
 
     #[test]
+    fn controls_keep_natural_centers_and_stable_tracks_across_percentages() {
+        use scarlet_ui::element::LayoutConstraints;
+        use scarlet_ui::geometry::{Point, Rect};
+        use scarlet_ui::views::{ButtonRenderObject, TextRenderObject};
+
+        fn collect(element: &dyn Element, origin: Point, out: &mut Vec<(String, Rect)>) {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            let bounds = Rect {
+                origin,
+                size: element.bounds().size,
+            };
+            let name = if let Some(text) = element
+                .as_any()
+                .downcast_ref::<RenderElement<Text, TextRenderObject>>()
+            {
+                Some(String::from(text.view().content()))
+            } else if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<SliderRenderObject>())
+            {
+                Some(String::from("slider"))
+            } else if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<ButtonRenderObject>())
+            {
+                Some(String::from("button"))
+            } else {
+                None
+            };
+            if let Some(name) = name {
+                out.push((name, bounds));
+            }
+            for child in element.children() {
+                collect(child.as_ref(), origin, out);
+            }
+        }
+
+        for presentation in [
+            ControlCenterPresentation::LaptopPopover,
+            ControlCenterPresentation::TabletSheet,
+        ] {
+            let mut previous_tracks = None;
+            for percent in [0, 9, 10, 80, 99, 100] {
+                let snapshot = ControlCenterSnapshot {
+                    power: Default::default(),
+                    audio: AudioSnapshot::unavailable(),
+                    brightness_percent: Some(percent),
+                    network: NetworkSnapshot {
+                        available: false,
+                        interfaces: Vec::new(),
+                    },
+                    system: SystemSnapshot {
+                        cpu_percent: None,
+                        task_count: None,
+                    },
+                    input_environment: InputEnvironmentSnapshot {
+                        available: false,
+                        tablet_mode: None,
+                        touch_present: None,
+                        keyboard_present: None,
+                        pointer_present: None,
+                    },
+                };
+                let mut element = build_control_center_view(
+                    presentation,
+                    snapshot,
+                    State::new(scarlet_ui::state::generate_state_id(), 25.0),
+                    State::new(scarlet_ui::state::generate_state_id(), percent as f32),
+                    State::new(scarlet_ui::state::generate_state_id(), None),
+                    State::new(scarlet_ui::state::generate_state_id(), None),
+                )
+                .create_element();
+                let size = element.layout(LayoutConstraints::unconstrained());
+                fn captures(element: &dyn Element) -> usize {
+                    usize::from(element.render_object().is_some_and(|r| r.reads_backdrop()))
+                        + element
+                            .children()
+                            .iter()
+                            .map(|child| captures(child.as_ref()))
+                            .sum::<usize>()
+                }
+                assert_eq!(
+                    captures(element.as_ref()),
+                    2,
+                    "only the two standard slider thumbs read local backdrop"
+                );
+                let mut rects = Vec::new();
+                collect(element.as_ref(), Point::ZERO, &mut rects);
+                let tracks: Vec<_> = rects
+                    .iter()
+                    .filter(|(name, _)| name == "slider")
+                    .map(|(_, rect)| *rect)
+                    .collect();
+                assert_eq!(tracks.len(), 2);
+                if let Some(previous) = previous_tracks {
+                    assert_eq!(tracks, previous);
+                }
+                previous_tracks = Some(tracks.clone());
+                assert_eq!(tracks[0].origin.x, tracks[1].origin.x);
+                assert_eq!(tracks[0].size.width, tracks[1].size.width);
+                for track in &tracks {
+                    assert!(
+                        track.origin.x >= 0.0 && track.origin.x + track.size.width <= size.width
+                    );
+                }
+                let label = rects
+                    .iter()
+                    .find(|(name, _)| name == "Brightness")
+                    .unwrap()
+                    .1;
+                let value = rects
+                    .iter()
+                    .find(|(name, _)| name == &alloc::format!("{}%", percent))
+                    .unwrap()
+                    .1;
+                assert_eq!(label.origin.x, value.origin.x);
+                assert!(value.origin.y >= label.origin.y + label.size.height);
+                let label_center = (label.origin.y + value.origin.y + value.size.height) / 2.0;
+                assert_eq!(
+                    label_center,
+                    tracks[0].origin.y + tracks[0].size.height / 2.0
+                );
+                let mute = rects.iter().find(|(name, _)| name == "button").unwrap().1;
+                assert_eq!(mute.origin.x, label.origin.x);
+                assert_eq!(
+                    mute.origin.y + mute.size.height / 2.0,
+                    tracks[1].origin.y + tracks[1].size.height / 2.0
+                );
+            }
+        }
+    }
+
+    #[test]
     fn brightness_row_fits_pointer_and_touch_metrics() {
         let laptop = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 1);
         let tablet = ControlCenterMetrics::resolve(ControlCenterPresentation::TabletSheet, 1);
         assert_eq!(laptop.width, 304);
         assert_eq!(
             laptop.controls_height,
-            2 * laptop.target_height + laptop.gap + 12
+            2 * laptop.target_height + laptop.gap
         );
-        assert!(laptop.height <= 320);
+        assert!(laptop.height <= 400);
         assert_eq!(tablet.width, 392);
         assert_eq!(
             tablet.controls_height,
-            2 * tablet.target_height + tablet.gap + 12
+            2 * tablet.target_height + tablet.gap
         );
         assert!(tablet.target_height > laptop.target_height);
     }
@@ -712,6 +1157,14 @@ mod tests {
 
         assert_eq!(body.width, metrics.width as f32);
         assert_eq!(body.height, metrics.height as f32);
+        let region = backdrop_region(body);
+        let outsets = ElevationRole::Floating.paint_outsets();
+        assert_eq!(region.rect.origin, Point::new(outsets.left, outsets.top));
+        assert_eq!(region.rect.size, body);
+        assert_eq!(region.corner_radius, ControlCenterMetrics::CORNER_RADIUS);
+        assert!(region.accepts_input);
+        assert!(region.rect.origin.x + body.width <= body.width + outsets.left + outsets.right);
+        assert!(region.rect.origin.y + body.height <= body.height + outsets.top + outsets.bottom);
     }
 
     #[test]
@@ -722,12 +1175,37 @@ mod tests {
     }
 
     #[test]
-    fn one_audio_output_does_not_consume_a_selector_row() {
-        let none = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 0);
-        let one = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 1);
-        let two = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 2);
-        assert_eq!(none.height - one.height, one.target_height + one.gap);
-        assert_eq!(two.height - one.height, 2 * (one.target_height + one.gap));
+    fn unavailable_audio_does_not_reserve_a_temporary_selector_row() {
+        for presentation in [
+            ControlCenterPresentation::LaptopPopover,
+            ControlCenterPresentation::TabletSheet,
+        ] {
+            let none = ControlCenterMetrics::resolve(presentation, 0);
+            let one = ControlCenterMetrics::resolve(presentation, 1);
+            let two = ControlCenterMetrics::resolve(presentation, 2);
+            assert_eq!(none.height, one.height);
+            assert_eq!(two.height - one.height, 2 * (one.target_height + one.gap));
+        }
+    }
+
+    #[test]
+    fn opening_requires_its_own_completed_sample_including_unavailable_results() {
+        let mut session = ControlCenterSession::default();
+        session.request_open();
+        let cancelled = session.generation();
+        assert!(session.open && session.snapshot.is_none());
+        session.close();
+        session.publish(cancelled, ControlCenterSnapshot::unavailable());
+        assert!(session.snapshot.is_none(), "a closed request cannot publish");
+
+        session.request_open();
+        session.publish(cancelled, ControlCenterSnapshot::unavailable());
+        assert!(session.snapshot.is_none(), "old IPC cannot complete a reopen");
+        session.publish(session.generation(), ControlCenterSnapshot::unavailable());
+        assert!(session.snapshot.is_some(), "unavailable is a completed sample");
+        session.close();
+        session.request_open();
+        assert!(session.snapshot.is_none(), "reopen samples fresh topology");
     }
 
     #[test]

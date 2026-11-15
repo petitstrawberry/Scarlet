@@ -10,12 +10,14 @@
 mod abi;
 mod async_abi;
 mod backend;
+mod backing_pin;
 mod completion;
 pub(crate) mod connection;
 mod execution;
 mod object;
 mod resource;
 mod submission;
+pub use scarlet_abi::gpu_timestamp::GPU_EXECUTION_SUPPORT_TIMESTAMPS;
 
 pub use crate::device::graphics::{
     GpuDisplayBackingOwner, GpuDisplayResource, GpuLinearDisplayBacking,
@@ -710,3 +712,5 @@ mod tests {
 }
 
 pub use abi::{GPU_IMAGE_FORMAT_NV12, GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImage};
+
+pub use backing_pin::GpuBackingPin;

@@ -76,9 +76,10 @@ use clap::Parser;
 use console::{ConsoleAction, ConsoleSnapshot, ConsoleState, PowerAction};
 use control_center::{
     ArmedPowerAction, AudioOutputSnapshot, AudioSnapshot, ControlCenterAction,
-    ControlCenterMetrics, ControlCenterPresentation, ControlCenterSettingsLink,
+    ControlCenterMetrics, ControlCenterPresentation, ControlCenterSession, ControlCenterSettingsLink,
     ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot, NetworkInterfaceSnapshot,
-    NetworkInterfaceState, NetworkSnapshot, SystemSnapshot, boxed, build_control_center_view,
+    NetworkInterfaceState, NetworkSnapshot, PercentWriteState, SystemSnapshot, boxed,
+    build_control_center_view,
 };
 use home_catalog::{ApplicationEntry, HomeApplication};
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
@@ -652,13 +653,14 @@ fn passive_clock_control(
     status_text_control(label, tokens, foreground)
 }
 
-fn toggle_control_center(open: State<bool>) {
-    if open.get() {
+fn toggle_control_center(open: State<ControlCenterSession>) {
+    if open.get().open {
         dismiss_window(CONTROL_CENTER_SCENE_KEY);
-        open.set(false);
+        open.update(ControlCenterSession::close);
     } else {
-        open_window(CONTROL_CENTER_SCENE_KEY);
-        open.set(true);
+        // The provider worker prepares this opening before on_idle creates
+        // its scene. No provisional unavailable-sized window is exposed.
+        open.update(ControlCenterSession::request_open);
     }
 }
 
@@ -696,7 +698,7 @@ fn build_status_cluster(
     snapshot: StatusProviderSnapshot,
     presentation: StatusPresentation,
     tokens: StatusItemTokens,
-    control_center_open: State<bool>,
+    control_center_session: State<ControlCenterSession>,
     foreground: Option<Color>,
 ) -> impl View + Clone {
     let mut items = Vec::new();
@@ -707,7 +709,7 @@ fn build_status_cluster(
     }
     if snapshot.preferences.is_visible(StatusItemId::Audio) {
         let volume_icon = volume_status_icon(snapshot.audio_volume_percent, snapshot.audio_muted);
-        let selected = control_center_open.get();
+        let selected = control_center_session.get().open;
         let item = MenuItem::new("")
             .icon(volume_icon)
             .icon_size(IconSize::Small)
@@ -715,7 +717,7 @@ fn build_status_cluster(
             .padding(tokens.horizontal_padding)
             .selected(selected)
             .on_click({
-                let open = control_center_open.clone();
+                let open = control_center_session.clone();
                 move || toggle_control_center(open.clone())
             });
         let item = menu_item_with_foreground(item, foreground);
@@ -728,12 +730,12 @@ fn build_status_cluster(
             NetworkKind::Wifi => Icon::Wifi,
             NetworkKind::Ethernet => Icon::Network,
         };
-        let open = control_center_open.clone();
+        let open = control_center_session.clone();
         let item = MenuItem::new("")
             .icon(icon)
             .icon_size(IconSize::Small)
             .padding(tokens.horizontal_padding)
-            .selected(control_center_open.get())
+            .selected(control_center_session.get().open)
             .on_click(move || toggle_control_center(open.clone()));
         items.push(boxed(
             menu_item_with_foreground(item, foreground)
@@ -755,8 +757,8 @@ fn build_status_cluster(
             .icon(icon)
             .icon_size(IconSize::Small)
             .padding(tokens.horizontal_padding)
-            .selected(control_center_open.get())
-            .on_click(move || toggle_control_center(control_center_open.clone()));
+            .selected(control_center_session.get().open)
+            .on_click(move || toggle_control_center(control_center_session.clone()));
         items.push(boxed(
             menu_item_with_foreground(item, foreground)
                 .frame(tokens.logical_height, tokens.logical_height),
@@ -918,6 +920,7 @@ fn apply_input_environment(
 fn listen_for_input_environment_changes(
     shell_layout: State<ShellLayout>,
     open_menu_index: State<Option<usize>>,
+    snapshot: State<Option<InputEnvironmentSnapshot>>,
 ) {
     loop {
         let Ok(SwsScreenConnection {
@@ -931,18 +934,27 @@ fn listen_for_input_environment_changes(
             continue;
         };
 
+        set_state_if_changed(
+            &snapshot,
+            input_environment.map(|environment| input_environment_snapshot(Some(environment))),
+        );
         if let Some(environment) = input_environment {
             apply_input_environment(&conn, environment, &shell_layout, &open_menu_index);
         }
 
         loop {
             if conn.dispatch().is_err() {
+                set_state_if_changed(&snapshot, None);
                 println!("[StatusBar] Input-environment listener transport lost; reconnecting");
                 break;
             }
             while let Some(event) = conn.poll_event() {
                 match event {
                     sws::event::Event::InputEnvironmentChanged(environment) => {
+                        set_state_if_changed(
+                            &snapshot,
+                            Some(input_environment_snapshot(Some(environment))),
+                        );
                         apply_input_environment(
                             &conn,
                             environment,
@@ -997,14 +1009,15 @@ struct ShellApp {
     status_snapshot: State<StatusProviderSnapshot>,
     windows: State<Vec<ShellWindow>>,
     overview_page: State<usize>,
-    control_center_open: State<bool>,
-    control_center_window_id: State<Option<u32>>,
+    control_center_session: State<ControlCenterSession>,
+    // Opening generation and platform ID; dismissed IDs cannot block a reopen.
+    control_center_window: State<Option<(u64, u32)>>,
     control_center_volume: State<f32>,
     control_center_brightness: State<f32>,
     display_brightness_percent: State<Option<u8>>,
+    input_environment_snapshot: State<Option<InputEnvironmentSnapshot>>,
     control_center_action: State<Option<ControlCenterAction>>,
     control_center_armed_power: State<Option<ArmedPowerAction>>,
-    control_center_size: State<Size>,
     home_applications: State<Vec<HomeApplication>>,
     home_filtered_applications: State<Vec<HomeApplication>>,
     home_query: State<String>,
@@ -1029,8 +1042,6 @@ impl ShellApp {
             ..StatusProviderSnapshot::default()
         };
         let initial_volume = status_snapshot.audio_volume_percent.unwrap_or(0) as f32;
-        let initial_control_center =
-            ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 0);
         Self {
             mode: State::new(StateId::new(35), ShellMode::Desktop),
             console_state: State::new(StateId::new(32), ConsoleState::default()),
@@ -1059,14 +1070,17 @@ impl ShellApp {
             status_snapshot: State::new(StateId::new(10), status_snapshot),
             windows: State::new(StateId::new(14), Vec::new()),
             overview_page: State::new(StateId::new(15), 0),
-            control_center_open: State::new(StateId::new(16), false),
-            control_center_window_id: State::new(StateId::new(17), None),
+            control_center_session: State::new(
+                StateId::new(16),
+                ControlCenterSession::default(),
+            ),
+            control_center_window: State::new(StateId::new(17), None),
             control_center_volume: State::new(StateId::new(18), initial_volume),
             control_center_brightness: State::new(StateId::new(40), 0.0),
             display_brightness_percent: State::new(StateId::new(41), None),
+            input_environment_snapshot: State::new(StateId::new(47), None),
             control_center_action: State::new(StateId::new(19), None),
             control_center_armed_power: State::new(StateId::new(20), None),
-            control_center_size: State::new(StateId::new(21), initial_control_center.body_size()),
             home_applications: State::new(StateId::new(23), Vec::new()),
             home_filtered_applications: State::new(StateId::new(28), Vec::new()),
             home_query: State::new(StateId::new(29), String::new()),
@@ -1302,15 +1316,21 @@ fn fixed_string(bytes: &[u8]) -> String {
         .to_string()
 }
 
-fn collect_audio_snapshot(status: &StatusProviderSnapshot) -> AudioSnapshot {
+fn collect_audio_snapshot(
+    status: &StatusProviderSnapshot,
+    audio_client: &mut Option<SasClient>,
+) -> AudioSnapshot {
     let mut snapshot = match (status.audio_volume_percent, status.audio_muted) {
         (Some(volume), Some(muted)) => AudioSnapshot::from_status(volume, muted),
         _ => AudioSnapshot::unavailable(),
     };
-    let Ok(mut client) = SasClient::connect() else {
-        return snapshot;
-    };
-    let Ok(outputs) = client.list_outputs() else {
+    if audio_client.is_none() {
+        *audio_client = SasClient::connect().ok();
+    }
+    let Some(outputs) = audio_client.as_mut().and_then(|client| client.list_outputs().ok()) else {
+        // The next scheduled sample or action establishes a fresh transport.
+        // Never retain a connection after a failed/partial protocol response.
+        *audio_client = None;
         return snapshot;
     };
 
@@ -1396,10 +1416,7 @@ fn collect_network_snapshot(status: &NetworkStatus) -> NetworkSnapshot {
     }
 }
 
-fn collect_input_environment_snapshot() -> InputEnvironmentSnapshot {
-    let environment = sws::Connection::connect("/tmp/sws.sock")
-        .ok()
-        .and_then(|connection| connection.get_input_environment().ok());
+fn input_environment_snapshot(environment: Option<sws::InputEnvironment>) -> InputEnvironmentSnapshot {
     match environment {
         Some(environment) => InputEnvironmentSnapshot {
             available: true,
@@ -1421,9 +1438,11 @@ fn collect_input_environment_snapshot() -> InputEnvironmentSnapshot {
 fn collect_control_center_snapshot(
     status: StatusProviderSnapshot,
     brightness_percent: Option<u8>,
+    audio_client: &mut Option<SasClient>,
+    input_environment: InputEnvironmentSnapshot,
 ) -> ControlCenterSnapshot {
     ControlCenterSnapshot {
-        audio: collect_audio_snapshot(&status),
+        audio: collect_audio_snapshot(&status, audio_client),
         brightness_percent,
         power: status.power,
         network: collect_network_snapshot(&status.network),
@@ -1431,7 +1450,7 @@ fn collect_control_center_snapshot(
             cpu_percent: status.cpu_percent,
             task_count: process::task_count().map(|count| count.min(u32::MAX as usize) as u32),
         },
-        input_environment: collect_input_environment_snapshot(),
+        input_environment,
     }
 }
 
@@ -1439,15 +1458,29 @@ fn update_shared_audio_status(
     status: &State<StatusProviderSnapshot>,
     control_center_volume: &State<f32>,
     state: sas_protocol::ControlState,
-) {
+) -> u8 {
     let volume = ((state.master_volume_q16 as u64 * 100 + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
         / MASTER_VOLUME_UNITY_Q16 as u64)
         .min(100) as u8;
-    status.update(|snapshot| {
-        snapshot.audio_volume_percent = Some(volume);
-        snapshot.audio_muted = Some(state.flags & sas_protocol::CONTROL_FLAG_MUTED != 0);
-    });
-    control_center_volume.set(volume as f32);
+    let muted = state.flags & sas_protocol::CONTROL_FLAG_MUTED != 0;
+    let current = status.get();
+    if (current.audio_volume_percent, current.audio_muted) != (Some(volume), Some(muted)) {
+        // Repeated acknowledgements must not rebuild the status window or
+        // invalidate its desktop backdrop when the visible value is unchanged.
+        status.update(|snapshot| {
+            snapshot.audio_volume_percent = Some(volume);
+            snapshot.audio_muted = Some(muted);
+        });
+    }
+    // Hardware acknowledges integer percentages. The captured Slider owns its
+    // continuous value until release, just as the brightness control does.
+    if !scarlet_ui::views::Slider::new(control_center_volume.clone())
+        .get_dragging()
+        .get()
+    {
+        set_state_if_changed(control_center_volume, volume as f32);
+    }
+    volume
 }
 
 fn apply_control_center_action(
@@ -1457,11 +1490,17 @@ fn apply_control_center_action(
     control_center_volume: &State<f32>,
     display: &mut Option<DisplayControl>,
     display_brightness_percent: &State<Option<u8>>,
-    control_center_brightness: &State<f32>,
-    control_center_open: &State<bool>,
+    control_center_session: &State<ControlCenterSession>,
+    brightness_write: &mut PercentWriteState,
+    volume_write: &mut PercentWriteState,
 ) {
     match action {
         ControlCenterAction::SetBrightness(percent) => {
+            if display.is_some()
+                && !brightness_write.needs_write(percent, display_brightness_percent.get())
+            {
+                return;
+            }
             if display.is_none() {
                 *display = DisplayControl::open_primary().ok();
             }
@@ -1470,9 +1509,10 @@ fn apply_control_center_action(
                 display.get_brightness_percent().ok()
             });
             if let Some(applied) = result {
+                brightness_write.complete(percent, Some(applied));
                 set_state_if_changed(display_brightness_percent, Some(applied));
-                set_state_if_changed(control_center_brightness, applied as f32);
             } else {
+                brightness_write.complete(percent, None);
                 println!(
                     "[ControlCenter] failed to set display brightness to {}%",
                     percent
@@ -1483,14 +1523,17 @@ fn apply_control_center_action(
                     .as_ref()
                     .and_then(|display| display.get_brightness_percent().ok());
                 set_state_if_changed(display_brightness_percent, actual);
-                if let Some(actual) = actual {
-                    set_state_if_changed(control_center_brightness, actual as f32);
-                } else {
+                if actual.is_none() {
                     *display = None;
                 }
             }
         }
         ControlCenterAction::SetVolume(percent) => {
+            if audio_client.is_some()
+                && !volume_write.needs_write(percent, status.get().audio_volume_percent)
+            {
+                return;
+            }
             if audio_client.is_none() {
                 *audio_client = SasClient::connect().ok();
             }
@@ -1500,8 +1543,10 @@ fn apply_control_center_action(
                 client.set_master_volume_q16(q16).ok()
             });
             if let Some(state) = result {
-                update_shared_audio_status(status, control_center_volume, state);
+                let applied = update_shared_audio_status(status, control_center_volume, state);
+                volume_write.complete(percent, Some(applied));
             } else {
+                volume_write.complete(percent, None);
                 *audio_client = None;
             }
         }
@@ -1520,6 +1565,9 @@ fn apply_control_center_action(
             }
         }
         ControlCenterAction::SelectOutput(id) => {
+            // A different output may have different gain/quantization even
+            // when its current percentage happens to match the old output.
+            *volume_write = PercentWriteState::default();
             let request = id
                 .strip_prefix("path:")
                 .and_then(|value| OutputRequest::new(OUTPUT_PREFERENCE_PATH, value))
@@ -1546,7 +1594,7 @@ fn apply_control_center_action(
         ) => {
             launch_app(b"org.scarlet-os.desktop.settings");
             dismiss_window(CONTROL_CENTER_SCENE_KEY);
-            control_center_open.set(false);
+            control_center_session.update(ControlCenterSession::close);
         }
         ControlCenterAction::ConfirmPowerOff => {
             request_system_power(power_request::PowerAction::PowerOff);
@@ -3324,6 +3372,254 @@ impl ShellApp {
     }
 }
 
+impl ShellApp {
+    fn status_bar_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let clock = self.clock.get();
+        let screen_width = self.screen_width.get();
+        let shell_layout = self.shell_layout.get();
+        let shell_presentation = self.shell_presentation();
+        let shell_navigation = shell_presentation != sws::ShellPresentation::Workspace;
+        let menu_tree = self.menu_tree.get();
+        let active_window_id = self.active_window_id.get();
+
+        let hours = clock / 3600;
+        let mins = (clock / 60) % 60;
+        let status_snapshot = self.status_snapshot.get();
+        let clock_label = status_snapshot.clock_label(hours as u8, mins as u8);
+        // The desktop top bar intentionally uses a light material. Its status
+        // labels and Tabler icons use ScarletUI's matching dark foreground.
+        let status_bar_palette = if shell_navigation {
+            ColorPalette::dark()
+        } else {
+            ColorPalette::light()
+        };
+        let status_bar_background = if shell_navigation {
+            if self.mode.get() == ShellMode::Console {
+                console::FROST
+            } else {
+                Color::TRANSPARENT
+            }
+        } else {
+            status_bar_palette.surface_variant()
+        };
+        let status_tokens = StatusItemTokens::for_layout(shell_layout);
+        let status_presentation = if shell_layout.tablet_mode {
+            StatusPresentation::Touch
+        } else {
+            StatusPresentation::Compact
+        };
+        let home_button =
+            build_home_button(self.workspace_state.get(), self.workspace_commands.clone());
+        let visible_menu_items = status_bar_menu_items(&menu_tree, shell_presentation);
+        let status_foreground = shell_navigation.then(|| status_bar_palette.text());
+        let menu_controls = build_menu_bar_view(
+            &visible_menu_items,
+            active_window_id,
+            self.open_menu_index.clone(),
+            shell_layout,
+            status_foreground,
+        );
+        let leading_controls = hstack! {
+            home_button,
+            menu_controls,
+        }
+        .spacing(LEADING_CONTROLS_SPACING)
+        .alignment(Alignment::Center);
+        let trailing_controls = hstack! {
+            build_status_cluster(
+                status_snapshot.clone(),
+                status_presentation,
+                status_tokens,
+                self.control_center_session.clone(),
+                status_foreground,
+            ),
+            build_passive_clock(clock_label, status_tokens, status_foreground),
+        }
+        .spacing(status_tokens.spacing)
+        .alignment(Alignment::Center);
+
+        Window::new(
+            "Scarlet Shell",
+            hstack! {
+                leading_controls,
+                Spacer::new(),
+                trailing_controls,
+            }
+            .spacing(status_tokens.spacing)
+            .alignment(Alignment::Center)
+            .padding(status_tokens.bar_padding),
+        )
+        .app_id("org.scarlet-os.desktop.shell")
+        .decorated(false)
+        .background_color(status_bar_background)
+        // The shell changes between an opaque workspace material and
+        // per-pixel transparency without recreating this surface.
+        // Keep alpha composition enabled from the first frame.
+        .opaque(false)
+        .window_type(scarlet_ui::views::window_type::TASKBAR)
+        .active_on_focus(false)
+        .resizable(false)
+        .movable(false)
+        .size(shell_layout.status_bar_window_size(screen_width))
+    }
+    fn control_center_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let screen_width = self.screen_width.get();
+        let shell_layout = self.shell_layout.get();
+        let control_center_snapshot = self.control_center_session.get().snapshot.unwrap_or_default();
+        let control_center_presentation = if shell_layout.tablet_mode {
+            ControlCenterPresentation::TabletSheet
+        } else {
+            ControlCenterPresentation::LaptopPopover
+        };
+        let control_center_metrics = ControlCenterMetrics::resolve(
+            control_center_presentation,
+            control_center_snapshot.audio.outputs.len(),
+        );
+        let control_center_size = control_center_metrics.body_size();
+        let (control_center_body_x, control_center_body_y) =
+            control_center_body_position(screen_width, shell_layout.popup_y(), control_center_size);
+        Window::new(
+            "Control Center",
+            build_control_center_view(
+                control_center_presentation,
+                control_center_snapshot,
+                self.control_center_volume.clone(),
+                self.control_center_brightness.clone(),
+                self.control_center_action.clone(),
+                self.control_center_armed_power.clone(),
+            ),
+        )
+        .scene_key(CONTROL_CENTER_SCENE_KEY)
+        .open_at_launch(false)
+        .app_id("org.scarlet-os.popup.control-center")
+        .decorated(false)
+        .background_color(scarlet_ui::color::Color::TRANSPARENT)
+        .opaque(false)
+        .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
+        .shadow_elevation(ElevationRole::Floating)
+        .window_type(scarlet_ui::views::window_type::ALWAYS_ON_TOP)
+        .focus_on_create(true)
+        .active_on_focus(false)
+        .resizable(false)
+        .movable(false)
+        .placement(WindowPlacement::At {
+            x: control_center_body_x,
+            y: control_center_body_y,
+        })
+        .size(control_center_size)
+    }
+    fn home_backdrop_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let screen_width = self.screen_width.get();
+        let screen_height = self.screen_height.get();
+        Window::new("Home Backdrop", Spacer::new())
+            .scene_key(HOME_BACKDROP_SCENE_KEY)
+            .open_at_launch(false)
+            .app_id("org.scarlet-os.desktop.shell.home-backdrop")
+            .decorated(false)
+            .background_color(HOME_BACKDROP_TINT)
+            .opaque(false)
+            .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+            .focus_on_create(false)
+            .active_on_focus(false)
+            .resizable(false)
+            .movable(false)
+            .placement(WindowPlacement::At { x: 0, y: 0 })
+            .size(Size::new(screen_width, screen_height))
+    }
+    fn overview_drawer_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let screen_width = self.screen_width.get();
+        let screen_height = self.screen_height.get();
+        Window::new("Overview Drawer", self.overview_drawer_handle())
+            .scene_key(OVERVIEW_DRAWER_SCENE_KEY)
+            .open_at_launch(false)
+            .app_id(sws_protocol::workspace::OVERVIEW_DRAWER_APP_ID)
+            .decorated(false)
+            .background_color(Color::TRANSPARENT)
+            .opaque(false)
+            .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+            .focus_on_create(false)
+            .active_on_focus(false)
+            .resizable(false)
+            .movable(false)
+            .placement(WindowPlacement::At {
+                x: 0,
+                y: (screen_height - sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32)
+                    .max(0.0) as i32,
+            })
+            .size(Size::new(
+                screen_width,
+                sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32,
+            ))
+    }
+    fn home_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let screen_width = self.screen_width.get();
+        let screen_height = self.screen_height.get();
+        Window::new("Home", self.home_content())
+            .scene_key(HOME_SCENE_KEY)
+            .open_at_launch(false)
+            .app_id(if self.mode.get() == ShellMode::Console {
+                sws_protocol::workspace::CONSOLE_HOME_APP_ID
+            } else {
+                "org.scarlet-os.desktop.shell.home"
+            })
+            .decorated(false)
+            .background_color(scarlet_ui::color::Color::TRANSPARENT)
+            .opaque(false)
+            .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+            .focus_on_create(false)
+            .active_on_focus(false)
+            .resizable(false)
+            .movable(false)
+            .placement(WindowPlacement::At { x: 0, y: 0 })
+            .size(Size::new(screen_width, screen_height))
+    }
+    fn console_chrome_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let screen_width = self.screen_width.get();
+        let console_layout = console::ConsoleLayout::resolve(&self.console_snapshot());
+        Window::new(
+            "Console Controls",
+            self.console_content(console::ConsolePart::Chrome),
+        )
+        .scene_key(CONSOLE_CHROME_SCENE_KEY)
+        .open_at_launch(false)
+        .app_id("org.scarlet-os.desktop.shell.console-chrome")
+        .decorated(false)
+        .background_color(Color::TRANSPARENT)
+        .opaque(false)
+        .window_type(sws_protocol::window_types::SHELL_PANEL)
+        .focus_on_create(false)
+        .active_on_focus(false)
+        .resizable(false)
+        .movable(false)
+        .placement(WindowPlacement::At {
+            x: 0,
+            y: console_layout.chrome_top() as i32,
+        })
+        .size(Size::new(screen_width, console_layout.chrome_height()))
+    }
+    fn volume_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let (osd_size, osd_x, osd_y) =
+            volume_osd::geometry(self.screen_width.get(), self.screen_height.get());
+        Window::new(
+            "Volume",
+            volume_osd::view(self.volume_feedback.get(), osd_size),
+        )
+        .scene_key(volume_osd::SCENE_KEY)
+        .open_at_launch(false)
+        .app_id("org.scarlet-os.desktop.shell.volume-osd")
+        .decorated(false)
+        .background_color(Color::TRANSPARENT)
+        .opaque(false)
+        .window_type(sws_protocol::window_types::ALWAYS_ON_TOP)
+        .focus_on_create(false)
+        .active_on_focus(false)
+        .resizable(false)
+        .movable(false)
+        .placement(WindowPlacement::At { x: osd_x, y: osd_y })
+        .size(osd_size)
+    }
+}
+
 impl Application for ShellApp {
     fn on_frame_presented(&mut self, ctx: &WindowContext) {
         if ctx.scene_key.as_str() == HOME_SCENE_KEY {
@@ -3362,6 +3658,14 @@ impl Application for ShellApp {
                 &self.home_search_focused,
             ]);
         }
+        if key.as_str() == CONTROL_CENTER_SCENE_KEY {
+            return Some(vec![
+                &self.screen_width,
+                &self.shell_layout,
+                &self.control_center_session,
+                &self.control_center_armed_power,
+            ]);
+        }
         if key.as_str() == "main" {
             // Home selection/catalog state does not change the status bar.
             // Subscribing this scene to every ShellApp state submits another
@@ -3378,7 +3682,9 @@ impl Application for ShellApp {
                 &self.open_menu_index,
                 &self.workspace_state,
                 &self.status_snapshot,
-                &self.control_center_open,
+                // Provider snapshots only rebuild CC. Its window lifecycle
+                // refreshes the status item's selected appearance.
+                &self.control_center_window,
             ]);
         }
         if key.as_str() == volume_osd::SCENE_KEY {
@@ -3430,9 +3736,15 @@ impl Application for ShellApp {
                 &console::chrome_regions(self.console_snapshot(), self.console_state.clone()),
             );
         } else if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
-            self.control_center_window_id
-                .set(Some(ctx.platform_window_id as u32));
+            self.control_center_window.set(Some((
+                self.control_center_session.get().generation(),
+                ctx.platform_window_id as u32,
+            )));
             let _ = window.set_opaque(false);
+            let _ = window.set_surface_regions(
+                true,
+                &[control_center::backdrop_region(window.managed_size())],
+            );
         } else if ctx.scene_key.as_str() == OVERVIEW_DRAWER_SCENE_KEY {
             let _ = window.set_opaque(false);
         } else if ctx.scene_key.as_str() == HOME_BACKDROP_SCENE_KEY {
@@ -3449,8 +3761,8 @@ impl Application for ShellApp {
 
     fn on_window_close_requested(&mut self, ctx: &WindowContext) -> bool {
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
-            self.control_center_open.set(false);
-            self.control_center_window_id.set(None);
+            self.control_center_session.update(ControlCenterSession::close);
+            self.control_center_window.set(None);
             self.control_center_armed_power.set(None);
         }
         true
@@ -3469,6 +3781,20 @@ impl Application for ShellApp {
     }
 
     fn on_idle(&mut self) {
+        let session = self.control_center_session.get();
+        if !session.open {
+            set_state_if_changed(&self.control_center_window, None);
+        }
+        if session.open
+            && session.snapshot.is_some()
+            && self.control_center_window.get().is_none_or(|(generation, _)| {
+                generation != session.generation()
+            })
+        {
+            // Both the declaration and initial layout now consume a completed
+            // sample. The command is handled on this same application tick.
+            open_window(CONTROL_CENTER_SCENE_KEY);
+        }
         if self.pending_app_menus.get().is_empty() {
             return;
         }
@@ -3538,10 +3864,23 @@ impl Application for ShellApp {
             return;
         }
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
-            let desired = self.control_center_size.get();
+            // Sync runs before reactive scene rebuilds. Derive the size from
+            // the source snapshot here, never a cache written by that rebuild.
+            let presentation = if self.shell_layout.get().tablet_mode {
+                ControlCenterPresentation::TabletSheet
+            } else {
+                ControlCenterPresentation::LaptopPopover
+            };
+            let snapshot = self.control_center_session.get().snapshot.unwrap_or_default();
+            let desired = ControlCenterMetrics::resolve(presentation, snapshot.audio.outputs.len())
+                .body_size();
             if status_bar_resize_needed(window.managed_size(), desired) {
                 let _ = window.resize_managed(desired.width as u32, desired.height as u32);
             }
+            let _ = window.set_surface_regions(
+                true,
+                &[control_center::backdrop_region(window.managed_size())],
+            );
             return;
         }
         if ctx.scene_key.as_str() == OVERVIEW_DRAWER_SCENE_KEY {
@@ -3628,279 +3967,37 @@ impl Application for ShellApp {
     }
 
     fn scenes(&self) -> impl Scene {
-        let clock = self.clock.get();
-        let screen_width = self.screen_width.get();
-        let screen_height = self.screen_height.get();
-        let shell_layout = self.shell_layout.get();
-        let shell_presentation = self.shell_presentation();
-        let shell_navigation = shell_presentation != sws::ShellPresentation::Workspace;
-        let _menu_bar = self.menu_bar.get();
-        let menu_tree = self.menu_tree.get();
-        // println!(
-        //     "[StatusBar] scenes() called: menu_tree has {} items",
-        //     menu_tree.items.len()
-        // );
-        let active_window_id = self.active_window_id.get();
-
-        let hours = clock / 3600;
-        let mins = (clock / 60) % 60;
-        let status_snapshot = self.status_snapshot.get();
-        let clock_label = status_snapshot.clock_label(hours as u8, mins as u8);
-        // The desktop top bar intentionally uses a light material. Its status
-        // labels and Tabler icons use ScarletUI's matching dark foreground.
-        let console_layout = console::ConsoleLayout::resolve(&self.console_snapshot());
-        let status_bar_palette = if shell_navigation {
-            ColorPalette::dark()
-        } else {
-            ColorPalette::light()
-        };
-        let status_bar_background = if shell_navigation {
-            if self.mode.get() == ShellMode::Console {
-                console::FROST
-            } else {
-                Color::TRANSPARENT
-            }
-        } else {
-            status_bar_palette.surface_variant()
-        };
-        let status_tokens = StatusItemTokens::for_layout(shell_layout);
-        let status_presentation = if shell_layout.tablet_mode {
-            StatusPresentation::Touch
-        } else {
-            StatusPresentation::Compact
-        };
-        if !self.control_center_open.get()
-            && let Some(volume) = status_snapshot.audio_volume_percent
-        {
-            set_state_if_changed(&self.control_center_volume, volume as f32);
-        }
-
-        let control_center_snapshot = if self.control_center_open.get() {
-            collect_control_center_snapshot(
-                status_snapshot.clone(),
-                self.display_brightness_percent.get(),
-            )
-        } else {
-            ControlCenterSnapshot {
-                power: status_snapshot.power,
-                audio: AudioSnapshot::unavailable(),
-                brightness_percent: self.display_brightness_percent.get(),
-                network: NetworkSnapshot {
-                    available: false,
-                    interfaces: Vec::new(),
-                },
-                system: SystemSnapshot {
-                    cpu_percent: status_snapshot.cpu_percent,
-                    task_count: None,
-                },
-                input_environment: InputEnvironmentSnapshot {
-                    available: false,
-                    tablet_mode: None,
-                    touch_present: None,
-                    keyboard_present: None,
-                    pointer_present: None,
-                },
-            }
-        };
-        let control_center_presentation = if shell_layout.tablet_mode {
-            ControlCenterPresentation::TabletSheet
-        } else {
-            ControlCenterPresentation::LaptopPopover
-        };
-        let control_center_metrics = ControlCenterMetrics::resolve(
-            control_center_presentation,
-            control_center_snapshot.audio.outputs.len(),
-        );
-        let control_center_size = control_center_metrics.body_size();
-        set_state_if_changed(&self.control_center_size, control_center_size);
-        let (control_center_body_x, control_center_body_y) =
-            control_center_body_position(screen_width, shell_layout.popup_y(), control_center_size);
-        let home_button =
-            build_home_button(self.workspace_state.get(), self.workspace_commands.clone());
-        let visible_menu_items = status_bar_menu_items(&menu_tree, shell_presentation);
-        let status_foreground = shell_navigation.then(|| status_bar_palette.text());
-        let menu_controls = build_menu_bar_view(
-            &visible_menu_items,
-            active_window_id,
-            self.open_menu_index.clone(),
-            shell_layout,
-            status_foreground,
-        );
-        let leading_controls = hstack! {
-            home_button,
-            menu_controls,
-        }
-        .spacing(LEADING_CONTROLS_SPACING)
-        .alignment(Alignment::Center);
-        let trailing_controls = hstack! {
-            build_status_cluster(
-                status_snapshot.clone(),
-                status_presentation,
-                status_tokens,
-                self.control_center_open.clone(),
-                status_foreground,
-            ),
-            build_passive_clock(clock_label, status_tokens, status_foreground),
-        }
-        .spacing(status_tokens.spacing)
-        .alignment(Alignment::Center);
-
-        let (osd_size, osd_x, osd_y) = volume_osd::geometry(screen_width, screen_height);
         (
             (
-                WindowGroup::new(
-                    "main",
-                    Window::new(
-                        "Scarlet Shell",
-                        hstack! {
-                            leading_controls,
-                            Spacer::new(),
-                            trailing_controls,
-                        }
-                        .spacing(status_tokens.spacing)
-                        .alignment(Alignment::Center)
-                        .padding(status_tokens.bar_padding),
-                    )
-                    .app_id("org.scarlet-os.desktop.shell")
-                    .decorated(false)
-                    .background_color(status_bar_background)
-                    // The shell changes between an opaque workspace material and
-                    // per-pixel transparency without recreating this surface.
-                    // Keep alpha composition enabled from the first frame.
-                    .opaque(false)
-                    .window_type(scarlet_ui::views::window_type::TASKBAR)
-                    .active_on_focus(false)
-                    .resizable(false)
-                    .movable(false)
-                    .size(shell_layout.status_bar_window_size(screen_width)),
-                ),
-                Window::new(
-                    "Control Center",
-                    build_control_center_view(
-                        control_center_presentation,
-                        control_center_snapshot,
-                        self.control_center_volume.clone(),
-                        self.control_center_brightness.clone(),
-                        self.control_center_action.clone(),
-                        self.control_center_armed_power.clone(),
-                    ),
-                )
-                .scene_key(CONTROL_CENTER_SCENE_KEY)
-                .open_at_launch(false)
-                .app_id("org.scarlet-os.popup.control-center")
-                .decorated(false)
-                .background_color(scarlet_ui::color::Color::TRANSPARENT)
-                .opaque(false)
-                .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
-                .shadow_elevation(ElevationRole::Floating)
-                .window_type(scarlet_ui::views::window_type::ALWAYS_ON_TOP)
-                .focus_on_create(true)
-                .active_on_focus(false)
-                .resizable(false)
-                .movable(false)
-                .placement(WindowPlacement::At {
-                    x: control_center_body_x,
-                    y: control_center_body_y,
-                })
-                .size(control_center_size),
+                self.status_bar_window(),
+                self.control_center_window(),
                 (
-                    // Keep the dimmed desktop stationary when only the drawer moves.
-                    // SWS reveals this pre-rendered, non-interactive surface together
-                    // with the workspace cards; it never fades out on drawer entry.
-                    Window::new("Home Backdrop", Spacer::new())
-                        .scene_key(HOME_BACKDROP_SCENE_KEY)
-                        .open_at_launch(false)
-                        .app_id("org.scarlet-os.desktop.shell.home-backdrop")
-                        .decorated(false)
-                        .background_color(HOME_BACKDROP_TINT)
-                        .opaque(false)
-                        .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
-                        .focus_on_create(false)
-                        .active_on_focus(false)
-                        .resizable(false)
-                        .movable(false)
-                        .placement(WindowPlacement::At { x: 0, y: 0 })
-                        .size(Size::new(screen_width, screen_height)),
-                    Window::new("Overview Drawer", self.overview_drawer_handle())
-                        .scene_key(OVERVIEW_DRAWER_SCENE_KEY)
-                        .open_at_launch(false)
-                        .app_id(sws_protocol::workspace::OVERVIEW_DRAWER_APP_ID)
-                        .decorated(false)
-                        .background_color(Color::TRANSPARENT)
-                        .opaque(false)
-                        .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
-                        .focus_on_create(false)
-                        .active_on_focus(false)
-                        .resizable(false)
-                        .movable(false)
-                        .placement(WindowPlacement::At {
-                            x: 0,
-                            y: (screen_height
-                                - sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32)
-                                .max(0.0) as i32,
-                        })
-                        .size(Size::new(
-                            screen_width,
-                            sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32,
-                        )),
-                    Window::new("Home", self.home_content())
-                        .scene_key(HOME_SCENE_KEY)
-                        .open_at_launch(false)
-                        .app_id(if self.mode.get() == ShellMode::Console {
-                            sws_protocol::workspace::CONSOLE_HOME_APP_ID
-                        } else {
-                            "org.scarlet-os.desktop.shell.home"
-                        })
-                        .decorated(false)
-                        .background_color(scarlet_ui::color::Color::TRANSPARENT)
-                        .opaque(false)
-                        .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
-                        .focus_on_create(false)
-                        .active_on_focus(false)
-                        .resizable(false)
-                        .movable(false)
-                        .placement(WindowPlacement::At { x: 0, y: 0 })
-                        .size(Size::new(screen_width, screen_height)),
+                    self.home_backdrop_window(),
+                    self.overview_drawer_window(),
+                    self.home_window(),
                 ),
-                Window::new(
-                    "Console Controls",
-                    self.console_content(console::ConsolePart::Chrome),
-                )
-                .scene_key(CONSOLE_CHROME_SCENE_KEY)
-                .open_at_launch(false)
-                .app_id("org.scarlet-os.desktop.shell.console-chrome")
-                .decorated(false)
-                .background_color(Color::TRANSPARENT)
-                .opaque(false)
-                .window_type(sws_protocol::window_types::SHELL_PANEL)
-                .focus_on_create(false)
-                .active_on_focus(false)
-                .resizable(false)
-                .movable(false)
-                .placement(WindowPlacement::At {
-                    x: 0,
-                    y: console_layout.chrome_top() as i32,
-                })
-                .size(Size::new(screen_width, console_layout.chrome_height())),
+                self.console_chrome_window(),
             ),
-            Window::new(
-                "Volume",
-                volume_osd::view(self.volume_feedback.get(), osd_size),
-            )
-            .scene_key(volume_osd::SCENE_KEY)
-            .open_at_launch(false)
-            .app_id("org.scarlet-os.desktop.shell.volume-osd")
-            .decorated(false)
-            .background_color(Color::TRANSPARENT)
-            .opaque(false)
-            .window_type(sws_protocol::window_types::ALWAYS_ON_TOP)
-            .focus_on_create(false)
-            .active_on_focus(false)
-            .resizable(false)
-            .movable(false)
-            .placement(WindowPlacement::At { x: osd_x, y: osd_y })
-            .size(osd_size),
+            self.volume_window(),
         )
+    }
+
+    fn scene_view(
+        &self,
+        key: &scarlet_ui::scene::SceneWindowKey,
+    ) -> Option<Box<dyn scarlet_ui::view::View>> {
+        // Build only the requested window. Never enumerate providers or build
+        // the panel/home siblings on a status-bar clock or audio update.
+        Some(match key.as_str() {
+            "main" => boxed(self.status_bar_window()),
+            CONTROL_CENTER_SCENE_KEY => boxed(self.control_center_window()),
+            HOME_BACKDROP_SCENE_KEY => boxed(self.home_backdrop_window()),
+            OVERVIEW_DRAWER_SCENE_KEY => boxed(self.overview_drawer_window()),
+            HOME_SCENE_KEY => boxed(self.home_window()),
+            CONSOLE_CHROME_SCENE_KEY => boxed(self.console_chrome_window()),
+            volume_osd::SCENE_KEY => boxed(self.volume_window()),
+            _ => return None,
+        })
     }
 
     fn exit_when_all_windows_closed(&self) -> bool {
@@ -3975,13 +4072,16 @@ impl ShellApp {
             app_name,
             menu_titles
         );
-        if self.control_center_window_id.get() == Some(window_id) {
+        if self.control_center_window.get().map(|(_, id)| id) == Some(window_id) {
             return;
         }
-        if self.control_center_open.get() && app_name != "TaskBar" && app_name != "Control Center" {
+        if self.control_center_session.get().open
+            && app_name != "TaskBar"
+            && app_name != "Control Center"
+        {
             dismiss_window(CONTROL_CENTER_SCENE_KEY);
-            self.control_center_open.set(false);
-            self.control_center_window_id.set(None);
+            self.control_center_session.update(ControlCenterSession::close);
+            self.control_center_window.set(None);
             self.control_center_armed_power.set(None);
         }
         let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
@@ -4081,10 +4181,19 @@ impl ShellApp {
         let control_center_volume = self.control_center_volume.clone();
         let control_center_brightness = self.control_center_brightness.clone();
         let display_brightness_percent = self.display_brightness_percent.clone();
-        let control_center_open = self.control_center_open.clone();
+        let brightness_dragging = scarlet_ui::views::Slider::new(control_center_brightness.clone())
+            .get_dragging()
+            .clone();
+        let control_center_session = self.control_center_session.clone();
+        let input_environment_listener = self.input_environment_snapshot.clone();
+        let input_environment_provider = self.input_environment_snapshot.clone();
 
         std::thread::spawn(move || {
-            listen_for_input_environment_changes(shell_layout_listener, open_menu_index_listener);
+            listen_for_input_environment_changes(
+                shell_layout_listener,
+                open_menu_index_listener,
+                input_environment_listener,
+            );
         });
 
         std::thread::spawn(move || {
@@ -4102,7 +4211,10 @@ impl ShellApp {
         std::thread::spawn(move || {
             let mut audio_client: Option<SasClient> = None;
             let mut display = None;
+            let mut brightness_write = PercentWriteState::default();
+            let mut volume_write = PercentWriteState::default();
             let mut next_display_poll = std::time::Instant::now();
+            let mut next_snapshot_poll = std::time::Instant::now();
             loop {
                 if control_center_action.get().is_some() {
                     // Take under the State lock so a newer slider event cannot
@@ -4110,6 +4222,11 @@ impl ShellApp {
                     let mut pending = None;
                     control_center_action.update(|action| pending = action.take());
                     if let Some(action) = pending {
+                        // Output enumeration changes on routing, not on each
+                        // brightness drag event. Keep that IPC at poll cadence.
+                        if matches!(action, ControlCenterAction::SelectOutput(_)) {
+                            next_snapshot_poll = std::time::Instant::now();
+                        }
                         apply_control_center_action(
                             action,
                             &mut audio_client,
@@ -4117,8 +4234,9 @@ impl ShellApp {
                             &control_center_volume,
                             &mut display,
                             &display_brightness_percent,
-                            &control_center_brightness,
-                            &control_center_open,
+                            &control_center_session,
+                            &mut brightness_write,
+                            &mut volume_write,
                         );
                     }
                     let status = control_center_status.get();
@@ -4134,17 +4252,48 @@ impl ShellApp {
                     let actual = display
                         .as_ref()
                         .and_then(|display| display.get_brightness_percent().ok());
-                    // Only external changes reset the slider; its own pending
-                    // drag value should survive unchanged provider samples.
-                    if set_state_if_changed(&display_brightness_percent, actual) {
-                        if let Some(actual) = actual {
-                            set_state_if_changed(&control_center_brightness, actual as f32);
-                        }
-                    }
+                    // Observe every sample, including during a drag. Reconcile
+                    // only after input releases and queued writes are drained.
+                    set_state_if_changed(&display_brightness_percent, actual);
                     if actual.is_none() {
                         display = None;
                     }
                     next_display_poll = std::time::Instant::now() + Duration::from_secs(1);
+                }
+                control_center::reconcile_brightness(
+                    &control_center_brightness,
+                    &brightness_dragging,
+                    display_brightness_percent.get(),
+                    &control_center_action,
+                );
+                let session = control_center_session.get();
+                if session.open
+                    && (session.snapshot.is_none()
+                        || std::time::Instant::now() >= next_snapshot_poll)
+                {
+                    let snapshot = collect_control_center_snapshot(
+                        control_center_status.get(),
+                        display_brightness_percent.get(),
+                        &mut audio_client,
+                        input_environment_provider
+                            .get()
+                            .unwrap_or_else(|| input_environment_snapshot(None)),
+                    );
+                    let current = control_center_session.get();
+                    if current.open
+                        && current.generation() == session.generation()
+                        && current.snapshot.as_ref() != Some(&snapshot)
+                    {
+                        control_center_session.update(|current| {
+                            current.publish(session.generation(), snapshot);
+                        });
+                    }
+                    next_snapshot_poll = std::time::Instant::now() + Duration::from_secs(1);
+                }
+                if !session.open {
+                    if let Some(volume) = control_center_status.get().audio_volume_percent {
+                        set_state_if_changed(&control_center_volume, volume as f32);
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(16));
             }

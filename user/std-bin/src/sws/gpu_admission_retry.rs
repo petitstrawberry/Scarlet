@@ -3,11 +3,26 @@
 #[derive(Default)]
 pub(super) struct GpuAdmissionRetry {
     deadline_ns: Option<u64>,
+    display_pending: bool,
 }
 
 impl GpuAdmissionRetry {
     pub(super) fn defer(&mut self, now_ns: u64, frame_interval_ns: u64) {
         self.deadline_ns = Some(now_ns.saturating_add(frame_interval_ns));
+    }
+
+    /// Display capacity advances by an explicit completion wake, not a timer.
+    pub(super) fn defer_display(&mut self) {
+        self.display_pending = true;
+    }
+
+    pub(super) fn waiting_for_display(&self) -> bool {
+        self.display_pending
+    }
+
+    /// Readiness of the exact current image clears only display pressure.
+    pub(super) fn display_ready(&mut self) {
+        self.display_pending = false;
     }
 
     pub(super) fn remaining_ns(&self, now_ns: u64) -> Option<u64> {
@@ -18,6 +33,7 @@ impl GpuAdmissionRetry {
 
     pub(super) fn clear(&mut self) {
         self.deadline_ns = None;
+        self.display_pending = false;
     }
 }
 
@@ -56,6 +72,32 @@ mod tests {
         retry.defer(100, 16);
         retry.clear();
         assert_eq!(retry.remaining_ns(101), None);
+    }
+
+    #[test]
+    fn exact_display_readiness_clears_only_display_wait_not_gpu_backoff() {
+        let mut retry = GpuAdmissionRetry::default();
+        retry.defer_display();
+        assert!(retry.waiting_for_display());
+        assert_eq!(
+            retry.remaining_ns(100),
+            None,
+            "display waits have no synthetic frame timer"
+        );
+        retry.defer(100, 16);
+        retry.display_ready();
+        assert!(!retry.waiting_for_display());
+        assert_eq!(
+            retry.remaining_ns(101),
+            Some(15),
+            "a display wake cannot erase GPU backpressure"
+        );
+        retry.defer_display();
+        assert!(retry.waiting_for_display());
+        assert_eq!(retry.remaining_ns(116), None);
+        retry.clear();
+        assert!(!retry.waiting_for_display());
+        assert_eq!(retry.remaining_ns(116), None);
     }
 
     #[test]

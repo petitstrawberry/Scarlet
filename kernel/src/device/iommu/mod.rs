@@ -109,6 +109,10 @@ pub struct IommuStreamId {
 /// IOMMU implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IommuFaultSnapshot {
+    /// Provider-decoded pending context fault, including a stalled transaction.
+    /// Read-only format/identification bits in context_status are excluded.
+    /// Reading this snapshot never acknowledges or clears the fault.
+    pub context_fault_pending: bool,
     /// Controller-wide fault status.
     pub global_status: u32,
     /// Domain or context-bank fault status.
@@ -233,6 +237,29 @@ pub trait IommuDomain: Send + Sync {
     /// `Ok(())` when hardware-visible state is synchronized.
     fn flush(&self) -> Result<(), IommuError>;
 
+    /// Release a detached, fault-free hardware context while retaining tables.
+    /// The caller must stop DMA and detach every stream first. Failure must be
+    /// treated as uncertain hardware ownership; never retry on another bank.
+    /// Providers without separable page tables reject this operation.
+    fn suspend(&self) -> Result<(), IommuError> {
+        Err(IommuError::NotSupported)
+    }
+
+    /// Acquire/configure a hardware context for retained tables and synchronize
+    /// its translations before attaching streams. No stream may be attached
+    /// until this succeeds. Idle domains need not retain finite hardware banks.
+    fn resume(&self) -> Result<(), IommuError> {
+        Err(IommuError::NotSupported)
+    }
+
+    /// Acquire a context if one is available. `Ok(false)` certifies that no
+    /// lease was acquired and no domain configuration changed; callers may
+    /// release an independently idle lease before retrying. Every uncertain
+    /// configuration or synchronization failure must return `Err`, not false.
+    fn try_resume(&self) -> Result<bool, IommuError> {
+        self.resume().map(|()| true)
+    }
+
     /// Capture the current hardware fault state for this domain.
     ///
     /// # Returns
@@ -241,6 +268,13 @@ pub trait IommuDomain: Send + Sync {
     /// fault registers, otherwise `None`.
     fn fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
         None
+    }
+
+    /// Read pending context-fault status without acknowledging it. Providers
+    /// may override this to read only their status register at DMA retirement.
+    /// None means this provider does not expose context fault reporting.
+    fn pending_context_fault(&self) -> Option<bool> {
+        self.fault_snapshot().map(|fault| fault.context_fault_pending)
     }
 }
 
@@ -263,6 +297,16 @@ pub trait IommuController: Send + Sync {
     ///
     /// A reference-counted domain on success.
     fn alloc_domain(&self, config: IommuDomainConfig) -> Result<Arc<dyn IommuDomain>, IommuError>;
+
+    /// Allocate owned page tables without reserving a hardware context. The
+    /// domain starts detached and requires successful `try_resume` before any
+    /// stream may attach. Controllers with inseparable tables reject this.
+    fn alloc_parked_domain(
+        &self,
+        _config: IommuDomainConfig,
+    ) -> Result<Arc<dyn IommuDomain>, IommuError> {
+        Err(IommuError::NotSupported)
+    }
 
     /// Decode firmware specifier cells into stream IDs.
     ///

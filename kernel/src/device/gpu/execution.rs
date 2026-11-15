@@ -1,6 +1,7 @@
 //! Kernel-owned GPU execution context and queue capabilities.
 
 mod asynchronous;
+mod timestamp;
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -186,7 +187,13 @@ impl GpuContext {
         attached_images
             .try_reserve(1)
             .map_err(|_| "Failed to retain GPU image for context lifetime")?;
-        let token = self.backend_context.attach_image(backend_image.as_ref())?;
+        let token = self.backend_context.attach_image_pinned(
+            backend_image.as_ref(),
+            super::GpuBackingPin {
+                gpu_writable: image.backing().allows_gpu_write(),
+                _owner: image.backing(),
+            },
+        )?;
         if token == 0 {
             let _ = self.backend_context.detach_image(backend_image.as_ref());
             return Err("GPU backend returned an invalid image attachment token");
@@ -262,7 +269,7 @@ impl GpuContext {
             .map_err(|_| "Failed to retain GPU buffer for context lifetime")?;
         let token = self
             .backend_context
-            .attach_buffer(backend_buffer.as_ref())?;
+            .attach_buffer_pinned(backend_buffer.as_ref(), super::GpuBackingPin { _owner: Arc::clone(&backing) as Arc<dyn Send + Sync>, gpu_writable: true })?;
         if token == 0 {
             let _ = self.backend_context.detach_buffer(backend_buffer.as_ref());
             return Err("GPU backend returned an invalid buffer attachment token");
@@ -757,12 +764,7 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while reading back")?;
-        let validate = if native {
-            super::resource::image_readback_native_layout
-        } else {
-            super::resource::image_readback_layout
-        };
-        let layout = match validate(&request, image.query_info(), image.layout()) {
+        let layout = match image.validate_readback(&request, native) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;
@@ -797,6 +799,9 @@ impl GpuContext {
 impl ControlOps for GpuContext {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            scarlet_abi::gpu_timestamp::GPU_CONTEXT_TIMESTAMP => {
+                timestamp::handle(self.backend_context.as_ref(), arg)
+            }
             GPU_CONTEXT_QUERY => self.handle_query_info(arg),
             GPU_CREATE_QUEUE => self.handle_create_queue(arg),
             GPU_CONTEXT_ATTACH_IMAGE => self.handle_attach_image(arg),

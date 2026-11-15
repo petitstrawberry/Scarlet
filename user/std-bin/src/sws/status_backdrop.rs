@@ -140,6 +140,90 @@ pub(super) fn expand_damage(geometries: &[BackdropGeometry], rects: &mut Vec<Rec
     }
 }
 
+/// Source identity is retained separately from presentation/repair damage.
+/// Only native content commits may skip their own (and lower) backdrops.
+/// Geometry, stacking, opacity and unknown damage have no foreground owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BackdropDamage {
+    pub rect: Rect,
+    pub foreground: Option<u32>,
+}
+
+impl BackdropDamage {
+    /// Keep the same bounded budget as presentation damage. Overflow forgets
+    /// ownership conservatively, never drops a background invalidation.
+    pub fn push_bounded(entries: &mut Vec<Self>, next: Self, limit: usize) {
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| entry.foreground == next.foreground && intersects(entry.rect, next.rect))
+        {
+            entry.rect = union(entry.rect, next.rect);
+        } else if entries.len() < limit {
+            entries.push(next);
+        } else {
+            let rect = entries
+                .iter()
+                .fold(next.rect, |rect, entry| union(rect, entry.rect));
+            entries.clear();
+            entries.push(Self {
+                rect,
+                foreground: None,
+            });
+        }
+    }
+}
+
+/// Decide which background captures changed, in native bottom-to-top order.
+/// The material is captured BEFORE its owner's foreground. Repairing an old
+/// swapchain image still expands presentation damage separately; it must not
+/// turn a foreground-only update into a fresh background capture.
+pub(super) fn backdrop_refreshes(
+    backdrops: &[(u32, BackdropGeometry)],
+    window_order: &[u32],
+    damage: Option<&[BackdropDamage]>,
+) -> Vec<bool> {
+    let Some(damage) = damage else {
+        return vec![true; backdrops.len()];
+    };
+    let ranks: Vec<_> = backdrops
+        .iter()
+        .map(|(owner, _)| window_order.iter().position(|id| id == owner))
+        .collect();
+    let mut refresh: Vec<_> = backdrops
+        .iter()
+        .zip(&ranks)
+        .map(|((_, geometry), rank)| {
+            let Some(rank) = rank else {
+                return true;
+            };
+            damage.iter().any(|damage| {
+                geometry.intersects_source(damage.rect)
+                    && damage
+                        .foreground
+                        .and_then(|source| window_order.iter().position(|id| *id == source))
+                        .is_none_or(|source_rank| source_rank < *rank)
+            })
+        })
+        .collect();
+    // A lower material can change pixels beyond the original damage through
+    // its blur kernel. Propagate its OUTPUT to upper sampling halos. Materials
+    // belonging to the same window all sample before that window is composed.
+    for rank in 0..window_order.len() {
+        for (index, (_, geometry)) in backdrops.iter().enumerate() {
+            if ranks[index] != Some(rank) || refresh[index] {
+                continue;
+            }
+            let upstream_changed = backdrops.iter().enumerate().any(|(lower, (_, material))| {
+                refresh[lower]
+                    && ranks[lower].is_none_or(|lower_rank| lower_rank < rank)
+                    && geometry.intersects_source(material.output)
+            });
+            refresh[index] = upstream_changed;
+        }
+    }
+    refresh
+}
+
 pub(super) struct CpuBackdrop {
     pub geometry: BackdropGeometry,
     pixels: Vec<u32>,
@@ -263,6 +347,85 @@ fn box_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_content_damage_only_refreshes_materials_above_its_owner() {
+        let geometry = BackdropGeometry::new(200, 200, (30, 30, 100, 100), 4, 8).unwrap();
+        let materials = [(10, geometry), (20, geometry)];
+        let order = [1, 10, 20, 30];
+        let damage = |foreground| {
+            [BackdropDamage {
+                rect: (50, 50, 4, 4),
+                foreground,
+            }]
+        };
+        assert_eq!(
+            backdrop_refreshes(&materials, &order, Some(&damage(Some(20)))),
+            [false, false]
+        );
+        assert_eq!(
+            backdrop_refreshes(&materials, &order, Some(&damage(Some(10)))),
+            [false, true]
+        );
+        assert_eq!(
+            backdrop_refreshes(&materials, &order, Some(&damage(Some(1)))),
+            [true, true]
+        );
+        assert_eq!(
+            backdrop_refreshes(&materials, &order, Some(&damage(Some(30)))),
+            [false, false]
+        );
+        // Move, resize, reorder, opacity and removed/unknown owners cannot use
+        // the foreground exclusion. A full repaint also invalidates all.
+        for owner in [None, Some(99)] {
+            assert_eq!(
+                backdrop_refreshes(&materials, &order, Some(&damage(owner))),
+                [true, true]
+            );
+        }
+        assert_eq!(backdrop_refreshes(&materials, &order, None), [true, true]);
+        assert_eq!(
+            backdrop_refreshes(&materials, &order, Some(&[])),
+            [false, false]
+        );
+        assert_eq!(
+            backdrop_refreshes(&materials, &[1, 20, 10, 30], Some(&damage(Some(10)))),
+            [false, false]
+        );
+    }
+
+    #[test]
+    fn lower_blur_output_propagates_upward_and_damage_overflow_stays_conservative() {
+        let lower = BackdropGeometry::new(300, 200, (30, 30, 100, 100), 4, 8).unwrap();
+        let upper = BackdropGeometry::new(300, 200, (120, 30, 80, 100), 4, 8).unwrap();
+        let damage = BackdropDamage {
+            rect: (25, 50, 2, 2),
+            foreground: Some(1),
+        };
+        assert!(!upper.intersects_source(damage.rect));
+        // Deliberately unsorted material list: stacking order is authoritative.
+        assert_eq!(
+            backdrop_refreshes(&[(20, upper), (10, lower)], &[1, 10, 20], Some(&[damage])),
+            [true, true]
+        );
+        let own = BackdropDamage {
+            rect: (50, 50, 2, 2),
+            foreground: Some(20),
+        };
+        let behind = BackdropDamage {
+            rect: (130, 50, 2, 2),
+            foreground: Some(1),
+        };
+        let mut entries = Vec::new();
+        BackdropDamage::push_bounded(&mut entries, own, 1);
+        BackdropDamage::push_bounded(&mut entries, behind, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].foreground, None);
+        assert_eq!(
+            backdrop_refreshes(&[(20, upper)], &[1, 20], Some(&entries)),
+            [true]
+        );
+    }
 
     #[test]
     fn overlapping_material_halos_share_one_clean_redraw() {

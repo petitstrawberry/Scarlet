@@ -290,6 +290,8 @@ pub struct Window {
     pub has_presented_frame: bool,
     /// Global presentation counter observed for the newest submitted frame.
     pub(super) last_frame_submission_counter: Option<u64>,
+    /// Last nominal display tick granted as next-encode permission, not an ack.
+    pub(super) last_frame_credit_tick: Option<u64>,
     /// Whether the retained buffer belongs to the current shell presentation.
     ///
     /// A shell background is withheld after a Home/Overview transition until
@@ -720,6 +722,7 @@ impl Window {
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
+            last_frame_credit_tick: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -795,6 +798,7 @@ impl Window {
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
+            last_frame_credit_tick: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -898,6 +902,7 @@ impl Window {
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
+            last_frame_credit_tick: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1684,6 +1689,7 @@ impl WindowManager {
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
+            last_frame_credit_tick: None,
             presentation_content_ready: true,
             pending_maximize: false,
             initial_size_negotiated: false,
@@ -1779,6 +1785,7 @@ impl WindowManager {
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
+            last_frame_credit_tick: None,
             // The initial client SHM has no submitted pixels yet. Keep it out
             // of composition while permitting focus and the bootstrap callback.
             // Both CPU UPDATE_BUFFER and SGFX COMMIT_SGFX_FRAME open this gate.

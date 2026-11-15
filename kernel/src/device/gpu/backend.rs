@@ -1,5 +1,7 @@
 //! Backend-neutral GPU information model.
 
+use super::GpuBackingPin;
+
 use alloc::{boxed::Box, sync::Arc};
 
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
@@ -798,6 +800,26 @@ impl GpuBackendLinearDisplayInfo {
 }
 /// Backend image retained by a [`crate::device::gpu::GpuImage`].
 pub trait GpuBackendImage: Send + Sync {
+    /// Opt into native readback through bounded physical spans for a non-linear
+    /// layout. The generic layer retains this image/backing and holds the
+    /// context's CPU-access reservation through invalidation and user copies.
+    fn supports_native_readback_spans(&self) -> bool {
+        false
+    }
+
+    /// Translate a logical row prefix to `(backing byte offset, texel count)`.
+    /// Return a nonempty contiguous run no wider than `width`. The generic
+    /// layer checks each span against the immutable backing before reading it.
+    /// This method must not submit GPU work or mutate the source image.
+    fn native_readback_span(
+        &self,
+        _x: u32,
+        _y: u32,
+        _width: u32,
+    ) -> Result<(u64, u32), &'static str> {
+        Err("GPU image does not support native readback spans")
+    }
+
     /// Query immutable backend-neutral image information.
     ///
     /// # Returns
@@ -842,6 +864,13 @@ pub trait GpuBackendCpuAccessGuard {}
 
 /// Backend execution context retained by a [`crate::device::gpu::GpuContext`].
 pub trait GpuBackendContext: Send + Sync {
+    /// Sample one device GPU clock, in nanoseconds, after retiring preceding
+    /// context work. Keep the device powered and exclude reset until sampled.
+    /// `None` means unsupported; never substitute CPU or host wall time.
+    fn timestamp_ns(&self) -> Result<Option<u64>, GpuBackendSubmitError> {
+        Ok(None)
+    }
+
     /// Query the effective execution dialect selected for this context.
     ///
     /// # Returns
@@ -855,6 +884,16 @@ pub trait GpuBackendContext: Send + Sync {
     ///
     /// A backend queue whose commands execute in this context.
     fn create_queue(&self) -> Result<Arc<dyn GpuBackendQueue>, &'static str>;
+
+    /// Attach with a real generic backing owner for persistent VM mappings.
+    /// Legacy backends may ignore the pin and use their existing attach path.
+    fn attach_image_pinned(
+        &self,
+        image: &dyn GpuBackendImage,
+        _backing: GpuBackingPin,
+    ) -> Result<u64, &'static str> {
+        self.attach_image(image)
+    }
 
     /// Attach an image so opaque commands in this context may reference it.
     ///
@@ -1010,6 +1049,15 @@ pub trait GpuBackendContext: Send + Sync {
         _readback: GpuImageUploadInfo,
     ) -> Result<(), &'static str> {
         Err("GPU backend context does not support image readback")
+    }
+
+    /// Buffer counterpart of `attach_image_pinned` with the same lifetime rule.
+    fn attach_buffer_pinned(
+        &self,
+        buffer: &dyn GpuBackendBuffer,
+        _backing: GpuBackingPin,
+    ) -> Result<u64, &'static str> {
+        self.attach_buffer(buffer)
     }
 
     /// Attach a buffer so opaque commands in this context may reference it.

@@ -21,6 +21,69 @@ mod native {
     const WAIT: Duration = Duration::from_millis(500);
     const EARLY: Duration = Duration::from_millis(250);
 
+    fn socket_and_notification_wait() {
+        use scarlet_os::poll::{POLLHUP, POLLIN, PollHandle, poll};
+
+        let listener = Socket::new().expect("multipoll listener");
+        let path = format!("/tmp/sws-multipoll-{}.sock", std::process::id());
+        listener.bind(&path).expect("multipoll bind");
+        listener.listen(1).expect("multipoll listen");
+        let socket = Socket::new().expect("multipoll socket");
+        socket.connect(&path).expect("multipoll connect");
+        let peer = Arc::new(listener.accept().expect("multipoll accept"));
+        let (notification, sender) = scarlet_os::ipc::pipe().expect("multipoll pipe");
+        let sender = Arc::new(sender);
+        let mut handles = [
+            PollHandle::new(socket.as_raw() as u32, POLLIN),
+            PollHandle::new(notification.as_raw() as u32, POLLIN),
+        ];
+        assert_eq!(poll(&mut handles, 0).unwrap(), 0);
+        // Alternate both sources, already-published events and delayed events.
+        // The source not being written must remain quiet through every rearm.
+        for iteration in 0..64 {
+            let index = iteration % 2;
+            let peer = Arc::clone(&peer);
+            let sender = Arc::clone(&sender);
+            let producer = thread::spawn(move || {
+                if iteration % 4 >= 2 {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                let byte = [iteration as u8];
+                let written = if index == 0 {
+                    peer.as_stream().unwrap().write(&byte).unwrap()
+                } else {
+                    sender.as_stream().unwrap().write(&byte).unwrap()
+                };
+                assert_eq!(written, 1);
+            });
+            assert_eq!(poll(&mut handles, WAIT.as_nanos() as i64).unwrap(), 1);
+            assert_ne!(handles[index].revents & POLLIN, 0);
+            assert_eq!(handles[1 - index].revents, 0);
+            producer.join().expect("multipoll producer");
+            let mut byte = [0];
+            let count = if index == 0 {
+                socket.as_stream().unwrap().read(&mut byte).unwrap()
+            } else {
+                notification.as_stream().unwrap().read(&mut byte).unwrap()
+            };
+            assert_eq!(count, 1);
+            assert_eq!(byte[0], iteration as u8);
+            assert_eq!(poll(&mut handles, 0).unwrap(), 0);
+        }
+        let idle = Duration::from_millis(25);
+        let started = Instant::now();
+        assert_eq!(poll(&mut handles, idle.as_nanos() as i64).unwrap(), 0);
+        assert!(started.elapsed() >= idle, "multipoll restarted/shortened deadline");
+        let closer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(2));
+            drop(sender);
+        });
+        assert_eq!(poll(&mut handles, WAIT.as_nanos() as i64).unwrap(), 1);
+        assert_ne!(handles[1].revents & POLLHUP, 0);
+        closer.join().expect("multipoll closer");
+        println!("[sws-event-wait-smoke] PASS socket+pipe 64 wakes/rearms, idle deadline, pipe close");
+    }
+
     fn send(peer: &Socket, message: u32, payload: &[u8]) {
         let header = MessageHeader::new(message, payload.len() as u32).to_le_bytes();
         let stream = peer.as_stream().expect("peer stream");
@@ -41,6 +104,7 @@ mod native {
     /// Returns after every assertion passes; a failed scenario aborts the probe.
     pub(super) fn run() {
         println!("[sws-event-wait-smoke] starting");
+        socket_and_notification_wait();
         let listener = Socket::new().expect("private listener");
         let path = format!("/tmp/sws-event-wait-{}.sock", std::process::id());
         listener.bind(&path).expect("private bind");

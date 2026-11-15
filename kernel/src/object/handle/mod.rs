@@ -25,6 +25,8 @@ struct HandleTableInner {
     metadata: Box<[Option<HandleMetadata>; HandleTable::MAX_HANDLES]>,
     /// Stack of available handle numbers for O(1) allocation
     free_handles: Vec<Handle>,
+    /// Closing/recycling a shared descriptor invalidates poll subscriptions.
+    removals: Arc<crate::sync::Waker>,
 }
 
 /// Handle table for managing kernel objects with support for sharing between tasks.
@@ -106,6 +108,7 @@ impl HandleTable {
                 handles,
                 metadata,
                 free_handles,
+                removals: Arc::new(crate::sync::Waker::new_interruptible("handle-removal")),
             })),
         }
     }
@@ -153,6 +156,7 @@ impl HandleTable {
                 handles: handles_clone,
                 metadata: metadata_clone,
                 free_handles,
+                removals: Arc::new(crate::sync::Waker::new_interruptible("handle-removal")),
             })),
         }
     }
@@ -405,13 +409,23 @@ impl HandleTable {
         }
 
         let mut inner = self.inner.write();
-        if let Some(obj) = inner.handles[handle as usize].take() {
-            inner.metadata[handle as usize] = None; // Clear metadata too
-            inner.free_handles.push(handle); // Return to free pool
-            Some(obj)
-        } else {
-            None
-        }
+        let object = inner.handles[handle as usize].take()?;
+        inner.metadata[handle as usize] = None;
+        inner.free_handles.push(handle);
+        let removals = Arc::clone(&inner.removals);
+        drop(inner);
+        removals.wake_all();
+        Some(object)
+    }
+
+    /// Subscribe before resolving watched handles, then recheck generation
+    /// after wait registration to catch close/reuse through CLONE_FILES.
+    pub(crate) fn subscribe_removals(
+        &self,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> crate::sync::ReadinessRegistration {
+        let source = Arc::clone(&self.inner.read().removals);
+        source.subscribe_readiness(waiter)
     }
 
     /// Update metadata for an existing handle
@@ -512,8 +526,10 @@ impl HandleTable {
         // every object while holding the table lock, then run those destructors
         // after the lock (and its IRQ/preemption guard) has been released.
         let mut removed_objects = Vec::with_capacity(Self::MAX_HANDLES);
+        let removals;
         {
             let mut inner = self.inner.write();
+            removals = Arc::clone(&inner.removals);
             for i in 0..Self::MAX_HANDLES {
                 if let Some(obj) = inner.handles[i].take() {
                     inner.metadata[i] = None; // Clear metadata too
@@ -521,6 +537,9 @@ impl HandleTable {
                     removed_objects.push(obj);
                 }
             }
+        }
+        if !removed_objects.is_empty() {
+            removals.wake_all();
         }
         drop(removed_objects);
     }

@@ -8,6 +8,213 @@ use std::println;
 use std::thread;
 use std::time::Instant;
 
+pub(crate) fn frame_profile_requested() -> bool {
+    env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1")
+        || env::args().any(|arg| arg == "--profile-frames")
+}
+
+/// Fixed-size, file-profile-only counters. A copy belongs to one admitted
+/// frame; new input accumulates independently while that frame retires.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DamageProfile {
+    pub(crate) enabled: bool,
+    pub(crate) native_commits: u64,
+    pub(crate) native_wire_pixels: u64,
+    pub(crate) native_clipped_pixels: u64,
+    pub(crate) native_max_rect_pixels: u64,
+    pub(crate) native_max_bbox_pixels: u64,
+    pub(crate) native_peak_owner: u64,
+    pub(crate) native_peak_serial: u64,
+    pub(crate) native_last_owner: u64,
+    pub(crate) native_last_serial: u64,
+    pub(crate) native_peak_extent_pixels: u64,
+    pub(crate) native_full_bbox_commits: u64,
+    pub(crate) native_projected_pixels: u64,
+    pub(crate) content_added_pixels: u64,
+    pub(crate) content_peak_pixels: u64,
+    pub(crate) content_peak_line: u64,
+    pub(crate) other_added_pixels: u64,
+    pub(crate) other_peak_pixels: u64,
+    pub(crate) other_peak_line: u64,
+    pub(crate) full_requests: u64,
+    pub(crate) full_line: u64,
+    pub(crate) policy_first: u64,
+    pub(crate) content_promotions: u64,
+    pub(crate) pending_pixels: u64,
+    pub(crate) pending_bbox_pixels: u64,
+    pub(crate) cursor_pixels: u64,
+    pub(crate) main_full: u64,
+    pub(crate) gpu_forced: u64,
+    pub(crate) invalid_caches: u64,
+    pub(crate) material_refreshes: u64,
+    pub(crate) requested_pixels: u64,
+    pub(crate) logical_pixels: u64,
+    pub(crate) aged_pixels: u64,
+}
+
+impl DamageProfile {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::default()
+        }
+    }
+    pub(crate) fn reset(&mut self) {
+        *self = Self::new(self.enabled);
+    }
+    pub(crate) fn full(&mut self, line: u32) {
+        if !self.enabled {
+            return;
+        }
+        self.full_requests = self.full_requests.saturating_add(1);
+        self.full_line = u64::from(line);
+    }
+    pub(crate) fn native(
+        &mut self,
+        owner: u32,
+        serial: u64,
+        extent: (u32, u32),
+        wire_pixels: u64,
+        rects: &[(u32, u32, u32, u32)],
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.native_commits = self.native_commits.saturating_add(1);
+        self.native_last_owner = u64::from(owner);
+        self.native_last_serial = serial;
+        self.native_wire_pixels = self.native_wire_pixels.saturating_add(wire_pixels);
+        let mut bounds = (u32::MAX, u32::MAX, 0, 0);
+        for &(x, y, w, h) in rects {
+            let pixels = u64::from(w) * u64::from(h);
+            self.native_clipped_pixels = self.native_clipped_pixels.saturating_add(pixels);
+            self.native_max_rect_pixels = self.native_max_rect_pixels.max(pixels);
+            bounds = (
+                bounds.0.min(x),
+                bounds.1.min(y),
+                bounds.2.max(x.saturating_add(w)),
+                bounds.3.max(y.saturating_add(h)),
+            );
+        }
+        let bbox = u64::from(bounds.2.saturating_sub(bounds.0))
+            * u64::from(bounds.3.saturating_sub(bounds.1));
+        let extent_pixels = u64::from(extent.0) * u64::from(extent.1);
+        if bbox >= self.native_max_bbox_pixels {
+            self.native_max_bbox_pixels = bbox;
+            self.native_peak_owner = u64::from(owner);
+            self.native_peak_serial = serial;
+            self.native_peak_extent_pixels = extent_pixels;
+        }
+        if bbox == extent_pixels {
+            self.native_full_bbox_commits = self.native_full_bbox_commits.saturating_add(1);
+        }
+    }
+    pub(crate) fn added(&mut self, rect: (i32, i32, u32, u32), content: bool, line: u32) {
+        if !self.enabled {
+            return;
+        }
+        let pixels = u64::from(rect.2) * u64::from(rect.3);
+        let (sum, peak, cause) = if content {
+            (
+                &mut self.content_added_pixels,
+                &mut self.content_peak_pixels,
+                &mut self.content_peak_line,
+            )
+        } else {
+            (
+                &mut self.other_added_pixels,
+                &mut self.other_peak_pixels,
+                &mut self.other_peak_line,
+            )
+        };
+        *sum = sum.saturating_add(pixels);
+        if pixels >= *peak {
+            *peak = pixels;
+            *cause = u64::from(line);
+        }
+    }
+    fn values(
+        &self,
+        timings: &crate::sgfx_ir_support::FrameTimings,
+    ) -> [u64; DAMAGE_COLUMNS.len()] {
+        [
+            self.native_commits,
+            self.native_wire_pixels,
+            self.native_clipped_pixels,
+            self.native_max_rect_pixels,
+            self.native_max_bbox_pixels,
+            self.native_peak_owner,
+            self.native_peak_serial,
+            self.native_last_owner,
+            self.native_last_serial,
+            self.native_peak_extent_pixels,
+            self.native_full_bbox_commits,
+            self.native_projected_pixels,
+            self.content_added_pixels,
+            self.content_peak_pixels,
+            self.content_peak_line,
+            self.other_added_pixels,
+            self.other_peak_pixels,
+            self.other_peak_line,
+            self.full_requests,
+            self.full_line,
+            self.policy_first,
+            self.content_promotions,
+            self.pending_pixels,
+            self.pending_bbox_pixels,
+            self.cursor_pixels,
+            self.main_full,
+            self.gpu_forced,
+            self.invalid_caches,
+            self.material_refreshes,
+            self.requested_pixels,
+            self.logical_pixels,
+            self.aged_pixels,
+            timings.damage_slot,
+            timings.damage_initialized,
+            timings.damage_history_pixels,
+        ]
+    }
+}
+
+const DAMAGE_COLUMNS: [&str; 35] = [
+    "native_commits",
+    "native_wire_pixels",
+    "native_clipped_pixels",
+    "native_max_rect_pixels",
+    "native_max_bbox_pixels",
+    "native_peak_owner",
+    "native_peak_serial",
+    "native_last_owner",
+    "native_last_serial",
+    "native_peak_extent_pixels",
+    "native_full_bbox_commits",
+    "native_projected_pixels",
+    "content_added_pixels",
+    "content_peak_pixels",
+    "content_peak_line",
+    "other_added_pixels",
+    "other_peak_pixels",
+    "other_peak_line",
+    "full_requests",
+    "full_line",
+    "policy_first",
+    "content_promotions",
+    "pending_pixels",
+    "pending_bbox_pixels",
+    "cursor_pixels",
+    "main_full",
+    "gpu_forced",
+    "invalid_caches",
+    "material_refreshes",
+    "requested_pixels",
+    "logical_pixels",
+    "aged_pixels",
+    "age_slot",
+    "age_initialized",
+    "age_history_pixels",
+];
+
 /// One compact row per completed composition; no per-frame console output.
 pub(crate) struct FrameProfile {
     file: BufWriter<std::fs::File>,
@@ -17,7 +224,7 @@ pub(crate) struct FrameProfile {
 
 impl FrameProfile {
     pub(crate) fn open() -> Option<Self> {
-        if !env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1") {
+        if !frame_profile_requested() {
             return None;
         }
         let file = std::fs::OpenOptions::new()
@@ -26,12 +233,23 @@ impl FrameProfile {
             .open(format!("/tmp/sws-frames-{}.tsv", std::process::id()))
             .ok()?;
         let mut file = BufWriter::with_capacity(32768, file);
-        writeln!(file, "frame\tbegin_ns\tend_ns\tprepare_ns\tencode_ns\tsubmit_ns\tpresent_ns\tretire_ns\tencode_submit_ns\tbackend_admit_ns\tgpu_wait_ns\tdisplay_enqueue_ns\timage_reuse_wait_ns\tquads\tdamage_pixels").ok()?;
+        Self::write_header(&mut file).ok()?;
         Some(Self {
             file,
             epoch: Instant::now(),
             frame: 0,
         })
+    }
+
+    fn write_header(file: &mut impl Write) -> std::io::Result<()> {
+        write!(
+            file,
+            "frame\tbegin_ns\tend_ns\tprepare_ns\tencode_ns\tsubmit_ns\tpresent_ns\tretire_ns\tencode_submit_ns\tbackend_admit_ns\tgpu_wait_ns\tdisplay_enqueue_ns\timage_reuse_wait_ns\tquads\tdamage_pixels"
+        )?;
+        for column in DAMAGE_COLUMNS {
+            write!(file, "\t{column}")?;
+        }
+        writeln!(file)
     }
 
     pub(crate) fn record(
@@ -40,10 +258,11 @@ impl FrameProfile {
         timings: &crate::sgfx_ir_support::FrameTimings,
         quads: usize,
         damage_pixels: u64,
+        damage: Option<&DamageProfile>,
     ) -> std::io::Result<()> {
         let [start, synced, encoded, submitted, presented, end] = stages;
         self.frame += 1;
-        writeln!(
+        write!(
             self.file,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.frame,
@@ -62,6 +281,11 @@ impl FrameProfile {
             quads,
             damage_pixels
         )?;
+        let damage = damage.copied().unwrap_or_default();
+        for value in damage.values(timings) {
+            write!(self.file, "\t{value}")?;
+        }
+        writeln!(self.file)?;
         if self.frame % 60 == 0 {
             self.file.flush()?;
         }
@@ -186,7 +410,8 @@ fn stage_name(stage: u32) -> &'static str {
 /// Start the trace watchdog when `SWS_LOG=trace` is selected.
 pub(crate) fn start_watchdog() {
     PROFILE_ENABLED.store(
-        env::var("SWS_PROFILE").is_ok_and(|value| value == "1"),
+        env::var("SWS_PROFILE").is_ok_and(|value| value == "1")
+            || env::args().any(|arg| arg == "--profile"),
         Ordering::Relaxed,
     );
     let enabled =
@@ -316,3 +541,122 @@ counter!(input_empty, INPUT_EMPTY);
 counter!(keyboard_loop, KEYBOARD_LOOPS);
 counter!(keyboard_event, KEYBOARD_EVENTS);
 counter!(keyboard_short_read, KEYBOARD_SHORT_READS);
+
+#[cfg(test)]
+mod damage_profile_tests {
+    use super::*;
+    #[test]
+    fn damage_snapshot_separates_raw_rects_from_bbox_and_new_input() {
+        let mut counters = DamageProfile::new(true);
+        counters.native(6100, 7, (100, 100), 200, &[(0, 0, 100, 1), (0, 99, 100, 1)]);
+        counters.added((10, 20, 5, 6), true, 123);
+        counters.added((0, 0, 40, 50), false, 456);
+        counters.full(789);
+        let admitted = counters;
+        counters.reset();
+        counters.native(6101, 9, (100, 100), 1, &[(0, 0, 1, 1)]);
+        assert_eq!(admitted.native_commits, 1);
+        assert_eq!(admitted.native_clipped_pixels, 200);
+        assert_eq!(admitted.native_max_rect_pixels, 100);
+        assert_eq!(admitted.native_max_bbox_pixels, 10000);
+        assert_eq!(admitted.native_full_bbox_commits, 1);
+        assert_eq!(admitted.native_peak_owner, 6100);
+        assert_eq!(admitted.native_peak_serial, 7);
+        assert_eq!(admitted.content_added_pixels, 30);
+        assert_eq!(admitted.other_added_pixels, 2000);
+        assert_eq!(admitted.other_peak_line, 456);
+        assert_eq!(admitted.full_line, 789);
+        assert_eq!(counters.native_peak_owner, 6101);
+        assert_eq!(counters.full_requests, 0);
+        let mut disabled = DamageProfile::default();
+        disabled.native(6100, 1, (100, 100), 10000, &[(0, 0, 100, 100)]);
+        disabled.added((0, 0, 100, 100), false, 1);
+        disabled.full(1);
+        assert!(
+            disabled
+                .values(&Default::default())
+                .into_iter()
+                .all(|value| value == 0)
+        );
+    }
+
+    #[test]
+    fn frame_file_keeps_original_columns_and_numeric_damage_snapshot_schema() {
+        let name = std::env::temp_dir().join(format!(
+            "sws-damage-profile-{}-{}.tsv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = std::fs::File::create(&name).unwrap();
+        let mut file = BufWriter::new(file);
+        FrameProfile::write_header(&mut file).unwrap();
+        let now = Instant::now();
+        let mut profile = FrameProfile {
+            file,
+            epoch: now,
+            frame: 0,
+        };
+        let mut damage = DamageProfile::new(true);
+        damage.native(6100, 7, (100, 100), 200, &[(1, 1, 10, 20)]);
+        damage.logical_pixels = 456;
+        let timings = crate::sgfx_ir_support::FrameTimings {
+            damage_slot: 2,
+            damage_initialized: 1,
+            damage_history_pixels: 123,
+            ..Default::default()
+        };
+        profile
+            .record([now; 6], &timings, 8, 789, Some(&damage))
+            .unwrap();
+        profile.file.flush().unwrap();
+        let data = std::fs::read_to_string(&name).unwrap();
+        drop(profile);
+        std::fs::remove_file(name).unwrap();
+        let mut lines = data.lines();
+        let header: Vec<_> = lines.next().unwrap().split('\t').collect();
+        let values: Vec<u64> = lines
+            .next()
+            .unwrap()
+            .split('\t')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(
+            &header[..15],
+            &[
+                "frame",
+                "begin_ns",
+                "end_ns",
+                "prepare_ns",
+                "encode_ns",
+                "submit_ns",
+                "present_ns",
+                "retire_ns",
+                "encode_submit_ns",
+                "backend_admit_ns",
+                "gpu_wait_ns",
+                "display_enqueue_ns",
+                "image_reuse_wait_ns",
+                "quads",
+                "damage_pixels"
+            ]
+        );
+        assert_eq!(header.len(), values.len());
+        assert_eq!(values[13..15], [8, 789]);
+        for (field, expected) in [
+            ("native_peak_owner", 6100),
+            ("native_peak_serial", 7),
+            ("native_clipped_pixels", 200),
+            ("logical_pixels", 456),
+            ("age_slot", 2),
+            ("age_initialized", 1),
+            ("age_history_pixels", 123),
+        ] {
+            let column = header.iter().position(|&value| value == field).unwrap();
+            assert_eq!(values[column], expected, "{field}");
+        }
+        assert!(lines.next().is_none());
+    }
+}

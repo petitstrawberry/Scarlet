@@ -71,6 +71,9 @@ impl ReadinessSource {
         let listener = Arc::new(ReadinessListener::new(Arc::downgrade(target)));
         {
             let mut subscribers = self.subscribers.lock();
+            // Native poll subscriptions are short-lived. A quiet source must
+            // not accumulate dead Weak entries while another source wakes us.
+            subscribers.retain(|subscriber| subscriber.strong_count() != 0);
             subscribers.push(Arc::downgrade(&listener));
             self.subscriber_count
                 .store(subscribers.len(), Ordering::Release);
@@ -122,6 +125,20 @@ impl ReadinessSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn repeated_poll_subscriptions_do_not_accumulate_on_quiet_sources() {
+        let source = Arc::new(Waker::new_interruptible("quiet-source"));
+        let target = Arc::new(Waker::new_interruptible("poll-target"));
+        for _ in 0..1024 {
+            let registration = source.subscribe_readiness(&target);
+            assert_eq!(source.readiness_subscriber_count_for_test(), 1);
+            drop(registration);
+        }
+        let registration = source.subscribe_readiness(&target);
+        source.wake_all();
+        assert_eq!(registration.generation(), 1);
+    }
 
     #[test_case]
     fn prewait_wake_advances_the_generation_without_a_task() {

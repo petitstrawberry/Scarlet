@@ -1,5 +1,8 @@
 //! Connection management for SWS client
 
+extern crate alloc;
+
+use self::alloc::collections::VecDeque;
 use crate::error::Error;
 use crate::event::{Event, ImeContextState, InputEnvironment, InputEvent};
 use crate::os::{Arc, BTreeMap, Handle, Mutex, SharedMemory, Socket, String, Vec, mutex_lock};
@@ -151,6 +154,11 @@ impl Capabilities {
     /// `true` when [`Connection::request_frame`] may be requested.
     pub const fn supports_frame_callbacks(self) -> bool {
         self.capabilities & protocol::capabilities::FRAME_CALLBACKS != 0
+    }
+
+    /// Whether next-encode credits are independent of GPU commits/presentation.
+    pub const fn supports_frame_credits(self) -> bool {
+        self.capabilities & protocol::capabilities::FRAME_CREDITS != 0
     }
 }
 
@@ -327,8 +335,9 @@ enum EventFilter {
 
 struct EventMailbox {
     filter: EventFilter,
-    events: Vec<Event>,
-    head: usize,
+    // Remove consumed events immediately, even if a continuous stream keeps
+    // this mailbox nonempty. Retain capacity for the unread high-water mark.
+    events: VecDeque<Event>,
 }
 
 /// Whether the application event loop has work, including other windows on
@@ -344,7 +353,7 @@ fn window_events_pending(
 
 fn subscribed_window_events_pending(subscribers: &BTreeMap<u64, EventMailbox>) -> bool {
     subscribers.values().any(|mailbox| {
-        matches!(mailbox.filter, EventFilter::Window(_)) && mailbox.head < mailbox.events.len()
+        matches!(mailbox.filter, EventFilter::Window(_)) && !mailbox.events.is_empty()
     })
 }
 
@@ -406,39 +415,20 @@ impl EventMailbox {
     fn new(filter: EventFilter) -> Self {
         Self {
             filter,
-            events: Vec::new(),
-            head: 0,
+            events: VecDeque::new(),
         }
     }
 
     fn push(&mut self, event: Event) {
-        self.events.push(event);
+        self.events.push_back(event);
     }
 
     fn poll(&mut self) -> Option<Event> {
-        if self.head >= self.events.len() {
-            self.events.clear();
-            self.head = 0;
-            return None;
-        }
-        let event = self.events[self.head].clone();
-        self.head += 1;
-        if self.head >= self.events.len() {
-            self.events.clear();
-            self.head = 0;
-        }
-        Some(event)
+        self.events.pop_front()
     }
 
     fn drain(&mut self) -> Vec<Event> {
-        if self.head == 0 {
-            core::mem::take(&mut self.events)
-        } else {
-            let events = self.events[self.head..].to_vec();
-            self.events.clear();
-            self.head = 0;
-            events
-        }
+        self.events.drain(..).collect()
     }
 }
 
@@ -498,7 +488,7 @@ impl EventReceiver {
         mutex_lock(&self.transport)
             .subscribers
             .get(&self.subscriber_id)
-            .map_or(false, |mailbox| mailbox.head < mailbox.events.len())
+            .map_or(false, |mailbox| !mailbox.events.is_empty())
     }
 }
 
@@ -2439,6 +2429,22 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Request one paced next-encode credit after negotiating FRAME_CREDITS.
+    /// Send immediately, without waiting for an earlier GPU submission/commit.
+    /// FRAME_DONE grants CPU work only; image reuse still needs BUFFER_RELEASED.
+    /// Legacy servers must use request_frame after their corresponding commit.
+    pub fn request_frame_credit(&self, surface_id: u32, callback_id: u64) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        if callback_id == 0 {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_request_frame(surface_id, callback_id);
+        self.send_message(protocol::client_msg::REQUEST_FRAME_CREDIT, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Capture or release raw relative pointer motion for a surface.
     ///
     /// Lock requests are accepted by SWS only while the surface is visible,
@@ -3507,6 +3513,12 @@ mod pointer_lock_tests {
         assert!(!capabilities.supports_frame_callbacks());
         capabilities.capabilities |= protocol::capabilities::FRAME_CALLBACKS;
         assert!(capabilities.supports_frame_callbacks());
+        assert!(!capabilities.supports_frame_credits());
+        capabilities.capabilities |= protocol::capabilities::FRAME_CREDITS;
+        assert!(capabilities.supports_frame_credits());
+        capabilities.capabilities &= !protocol::capabilities::FRAME_CALLBACKS;
+        assert!(!capabilities.supports_frame_callbacks());
+        assert!(capabilities.supports_frame_credits());
     }
 }
 
@@ -3993,12 +4005,113 @@ mod window_wait_tests {
         let mut subscribers = BTreeMap::new();
         let mut mailbox = EventMailbox::new(EventFilter::Window(101));
         mailbox.push(frame_done(101));
-        mailbox.head = 1;
+        assert_eq!(mailbox.poll(), Some(frame_done(101)));
         subscribers.insert(1, mailbox);
         let pending = [frame_done(101)];
 
         assert!(window_events_pending(0, &pending, &subscribers));
         assert!(!window_events_pending(1, &pending, &subscribers));
+    }
+
+    #[test]
+    fn continuously_nonempty_mailbox_retains_only_unread_events() {
+        fn numbered_frame(serial: u64) -> Event {
+            Event::FrameDone {
+                surface_id: 101,
+                callback_id: serial,
+                presentation_time_ns: serial * 16_666_667,
+            }
+        }
+
+        let mut mailbox = EventMailbox::new(EventFilter::Window(101));
+        for serial in 0..64 {
+            mailbox.push(numbered_frame(serial));
+        }
+        let capacity = mailbox.events.capacity();
+        let mut consumed = 0;
+        let mut received = 64;
+        for _ in 0..1024 {
+            for _ in 0..32 {
+                assert_eq!(mailbox.poll(), Some(numbered_frame(consumed)));
+                consumed += 1;
+            }
+            assert_eq!(mailbox.events.len(), 32);
+            for _ in 0..32 {
+                mailbox.push(numbered_frame(received));
+                received += 1;
+            }
+            assert_eq!(mailbox.events.len(), 64);
+            assert_eq!(mailbox.events.capacity(), capacity);
+        }
+        let remaining = mailbox.drain();
+        assert_eq!(remaining.len(), 64);
+        for event in remaining {
+            assert_eq!(event, numbered_frame(consumed));
+            consumed += 1;
+        }
+        assert_eq!(consumed, received);
+        assert!(mailbox.events.is_empty());
+        assert_eq!(mailbox.poll(), None);
+    }
+
+    #[test]
+    fn touch_mailbox_moves_payloads_and_preserves_edges_and_velocity_samples() {
+        use crate::os::Vec;
+        use sws_protocol::touch::{Change, Frame, Phase};
+
+        let phases = [
+            Phase::Down,
+            Phase::Move,
+            Phase::Move,
+            Phase::Up,
+            Phase::Down,
+            Phase::Cancel,
+        ];
+        let mut mailbox = EventMailbox::new(EventFilter::Window(101));
+        let mut payloads = Vec::new();
+        for (index, phase) in phases.into_iter().enumerate() {
+            let changes = Vec::from([Change {
+                id: if index >= 4 { 2 } else { 1 },
+                phase,
+                x: index as i32 * 10,
+                y: index as i32 * 7,
+                pressure: Some(23),
+                touch_major: Some(8),
+            }]);
+            payloads.push(changes.as_ptr());
+            mailbox.push(Event::TouchFrame {
+                surface_id: 101,
+                frame: Frame {
+                    seat_id: 1,
+                    serial: index as u64 + 1,
+                    time_ns: 10_000_000 + index as u64 * 2_000_000,
+                    changes,
+                },
+            });
+        }
+
+        // Exercise both poll and bulk drain, including a live unread suffix.
+        let mut received = Vec::from([mailbox.poll().unwrap()]);
+        received.extend(mailbox.drain());
+        assert_eq!(received.len(), phases.len());
+        for (index, event) in received.into_iter().enumerate() {
+            let Event::TouchFrame { surface_id, frame } = event else {
+                panic!("touch event changed type");
+            };
+            assert_eq!(surface_id, 101);
+            assert_eq!(frame.seat_id, 1);
+            assert_eq!(frame.serial, index as u64 + 1);
+            assert_eq!(frame.time_ns, 10_000_000 + index as u64 * 2_000_000);
+            assert_eq!(frame.changes.as_ptr(), payloads[index]);
+            assert_eq!(frame.changes.len(), 1);
+            assert_eq!(frame.changes[0].phase, phases[index]);
+            assert_eq!(frame.changes[0].id, if index >= 4 { 2 } else { 1 });
+            assert_eq!(frame.changes[0].x, index as i32 * 10);
+            assert_eq!(frame.changes[0].y, index as i32 * 7);
+            assert_eq!(frame.changes[0].pressure, Some(23));
+            assert_eq!(frame.changes[0].touch_major, Some(8));
+        }
+        assert!(mailbox.events.is_empty());
     }
 
     #[test]
