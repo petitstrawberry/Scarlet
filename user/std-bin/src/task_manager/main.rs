@@ -1755,6 +1755,8 @@ fn frequency_or_dash(khz: u64) -> String {
 fn format_frequency_value(khz: u64) -> String {
     if khz >= 1_000_000 {
         format!("{}.{:02} GHz", khz / 1_000_000, (khz % 1_000_000) / 10_000)
+    } else if khz >= 1_000 && khz % 1_000 == 0 {
+        format!("{} MHz", khz / 1_000)
     } else if khz >= 1_000 {
         format!("{}.{:02} MHz", khz / 1_000, (khz % 1_000) / 10)
     } else {
