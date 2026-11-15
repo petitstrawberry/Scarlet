@@ -918,6 +918,7 @@ fn apply_input_environment(
 fn listen_for_input_environment_changes(
     shell_layout: State<ShellLayout>,
     open_menu_index: State<Option<usize>>,
+    snapshot: State<Option<InputEnvironmentSnapshot>>,
 ) {
     loop {
         let Ok(SwsScreenConnection {
@@ -931,18 +932,27 @@ fn listen_for_input_environment_changes(
             continue;
         };
 
+        set_state_if_changed(
+            &snapshot,
+            input_environment.map(|environment| input_environment_snapshot(Some(environment))),
+        );
         if let Some(environment) = input_environment {
             apply_input_environment(&conn, environment, &shell_layout, &open_menu_index);
         }
 
         loop {
             if conn.dispatch().is_err() {
+                set_state_if_changed(&snapshot, None);
                 println!("[StatusBar] Input-environment listener transport lost; reconnecting");
                 break;
             }
             while let Some(event) = conn.poll_event() {
                 match event {
                     sws::event::Event::InputEnvironmentChanged(environment) => {
+                        set_state_if_changed(
+                            &snapshot,
+                            Some(input_environment_snapshot(Some(environment))),
+                        );
                         apply_input_environment(
                             &conn,
                             environment,
@@ -1003,6 +1013,7 @@ struct ShellApp {
     control_center_snapshot: State<ControlCenterSnapshot>,
     control_center_brightness: State<f32>,
     display_brightness_percent: State<Option<u8>>,
+    input_environment_snapshot: State<Option<InputEnvironmentSnapshot>>,
     control_center_action: State<Option<ControlCenterAction>>,
     control_center_armed_power: State<Option<ArmedPowerAction>>,
     control_center_size: State<Size>,
@@ -1069,6 +1080,7 @@ impl ShellApp {
             ),
             control_center_brightness: State::new(StateId::new(40), 0.0),
             display_brightness_percent: State::new(StateId::new(41), None),
+            input_environment_snapshot: State::new(StateId::new(47), None),
             control_center_action: State::new(StateId::new(19), None),
             control_center_armed_power: State::new(StateId::new(20), None),
             control_center_size: State::new(StateId::new(21), initial_control_center.body_size()),
@@ -1307,15 +1319,21 @@ fn fixed_string(bytes: &[u8]) -> String {
         .to_string()
 }
 
-fn collect_audio_snapshot(status: &StatusProviderSnapshot) -> AudioSnapshot {
+fn collect_audio_snapshot(
+    status: &StatusProviderSnapshot,
+    audio_client: &mut Option<SasClient>,
+) -> AudioSnapshot {
     let mut snapshot = match (status.audio_volume_percent, status.audio_muted) {
         (Some(volume), Some(muted)) => AudioSnapshot::from_status(volume, muted),
         _ => AudioSnapshot::unavailable(),
     };
-    let Ok(mut client) = SasClient::connect() else {
-        return snapshot;
-    };
-    let Ok(outputs) = client.list_outputs() else {
+    if audio_client.is_none() {
+        *audio_client = SasClient::connect().ok();
+    }
+    let Some(outputs) = audio_client.as_mut().and_then(|client| client.list_outputs().ok()) else {
+        // The next scheduled sample or action establishes a fresh transport.
+        // Never retain a connection after a failed/partial protocol response.
+        *audio_client = None;
         return snapshot;
     };
 
@@ -1401,10 +1419,7 @@ fn collect_network_snapshot(status: &NetworkStatus) -> NetworkSnapshot {
     }
 }
 
-fn collect_input_environment_snapshot() -> InputEnvironmentSnapshot {
-    let environment = sws::Connection::connect("/tmp/sws.sock")
-        .ok()
-        .and_then(|connection| connection.get_input_environment().ok());
+fn input_environment_snapshot(environment: Option<sws::InputEnvironment>) -> InputEnvironmentSnapshot {
     match environment {
         Some(environment) => InputEnvironmentSnapshot {
             available: true,
@@ -1426,9 +1441,11 @@ fn collect_input_environment_snapshot() -> InputEnvironmentSnapshot {
 fn collect_control_center_snapshot(
     status: StatusProviderSnapshot,
     brightness_percent: Option<u8>,
+    audio_client: &mut Option<SasClient>,
+    input_environment: InputEnvironmentSnapshot,
 ) -> ControlCenterSnapshot {
     ControlCenterSnapshot {
-        audio: collect_audio_snapshot(&status),
+        audio: collect_audio_snapshot(&status, audio_client),
         brightness_percent,
         power: status.power,
         network: collect_network_snapshot(&status.network),
@@ -1436,7 +1453,7 @@ fn collect_control_center_snapshot(
             cpu_percent: status.cpu_percent,
             task_count: process::task_count().map(|count| count.min(u32::MAX as usize) as u32),
         },
-        input_environment: collect_input_environment_snapshot(),
+        input_environment,
     }
 }
 
@@ -1448,11 +1465,24 @@ fn update_shared_audio_status(
     let volume = ((state.master_volume_q16 as u64 * 100 + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
         / MASTER_VOLUME_UNITY_Q16 as u64)
         .min(100) as u8;
-    status.update(|snapshot| {
-        snapshot.audio_volume_percent = Some(volume);
-        snapshot.audio_muted = Some(state.flags & sas_protocol::CONTROL_FLAG_MUTED != 0);
-    });
-    control_center_volume.set(volume as f32);
+    let muted = state.flags & sas_protocol::CONTROL_FLAG_MUTED != 0;
+    let current = status.get();
+    if (current.audio_volume_percent, current.audio_muted) != (Some(volume), Some(muted)) {
+        // Repeated acknowledgements must not rebuild the status window or
+        // invalidate its desktop backdrop when the visible value is unchanged.
+        status.update(|snapshot| {
+            snapshot.audio_volume_percent = Some(volume);
+            snapshot.audio_muted = Some(muted);
+        });
+    }
+    // Hardware acknowledges integer percentages. The captured Slider owns its
+    // continuous value until release, just as the brightness control does.
+    if !scarlet_ui::views::Slider::new(control_center_volume.clone())
+        .get_dragging()
+        .get()
+    {
+        set_state_if_changed(control_center_volume, volume as f32);
+    }
 }
 
 fn apply_control_center_action(
@@ -4110,9 +4140,15 @@ impl ShellApp {
             .get_dragging()
             .clone();
         let control_center_open = self.control_center_open.clone();
+        let input_environment_listener = self.input_environment_snapshot.clone();
+        let input_environment_provider = self.input_environment_snapshot.clone();
 
         std::thread::spawn(move || {
-            listen_for_input_environment_changes(shell_layout_listener, open_menu_index_listener);
+            listen_for_input_environment_changes(
+                shell_layout_listener,
+                open_menu_index_listener,
+                input_environment_listener,
+            );
         });
 
         std::thread::spawn(move || {
@@ -4187,6 +4223,10 @@ impl ShellApp {
                     let snapshot = collect_control_center_snapshot(
                         control_center_status.get(),
                         display_brightness_percent.get(),
+                        &mut audio_client,
+                        input_environment_provider
+                            .get()
+                            .unwrap_or_else(|| input_environment_snapshot(None)),
                     );
                     set_state_if_changed(&control_center_snapshot, snapshot);
                     next_snapshot_poll = std::time::Instant::now() + Duration::from_secs(1);
