@@ -2404,6 +2404,7 @@ pub struct Compositor {
     backend: SwsBackend,
     gpu_compositor: Option<GpuCompositor>,
     pending_gpu_present: Option<PresentDamage>,
+    damage_profile: super::trace::DamageProfile,
     deferred_gpu_ipc: Vec<IpcEvent>,
     deferred_gpu_remote: Vec<RemoteEvent>,
     window_manager: WindowManager,
@@ -2915,6 +2916,7 @@ impl Compositor {
             backend,
             gpu_compositor,
             pending_gpu_present: None,
+            damage_profile: super::trace::DamageProfile::new(super::trace::frame_profile_requested()),
             deferred_gpu_ipc: Vec::new(),
             deferred_gpu_remote: Vec::new(),
             window_manager,
@@ -3100,6 +3102,7 @@ impl Compositor {
         self.apply_workspace_presentation_policy();
         self.publish_workspace_state();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
     }
 
     fn navigate_workspace(&mut self, direction: i32) -> bool {
@@ -3553,7 +3556,7 @@ impl Compositor {
         // waiting for the initial swap completion. stemd must not interpret
         // that transient display delay as a failure to start the service.
         self.full_redraw_needed = true;
-
+        self.damage_profile.full(line!());
         println!("[Compositor] Display initialized; first present deferred");
 
         Ok(())
@@ -3682,6 +3685,7 @@ impl Compositor {
 
         self.refresh_input_panel();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         self.pending_damage.clear();
         self.pending_backdrop_damage.clear();
         Ok(true)
@@ -3963,17 +3967,21 @@ impl Compositor {
         }
     }
 
+    #[track_caller]
     fn add_pending_damage(&mut self, rect: (i32, i32, u32, u32)) {
         self.add_damage_from(rect, None);
     }
 
+    #[track_caller]
     fn add_window_content_damage(&mut self, window_id: u32, rect: (i32, i32, u32, u32)) {
         self.add_damage_from(rect, Some(window_id));
     }
 
+    #[track_caller]
     fn add_damage_from(&mut self, rect: (i32, i32, u32, u32), foreground: Option<u32>) {
         if !ENABLE_DIRTY_RECT {
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
             return;
         }
 
@@ -3981,6 +3989,11 @@ impl Compositor {
             return;
         };
 
+        self.damage_profile.added(
+            (sx0, sy0, w, h),
+            foreground.is_some(),
+            std::panic::Location::caller().line(),
+        );
         Self::push_damage_rect(&mut self.pending_damage, (sx0, sy0, w, h));
         BackdropDamage::push_bounded(
             &mut self.pending_backdrop_damage,
@@ -4128,6 +4141,7 @@ impl Compositor {
             //     window_id, w.x, w.y, w.width, w.height);
             self.add_pending_damage(w.presentation_geometry());
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
             // println!("[Compositor] Full redraw needed: {}", self.full_redraw_needed);
         }
     }
@@ -4357,6 +4371,7 @@ impl Compositor {
         self.finish_unaccelerated_animations();
         self.gpu_admission_retry.clear();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         self.pending_damage.clear();
         self.pending_backdrop_damage.clear();
         self.presented_damage.clear();
@@ -4425,6 +4440,26 @@ impl Compositor {
     /// frame. The strict `sgfx` mode instead propagates a fatal error.
     fn composite_and_present_gpu(&mut self) -> Result<GpuPresentResult, &'static str> {
         let damage = self.gpu_present_damage();
+        let damage_profile = self.damage_profile.enabled.then(|| {
+            let mut profile = self.damage_profile;
+            profile.pending_pixels = self
+                .pending_damage
+                .iter()
+                .map(|rect| u64::from(rect.2) * u64::from(rect.3))
+                .sum();
+            profile.pending_bbox_pixels = damage.map_or(
+                u64::from(self.screen_width) * u64::from(self.screen_height),
+                |rect| u64::from(rect.2) * u64::from(rect.3),
+            );
+            profile.cursor_pixels = if self.cursor.needs_redraw() {
+                self.clamp_rect_to_screen(self.cursor.get_dirty_region())
+                    .map_or(0, |rect| u64::from(rect.2) * u64::from(rect.3))
+            } else {
+                0
+            };
+            profile.main_full = u64::from(self.full_redraw_needed);
+            profile
+        });
         // Keep source damage separate from cursor and swapchain repair damage.
         // Materials only need a fresh capture when their sampling halo changes.
         let scene_damage =
@@ -4464,6 +4499,7 @@ impl Compositor {
             damage,
             scene_damage,
             &backdrops,
+            damage_profile,
         );
         drop(scenes);
         match result {
@@ -4496,6 +4532,7 @@ impl Compositor {
                 self.pending_damage.clear();
                 self.pending_backdrop_damage.clear();
                 self.presented_damage.clear();
+                self.damage_profile.reset();
                 Ok(GpuPresentResult::Presented)
             }
             Err(super::gpu_compositor::GpuCompositionError::Pending) => {
@@ -4510,6 +4547,7 @@ impl Compositor {
                 self.pending_damage.clear();
                 self.pending_backdrop_damage.clear();
                 self.presented_damage.clear();
+                self.damage_profile.reset();
                 self.gpu_admission_retry.clear();
                 Ok(GpuPresentResult::Retry)
             }
@@ -4527,6 +4565,7 @@ impl Compositor {
                 // published. Preserve client buffers and all upload damage;
                 // retry after the worker progresses without disabling GPU.
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
                 self.gpu_admission_retry
                     .defer(monotonic_time_ns(), FRAME_BATCH_INTERVAL_NS);
                 Ok(GpuPresentResult::Retry)
@@ -4543,6 +4582,7 @@ impl Compositor {
                     // frame can retry after the CPU fallback has presented a
                     // coherent desktop.
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                     if self.backend == SwsBackend::Sgfx {
                         return Err("SWS_BACKEND=sgfx frame composition failed");
                     }
@@ -5452,6 +5492,7 @@ impl Compositor {
             self.apply_workspace_presentation_policy();
             self.publish_workspace_state();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
         if self
             .pointer_lock
@@ -5944,6 +5985,7 @@ impl Compositor {
         self.clear_pointer_focus_for_shell_navigation();
         self.update_overview_transforms();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         true
     }
 
@@ -5959,6 +6001,7 @@ impl Compositor {
         self.overview_window_drag = Some(drag);
         self.update_overview_transforms();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         true
     }
 
@@ -6061,6 +6104,7 @@ impl Compositor {
             self.publish_workspace_state();
         }
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         changed
     }
 
@@ -6070,6 +6114,7 @@ impl Compositor {
         }
         self.apply_workspace_presentation_policy();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         true
     }
 
@@ -6106,6 +6151,7 @@ impl Compositor {
         self.apply_workspace_presentation_policy();
         self.publish_workspace_state();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         true
     }
 
@@ -6123,6 +6169,7 @@ impl Compositor {
             self.overview_add_workspace_selected = false;
             self.update_overview_transforms();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
             return true;
         }
 
@@ -6136,6 +6183,7 @@ impl Compositor {
             self.overview_add_workspace_selected = true;
             self.update_overview_transforms();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
             return true;
         }
 
@@ -6248,6 +6296,7 @@ impl Compositor {
             self.apply_workspace_presentation_policy();
             self.update_overview_transforms();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
     }
 
@@ -6538,6 +6587,7 @@ impl Compositor {
         if update.is_some() {
             self.update_overview_transforms();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
     }
 
@@ -6548,6 +6598,7 @@ impl Compositor {
             // keep their normal suspension/frame-callback policy while browsing.
             self.apply_workspace_presentation_policy();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
     }
 
@@ -6591,6 +6642,7 @@ impl Compositor {
         self.apply_workspace_presentation_policy();
         self.publish_workspace_state();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
     }
 
     fn advance_system_touch_contact(&mut self, navigation: &mut SystemTouchNavigation, now: u64) {
@@ -6699,6 +6751,7 @@ impl Compositor {
             self.apply_workspace_presentation_policy();
             self.publish_workspace_state();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
         changed
     }
@@ -6812,6 +6865,7 @@ impl Compositor {
             } else {
                 self.update_overview_transforms();
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
             }
             return Some(true);
         }
@@ -7199,6 +7253,7 @@ impl Compositor {
             gpu_compositor.invalidate_cursor_texture();
         }
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         println!("[Compositor] Activated cursor theme: {}", theme_path);
         Ok(())
     }
@@ -7730,6 +7785,7 @@ impl Compositor {
         if motion_changed {
             self.update_overview_transforms();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
         self.refresh_input_panel_occlusion();
         Ok(())
@@ -7823,6 +7879,7 @@ impl Compositor {
                     error, RUNTIME_ERROR_RETRY_DELAY_MS
                 );
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
                 self.presented_damage.clear();
                 self.next_frame_deadline_ns = None;
                 super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
@@ -8061,6 +8118,7 @@ impl Compositor {
                     == sws_protocol::workspace::ShellPresentation::Overview
                 {
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
 
                 if self.overview_window_drag.is_some() {
@@ -8168,6 +8226,7 @@ impl Compositor {
                     == sws_protocol::workspace::ShellPresentation::Overview
                 {
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
 
                 if self.overview_window_drag.is_some() {
@@ -10028,6 +10087,7 @@ impl Compositor {
 
         self.refresh_cursor_icon();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         Ok(true)
     }
 
@@ -10255,6 +10315,7 @@ impl Compositor {
         self.send_window_state_changed(window_id);
         self.publish_workspace_state();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         true
     }
 
@@ -10469,6 +10530,7 @@ impl Compositor {
         }
         self.refresh_input_panel_occlusion();
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
     }
 
     fn refresh_input_panel_occlusion(&mut self) {
@@ -10592,6 +10654,7 @@ impl Compositor {
             self.send_current_window_configure(window_id);
         }
         self.full_redraw_needed = true;
+        self.damage_profile.full(line!());
         true
     }
 
@@ -10619,6 +10682,16 @@ impl Compositor {
         else {
             return;
         };
+        if self.damage_profile.enabled {
+            self.damage_profile.policy_first = self
+                .damage_profile
+                .policy_first
+                .saturating_add(u64::from(first_frame_needs_policy));
+            self.damage_profile.content_promotions = self
+                .damage_profile
+                .content_promotions
+                .saturating_add(u64::from(presentation_content_became_ready));
+        }
         if first_frame_needs_policy {
             self.window_policy_pending = true;
         }
@@ -10626,6 +10699,7 @@ impl Compositor {
             // Buffer damage was evaluated while the stale-content gate was
             // closed. Reveal the replacement atomically with a full redraw.
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
             self.sync_shell_presentation_focus();
             self.route_pointer_motion_at_cursor();
         }
@@ -10640,6 +10714,7 @@ impl Compositor {
             self.begin_home_drawer_motion(window_id);
             self.update_overview_transforms();
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
         }
     }
 
@@ -10993,6 +11068,7 @@ impl Compositor {
         {
             if self.apply_input_environment_snapshot(snapshot)? {
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
             }
         }
         Ok(())
@@ -11851,6 +11927,7 @@ impl Compositor {
         }
         if changed {
             self.full_redraw_needed = true;
+            self.damage_profile.full(line!());
             self.route_pointer_motion_at_cursor();
         }
         self.refresh_input_panel_occlusion();
@@ -12703,6 +12780,11 @@ impl Compositor {
                 }
                 match result {
                     Ok(damage) => {
+                        if self.damage_profile.enabled {
+                            let wire_pixels = damage_rects.iter().fold(0u64, |sum, rect|
+                                sum.saturating_add(u64::from(rect.width) * u64::from(rect.height)));
+                            self.damage_profile.native(window_id, commit_serial, damage.extent, wire_pixels, &damage.rects);
+                        }
                         if let Some((presented, projections)) =
                             self.window_manager.get_window(window_id).map(|window| {
                                 let mut projections = vec![(window.presentation_geometry(), window.presentation_clip)];
@@ -12720,6 +12802,10 @@ impl Compositor {
                                     damage.extent, geometry, clip,
                                     (self.screen_width, self.screen_height), &damage.rects,
                                 ) {
+                                    if self.damage_profile.enabled {
+                                        self.damage_profile.native_projected_pixels = self.damage_profile.native_projected_pixels
+                                            .saturating_add(u64::from(rect.2) * u64::from(rect.3));
+                                    }
                                     self.add_window_content_damage(window_id, rect);
                                 }
                             }
@@ -12946,6 +13032,7 @@ impl Compositor {
                     // Keep transient children above their parent by raising the group.
                     self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::SetWindowTransientFlags { window_id, flags } => {
@@ -12962,6 +13049,7 @@ impl Compositor {
                         self.window_manager.raise_to_top_with_type(window_id);
                     }
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::SetWindowSizeLimits {
@@ -12983,6 +13071,7 @@ impl Compositor {
                         self.apply_focused_policy_to_window(window_id);
                     }
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::ResizeWindow {
@@ -13092,6 +13181,7 @@ impl Compositor {
                         );
                     }
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::MaximizeWindow { window_id } => {
@@ -13158,6 +13248,7 @@ impl Compositor {
                         }
                     }
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::SetFullscreen {
@@ -13245,6 +13336,7 @@ impl Compositor {
                     self.add_pending_damage(rect);
                 }
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
             }
             IpcEvent::UnsetFullscreen {
                 client_id,
@@ -13294,6 +13386,7 @@ impl Compositor {
                     self.add_pending_damage(rect);
                 }
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
             }
             IpcEvent::SetPointerLock {
                 client_id,
@@ -13454,6 +13547,7 @@ impl Compositor {
                     // Re-raise to update Z-order based on window type
                     self.window_manager.raise_to_top_with_type(window_id);
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::SetWindowOpacity { window_id, opacity } => {
@@ -13471,6 +13565,7 @@ impl Compositor {
             IpcEvent::TextInputContextUpdated { context_id } => {
                 if self.position_ime_popups_for_context(context_id) {
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::ImeSetPopupWindow {
@@ -13482,6 +13577,7 @@ impl Compositor {
             } => {
                 if self.set_ime_popup_window(context_id, window_id, offset_x, offset_y, visible) {
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
             }
             IpcEvent::ExtensionRegistered {
@@ -13669,6 +13765,7 @@ impl Compositor {
                             // hiding an unowned Normal window.
                             self.register_new_workspace_scene_and_publish(wid);
                             self.full_redraw_needed = true;
+                            self.damage_profile.full(line!());
                         }
                         Err(e) => {
                             println!("[Compositor] Failed to create extension window: {}", e);
@@ -13893,6 +13990,7 @@ impl Compositor {
                         window.surface_regions = regions;
                         window.restrict_input_to_regions = restrict_input;
                         self.full_redraw_needed = true;
+                        self.damage_profile.full(line!());
                     }
                 }
             }
@@ -14091,6 +14189,7 @@ impl Compositor {
                     self.apply_windowing_mode_policy();
                 }
                 self.full_redraw_needed = true;
+                self.damage_profile.full(line!());
             }
             IpcEvent::SetWindowResizable {
                 window_id,
@@ -14284,6 +14383,7 @@ impl Compositor {
                     && self.apply_input_environment_snapshot(snapshot)?
                 {
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
                 let snapshot = input_environment::snapshot();
                 send_response_to_client(
@@ -14303,6 +14403,7 @@ impl Compositor {
                     && self.apply_input_environment_snapshot(snapshot)?
                 {
                     self.full_redraw_needed = true;
+                    self.damage_profile.full(line!());
                 }
                 let snapshot = input_environment::snapshot();
                 send_response_to_client(
@@ -14388,6 +14489,7 @@ impl Compositor {
                             payload,
                         );
                         self.full_redraw_needed = true;
+                        self.damage_profile.full(line!());
                     }
                     Err(super::workspace::ApplyError::StaleGeneration) => {
                         send_response_to_client(

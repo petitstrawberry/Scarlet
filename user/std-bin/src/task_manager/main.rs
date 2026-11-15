@@ -2128,6 +2128,84 @@ mod tests {
         assert_eq!(graph.handle, handle);
     }
 
+    #[test]
+    fn live_cpu_page_updates_keep_native_presentation_damage_bounded() {
+        use scarlet_ui::compositor::DamageRect;
+        use scarlet_ui::renderer::{BackendFrame, PaintBackend};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Capture(Rc<RefCell<Option<Vec<DamageRect>>>>);
+        impl PaintBackend for Capture {
+            fn supports_retained_display_lists(&self) -> bool {
+                true
+            }
+            fn resize(&mut self, _: Size, _: u32) {}
+            fn render<'a>(
+                &'a mut self,
+                _: &PaintContext<'_>,
+                _: Color,
+                _: Option<&[Rect]>,
+                damage: Option<&[DamageRect]>,
+            ) -> scarlet_ui::Result<BackendFrame<'a>> {
+                *self.0.borrow_mut() = damage.map(<[DamageRect]>::to_vec);
+                Ok(BackendFrame::External)
+            }
+        }
+        let snapshot = |sample: u32| {
+            let cpus = (0..4)
+                .map(|id| CpuSnapshot {
+                    id,
+                    usage_per_mille: 200 + sample * 20,
+                    history: vec![0, 250, 750, sample * 100],
+                    ..CpuSnapshot::default()
+                })
+                .collect::<Vec<_>>();
+            Arc::new(Snapshot {
+                cpus,
+                online_cpus: 4,
+                cpu_history: vec![0, 250, 750, sample * 100],
+                cpu_busy_per_mille: 200 + sample * 20,
+                status: format!("Sample {sample} · updated every 750 ms"),
+                ..Snapshot::default()
+            })
+        };
+        let app = TaskManagerApp::new();
+        app.selected_tab.set(1);
+        app.snapshot.set(snapshot(1));
+        app.cpu_cards.set(app.snapshot.get().cpus.clone());
+        let damage = Rc::new(RefCell::new(None));
+        let mut pipeline = scarlet_ui::pipeline::RenderingPipeline::new();
+        pipeline.set_root(Box::new(
+            scarlet_ui::element::ComponentElement::new_with_builder(app.clone(), |app| {
+                let mut scenes = scarlet_ui::SceneBuilder::new();
+                app.scenes().build(&mut scenes);
+                scenes.into_declarations().remove(0).view
+            }),
+        ));
+        pipeline.set_paint_backend(Box::new(Capture(damage.clone())));
+        pipeline.layout_initial();
+        pipeline.set_scale_milli(2000);
+        pipeline.resize(Size::new(538., 680.));
+        pipeline.handle_event(&Event::TabletPresentationChanged { active: true });
+        pipeline.render_for_present().unwrap();
+        for sample in 2..=5 {
+            let next = snapshot(sample);
+            app.cpu_cards.set(next.cpus.clone());
+            app.snapshot.set(next);
+            pipeline.render_for_present().unwrap();
+            let captured = damage.borrow();
+            let damage = captured
+                .as_ref()
+                .expect("a changing graph must not force full native damage");
+            assert!(!damage.is_empty());
+            let area: u64 = damage.iter().map(|r| u64::from(r.2) * u64::from(r.3)).sum();
+            assert!(
+                area < 1076 * 1360,
+                "CPU page update filled native pane: {damage:?}"
+            );
+        }
+    }
+
     /// Scroll content may extend outside its parent; the viewport itself and
     /// all non-scrolling siblings must fit in their assigned parent bounds.
     fn assert_layout_bounds(element: &dyn Element, parent: Option<Size>, label: &str) {

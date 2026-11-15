@@ -69,19 +69,65 @@ impl fmt::Display for Error {
 
 impl error::Error for Error {}
 
-/// Apply only the exact commit sampled by a completed frame. A newer commit
-/// remains pending; absence of a submitted commit never acknowledges new work.
-pub(crate) fn retire_shared_snapshot<T: Copy + Eq>(
-    mut current: [Option<T>; 3], submitted: [Option<T>; 3],
-) -> Result<([Option<T>; 3], [Option<T>; 2]), &'static str> {
-    let Some(commit) = submitted[1] else { return Ok((current, [None, None])); };
+/// Four client targets, including the currently presented image. Three retired
+/// storage slots allow all four initial commits before any image is presented;
+/// once presented is occupied, only two retired slots can be occupied.
+pub(crate) const SHARED_FRAME_LEASE_CAPACITY: usize = 4;
+
+/// Admit a distinct image without releasing an older pending use. Slots are
+/// presented, pending, then retired. Identity equality is independent of serial.
+pub(crate) fn queue_shared_commit<T: Copy + Eq, const N: usize>(
+    mut current: [Option<T>; N], commit: T, same_image: impl Fn(T, T) -> bool,
+) -> Result<[Option<T>; N], &'static str> {
+    if N < 2 || current.iter().flatten().count() >= SHARED_FRAME_LEASE_CAPACITY {
+        return Err("Shared frame lease capacity exhausted");
+    }
+    if current.iter().flatten().any(|held| same_image(*held, commit)) {
+        return Err("Shared image is still retained");
+    }
+    if let Some(pending) = current[1] {
+        let slot = current[2..].iter_mut().find(|slot| slot.is_none())
+            .ok_or("Shared retirement storage exhausted")?;
+        *slot = Some(pending);
+    }
+    current[1] = Some(commit);
+    Ok(current)
+}
+
+/// Retire only leases in the exact completed GPU snapshot. A submitted pending
+/// image can have moved to any retired slot while newer commits were accepted.
+/// Later pending/retired uses remain held, and a snapshot with no pending image
+/// never acknowledges later work. The fixed return array requires no allocation.
+pub(crate) fn retire_shared_snapshot<T: Copy + Eq, const N: usize>(
+    mut current: [Option<T>; N], submitted: [Option<T>; N],
+) -> Result<([Option<T>; N], [Option<T>; N]), &'static str> {
+    if N < 2 { return Err("Invalid shared frame lease layout"); }
+    let mut released = [None; N];
+    let Some(commit) = submitted[1] else { return Ok((current, released)); };
     if current[0] != submitted[0] { return Err("Presented commit changed before completion"); }
-    if current[1] == Some(commit) { current[1] = None; }
-    else if current[2] == Some(commit) { current[2] = None; }
-    else { return Err("Submitted commit lost its lease"); }
-    if current[2] == submitted[2] { current[2] = None; }
-    let old = current[0].replace(commit);
-    Ok((current, [old, submitted[2]]))
+    // Validate the complete captured set before changing any role. Equality
+    // includes serial/generation/epoch at the native caller, never just slot ID.
+    for (index, token) in submitted.iter().enumerate().skip(1) {
+        if let Some(token) = token {
+            if submitted[..index].contains(&Some(*token)) {
+                return Err("Duplicate lease in submitted snapshot");
+            }
+            if current[1..].iter().filter(|held| **held == Some(*token)).count() != 1 {
+                return Err("Submitted commit lost its lease");
+            }
+        }
+    }
+    released[0] = current[0];
+    for (index, token) in submitted.iter().enumerate().skip(1) {
+        if let Some(token) = token {
+            for held in &mut current[1..] {
+                if *held == Some(*token) { *held = None; }
+            }
+            if index >= 2 { released[index - 1] = Some(*token); }
+        }
+    }
+    current[0] = Some(commit);
+    Ok((current, released))
 }
 
 /// One directly selected frontend context with a mapped presentation target.
@@ -179,6 +225,9 @@ pub(crate) struct FrameTimings {
     pub(crate) gpu_wait_ns: u128,
     pub(crate) display_enqueue_ns: u128,
     pub(crate) image_reuse_wait_ns: u128,
+    pub(crate) damage_slot: u64,
+    pub(crate) damage_initialized: u64,
+    pub(crate) damage_history_pixels: u64,
 }
 
 #[cfg(target_os = "scarlet")]
@@ -331,6 +380,14 @@ impl MappedTarget {
             Some(pending) => union_pixel_rect(pending, requested)?,
             None => requested,
         });
+        if let Some(timings) = &mut self.frame_timings {
+            let slot = &self.slots[self.current_slot];
+            timings.damage_slot = self.current_slot as u64;
+            timings.damage_initialized = u64::from(slot.initialized);
+            timings.damage_history_pixels = slot
+                .damage
+                .map_or(0, |rect| u64::from(rect.width()) * u64::from(rect.height()));
+        }
         if self.slots.len() == 1 {
             return Ok(requested);
         }
@@ -2201,10 +2258,10 @@ mod tests {
     fn async_snapshot_promotes_submitted_b_and_preserves_newer_c() {
         let (state, released) = super::retire_shared_snapshot([Some(1), Some(3), Some(2)], [Some(1), Some(2), None]).unwrap();
         assert_eq!(state, [Some(2), Some(3), None]);
-        assert_eq!(released, [Some(1), None]);
+        assert_eq!(released, [Some(1), None, None]);
         let (state, released) = super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), None, None]).unwrap();
         assert_eq!(state, [Some(1), Some(3), None]);
-        assert_eq!(released, [None, None]);
+        assert_eq!(released, [None, None, None]);
     }
 
     #[test]
@@ -2213,7 +2270,56 @@ mod tests {
         assert!(super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), Some(2), None]).is_err());
         let (state, released) = super::retire_shared_snapshot([Some(1), Some(2), Some(0)], [Some(1), Some(2), Some(0)]).unwrap();
         assert_eq!(state, [Some(2), None, None]);
-        assert_eq!(released, [Some(1), Some(0)]);
+        assert_eq!(released, [Some(1), Some(0), None]);
+    }
+
+    #[test]
+    fn shared_startup_accepts_four_distinct_images_and_rejects_fifth() {
+        let mut state = [None; 5];
+        for image in 1..=4 {
+            state = super::queue_shared_commit(state, image, |a, b| a == b).unwrap();
+            assert_eq!(state.iter().flatten().count(), image as usize);
+        }
+        assert_eq!(state, [None, Some(4), Some(1), Some(2), Some(3)]);
+        assert!(super::queue_shared_commit(state, 5, |a, b| a == b).is_err());
+        let (state, released) = super::retire_shared_snapshot(state, state).unwrap();
+        assert_eq!(state, [Some(4), None, None, None, None]);
+        assert_eq!(released, [None, Some(1), Some(2), Some(3), None]);
+    }
+
+    #[test]
+    fn shared_steady_four_leases_keep_newer_commits_across_exact_snapshot_retirement() {
+        let mut state = [Some(1), None, None, None, None];
+        state = super::queue_shared_commit(state, 2, |a, b| a == b).unwrap();
+        let first_gpu_snapshot = state;
+        state = super::queue_shared_commit(state, 3, |a, b| a == b).unwrap();
+        state = super::queue_shared_commit(state, 4, |a, b| a == b).unwrap();
+        assert_eq!(state, [Some(1), Some(4), Some(2), Some(3), None]);
+        assert!(super::queue_shared_commit(state, 5, |a, b| a == b).is_err());
+        let (state, released) = super::retire_shared_snapshot(state, first_gpu_snapshot).unwrap();
+        assert_eq!(state, [Some(2), Some(4), None, Some(3), None]);
+        assert_eq!(released, [Some(1), None, None, None, None]);
+        let second_gpu_snapshot = state;
+        let state = super::queue_shared_commit(state, 5, |a, b| a == b).unwrap();
+        let (state, released) = super::retire_shared_snapshot(state, second_gpu_snapshot).unwrap();
+        assert_eq!(state, [Some(4), Some(5), None, None, None]);
+        assert_eq!(released, [Some(2), None, Some(3), None, None]);
+    }
+
+    #[test]
+    fn shared_identity_reuse_checks_retired_slots_independently_of_serial() {
+        let mut state = [Some((1, 10)), None, None, None, None];
+        state = super::queue_shared_commit(state, (2, 20), |a, b| a.0 == b.0).unwrap();
+        state = super::queue_shared_commit(state, (3, 30), |a, b| a.0 == b.0).unwrap();
+        for identity in 1..=3 {
+            assert!(super::queue_shared_commit(state, (identity, 99), |a, b| a.0 == b.0).is_err());
+        }
+        let snapshot = [Some((1, 10)), Some((2, 19)), None, None, None];
+        assert!(super::retire_shared_snapshot(state, snapshot).is_err(), "serial mismatch cannot prove retirement");
+        let snapshot = [Some((1, 10)), Some((2, 20)), Some((4, 40)), None, None];
+        assert!(super::retire_shared_snapshot(state, snapshot).is_err(), "missing captured retired image cannot be acknowledged");
+        let no_pending_snapshot = [Some((1, 10)), None, None, None, None];
+        assert_eq!(super::retire_shared_snapshot(state, no_pending_snapshot).unwrap(), (state, [None; 5]));
     }
 
     #[test]

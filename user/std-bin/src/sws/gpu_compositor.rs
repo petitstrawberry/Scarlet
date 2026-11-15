@@ -287,7 +287,7 @@ struct SharedWindowState {
     compositor_epoch: u32,
     presented: Option<SgfxCommitToken>,
     pending: Option<SgfxCommitToken>,
-    retire_after_present: Option<SgfxCommitToken>,
+    retire_after_present: [Option<SgfxCommitToken>; 3],
 }
 
 struct CursorTextureSet {
@@ -306,6 +306,7 @@ struct ScenePublication {
 struct PendingComposition {
     region: Option<DisplayPresentRegion>,
     logical_damage: DamageRect,
+    damage_profile: Option<super::trace::DamageProfile>,
     shared: Vec<SharedWindowState>,
     backdrops: Vec<(usize, BackdropGeometry)>,
     scenes: Vec<ScenePublication>,
@@ -691,7 +692,7 @@ impl GpuCompositor {
                 compositor_epoch: identity.compositor_epoch,
                 presented: None,
                 pending: None,
-                retire_after_present: None,
+                retire_after_present: [None; 3],
             }),
         }
         self.shared_textures.push(SharedWindowTexture {
@@ -730,22 +731,10 @@ impl GpuCompositor {
         {
             return Err(SgfxBufferError::StaleGeneration);
         }
-        if state
-            .presented
-            .is_some_and(|commit| commit.identity == identity)
-            || state
-                .pending
-                .is_some_and(|commit| commit.identity == identity)
-            || state
-                .retire_after_present
-                .is_some_and(|commit| commit.identity == identity)
-        {
-            return Err(SgfxBufferError::BufferBusy);
-        }
-
-        if state.pending.is_some() && state.retire_after_present.is_some() {
-            return Err(SgfxBufferError::BufferBusy);
-        }
+        let commit = SgfxCommitToken { identity, commit_serial };
+        let leases = crate::sgfx_ir_support::queue_shared_commit(
+            shared_lease_snapshot(state), commit, |a, b| a.identity == b.identity,
+        ).map_err(|_| SgfxBufferError::BufferBusy)?;
 
         let mut clipped_damage = Vec::new();
         for rect in damage_rects {
@@ -781,15 +770,7 @@ impl GpuCompositor {
             .iter_mut()
             .find(|state| state.window_id == identity.window_id)
             .ok_or(SgfxBufferError::InvalidBuffer)?;
-        let commit = SgfxCommitToken {
-            identity,
-            commit_serial,
-        };
-        if state.pending.is_some() {
-            state.retire_after_present = state.pending.replace(commit);
-        } else {
-            state.pending = Some(commit);
-        }
+        install_shared_lease_snapshot(state, leases);
         Ok(SharedFrameDamage {
             extent,
             rects: clipped_damage,
@@ -811,9 +792,8 @@ impl GpuCompositor {
                 || state
                     .pending
                     .is_some_and(|commit| commit.identity == identity)
-                || state
-                    .retire_after_present
-                    .is_some_and(|commit| commit.identity == identity))
+                || state.retire_after_present.iter().flatten()
+                    .any(|commit| commit.identity == identity))
         {
             return Err(SgfxBufferError::BufferBusy);
         }
@@ -1253,8 +1233,12 @@ impl GpuCompositor {
         damage: Option<DamageRect>,
         scene_damage: Option<&[BackdropDamage]>,
         backdrops: &[(WindowId, BackdropGeometry)],
+        mut damage_profile: Option<super::trace::DamageProfile>,
     ) -> Result<(Vec<SgfxCommitToken>, DamageRect), GpuCompositionError> {
         if self.has_pending_frame() { return Err(GpuCompositionError::Pending); }
+        if let Some(profile) = &mut damage_profile {
+            profile.gpu_forced = if self.force_full_repaint { 4 } else { 0 };
+        }
         let profiling = super::trace::profile_enabled() || self.frame_profile.is_some();
         let profile_start = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
@@ -1280,6 +1264,7 @@ impl GpuCompositor {
             // placement/rounding and overlapping upper materials. Only the
             // expensive allocation/context reset is removed.
             self.force_full_repaint = true;
+            if let Some(profile) = &mut damage_profile { profile.gpu_forced |= 2; }
         }
         // The table is append-only. Retire incompatible/removed allocations
         // through the existing bounded rebuild; new regions can append below.
@@ -1298,7 +1283,10 @@ impl GpuCompositor {
         {
             self.rebuild_pending = true;
         }
-        self.rebuild_if_needed(cursor, windows)?;
+        let rebuilt = self.rebuild_if_needed(cursor, windows)?;
+        if let Some(profile) = &mut damage_profile {
+            profile.gpu_forced |= u64::from(rebuilt);
+        }
         self.target.frame_timings = profiling.then(Default::default);
         let mut texture_uploads = Vec::new();
         self.prepare_scene_textures(scenes, windows, &mut texture_uploads)?;
@@ -1318,6 +1306,15 @@ impl GpuCompositor {
                 .map_err(|_| "Failed to define backdrop textures")?;
                 self.backdrops.push((id, geometry, textures));
             }
+        }
+        if let Some(profile) = &mut damage_profile {
+            profile.invalid_caches = self
+                .backdrops
+                .iter()
+                .filter(|(id, geometry, textures)| {
+                    !textures.valid && backdrops.contains(&(*id, *geometry))
+                })
+                .count() as u64;
         }
         // A newly allocated/invalid lower cache can change its output even
         // without a new foreground commit. Include that dependency before
@@ -1376,6 +1373,14 @@ impl GpuCompositor {
             })
             .collect::<Result<Vec<_>, sgfx::ir::Error>>()
             .map_err(|_| "Invalid backdrop damage geometry")?;
+        if let Some(profile) = &mut damage_profile {
+            profile.material_refreshes =
+                materials.iter().filter(|material| material.refresh).count() as u64;
+            profile.requested_pixels = damage.map_or(
+                u64::from(self.target.width) * u64::from(self.target.height),
+                |rect| u64::from(rect.2) * u64::from(rect.3),
+            );
+        }
         let force_full_repaint = self.force_full_repaint;
         let damage = if force_full_repaint { None } else { damage };
         let mut uploaded_texture_indices = Vec::new();
@@ -1419,6 +1424,11 @@ impl GpuCompositor {
             .map_err(|_| "Failed to prepare GPU swapchain damage")?;
         let render_area = MaterialDamage::repair_region(aged_area, &materials)
             .map_err(|_| "Invalid backdrop repair damage")?;
+        if let Some(profile) = &mut damage_profile {
+            profile.logical_pixels =
+                u64::from(logical_area.width()) * u64::from(logical_area.height());
+            profile.aged_pixels = u64::from(aged_area.width()) * u64::from(aged_area.height());
+        }
         let damage_clip = (render_area != full_area).then_some(render_area);
         let mut operations = self.operations.borrow_mut();
         operations.clear();
@@ -1590,6 +1600,7 @@ impl GpuCompositor {
         }
         let profile_encoded = profiling.then(Instant::now);
         let mut publication = PendingComposition {
+            damage_profile,
             logical_damage: (logical_area.x(), logical_area.y(), logical_area.width(), logical_area.height()),
             region: (render_area != full_area).then_some(DisplayPresentRegion {
                 x: render_area.x(), y: render_area.y(), width: render_area.width(), height: render_area.height(),
@@ -1656,9 +1667,11 @@ impl GpuCompositor {
             .map(|releases| (releases, logical_damage))
     }
 
-    fn publish_completed_frame(&mut self, display: &DisplaySurface, frame: PendingComposition)
-        -> Result<Vec<SgfxCommitToken>, GpuCompositionError>
-    {
+    fn publish_completed_frame(
+        &mut self,
+        display: &DisplaySurface,
+        frame: PendingComposition,
+    ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
         // Preserve the existing stage-file wall intervals: submit spans fence
         // retirement (now overlapped with input), present measures enqueue only.
@@ -1698,7 +1711,7 @@ impl GpuCompositor {
         let submitted = gpu_retired;
         if let (Some(profile), Some(start), Some(synced), Some(encoded), Some(submitted), Some(presented), Some(timings)) =
             (&mut self.frame_profile, start, synced, encoded, submitted, presented, &self.target.frame_timings) {
-            if profile.record([start, synced, encoded, submitted, presented, Instant::now()], timings, frame.quads, frame.damage_pixels).is_err() {
+            if profile.record([start, synced, encoded, submitted, presented, Instant::now()], timings, frame.quads, frame.damage_pixels, frame.damage_profile.as_ref()).is_err() {
                 self.frame_profile = None;
                 std::println!("[SWS_PROFILE] frame file write failed; profiling disabled");
             }
@@ -2070,7 +2083,7 @@ impl GpuCompositor {
         &mut self,
         cursor: &Cursor,
         windows: &[Window],
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         let cursor_layout_changed = self.cursor_images.len() != cursor.image_count()
             || self.cursor_images.iter().enumerate().any(|(index, image)| {
                 cursor.image_extent(index) != Some((image.width, image.height))
@@ -2094,7 +2107,7 @@ impl GpuCompositor {
             && !texture_extent_changed
             && !self.target.retired_imports_need_rebuild()
         {
-            return Ok(());
+            return Ok(false);
         }
 
         let (width, height) = self
@@ -2180,7 +2193,7 @@ impl GpuCompositor {
         self.rebuild_pending = false;
         self.rebuild_extent = None;
         self.force_full_repaint = true;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -2189,25 +2202,34 @@ impl GpuCompositor {
 /// The previously presented commit remains retained until this transition.
 /// This is also the generation boundary used during a window resize: SWS may
 /// sample the old extent until the replacement extent has actually presented.
-fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCommitToken>; 2] {
-    let Some(pending) = state.pending.take() else {
-        return [None, None];
-    };
-    [
-        state.presented.replace(pending),
-        state.retire_after_present.take(),
-    ]
+fn shared_lease_snapshot(state: &SharedWindowState) -> [Option<SgfxCommitToken>; 5] {
+    [state.presented, state.pending, state.retire_after_present[0],
+        state.retire_after_present[1], state.retire_after_present[2]]
+}
+
+fn install_shared_lease_snapshot(state: &mut SharedWindowState, leases: [Option<SgfxCommitToken>; 5]) {
+    [state.presented, state.pending, state.retire_after_present[0],
+        state.retire_after_present[1], state.retire_after_present[2]] = leases;
+}
+
+fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCommitToken>; 5] {
+    // The caller's offscreen-shell policy already establishes that no display
+    // frame samples this preparation. Use the same exact snapshot transition.
+    let snapshot = shared_lease_snapshot(state);
+    let (current, released) = crate::sgfx_ir_support::retire_shared_snapshot(snapshot, snapshot)
+        .expect("current shared frame snapshot must retain its own leases");
+    install_shared_lease_snapshot(state, current);
+    released
 }
 
 fn promote_completed_shared_frame(state: &mut SharedWindowState, submitted: &SharedWindowState)
-    -> Result<[Option<SgfxCommitToken>; 2], &'static str>
+    -> Result<[Option<SgfxCommitToken>; 5], &'static str>
 {
     if state.compositor_epoch != submitted.compositor_epoch { return Err("Shared frame epoch changed before completion"); }
     let (current, released) = crate::sgfx_ir_support::retire_shared_snapshot(
-        [state.presented, state.pending, state.retire_after_present],
-        [submitted.presented, submitted.pending, submitted.retire_after_present],
+        shared_lease_snapshot(state), shared_lease_snapshot(submitted),
     )?;
-    [state.presented, state.pending, state.retire_after_present] = current;
+    install_shared_lease_snapshot(state, current);
     Ok(released)
 }
 
@@ -2259,7 +2281,7 @@ mod shared_frame_promotion_tests {
             compositor_epoch: 3,
             presented: Some(old_presented),
             pending: Some(replacement),
-            retire_after_present: None,
+            retire_after_present: [None; 3],
         };
 
         assert_eq!(state.presented, Some(old_presented));
@@ -2267,7 +2289,7 @@ mod shared_frame_promotion_tests {
 
         let releases = promote_pending_shared_frame(&mut state);
 
-        assert_eq!(releases, [Some(old_presented), None]);
+        assert_eq!(releases, [Some(old_presented), None, None, None, None]);
         assert_eq!(state.presented, Some(replacement));
         assert!(state.pending.is_none());
     }
