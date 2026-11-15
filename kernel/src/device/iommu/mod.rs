@@ -109,6 +109,10 @@ pub struct IommuStreamId {
 /// IOMMU implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IommuFaultSnapshot {
+    /// Provider-decoded pending context fault, including a stalled transaction.
+    /// Read-only format/identification bits in context_status are excluded.
+    /// Reading this snapshot never acknowledges or clears the fault.
+    pub context_fault_pending: bool,
     /// Controller-wide fault status.
     pub global_status: u32,
     /// Domain or context-bank fault status.
@@ -241,6 +245,13 @@ pub trait IommuDomain: Send + Sync {
     /// fault registers, otherwise `None`.
     fn fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
         None
+    }
+
+    /// Read pending context-fault status without acknowledging it. Providers
+    /// may override this to read only their status register at DMA retirement.
+    /// None means this provider does not expose context fault reporting.
+    fn pending_context_fault(&self) -> Option<bool> {
+        self.fault_snapshot().map(|fault| fault.context_fault_pending)
     }
 }
 

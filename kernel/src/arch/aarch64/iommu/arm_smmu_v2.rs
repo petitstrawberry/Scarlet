@@ -8,6 +8,9 @@
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::arch::asm;
 
+#[path = "arm_smmu_v2_fault.rs"]
+mod fault;
+
 use crate::{
     arch::{self, mmio},
     device::{
@@ -234,6 +237,52 @@ struct ContextLease {
     snapshot: ContextSnapshot,
 }
 
+/// Used only with the hardware/routing lock and an exclusively reserved bank.
+struct ReuseBank<'a> {
+    hardware: &'a SmmuHardware,
+    context: usize,
+}
+
+impl fault::BankIo for ReuseBank<'_> {
+    fn routed(&self) -> bool {
+        self.hardware.context_is_routed(self.context)
+    }
+
+    fn disable(&self) -> bool {
+        self.hardware.context_write(self.context, CONTEXT_CONTROL, 0);
+        arch::io_wmb();
+        self.hardware.context_read(self.context, CONTEXT_CONTROL) & CONTEXT_CONTROL_MMU_ENABLE == 0
+    }
+
+    fn synchronize_disabled(&self) -> bool {
+        // A newly reclaimed firmware bank can have an unknown old ASID.
+        // Synchronize all old translations before changing its configuration.
+        self.hardware.invalidate_global().is_ok()
+    }
+
+    fn status(&self) -> u32 {
+        self.hardware.context_read(self.context, CONTEXT_FAULT_STATUS)
+    }
+
+    fn record(&self, status: u32) {
+        println!(
+            "[arm-smmu-v2] context reuse fault CB {}: fsr={:#x} far={:#x} fsynr0={:#x} fsynr1={:#x}",
+            self.context, status,
+            self.hardware.context_read64(self.context, CONTEXT_FAULT_ADDRESS),
+            self.hardware.context_read(self.context, CONTEXT_FAULT_SYNDROME_0),
+            self.hardware.context_read(self.context, CONTEXT_FAULT_SYNDROME_1),
+        );
+    }
+
+    fn acknowledge(&self, bits: u32) {
+        self.hardware.context_write(self.context, CONTEXT_FAULT_STATUS, bits);
+    }
+
+    fn barrier(&self) {
+        arch::io_wmb();
+    }
+}
+
 impl SmmuHardware {
     fn page_offset(&self, page: usize, offset: usize) -> usize {
         (page << self.register_page_shift) + offset
@@ -341,6 +390,12 @@ impl SmmuHardware {
             // it does not establish ownership. Reinitializing this bank is safe
             // because no valid SMR selects it and SCTLR.M is clear.
             allocated[index] = true;
+            if let Err(reason) = fault::prepare_reuse(&ReuseBank { hardware: self, context: index }) {
+                // No lease is returned, so allocation rollback cannot restore
+                // configuration over an unhandled fault or release this bank.
+                println!("[arm-smmu-v2] context lease stage=quarantined CB {}: reuse {:?}", index, reason);
+                continue;
+            }
             println!(
                 "[arm-smmu-v2] context lease stage=reserved CB {}: cbar={:#010x} cba2r={:#010x} sctlr={:#010x}",
                 index, snapshot.cbar, snapshot.cba2r, snapshot.sctlr,
@@ -368,15 +423,10 @@ impl SmmuHardware {
             );
             return false;
         }
-        self.context_write(context, CONTEXT_CONTROL, 0);
-        arch::io_wmb();
-        if self
-            .invalidate_context(context, context_asid(context))
-            .is_err()
-        {
+        if let Err(reason) = fault::prepare_reuse(&ReuseBank { hardware: self, context }) {
             println!(
-                "[arm-smmu-v2] context lease stage=quarantined CB {}: context TLBI sync failed",
-                context,
+                "[arm-smmu-v2] context lease stage=quarantined CB {}: release {:?}",
+                context, reason,
             );
             return false;
         }
@@ -1351,11 +1401,11 @@ impl IommuDomain for DmaDomain {
     }
 
     fn fault_snapshot(&self) -> Option<IommuFaultSnapshot> {
+        let context_status = self.hardware.context_read(self.context.index, CONTEXT_FAULT_STATUS);
         Some(IommuFaultSnapshot {
+            context_fault_pending: fault::pending(context_status),
             global_status: self.hardware.registers.read(GLOBAL_FAULT_STATUS),
-            context_status: self
-                .hardware
-                .context_read(self.context.index, CONTEXT_FAULT_STATUS),
+            context_status,
             fault_address: self
                 .hardware
                 .context_read64(self.context.index, CONTEXT_FAULT_ADDRESS),
@@ -1366,6 +1416,10 @@ impl IommuDomain for DmaDomain {
                 .hardware
                 .context_read(self.context.index, CONTEXT_FAULT_SYNDROME_1),
         })
+    }
+
+    fn pending_context_fault(&self) -> Option<bool> {
+        Some(fault::pending(self.hardware.context_read(self.context.index, CONTEXT_FAULT_STATUS)))
     }
 }
 
