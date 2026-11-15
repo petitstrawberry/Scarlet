@@ -62,27 +62,79 @@ fn settings_section(content: impl View + Clone, title: &str, title_size: f32) ->
         .frame_width(f32::INFINITY)
         .background(Color::rgb(247, 248, 250))
 }
-fn settings_page(content: impl View + Clone) -> impl View + Clone {
-    ScrollView::new(content)
-        .vertical()
-        .frame(f32::INFINITY, f32::INFINITY)
+// ScrollView offers its finite viewport to its child. Settings pages must
+// measure the entire document, including dynamic status messages, so the final
+// controls remain reachable at every window height.
+#[derive(Clone)]
+struct SettingsPageContent<V: View + Clone>(V);
+
+impl<V: View + Clone> View for SettingsPageContent<V> {
+    fn create_element(&self) -> alloc::boxed::Box<dyn Element> {
+        alloc::boxed::Box::new(
+            scarlet_ui::element::RenderElement::with_view_children_and_updater(
+                self.clone(),
+                |_| SettingsPageLayout(Size::ZERO),
+                // Remeasure the document on update: a descendant's tight
+                // layout boundary can otherwise retain its previous height.
+                |_, _| scarlet_ui::element::UpdateResult::Updated,
+                |view| vec![view.0.clone_view()],
+            ),
+        )
+    }
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        self.0.listenables()
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
-fn long_settings_page(content: impl View + Clone, height: f32) -> impl View + Clone {
-    ScrollView::new(content)
-        .vertical()
-        .content_size(0.0, height)
-        .frame(f32::INFINITY, f32::INFINITY)
+struct SettingsPageLayout(Size);
+impl scarlet_ui::element::ElementRenderObject for SettingsPageLayout {
+    fn layout(&mut self, constraints: scarlet_ui::element::LayoutConstraints) -> Size {
+        self.0 = Size::new(constraints.max_width, 0.0);
+        self.0
+    }
+    fn layout_with_children(
+        &mut self,
+        constraints: scarlet_ui::element::LayoutConstraints,
+        children: &mut [alloc::boxed::Box<dyn Element>],
+    ) -> Size {
+        self.0 = children
+            .first_mut()
+            .map(|child| {
+                child.set_position(Point::ZERO);
+                child.layout(scarlet_ui::element::LayoutConstraints::new(
+                    constraints.max_width,
+                    constraints.max_width,
+                    0.0,
+                    f32::INFINITY,
+                ))
+            })
+            .unwrap_or(Size::ZERO);
+        self.0
+    }
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+    fn size(&self) -> Size {
+        self.0
+    }
+    fn render(&mut self) {}
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 }
-fn extra_note_height(value: String) -> f32 {
-    let wrapped = wrap_settings_note(value);
-    let height = scarlet_ui::measure_text_sized(&wrapped, SETTINGS_NOTE_FONT_SIZE).1;
-    let first_line_height = scarlet_ui::measure_text_sized(
-        wrapped.lines().next().unwrap_or_default(),
-        SETTINGS_NOTE_FONT_SIZE,
-    )
-    .1;
-    height.saturating_sub(first_line_height) as f32
+
+fn settings_scroll(content: impl View + Clone) -> ScrollView<impl View + Clone> {
+    ScrollView::new(SettingsPageContent(content)).vertical()
+}
+
+fn settings_page(content: impl View + Clone) -> impl View + Clone {
+    settings_scroll(content).frame(f32::INFINITY, f32::INFINITY)
 }
 
 pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
@@ -97,10 +149,7 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
         .collect::<Vec<_>>();
     presets.push(String::from("Custom"));
     let color = app.current_color();
-    let height = 872.0
-        + extra_note_height(app.background_image_label.get())
-        + extra_note_height(app.background_status.get());
-    long_settings_page(vstack! {
+    settings_page(vstack! {
         settings_section(vstack! {
             settings_row(Select::new(vec![String::from("Gradient + Lines"), String::from("Gradient"), String::from("Solid")], app.background_style_index.clone())
                 .width(300.0).on_change(move |index| style_app.background_style.set(match index { 1 => BackgroundStyle::Gradient, 2 => BackgroundStyle::Solid, _ => BackgroundStyle::GradientLines })), "Style"),
@@ -125,7 +174,7 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
         settings_note(app.background_status.get()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
         cursor_section(app.clone()),
         Button::new("Save again").on_click(move || app.save_config()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
-    }.spacing(18.0).alignment(Alignment::Leading), height)
+    }.spacing(18.0).alignment(Alignment::Leading))
 }
 pub(super) fn about_page() -> impl View + Clone {
     let (distribution, version, kernel, target) = system_description();
@@ -164,7 +213,6 @@ fn cursor_section(app: SettingsApp) -> impl View + Clone {
     let themes = app.cursor_themes.get();
     let select_app = app.clone();
     let refresh_app = app.clone();
-    let height = 180.0 + extra_note_height(app.cursor_theme_status.get());
     settings_section(vstack! {
         settings_row(hstack! {
             Select::new(themes.iter().map(|theme|theme.name.clone()).collect(),app.cursor_theme_index.clone()).width(310.0).placeholder("No cursor themes installed").on_change(move |index|select_app.select_cursor_theme(index)),
@@ -172,7 +220,7 @@ fn cursor_section(app: SettingsApp) -> impl View + Clone {
         }.spacing(8.0), "Theme"),
         settings_note(app.cursor_theme_status.get()),
         settings_note("Cursor themes apply immediately. Installed themes are read from /share/cursors."),
-    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer", 14.0).frame_height(height)
+    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer", 14.0)
 }
 pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
     let outputs = app.audio_outputs.get();
@@ -205,12 +253,11 @@ pub(super) fn input_page(app: SettingsApp) -> impl View + Clone {
         .get(app.selected_ime_index.get())
         .map(|m| m.name.clone())
         .unwrap_or_else(|| String::from("None"));
-    let height = 150.0 + extra_note_height(app.input_status.get());
-    long_settings_page(settings_section(vstack! {
+    settings_page(settings_section(vstack! {
         settings_row(Select::new(input_method_labels(&methods),app.selected_ime_index.clone()).width(330.0).placeholder("No input methods registered").on_change(move |index|select_app.select_input_method(index)), "Input method"),
         settings_note(format!("Active: {} · {} registered methods",selected,methods.len())),
         settings_note(app.input_status.get()),
-    }.spacing(12.0).alignment(Alignment::Leading), "Typing", 14.0).frame_height(height), height)
+    }.spacing(12.0).alignment(Alignment::Leading), "Typing", 14.0))
 }
 fn status_item_label(item: StatusItemId) -> &'static str {
     match item {
@@ -255,10 +302,7 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
     let clock = app.clone();
     let region = app.clone();
     let timezone = app.clone();
-    let height = 732.0
-        + extra_note_height(app.timezone_status.get())
-        + extra_note_height(app.status_preferences_status.get());
-    long_settings_page(vstack! {
+    settings_page(vstack! {
         settings_section(vstack! {
             settings_note("Show items in the status bar and choose their order."),
             status_item_row(app.clone(),first,0,count),status_item_row(app.clone(),second,1,count),
@@ -278,7 +322,7 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
         }.spacing(12.0).alignment(Alignment::Leading),"Clock", 14.0),
         settings_note(app.status_preferences_status.get()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
         hstack! { Button::new("Refresh").on_click(move||refresh.refresh_status_preferences()), Button::new("Reset to defaults").on_click(move||reset.reset_status_preferences()), }.spacing(8.0).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
-    }.spacing(18.0).alignment(Alignment::Leading), height)
+    }.spacing(18.0).alignment(Alignment::Leading))
 }
 
 pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
@@ -342,11 +386,6 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
     } else {
         "•".repeat(app.wifi_password.get().chars().count().min(40))
     };
-    let height = 1152.0
-        + extra_note_height(detail.clone())
-        + extra_note_height(app.wifi_status.get())
-        + extra_note_height(app.network_status.get())
-        + extra_note_height(app.network_routes.get());
     let content=vstack! {
         settings_section(vstack! {
             vstack! {
@@ -388,9 +427,7 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
             settings_note("WPA2-Personal networks are supported. Disconnect before scanning. A successfully connected network is saved for automatic reconnection."),
         }.spacing(14.0).alignment(Alignment::Leading),"Wi-Fi",16.0),
     }.spacing(18.0).alignment(Alignment::Leading);
-    ScrollView::new(content)
-        .vertical()
-        .content_size(0.0, height)
+    settings_scroll(content)
         .scrollbar_visibility(scarlet_ui::ScrollbarVisibility::Always)
         .frame(f32::INFINITY, f32::INFINITY)
 }
@@ -400,6 +437,137 @@ mod layout_tests {
     use super::*;
     use scarlet_ui::element::{Element, LayoutConstraints};
     use scarlet_ui::geometry::{Point, Rect};
+
+    #[test]
+    fn settings_page_keeps_natural_height_and_last_control_reachable_after_resize() {
+        use scarlet_ui::event::{Event, MouseEvent, Phase, ScrollSource, WheelPhase};
+        for lines in [1, 48] {
+            let content = vstack! {
+                settings_section(vstack! {
+                    settings_note("A status message\n".repeat(lines)),
+                    Button::new("Refresh"),
+                }.spacing(12.0), "Device", 14.0),
+                settings_section(settings_note("Another section"), "Options", 14.0),
+                Button::new("Save again"),
+            }
+            .spacing(18.0)
+            .alignment(Alignment::Leading);
+            let natural = content.create_element().layout(LayoutConstraints::new(
+                640.0,
+                640.0,
+                0.0,
+                f32::INFINITY,
+            ));
+            let mut page = settings_page(content).create_element();
+            for height in [120.0, 540.0, 0.0, 360.0] {
+                page.layout(LayoutConstraints::tight(640.0, height));
+                let scroll = page.children_mut()[0].as_mut();
+                assert_eq!(
+                    scroll.children()[0].bounds().size.height,
+                    natural.height,
+                    "status lines={lines}, viewport height={height}"
+                );
+                let mut buttons = Vec::new();
+                rects::<scarlet_ui::views::ButtonRenderObject>(
+                    scroll.children()[0].as_ref(),
+                    Point::ZERO,
+                    &mut buttons,
+                );
+                assert_eq!(buttons.len(), 2);
+                assert!(buttons[1].origin.y >= buttons[0].bottom() + 18.0);
+                scroll.handle_event(
+                    &Event::Mouse(MouseEvent::Wheel {
+                        delta_x: 0,
+                        delta_y: -100_000,
+                        x: 4,
+                        y: 4,
+                        phase: WheelPhase::Started,
+                        source: ScrollSource::Trackpad,
+                    }),
+                    Phase::Target,
+                );
+                if natural.height > height && height > 0.0 {
+                    let mut after = Vec::new();
+                    rects::<scarlet_ui::views::ButtonRenderObject>(
+                        scroll.children()[0].as_ref(),
+                        Point::ZERO,
+                        &mut after,
+                    );
+                    assert!(
+                        (after[1].bottom() - height).abs() < 0.5,
+                        "last control must reach viewport bottom: {:?}",
+                        after[1]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_page_remeasures_changed_status_and_clamps_old_scroll_position() {
+        use scarlet_ui::event::{Event, MouseEvent, Phase, ScrollSource, WheelPhase};
+        let content = |lines| {
+            VStack::new((
+                settings_section(
+                    settings_note("Route status\n".repeat(lines)),
+                    "Network",
+                    16.0,
+                ),
+                Button::new("Connect"),
+            ))
+            .spacing(18.0)
+            .alignment(Alignment::Leading)
+        };
+        let mut pipeline = scarlet_ui::pipeline::RenderingPipeline::new();
+        pipeline.set_root(settings_page(content(1)).create_element());
+        pipeline.layout_initial();
+        pipeline.resize(Size::new(640.0, 360.0));
+        let _ = pipeline.render_for_present().unwrap();
+        for lines in [48, 2, 64, 1] {
+            let next = content(lines);
+            let natural = next.create_element().layout(LayoutConstraints::new(
+                640.0,
+                640.0,
+                0.0,
+                f32::INFINITY,
+            ));
+            pipeline
+                .element_tree_mut()
+                .root_mut()
+                .unwrap()
+                .update(&settings_page(next));
+            let _ = pipeline.render_for_present().unwrap();
+            let scroll = pipeline
+                .element_tree_mut()
+                .root_mut()
+                .unwrap()
+                .children_mut()[0]
+                .as_mut();
+            let document = scroll.children()[0].as_ref();
+            assert_eq!(document.bounds().size.height, natural.height);
+            assert!(document.position().y >= -(natural.height - 360.0).max(0.0));
+            assert!(document.position().y <= 0.0);
+            scroll.handle_event(
+                &Event::Mouse(MouseEvent::Wheel {
+                    delta_x: 0,
+                    delta_y: -100_000,
+                    x: 4,
+                    y: 4,
+                    phase: WheelPhase::Started,
+                    source: ScrollSource::Trackpad,
+                }),
+                Phase::Target,
+            );
+            let mut buttons = Vec::new();
+            rects::<scarlet_ui::views::ButtonRenderObject>(
+                scroll.children()[0].as_ref(),
+                Point::ZERO,
+                &mut buttons,
+            );
+            assert_eq!(buttons.len(), 1);
+            assert!((buttons[0].bottom() - natural.height.min(360.0)).abs() < 0.5);
+        }
+    }
 
     fn rects<T: 'static>(element: &dyn Element, origin: Point, out: &mut Vec<Rect>) {
         let origin = Point::new(
