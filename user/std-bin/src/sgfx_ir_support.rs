@@ -500,7 +500,7 @@ pub(crate) struct TextureUpload<'a> {
     pub(crate) bytes: &'a [u8],
 }
 
-/// Clean linear captures and a cached paired-sample reduction pyramid. Render
+/// Clean linear captures, a reduction pyramid and the finished material. Render
 /// targets stay separate from sampled textures: native Maxwell uses tiled render
 /// targets and the proven tiled-to-linear copy path for subsequent sampling.
 pub(crate) struct BackdropTextures {
@@ -508,6 +508,8 @@ pub(crate) struct BackdropTextures {
     reduction_targets: Vec<(TextureId, u32)>,
     filter_target: TextureId,
     filtered: TextureId,
+    finished_target: TextureId,
+    finished: TextureId,
     pub(crate) valid: bool,
 }
 
@@ -556,6 +558,8 @@ impl BackdropTextures {
             reduction_targets,
             filter_target: render_target(w, h)?,
             filtered: sampled(w, h)?,
+            finished_target: render_target(width, height)?,
+            finished: sampled(width, height)?,
             valid: false,
         })
     }
@@ -1063,85 +1067,160 @@ impl QuadRenderer {
                         })],
                     )?;
                 }
-                let mut quads = Vec::with_capacity(5 + backdrop.clips.len() * 2);
-                let mut total = 0.0;
-                for (y, weight) in positions.into_iter().zip(weights) {
-                    total += weight;
-                    quads.push(Quad::SampledOffset {
-                        rect: SampledRect {
-                            texture: backdrop.textures.filtered,
-                            texture_width: rw,
-                            texture_height: rh,
-                            destination: backdrop.source,
-                            source: reduced_area,
-                            tint: ir::Color::rgba(1.0, 1.0, 1.0, weight / total)
-                                .map_err(|_| "Invalid backdrop sample weight")?,
-                            ignore_source_alpha: true,
-                            clip: Some(backdrop.output),
-                        },
-                        offset: [0.0, y * step_y],
-                    });
-                }
+                if backdrop.refresh {
+                    // Cache the completed vertical filter and rounded restoration.
+                    // All operations below retain their old pixel math; translate
+                    // only their destination/scissor into this capture's coordinates.
+                    let mut quads = Vec::with_capacity(5 + backdrop.clips.len() * 2);
+                    let mut total = 0.0;
+                    for (y, weight) in positions.into_iter().zip(weights) {
+                        total += weight;
+                        quads.push(Quad::SampledOffset {
+                            rect: SampledRect {
+                                texture: backdrop.textures.filtered,
+                                texture_width: rw,
+                                texture_height: rh,
+                                destination: backdrop.source,
+                                source: reduced_area,
+                                tint: ir::Color::rgba(1.0, 1.0, 1.0, weight / total)
+                                    .map_err(|_| "Invalid backdrop sample weight")?,
+                                ignore_source_alpha: true,
+                                clip: Some(backdrop.output),
+                            },
+                            offset: [0.0, y * step_y],
+                        });
+                    }
 
-                // The kernel uses one rectangular scissor. Restore the small
-                // corner areas outside the rounded material from the clean
-                // capture so blur never leaks through transparent corners.
-                let output_right = backdrop
-                    .output
-                    .x()
-                    .checked_add(backdrop.output.width())
-                    .ok_or("Invalid backdrop output")?;
-                for clip in &backdrop.clips {
-                    if clip.x() > backdrop.output.x() {
-                        let corner = PixelRect::new(
-                            backdrop.output.x(),
-                            clip.y(),
-                            clip.x() - backdrop.output.x(),
-                            clip.height(),
-                        )
-                        .map_err(|_| "Invalid backdrop corner")?;
-                        quads.push(Quad::Sampled(SampledRect {
-                            texture: capture,
-                            texture_width: sw,
-                            texture_height: sh,
-                            destination: backdrop.source,
-                            source: local,
-                            tint: white,
-                            ignore_source_alpha: true,
-                            clip: Some(corner),
-                        }));
-                    }
-                    let clip_right = clip
+                    // The kernel uses one rectangular scissor. Restore the small
+                    // corner areas outside the rounded material from the clean
+                    // capture so blur never leaks through transparent corners.
+                    let output_right = backdrop
+                        .output
                         .x()
-                        .checked_add(clip.width())
-                        .ok_or("Invalid backdrop clip")?;
-                    if clip_right < output_right {
-                        let corner = PixelRect::new(
-                            clip_right,
-                            clip.y(),
-                            output_right - clip_right,
-                            clip.height(),
-                        )
-                        .map_err(|_| "Invalid backdrop corner")?;
-                        quads.push(Quad::Sampled(SampledRect {
+                        .checked_add(backdrop.output.width())
+                        .ok_or("Invalid backdrop output")?;
+                    for clip in &backdrop.clips {
+                        if clip.x() > backdrop.output.x() {
+                            let corner = PixelRect::new(
+                                backdrop.output.x(),
+                                clip.y(),
+                                clip.x() - backdrop.output.x(),
+                                clip.height(),
+                            )
+                            .map_err(|_| "Invalid backdrop corner")?;
+                            quads.push(Quad::Sampled(SampledRect {
+                                texture: capture,
+                                texture_width: sw,
+                                texture_height: sh,
+                                destination: backdrop.source,
+                                source: local,
+                                tint: white,
+                                ignore_source_alpha: true,
+                                clip: Some(corner),
+                            }));
+                        }
+                        let clip_right = clip
+                            .x()
+                            .checked_add(clip.width())
+                            .ok_or("Invalid backdrop clip")?;
+                        if clip_right < output_right {
+                            let corner = PixelRect::new(
+                                clip_right,
+                                clip.y(),
+                                output_right - clip_right,
+                                clip.height(),
+                            )
+                            .map_err(|_| "Invalid backdrop corner")?;
+                            quads.push(Quad::Sampled(SampledRect {
+                                texture: capture,
+                                texture_width: sw,
+                                texture_height: sh,
+                                destination: backdrop.source,
+                                source: local,
+                                tint: white,
+                                ignore_source_alpha: true,
+                                clip: Some(corner),
+                            }));
+                        }
+                    }
+                    for quad in &mut quads {
+                        let rect = match quad {
+                            Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => rect,
+                            _ => return Err("Invalid cached backdrop operation".into()),
+                        };
+                        let localize = |r: PixelRect| -> Result<PixelRect, &'static str> {
+                            PixelRect::new(
+                                r.x()
+                                    .checked_sub(backdrop.source.x())
+                                    .ok_or("Invalid backdrop local x")?,
+                                r.y()
+                                    .checked_sub(backdrop.source.y())
+                                    .ok_or("Invalid backdrop local y")?,
+                                r.width(),
+                                r.height(),
+                            )
+                            .map_err(|_| "Invalid backdrop local rectangle")
+                        };
+                        rect.destination = localize(rect.destination)?;
+                        rect.clip = rect.clip.map(localize).transpose()?;
+                    }
+                    region(
+                        backdrop.textures.finished_target,
+                        sw,
+                        sh,
+                        local,
+                        LoadOp::Load,
+                        &[Quad::Sampled(SampledRect {
                             texture: capture,
                             texture_width: sw,
                             texture_height: sh,
-                            destination: backdrop.source,
+                            destination: local,
                             source: local,
                             tint: white,
                             ignore_source_alpha: true,
-                            clip: Some(corner),
-                        }));
-                    }
+                            clip: None,
+                        })],
+                    )?;
+                    region(
+                        backdrop.textures.finished_target,
+                        sw,
+                        sh,
+                        local,
+                        LoadOp::Load,
+                        &quads,
+                    )?;
+                    region(
+                        backdrop.textures.finished,
+                        sw,
+                        sh,
+                        local,
+                        LoadOp::Load,
+                        &[Quad::Copy(CopiedRect {
+                            texture: backdrop.textures.finished_target,
+                            source: local,
+                            destination: local,
+                            clip: None,
+                        })],
+                    )?;
                 }
+                // Foreground-only and cursor updates reuse the completed material:
+                // one sample, with no repeated five-tap filter or corner restoration.
                 region(
                     texture,
                     width,
                     height,
                     backdrop.output,
                     LoadOp::Load,
-                    &quads,
+                    &[Quad::Sampled(SampledRect {
+                        texture: backdrop.textures.finished,
+                        texture_width: sw,
+                        texture_height: sh,
+                        destination: backdrop.source,
+                        source: local,
+                        tint: white,
+                        ignore_source_alpha: true,
+                        clip: Some(backdrop.output),
+                    })],
                 )?;
             }
             previous_split = split;
@@ -1895,15 +1974,15 @@ mod tests {
             &inspect.copies[..2],
             &[(scene, a.levels[0].0), (scene, b.levels[0].0)]
         );
-        assert_eq!(inspect.draws, 36);
+        assert_eq!(inspect.draws, 40);
         assert!(
             inspect
                 .copies
                 .iter()
                 .all(|(source, destination)| source != destination)
         );
-        // Cursor-only replay samples the cached horizontal result and clean
-        // corner capture. It must issue no source captures or reduction passes.
+        // Cursor-only replay samples the completed cached materials.
+        // It must issue no source captures, filters or corner restoration.
         for pass in &mut passes {
             pass.refresh = false;
         }
@@ -1928,7 +2007,10 @@ mod tests {
         assert_eq!(inspect.calls, 1);
         assert_eq!(inspect.uploads, 1);
         assert!(inspect.copies.is_empty());
-        assert_eq!(inspect.draws, 10, "only the two vertical kernels remain");
+        assert_eq!(
+            inspect.draws, 2,
+            "one completed-material sample per backdrop"
+        );
         // A changed source refreshes that material while the other cache remains reusable.
         passes[0].refresh = true;
         inspect.copies.clear();
@@ -1955,7 +2037,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(inspect.draws, 23);
+        assert_eq!(inspect.draws, 21);
         for textures in [&a, &b] {
             for &(sampled, _, _) in &textures.levels {
                 let usage = resources

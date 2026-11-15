@@ -1542,8 +1542,8 @@ impl GpuCompositor {
                 );
             }
         }
-        // Only a successfully published frame certifies the clean capture and
-        // horizontal filter for cursor-only redraws. Failed submissions stay cold.
+        // Only a successfully published frame certifies the completed background
+        // material for reuse. Failed submissions stay cold.
         drop(backdrop_passes);
         for (index, _) in backdrop_splits {
             self.backdrops[index].2.valid = true;
