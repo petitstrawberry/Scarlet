@@ -1101,9 +1101,15 @@ impl GpuCompositor {
                     ignore_source_alpha: !window.has_alpha_content,
                     clip: None,
                 };
-                let operation = if scene_texture.is_some() {
-                    // Apply group opacity once, after composing all children.
-                    rect.ignore_source_alpha = false;
+                let operation = if scene_texture.is_some() || shared_texture.is_some() {
+                    // Extension GPU buffers, like composed scenes, carry
+                    // premultiplied RGB. Scale RGB and alpha together for
+                    // window opacity; straight-alpha blending darkens glass
+                    // and antialiased edges by applying source alpha twice.
+                    // Opaque GPU registrations still ignore their alpha.
+                    if scene_texture.is_some() {
+                        rect.ignore_source_alpha = false;
+                    }
                     rect.tint = Color::rgba(opacity, opacity, opacity, opacity)
                         .map_err(|_| "Invalid scene opacity")?;
                     let l = source.x() as f32 / texture_width as f32;
