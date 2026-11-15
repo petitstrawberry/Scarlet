@@ -25,7 +25,7 @@ subdir = "native"
 [[layers]]
 kind = "cargo"
 # Keep this SGFX revision aligned with bundles/sgfx-native/bundle.toml.
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "233848874663050cd1559c957cba244387753252" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "0ca31d0c69d4836f34de40bf68ecf590cb19bde9" }
 package = "vulkan-sgfx"
 lib = "vulkan_sgfx"
 default-features = false
