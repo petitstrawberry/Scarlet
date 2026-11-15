@@ -7,8 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "27cb65919d973c4afa80d451205d8cdfca289b0e", default-features = false, features = ["std", "platform-winit"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "27cb65919d973c4afa80d451205d8cdfca289b0e" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "cb3175bcf2747d62bc0f4488fb2fe67bf42d462a", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "cb3175bcf2747d62bc0f4488fb2fe67bf42d462a" }
 scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config", default-features = false, features = ["std"] }
 
 [[bin]]
