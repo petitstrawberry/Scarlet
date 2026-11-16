@@ -1,7 +1,10 @@
-//! RFB 3.8 server with negotiated ZRLE/Raw encoding and DesktopSize support.
+//! RFB server with negotiated ZRLE/Raw encoding and DesktopSize support.
 
+mod handshake;
 mod keysym;
 mod rfb;
+
+pub(crate) use handshake::VncPassword;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, ErrorKind, Write};
@@ -53,16 +56,21 @@ impl ClientFramebufferState {
 ///
 /// * `listener` - Bound TCP listener.
 /// * `state` - Shared captured desktop state.
+/// * `password` - Optional VNC password; when set, None security is not offered.
 ///
 /// # Returns
 ///
 /// Failure only if the listener permanently stops accepting clients.
-pub(crate) fn serve(listener: TcpListener, state: Arc<DesktopState>) -> ExitCode {
+pub(crate) fn serve(
+    listener: TcpListener,
+    state: Arc<DesktopState>,
+    password: Option<VncPassword>,
+) -> ExitCode {
     loop {
         match listener.accept() {
             Ok((stream, peer)) => {
                 println!("[remote-desktop] VNC client connected from {peer}");
-                if let Err(error) = client_loop(stream, &state) {
+                if let Err(error) = client_loop(stream, &state, password.as_ref()) {
                     eprintln!("[remote-desktop] VNC client ended: {error}");
                 }
             }
@@ -77,9 +85,13 @@ pub(crate) fn serve(listener: TcpListener, state: Arc<DesktopState>) -> ExitCode
     }
 }
 
-fn client_loop(mut stream: TcpStream, state: &DesktopState) -> io::Result<()> {
+fn client_loop(
+    mut stream: TcpStream,
+    state: &DesktopState,
+    password: Option<&VncPassword>,
+) -> io::Result<()> {
     let (initial_width, initial_height) = wait_for_output(state)?;
-    rfb::handshake(&mut stream, initial_width, initial_height)?;
+    handshake::handshake(&mut stream, initial_width, initial_height, password)?;
     stream.set_nonblocking(true)?;
 
     let mut reader = rfb::MessageReader::new();

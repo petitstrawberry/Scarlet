@@ -2852,7 +2852,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     // needed when the notification pipe exists.
                     let mut handles = [
                         PollHandle::new(socket.as_raw() as u32, socket_interest),
-                        PollHandle::new(wake_read.as_ref().map_or(0, |wake| wake.as_raw() as u32), POLLIN),
+                        PollHandle::new(
+                            wake_read.as_ref().map_or(0, |wake| wake.as_raw() as u32),
+                            POLLIN,
+                        ),
                     ];
                     let (count, timeout) = if wake_read.is_some() {
                         (2, -1)
@@ -4231,8 +4234,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     }
                 }
             }
-            Ok(ClientMessageRef::RequestFrame { window_id, callback_id }
-                | ClientMessageRef::RequestFrameCredit { window_id, callback_id }) => {
+            Ok(
+                ClientMessageRef::RequestFrame {
+                    window_id,
+                    callback_id,
+                }
+                | ClientMessageRef::RequestFrameCredit {
+                    window_id,
+                    callback_id,
+                },
+            ) => {
                 if header.flags != 0 || request_id != 0 {
                     send_message_to_client(
                         client_id,
@@ -4254,7 +4265,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     client_id,
                     window_id,
                     callback_id,
-                    is_credit: u32::from(header.msg_type) == protocol::client_msg::REQUEST_FRAME_CREDIT,
+                    is_credit: u32::from(header.msg_type)
+                        == protocol::client_msg::REQUEST_FRAME_CREDIT,
                 });
             }
             Ok(ClientMessageRef::RegisterSgfxBuffer {

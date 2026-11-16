@@ -274,7 +274,8 @@ pub trait IommuDomain: Send + Sync {
     /// may override this to read only their status register at DMA retirement.
     /// None means this provider does not expose context fault reporting.
     fn pending_context_fault(&self) -> Option<bool> {
-        self.fault_snapshot().map(|fault| fault.context_fault_pending)
+        self.fault_snapshot()
+            .map(|fault| fault.context_fault_pending)
     }
 }
 

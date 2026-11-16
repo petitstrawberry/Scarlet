@@ -13,12 +13,12 @@ pub const GPU_IMAGE_FORMAT_NV12: u32 = 3;
 mod completion;
 mod submission;
 mod timestamp;
-pub use scarlet_abi::gpu_timestamp::{GpuContextTimestamp, GPU_EXECUTION_SUPPORT_TIMESTAMPS};
 pub use completion::{
     GPU_COMPLETION_COMPLETE, GPU_COMPLETION_FAILED, GPU_COMPLETION_FAILURE_ABANDONED,
     GPU_COMPLETION_FAILURE_DEVICE_LOST, GPU_COMPLETION_FAILURE_EXECUTION,
     GPU_COMPLETION_FAILURE_NONE, GPU_COMPLETION_PENDING, GpuCompletion, GpuCompletionInfo,
 };
+pub use scarlet_abi::gpu_timestamp::{GPU_EXECUTION_SUPPORT_TIMESTAMPS, GpuContextTimestamp};
 pub use submission::{GpuQueueAsyncInfo, GpuQueueSubmitAsync, GpuSubmitError};
 
 #[cfg(not(feature = "std"))]

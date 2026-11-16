@@ -16,8 +16,8 @@ use scarlet_ui::state::State;
 use scarlet_ui::view::{View, ViewExt};
 use scarlet_ui::views::containers::ViewTuple;
 use scarlet_ui::views::{
-    Button, Divider, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface,
-    SurfaceRole, SurfaceStyle, Text, TextStyle, VStack,
+    Button, Divider, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface, SurfaceRole,
+    SurfaceStyle, Text, TextStyle, VStack,
 };
 use scarlet_ui::{Icon, IconSize};
 
@@ -880,18 +880,42 @@ mod tests {
     #[test]
     fn percent_writes_deduplicate_acks_but_keep_changes_retries_and_final_targets() {
         let mut writes = PercentWriteState::default();
-        assert!(writes.needs_write(42, Some(42)), "initial input still writes");
+        assert!(
+            writes.needs_write(42, Some(42)),
+            "initial input still writes"
+        );
         writes.complete(42, Some(41));
-        assert!(!writes.needs_write(42, Some(41)), "rounded hardware ack may differ");
-        assert!(writes.needs_write(42, Some(20)), "external change permits same request");
-        assert!(writes.needs_write(42, None), "unknown provider cannot suppress writes");
-        assert!(writes.needs_write(43, Some(41)), "new final percentage must be sent");
+        assert!(
+            !writes.needs_write(42, Some(41)),
+            "rounded hardware ack may differ"
+        );
+        assert!(
+            writes.needs_write(42, Some(20)),
+            "external change permits same request"
+        );
+        assert!(
+            writes.needs_write(42, None),
+            "unknown provider cannot suppress writes"
+        );
+        assert!(
+            writes.needs_write(43, Some(41)),
+            "new final percentage must be sent"
+        );
         writes.complete(43, None);
-        assert!(writes.needs_write(43, Some(41)), "failure permits identical retry");
-        assert!(writes.needs_write(42, Some(41)), "failure also clears the old ack");
+        assert!(
+            writes.needs_write(43, Some(41)),
+            "failure permits identical retry"
+        );
+        assert!(
+            writes.needs_write(42, Some(41)),
+            "failure also clears the old ack"
+        );
         writes.complete(43, Some(43));
         assert!(!writes.needs_write(43, Some(43)));
-        assert!(writes.needs_write(42, Some(43)), "reversing a drag must write again");
+        assert!(
+            writes.needs_write(42, Some(43)),
+            "reversing a drag must write again"
+        );
     }
 
     fn brightness_slider(element: &dyn Element, id: StateId) -> Option<&Slider> {
@@ -1196,13 +1220,22 @@ mod tests {
         assert!(session.open && session.snapshot.is_none());
         session.close();
         session.publish(cancelled, ControlCenterSnapshot::unavailable());
-        assert!(session.snapshot.is_none(), "a closed request cannot publish");
+        assert!(
+            session.snapshot.is_none(),
+            "a closed request cannot publish"
+        );
 
         session.request_open();
         session.publish(cancelled, ControlCenterSnapshot::unavailable());
-        assert!(session.snapshot.is_none(), "old IPC cannot complete a reopen");
+        assert!(
+            session.snapshot.is_none(),
+            "old IPC cannot complete a reopen"
+        );
         session.publish(session.generation(), ControlCenterSnapshot::unavailable());
-        assert!(session.snapshot.is_some(), "unavailable is a completed sample");
+        assert!(
+            session.snapshot.is_some(),
+            "unavailable is a completed sample"
+        );
         session.close();
         session.request_open();
         assert!(session.snapshot.is_none(), "reopen samples fresh topology");

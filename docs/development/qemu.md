@@ -208,6 +208,22 @@ and `127.0.0.1:<SSH host port>` to guest 22. QEMU's own VNC server is
 separate from Scarlet's remote-desktop service; the AArch64 default avoids
 their host-port collision by moving the latter to 5901 when necessary.
 
+Run `remote-desktop server` in Scarlet to start its remote desktop service.
+It negotiates RFB 3.3, 3.7, or 3.8. For macOS Screen Sharing, use
+`remote-desktop server --password-file /path/to/vnc-password`, where the
+file contains 1-8 printable ASCII password bytes with an optional trailing
+newline. This enables VNC challenge-response authentication; without the
+option, the server continues to use None security. On the Mac, use
+`open vnc://127.0.0.1:5900` (or port 5901 when QEMU's own VNC display
+occupies 5900), then enter the VNC password. Use an SSH tunnel on untrusted
+networks: classic VNC authentication does not encrypt the desktop traffic.
+
+Host-side handshake regression tests run independently of the Scarlet kernel:
+
+```sh
+cargo test --locked --manifest-path tools/remote-desktop-host/Cargo.toml
+```
+
 The default rules other than SSH omit a host bind address. Use explicit
 loopback rules when services should not be exposed on other host interfaces:
 

@@ -1,9 +1,9 @@
-//! RFB 3.8 wire parsing and Raw/ZRLE framebuffer-update encoding.
+//! RFB wire parsing and Raw/ZRLE framebuffer-update encoding.
 
 use miniz_oxide::deflate::core::{CompressorOxide, create_comp_flags_from_zip_params};
 use miniz_oxide::deflate::stream::deflate;
 use miniz_oxide::{MZ_DEFAULT_WINDOW_BITS, MZFlush};
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read};
 use std::net::TcpStream;
 use std::vec::Vec;
 use sws_remote_protocol::Rect;
@@ -13,8 +13,6 @@ use super::super::sws::FrameState;
 pub(super) const ENCODING_RAW: i32 = 0;
 pub(super) const ENCODING_ZRLE: i32 = 16;
 pub(super) const ENCODING_DESKTOP_SIZE: i32 = -223;
-const PROTOCOL_VERSION: &[u8; 12] = b"RFB 003.008\n";
-const SERVER_NAME: &[u8] = b"Scarlet Remote Desktop";
 const MAX_CLIENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ENCODINGS: usize = 4096;
 const ZRLE_TILE_SIZE: u32 = 64;
@@ -202,7 +200,8 @@ impl PixelFormat {
     /// `None`.
     pub(super) const fn pixel_order(self) -> Option<PixelOrder> {
         if !(self.bits_per_pixel == 32
-            && self.depth == 24
+            // Screen Sharing reports depth 32 for the same 24-bit RGB masks.
+            && matches!(self.depth, 24 | 32)
             && !self.big_endian
             && self.true_color
             && self.red_max == 255
@@ -217,57 +216,6 @@ impl PixelFormat {
             _ => None,
         }
     }
-}
-
-/// Complete the RFB 3.8 None-security handshake.
-///
-/// # Arguments
-///
-/// * `stream` - Newly accepted TCP connection.
-/// * `width` - Initial framebuffer width.
-/// * `height` - Initial framebuffer height.
-///
-/// # Returns
-///
-/// Success after `ServerInit` has been sent.
-pub(super) fn handshake(stream: &mut TcpStream, width: u32, height: u32) -> io::Result<()> {
-    let width = u16::try_from(width)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "framebuffer width exceeds RFB"))?;
-    let height = u16::try_from(height)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "framebuffer height exceeds RFB"))?;
-
-    stream.write_all(PROTOCOL_VERSION)?;
-    let mut client_version = [0; 12];
-    stream.read_exact(&mut client_version)?;
-    if &client_version != PROTOCOL_VERSION {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "only RFB 3.8 is supported",
-        ));
-    }
-
-    stream.write_all(&[1, 1])?; // one security type: None
-    let mut selected_security = [0; 1];
-    stream.read_exact(&mut selected_security)?;
-    if selected_security[0] != 1 {
-        return Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            "client rejected RFB None security",
-        ));
-    }
-    stream.write_all(&0u32.to_be_bytes())?; // SecurityResult: OK
-
-    let mut shared_flag = [0; 1];
-    stream.read_exact(&mut shared_flag)?;
-
-    let mut server_init = Vec::with_capacity(24 + SERVER_NAME.len());
-    server_init.extend_from_slice(&width.to_be_bytes());
-    server_init.extend_from_slice(&height.to_be_bytes());
-    encode_native_pixel_format(&mut server_init);
-    server_init.extend_from_slice(&(SERVER_NAME.len() as u32).to_be_bytes());
-    server_init.extend_from_slice(SERVER_NAME);
-    stream.write_all(&server_init)?;
-    stream.flush()
 }
 
 /// Incremental parser for non-blocking RFB client messages.
@@ -753,14 +701,6 @@ pub(super) fn encode_desktop_size(width: u32, height: u32) -> io::Result<Vec<u8>
     Ok(message)
 }
 
-fn encode_native_pixel_format(bytes: &mut Vec<u8>) {
-    bytes.extend_from_slice(&[32, 24, 0, 1]);
-    bytes.extend_from_slice(&255u16.to_be_bytes());
-    bytes.extend_from_slice(&255u16.to_be_bytes());
-    bytes.extend_from_slice(&255u16.to_be_bytes());
-    bytes.extend_from_slice(&[16, 8, 0, 0, 0, 0]);
-}
-
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
 }
@@ -858,6 +798,14 @@ mod tests {
         };
         assert_eq!(native.pixel_order(), Some(PixelOrder::Bgr));
         assert_eq!(rgb.pixel_order(), Some(PixelOrder::Rgb));
+        assert_eq!(
+            PixelFormat {
+                depth: 32,
+                ..native
+            }
+            .pixel_order(),
+            Some(PixelOrder::Bgr)
+        );
         assert_eq!(PixelFormat { depth: 16, ..rgb }.pixel_order(), None);
     }
 

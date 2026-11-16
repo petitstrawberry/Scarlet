@@ -300,7 +300,11 @@ fn target(policy: &Policy, state: &PolicyState) -> u64 {
         .freq_khz
 }
 
-fn apply(policy: &Policy, state: &mut PolicyState, mut next: PolicyState) -> Result<(), &'static str> {
+fn apply(
+    policy: &Policy,
+    state: &mut PolicyState,
+    mut next: PolicyState,
+) -> Result<(), &'static str> {
     if policy.driver.current_frequency_khz()? != state.target_khz {
         return Err("devfreq: hardware rate differs from policy target");
     }
@@ -312,7 +316,9 @@ fn apply(policy: &Policy, state: &mut PolicyState, mut next: PolicyState) -> Res
         let elapsed = completed.saturating_sub(started);
         let transitions = &mut state.transitions;
         transitions.attempts = transitions.attempts.saturating_add(1);
-        transitions.failures = transitions.failures.saturating_add(u64::from(result.is_err()));
+        transitions.failures = transitions
+            .failures
+            .saturating_add(u64::from(result.is_err()));
         transitions.last_call_ns = elapsed;
         transitions.max_call_ns = transitions.max_call_ns.max(elapsed);
         transitions.total_call_ns = transitions.total_call_ns.saturating_add(elapsed);
@@ -921,15 +927,24 @@ mod activity_tests {
         assert_eq!(policy.state.lock().target_khz, 180_000);
         let failed = snapshots()[0].transitions;
         assert_eq!((failed.attempts, failed.failures), (1, 1));
-        assert_eq!((failed.last_from_khz, failed.last_to_khz), (180_000, 800_000));
+        assert_eq!(
+            (failed.last_from_khz, failed.last_to_khz),
+            (180_000, 800_000)
+        );
         driver.reject.store(false, Ordering::Relaxed);
         drop(acquire_activity("activity-test").unwrap());
         assert_eq!(policy.state.lock().active_jobs, 0);
         let mut state = policy.state.lock();
-        assert_eq!((state.transitions.attempts, state.transitions.failures), (2, 1));
+        assert_eq!(
+            (state.transitions.attempts, state.transitions.failures),
+            (2, 1)
+        );
         let unchanged = *state;
         apply(&policy, &mut state, unchanged).unwrap();
-        assert_eq!(state.transitions.attempts, 2, "unchanged rates make no driver call");
+        assert_eq!(
+            state.transitions.attempts, 2,
+            "unchanged rates make no driver call"
+        );
     }
 
     #[test]

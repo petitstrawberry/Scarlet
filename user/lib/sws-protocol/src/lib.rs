@@ -2862,9 +2862,15 @@ pub fn parse_client_message<'a>(
             }
             let window_id = read_u32(payload, 0)?;
             if msg_type == client_msg::REQUEST_FRAME_CREDIT {
-                Ok(ClientMessageRef::RequestFrameCredit { window_id, callback_id })
+                Ok(ClientMessageRef::RequestFrameCredit {
+                    window_id,
+                    callback_id,
+                })
             } else {
-                Ok(ClientMessageRef::RequestFrame { window_id, callback_id })
+                Ok(ClientMessageRef::RequestFrame {
+                    window_id,
+                    callback_id,
+                })
             }
         }
         client_msg::REGISTER_SGFX_BUFFER => {
@@ -6395,14 +6401,24 @@ mod tests {
         let request = payload_request_frame(77, 1234);
         assert_eq!(
             parse_client_message(client_msg::REQUEST_FRAME_CREDIT, &request).unwrap(),
-            ClientMessageRef::RequestFrameCredit { window_id: 77, callback_id: 1234 }
+            ClientMessageRef::RequestFrameCredit {
+                window_id: 77,
+                callback_id: 1234
+            }
         );
-        assert!(matches!(parse_client_message(client_msg::REQUEST_FRAME, &request),
-            Ok(ClientMessageRef::RequestFrame { .. })));
-        assert_ne!(crate::capabilities::FRAME_CALLBACKS, crate::capabilities::FRAME_CREDITS);
+        assert!(matches!(
+            parse_client_message(client_msg::REQUEST_FRAME, &request),
+            Ok(ClientMessageRef::RequestFrame { .. })
+        ));
+        assert_ne!(
+            crate::capabilities::FRAME_CALLBACKS,
+            crate::capabilities::FRAME_CREDITS
+        );
         for invalid in [&request[..11], &payload_request_frame(77, 0)[..]] {
-            assert_eq!(parse_client_message(client_msg::REQUEST_FRAME_CREDIT, invalid),
-                Err(ProtocolError::MalformedPayload));
+            assert_eq!(
+                parse_client_message(client_msg::REQUEST_FRAME_CREDIT, invalid),
+                Err(ProtocolError::MalformedPayload)
+            );
         }
     }
 

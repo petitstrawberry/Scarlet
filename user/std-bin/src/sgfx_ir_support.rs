@@ -77,16 +77,24 @@ pub(crate) const SHARED_FRAME_LEASE_CAPACITY: usize = 4;
 /// Admit a distinct image without releasing an older pending use. Slots are
 /// presented, pending, then retired. Identity equality is independent of serial.
 pub(crate) fn queue_shared_commit<T: Copy + Eq, const N: usize>(
-    mut current: [Option<T>; N], commit: T, same_image: impl Fn(T, T) -> bool,
+    mut current: [Option<T>; N],
+    commit: T,
+    same_image: impl Fn(T, T) -> bool,
 ) -> Result<[Option<T>; N], &'static str> {
     if N < 2 || current.iter().flatten().count() >= SHARED_FRAME_LEASE_CAPACITY {
         return Err("Shared frame lease capacity exhausted");
     }
-    if current.iter().flatten().any(|held| same_image(*held, commit)) {
+    if current
+        .iter()
+        .flatten()
+        .any(|held| same_image(*held, commit))
+    {
         return Err("Shared image is still retained");
     }
     if let Some(pending) = current[1] {
-        let slot = current[2..].iter_mut().find(|slot| slot.is_none())
+        let slot = current[2..]
+            .iter_mut()
+            .find(|slot| slot.is_none())
             .ok_or("Shared retirement storage exhausted")?;
         *slot = Some(pending);
     }
@@ -99,12 +107,19 @@ pub(crate) fn queue_shared_commit<T: Copy + Eq, const N: usize>(
 /// Later pending/retired uses remain held, and a snapshot with no pending image
 /// never acknowledges later work. The fixed return array requires no allocation.
 pub(crate) fn retire_shared_snapshot<T: Copy + Eq, const N: usize>(
-    mut current: [Option<T>; N], submitted: [Option<T>; N],
+    mut current: [Option<T>; N],
+    submitted: [Option<T>; N],
 ) -> Result<([Option<T>; N], [Option<T>; N]), &'static str> {
-    if N < 2 { return Err("Invalid shared frame lease layout"); }
+    if N < 2 {
+        return Err("Invalid shared frame lease layout");
+    }
     let mut released = [None; N];
-    let Some(commit) = submitted[1] else { return Ok((current, released)); };
-    if current[0] != submitted[0] { return Err("Presented commit changed before completion"); }
+    let Some(commit) = submitted[1] else {
+        return Ok((current, released));
+    };
+    if current[0] != submitted[0] {
+        return Err("Presented commit changed before completion");
+    }
     // Validate the complete captured set before changing any role. Equality
     // includes serial/generation/epoch at the native caller, never just slot ID.
     for (index, token) in submitted.iter().enumerate().skip(1) {
@@ -112,7 +127,12 @@ pub(crate) fn retire_shared_snapshot<T: Copy + Eq, const N: usize>(
             if submitted[..index].contains(&Some(*token)) {
                 return Err("Duplicate lease in submitted snapshot");
             }
-            if current[1..].iter().filter(|held| **held == Some(*token)).count() != 1 {
+            if current[1..]
+                .iter()
+                .filter(|held| **held == Some(*token))
+                .count()
+                != 1
+            {
                 return Err("Submitted commit lost its lease");
             }
         }
@@ -121,9 +141,13 @@ pub(crate) fn retire_shared_snapshot<T: Copy + Eq, const N: usize>(
     for (index, token) in submitted.iter().enumerate().skip(1) {
         if let Some(token) = token {
             for held in &mut current[1..] {
-                if *held == Some(*token) { *held = None; }
+                if *held == Some(*token) {
+                    *held = None;
+                }
             }
-            if index >= 2 { released[index - 1] = Some(*token); }
+            if index >= 2 {
+                released[index - 1] = Some(*token);
+            }
         }
     }
     current[0] = Some(commit);
@@ -239,7 +263,9 @@ impl MappedTarget {
 
     pub(crate) fn prepare_gpu_completion(&mut self, wake: fn()) -> Result<(), &'static str> {
         self.prepare_display_completion(wake);
-        if self.gpu_completion.is_none() { self.gpu_completion = Some(GpuCompletionQueue::new(wake)?); }
+        if self.gpu_completion.is_none() {
+            self.gpu_completion = Some(GpuCompletionQueue::new(wake)?);
+        }
         Ok(())
     }
 
@@ -251,11 +277,19 @@ impl MappedTarget {
     }
 
     pub(crate) fn poll_gpu_completion(&mut self) -> Result<bool, &'static str> {
-        let elapsed = self.gpu_completion.as_mut().ok_or("GPU completion worker unavailable")?.poll()?;
+        let elapsed = self
+            .gpu_completion
+            .as_mut()
+            .ok_or("GPU completion worker unavailable")?
+            .poll()?;
         if let Some(elapsed) = elapsed {
-            if let Some(timings) = &mut self.frame_timings { timings.gpu_wait_ns += elapsed.as_nanos(); }
+            if let Some(timings) = &mut self.frame_timings {
+                timings.gpu_wait_ns += elapsed.as_nanos();
+            }
             Ok(true)
-        } else { Ok(false) }
+        } else {
+            Ok(false)
+        }
     }
 
     pub(crate) fn supports_tracked_submission(&self) -> bool {
@@ -494,7 +528,11 @@ impl MappedTarget {
                             .map_err(|_| "Failed to retain SGFX swapchain image")?,
                     );
                 }
-                self.presentation = Some(PresentationQueue::new(display, images, self.display_completion_wake.clone())?);
+                self.presentation = Some(PresentationQueue::new(
+                    display,
+                    images,
+                    self.display_completion_wake.clone(),
+                )?);
                 println!(
                     "sgfx: asynchronous display presentation with {} images",
                     self.slots.len()
@@ -717,7 +755,9 @@ impl BackdropTextures {
     /// Screen position and corner masks do not change texture allocation.
     /// Their cached CONTENT must still be refreshed when geometry changes.
     pub(crate) fn allocation_matches(&self, width: u32, height: u32, radius: u32) -> bool {
-        self.levels.first().is_some_and(|&(_, w, h)| w == width && h == height)
+        self.levels
+            .first()
+            .is_some_and(|&(_, w, h)| w == width && h == height)
             && self.radius == radius.clamp(1, 64)
     }
 }
@@ -1175,7 +1215,10 @@ impl QuadRenderer {
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
         backdrops: &[BackdropPass<'_>],
-    ) -> Result<Vec<sgfx::Submission>, QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+    ) -> Result<
+        Vec<sgfx::Submission>,
+        QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>,
+    > {
         let texture = target.texture;
         let extent = (target.width, target.height);
         self.enqueue_texture_with_uploads_tracked(
@@ -1198,15 +1241,21 @@ impl QuadRenderer {
         backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
         use sgfx::backend::Completion;
-        let receipts = self.enqueue_texture_with_uploads_tracked(target, texture, extent, area, load, uploads, operations, backdrops)?;
+        let receipts = self.enqueue_texture_with_uploads_tracked(
+            target, texture, extent, area, load, uploads, operations, backdrops,
+        )?;
         let started = std::time::Instant::now();
         for receipt in receipts {
-            match receipt.wait(None).map_err(|error| QuadSubmitError::Execution(FrameSubmissionError::Completion(error)))? {
+            match receipt.wait(None).map_err(|error| {
+                QuadSubmitError::Execution(FrameSubmissionError::Completion(error))
+            })? {
                 CompletionStatus::Complete => {}
                 _ => return Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
             }
         }
-        if let Some(timings) = &mut target.frame_timings { timings.gpu_wait_ns += started.elapsed().as_nanos(); }
+        if let Some(timings) = &mut target.frame_timings {
+            timings.gpu_wait_ns += started.elapsed().as_nanos();
+        }
         Ok(())
     }
 
@@ -1221,7 +1270,10 @@ impl QuadRenderer {
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
         backdrops: &[BackdropPass<'_>],
-    ) -> Result<Vec<sgfx::Submission>, QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+    ) -> Result<
+        Vec<sgfx::Submission>,
+        QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>,
+    > {
         let encode_start = target
             .frame_timings
             .as_ref()
@@ -1264,7 +1316,9 @@ impl QuadRenderer {
         if let (Some(start), Some(timings)) = (encode_start, &mut target.frame_timings) {
             timings.encode_submit_ns += start.elapsed().as_nanos();
         }
-        executor.into_submissions().map_err(QuadSubmitError::Execution)
+        executor
+            .into_submissions()
+            .map_err(QuadSubmitError::Execution)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2263,19 +2317,30 @@ mod tests {
 
     #[test]
     fn async_snapshot_promotes_submitted_b_and_preserves_newer_c() {
-        let (state, released) = super::retire_shared_snapshot([Some(1), Some(3), Some(2)], [Some(1), Some(2), None]).unwrap();
+        let (state, released) =
+            super::retire_shared_snapshot([Some(1), Some(3), Some(2)], [Some(1), Some(2), None])
+                .unwrap();
         assert_eq!(state, [Some(2), Some(3), None]);
         assert_eq!(released, [Some(1), None, None]);
-        let (state, released) = super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), None, None]).unwrap();
+        let (state, released) =
+            super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), None, None]).unwrap();
         assert_eq!(state, [Some(1), Some(3), None]);
         assert_eq!(released, [None, None, None]);
     }
 
     #[test]
     fn async_snapshot_rejects_missing_or_replaced_generation() {
-        assert!(super::retire_shared_snapshot([Some(4), Some(2), None], [Some(1), Some(2), None]).is_err());
-        assert!(super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), Some(2), None]).is_err());
-        let (state, released) = super::retire_shared_snapshot([Some(1), Some(2), Some(0)], [Some(1), Some(2), Some(0)]).unwrap();
+        assert!(
+            super::retire_shared_snapshot([Some(4), Some(2), None], [Some(1), Some(2), None])
+                .is_err()
+        );
+        assert!(
+            super::retire_shared_snapshot([Some(1), Some(3), None], [Some(1), Some(2), None])
+                .is_err()
+        );
+        let (state, released) =
+            super::retire_shared_snapshot([Some(1), Some(2), Some(0)], [Some(1), Some(2), Some(0)])
+                .unwrap();
         assert_eq!(state, [Some(2), None, None]);
         assert_eq!(released, [Some(1), Some(0), None]);
     }
@@ -2322,11 +2387,20 @@ mod tests {
             assert!(super::queue_shared_commit(state, (identity, 99), |a, b| a.0 == b.0).is_err());
         }
         let snapshot = [Some((1, 10)), Some((2, 19)), None, None, None];
-        assert!(super::retire_shared_snapshot(state, snapshot).is_err(), "serial mismatch cannot prove retirement");
+        assert!(
+            super::retire_shared_snapshot(state, snapshot).is_err(),
+            "serial mismatch cannot prove retirement"
+        );
         let snapshot = [Some((1, 10)), Some((2, 20)), Some((4, 40)), None, None];
-        assert!(super::retire_shared_snapshot(state, snapshot).is_err(), "missing captured retired image cannot be acknowledged");
+        assert!(
+            super::retire_shared_snapshot(state, snapshot).is_err(),
+            "missing captured retired image cannot be acknowledged"
+        );
         let no_pending_snapshot = [Some((1, 10)), None, None, None, None];
-        assert_eq!(super::retire_shared_snapshot(state, no_pending_snapshot).unwrap(), (state, [None; 5]));
+        assert_eq!(
+            super::retire_shared_snapshot(state, no_pending_snapshot).unwrap(),
+            (state, [None; 5])
+        );
     }
 
     #[test]
@@ -2662,7 +2736,10 @@ mod tests {
                 if inside(source) {
                     assert!(inside(repair));
                 }
-                assert_eq!(inside(next_repair), (20..77).contains(&x) && (30..70).contains(&y));
+                assert_eq!(
+                    inside(next_repair),
+                    (20..77).contains(&x) && (30..70).contains(&y)
+                );
             }
         }
     }
@@ -2697,7 +2774,8 @@ mod tests {
                             self.copies.push((source.id(), destination.id()));
                         }
                         ir::Command::BeginRenderPass(pass) => {
-                            if pass.color_attachments().next().unwrap().target().id() == self.scene {
+                            if pass.color_attachments().next().unwrap().target().id() == self.scene
+                            {
                                 self.scene_areas.push(pass.area());
                             }
                             if pass.color_attachments().next().unwrap().target().id() != self.scene

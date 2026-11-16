@@ -341,7 +341,9 @@ pub(super) struct GpuCompositor {
 }
 
 impl GpuCompositor {
-    pub(super) fn has_pending_frame(&self) -> bool { self.pending_frame.is_some() }
+    pub(super) fn has_pending_frame(&self) -> bool {
+        self.pending_frame.is_some()
+    }
 
     pub(super) fn pending_logical_damage(&self) -> Option<DamageRect> {
         self.pending_frame
@@ -349,11 +351,20 @@ impl GpuCompositor {
             .map(|frame| frame.logical_damage)
     }
 
-    pub(super) fn retire_pending_frame(&mut self, display: &DisplaySurface)
-        -> Result<Option<Vec<SgfxCommitToken>>, GpuCompositionError>
-    {
-        if self.pending_frame.is_none() { return Ok(None); }
-        if !self.target.poll_gpu_completion().map_err(GpuCompositionError::Backend)? { return Ok(None); }
+    pub(super) fn retire_pending_frame(
+        &mut self,
+        display: &DisplaySurface,
+    ) -> Result<Option<Vec<SgfxCommitToken>>, GpuCompositionError> {
+        if self.pending_frame.is_none() {
+            return Ok(None);
+        }
+        if !self
+            .target
+            .poll_gpu_completion()
+            .map_err(GpuCompositionError::Backend)?
+        {
+            return Ok(None);
+        }
         let frame = self.pending_frame.take().unwrap();
         self.publish_completed_frame(display, frame).map(Some)
     }
@@ -738,10 +749,16 @@ impl GpuCompositor {
         {
             return Err(SgfxBufferError::StaleGeneration);
         }
-        let commit = SgfxCommitToken { identity, commit_serial };
+        let commit = SgfxCommitToken {
+            identity,
+            commit_serial,
+        };
         let leases = crate::sgfx_ir_support::queue_shared_commit(
-            shared_lease_snapshot(state), commit, |a, b| a.identity == b.identity,
-        ).map_err(|_| SgfxBufferError::BufferBusy)?;
+            shared_lease_snapshot(state),
+            commit,
+            |a, b| a.identity == b.identity,
+        )
+        .map_err(|_| SgfxBufferError::BufferBusy)?;
 
         let mut clipped_damage = Vec::new();
         for rect in damage_rects {
@@ -799,7 +816,10 @@ impl GpuCompositor {
                 || state
                     .pending
                     .is_some_and(|commit| commit.identity == identity)
-                || state.retire_after_present.iter().flatten()
+                || state
+                    .retire_after_present
+                    .iter()
+                    .flatten()
                     .any(|commit| commit.identity == identity))
         {
             return Err(SgfxBufferError::BufferBusy);
@@ -924,7 +944,9 @@ impl GpuCompositor {
     /// Retire all GPU resources after the window itself is closed.
     pub(super) fn remove_window(&mut self, window_id: WindowId) -> Result<(), &'static str> {
         if self.has_pending_frame() {
-            if !self.deferred_window_removals.contains(&window_id) { self.deferred_window_removals.push(window_id); }
+            if !self.deferred_window_removals.contains(&window_id) {
+                self.deferred_window_removals.push(window_id);
+            }
             return Ok(());
         }
         self.remove_window_texture(window_id)?;
@@ -1242,7 +1264,9 @@ impl GpuCompositor {
         backdrops: &[(WindowId, BackdropGeometry)],
         mut damage_profile: Option<super::trace::DamageProfile>,
     ) -> Result<(Vec<SgfxCommitToken>, DamageRect), GpuCompositionError> {
-        if self.has_pending_frame() { return Err(GpuCompositionError::Pending); }
+        if self.has_pending_frame() {
+            return Err(GpuCompositionError::Pending);
+        }
         if let Some(profile) = &mut damage_profile {
             profile.gpu_forced = if self.force_full_repaint { 4 } else { 0 };
         }
@@ -1264,14 +1288,18 @@ impl GpuCompositor {
         // cached allocation once. Moving a region only invalidates its content;
         // it must not drain presentation, rebuild the context/cursor atlas and
         // reimport every client image on every animation frame.
-        if self.backdrops.iter()
+        if self
+            .backdrops
+            .iter()
             .any(|(owner, old, _)| !backdrops.contains(&(*owner, *old)))
         {
             // Keep the old rebuild's conservative invalidation for changed
             // placement/rounding and overlapping upper materials. Only the
             // expensive allocation/context reset is removed.
             self.force_full_repaint = true;
-            if let Some(profile) = &mut damage_profile { profile.gpu_forced |= 2; }
+            if let Some(profile) = &mut damage_profile {
+                profile.gpu_forced |= 2;
+            }
         }
         // The table is append-only. Retire incompatible/removed allocations
         // through the existing bounded rebuild; new regions can append below.
@@ -1347,13 +1375,20 @@ impl GpuCompositor {
             backdrop_refreshes(
                 backdrops,
                 &window_order,
-                if self.force_full_repaint { None } else { capture_damage.as_deref() },
+                if self.force_full_repaint {
+                    None
+                } else {
+                    capture_damage.as_deref()
+                },
             )
         };
         for (id, geometry, textures) in &mut self.backdrops {
-            if backdrops.iter().zip(&refresh)
+            if backdrops
+                .iter()
+                .zip(&refresh)
                 .find(|((owner, current), _)| id == owner && geometry == current)
-                .is_none_or(|(_, refresh)| *refresh) {
+                .is_none_or(|(_, refresh)| *refresh)
+            {
                 textures.valid = false;
             }
         }
@@ -1476,9 +1511,11 @@ impl GpuCompositor {
                             geometry.output.1 as u32,
                             geometry.output.2,
                             geometry.output.3,
-                        ).map_err(|_| "Invalid backdrop output")?,
+                        )
+                        .map_err(|_| "Invalid backdrop output")?,
                         render_area,
-                    ).is_some()
+                    )
+                    .is_some()
                 {
                     backdrop_splits.push((index, operations.len()));
                 }
@@ -1608,22 +1645,64 @@ impl GpuCompositor {
         let profile_encoded = profiling.then(Instant::now);
         let mut publication = PendingComposition {
             damage_profile,
-            logical_damage: (logical_area.x(), logical_area.y(), logical_area.width(), logical_area.height()),
+            logical_damage: (
+                logical_area.x(),
+                logical_area.y(),
+                logical_area.width(),
+                logical_area.height(),
+            ),
             region: (render_area != full_area).then_some(DisplayPresentRegion {
-                x: render_area.x(), y: render_area.y(), width: render_area.width(), height: render_area.height(),
+                x: render_area.x(),
+                y: render_area.y(),
+                width: render_area.width(),
+                height: render_area.height(),
             }),
-            shared: self.shared_windows.iter().filter(|state| !windows.iter().any(|window|
-                window.id == state.window_id && window.retains_native_transition_frame())).cloned().collect(),
-            backdrops: backdrop_splits.iter().map(|&(index, _)| (index, self.backdrops[index].1)).collect(),
-            scenes: scenes.iter().filter_map(|view| {
-                let entry = self.scene_textures.iter().find(|entry| entry.window_id == view.scene.window_id && entry.direct)?;
-                if !windows.iter().any(|window| window.id == entry.window_id && window.is_presented()) { return None; }
-                Some(ScenePublication { window_id: entry.window_id, texture: entry.texture,
-                    serial: view.scene.serial, buffers: view.scene.layers.iter().zip(&view.sources)
-                        .map(|(layer, source)| source.gpu_buffer.is_none().then_some(layer.buffer_id)).collect() })
-            }).collect(),
+            shared: self
+                .shared_windows
+                .iter()
+                .filter(|state| {
+                    !windows.iter().any(|window| {
+                        window.id == state.window_id && window.retains_native_transition_frame()
+                    })
+                })
+                .cloned()
+                .collect(),
+            backdrops: backdrop_splits
+                .iter()
+                .map(|&(index, _)| (index, self.backdrops[index].1))
+                .collect(),
+            scenes: scenes
+                .iter()
+                .filter_map(|view| {
+                    let entry = self
+                        .scene_textures
+                        .iter()
+                        .find(|entry| entry.window_id == view.scene.window_id && entry.direct)?;
+                    if !windows
+                        .iter()
+                        .any(|window| window.id == entry.window_id && window.is_presented())
+                    {
+                        return None;
+                    }
+                    Some(ScenePublication {
+                        window_id: entry.window_id,
+                        texture: entry.texture,
+                        serial: view.scene.serial,
+                        buffers: view
+                            .scene
+                            .layers
+                            .iter()
+                            .zip(&view.sources)
+                            .map(|(layer, source)| {
+                                source.gpu_buffer.is_none().then_some(layer.buffer_id)
+                            })
+                            .collect(),
+                    })
+                })
+                .collect(),
             profile: [profile_start, profile_synced, profile_encoded, None],
-            quads: operations.len(), damage_pixels: u64::from(render_area.width()) * u64::from(render_area.height()),
+            quads: operations.len(),
+            damage_pixels: u64::from(render_area.width()) * u64::from(render_area.height()),
         };
         let receipts = if self.target.supports_tracked_submission() {
             self.quad_renderer
@@ -1665,7 +1744,9 @@ impl GpuCompositor {
         drop(backdrop_passes);
         drop(operations);
         if self.target.supports_tracked_submission() {
-            self.target.queue_gpu_completion(receipts).map_err(GpuCompositionError::Backend)?;
+            self.target
+                .queue_gpu_completion(receipts)
+                .map_err(GpuCompositionError::Backend)?;
             self.pending_frame = Some(publication);
             return Err(GpuCompositionError::Pending);
         }
@@ -1683,17 +1764,23 @@ impl GpuCompositor {
         // Preserve the existing stage-file wall intervals: submit spans fence
         // retirement (now overlapped with input), present measures enqueue only.
         let gpu_retired = frame.profile[3].map(|_| Instant::now());
-        self.target.present(display, frame.region).map_err(GpuCompositionError::Backend)?;
+        self.target
+            .present(display, frame.region)
+            .map_err(GpuCompositionError::Backend)?;
         let presented = self.frame_profile.as_ref().map(|_| Instant::now());
         for (index, geometry) in frame.backdrops {
             if let Some((_, current, textures)) = self.backdrops.get_mut(index) {
-                if *current == geometry { textures.valid = true; }
+                if *current == geometry {
+                    textures.valid = true;
+                }
             }
         }
         for update in frame.scenes {
-            if let Some(entry) = self.scene_textures.iter_mut().find(|entry|
-                entry.window_id == update.window_id && entry.texture == update.texture && entry.direct)
-            {
+            if let Some(entry) = self.scene_textures.iter_mut().find(|entry| {
+                entry.window_id == update.window_id
+                    && entry.texture == update.texture
+                    && entry.direct
+            }) {
                 entry.serial = Some(update.serial);
                 entry.uploaded_source_buffers = update.buffers;
             }
@@ -1701,14 +1788,25 @@ impl GpuCompositor {
         self.force_full_repaint = false;
         let mut releases = Vec::new();
         for snapshot in frame.shared {
-            if let Some(state) = self.shared_windows.iter_mut().find(|state| state.window_id == snapshot.window_id) {
-                releases.extend(promote_completed_shared_frame(state, &snapshot)
-                    .map_err(GpuCompositionError::Backend)?.into_iter().flatten());
+            if let Some(state) = self
+                .shared_windows
+                .iter_mut()
+                .find(|state| state.window_id == snapshot.window_id)
+            {
+                releases.extend(
+                    promote_completed_shared_frame(state, &snapshot)
+                        .map_err(GpuCompositionError::Backend)?
+                        .into_iter()
+                        .flatten(),
+                );
             }
         }
         for texture in &mut self.textures {
-            if texture.window_id.is_some_and(|id| self.shared_windows.iter()
-                .any(|state| state.window_id == id && state.presented.is_some())) {
+            if texture.window_id.is_some_and(|id| {
+                self.shared_windows
+                    .iter()
+                    .any(|state| state.window_id == id && state.presented.is_some())
+            }) {
                 texture.window_id = None;
                 texture.pending_damage = None;
             }
@@ -1716,18 +1814,44 @@ impl GpuCompositor {
         self.schedule_retired_texture_rebuild();
         let [start, synced, encoded, _admitted] = frame.profile;
         let submitted = gpu_retired;
-        if let (Some(profile), Some(start), Some(synced), Some(encoded), Some(submitted), Some(presented), Some(timings)) =
-            (&mut self.frame_profile, start, synced, encoded, submitted, presented, &self.target.frame_timings) {
-            if profile.record([start, synced, encoded, submitted, presented, Instant::now()], timings, frame.quads, frame.damage_pixels, frame.damage_profile.as_ref()).is_err() {
+        if let (
+            Some(profile),
+            Some(start),
+            Some(synced),
+            Some(encoded),
+            Some(submitted),
+            Some(presented),
+            Some(timings),
+        ) = (
+            &mut self.frame_profile,
+            start,
+            synced,
+            encoded,
+            submitted,
+            presented,
+            &self.target.frame_timings,
+        ) {
+            if profile
+                .record(
+                    [start, synced, encoded, submitted, presented, Instant::now()],
+                    timings,
+                    frame.quads,
+                    frame.damage_pixels,
+                    frame.damage_profile.as_ref(),
+                )
+                .is_err()
+            {
                 self.frame_profile = None;
                 std::println!("[SWS_PROFILE] frame file write failed; profiling disabled");
             }
         }
         for window in core::mem::take(&mut self.deferred_texture_removals) {
-            self.remove_window_texture(window).map_err(GpuCompositionError::Backend)?;
+            self.remove_window_texture(window)
+                .map_err(GpuCompositionError::Backend)?;
         }
         for window in core::mem::take(&mut self.deferred_window_removals) {
-            self.remove_window(window).map_err(GpuCompositionError::Backend)?;
+            self.remove_window(window)
+                .map_err(GpuCompositionError::Backend)?;
         }
         Ok(releases)
     }
@@ -2210,13 +2334,26 @@ impl GpuCompositor {
 /// This is also the generation boundary used during a window resize: SWS may
 /// sample the old extent until the replacement extent has actually presented.
 fn shared_lease_snapshot(state: &SharedWindowState) -> [Option<SgfxCommitToken>; 5] {
-    [state.presented, state.pending, state.retire_after_present[0],
-        state.retire_after_present[1], state.retire_after_present[2]]
+    [
+        state.presented,
+        state.pending,
+        state.retire_after_present[0],
+        state.retire_after_present[1],
+        state.retire_after_present[2],
+    ]
 }
 
-fn install_shared_lease_snapshot(state: &mut SharedWindowState, leases: [Option<SgfxCommitToken>; 5]) {
-    [state.presented, state.pending, state.retire_after_present[0],
-        state.retire_after_present[1], state.retire_after_present[2]] = leases;
+fn install_shared_lease_snapshot(
+    state: &mut SharedWindowState,
+    leases: [Option<SgfxCommitToken>; 5],
+) {
+    [
+        state.presented,
+        state.pending,
+        state.retire_after_present[0],
+        state.retire_after_present[1],
+        state.retire_after_present[2],
+    ] = leases;
 }
 
 fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCommitToken>; 5] {
@@ -2229,12 +2366,16 @@ fn promote_pending_shared_frame(state: &mut SharedWindowState) -> [Option<SgfxCo
     released
 }
 
-fn promote_completed_shared_frame(state: &mut SharedWindowState, submitted: &SharedWindowState)
-    -> Result<[Option<SgfxCommitToken>; 5], &'static str>
-{
-    if state.compositor_epoch != submitted.compositor_epoch { return Err("Shared frame epoch changed before completion"); }
+fn promote_completed_shared_frame(
+    state: &mut SharedWindowState,
+    submitted: &SharedWindowState,
+) -> Result<[Option<SgfxCommitToken>; 5], &'static str> {
+    if state.compositor_epoch != submitted.compositor_epoch {
+        return Err("Shared frame epoch changed before completion");
+    }
     let (current, released) = crate::sgfx_ir_support::retire_shared_snapshot(
-        shared_lease_snapshot(state), shared_lease_snapshot(submitted),
+        shared_lease_snapshot(state),
+        shared_lease_snapshot(submitted),
     )?;
     install_shared_lease_snapshot(state, current);
     Ok(released)

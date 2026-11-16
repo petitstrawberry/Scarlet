@@ -97,9 +97,9 @@ fn wait_for_multiple(
     fds: &mut [PollHandle],
     deadline: Option<u64>,
 ) {
-    use alloc::{sync::Arc, vec::Vec};
     use crate::sync::{Waker, waker::WaitResult};
     use crate::timer::{TimerPrecision, get_time_ns};
+    use alloc::{sync::Arc, vec::Vec};
 
     let waiter = Arc::new(Waker::new_interruptible("native-poll"));
     loop {
@@ -113,15 +113,21 @@ fn wait_for_multiple(
         let mut subscriptions = Vec::new();
         let mut needs_recheck = false;
         for pfd in fds.iter() {
-            let Some(object) = task.handle_table.get(pfd.handle) else { continue };
-            let Some(selectable) = object.as_selectable() else { continue };
+            let Some(object) = task.handle_table.get(pfd.handle) else {
+                continue;
+            };
+            let Some(selectable) = object.as_selectable() else {
+                continue;
+            };
             let interest = ReadyInterest {
                 read: pfd.events & POLLIN != 0,
                 write: pfd.events & POLLOUT != 0,
                 except: pfd.events & POLLPRI != 0,
             };
             match selectable.subscribe_readiness(interest, &waiter) {
-                Some(registrations) if !registrations.is_empty() => subscriptions.extend(registrations),
+                Some(registrations) if !registrations.is_empty() => {
+                    subscriptions.extend(registrations)
+                }
                 // An empty set cannot wake for terminal events either.
                 _ => needs_recheck = true,
             }
@@ -150,9 +156,15 @@ fn wait_for_multiple(
         // notification after this final scan wakes the registered task; an
         // earlier notification also remains in the private Waker's latch.
         let result = waiter.wait_with_timeout_precision_until(
-            task.get_id(), trapframe, timeout, TimerPrecision::Exact,
-            || scan() || task.has_pending_process_control()
-                || table_change.generation() != table_generation,
+            task.get_id(),
+            trapframe,
+            timeout,
+            TimerPrecision::Exact,
+            || {
+                scan()
+                    || task.has_pending_process_control()
+                    || table_change.generation() != table_generation
+            },
         );
         if result == WaitResult::Interrupted {
             break;
@@ -249,8 +261,8 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
         let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
             if selectable_count > 1 {
-                let deadline = timeout_ns.map(|duration_ns|
-                    crate::timer::get_time_ns().saturating_add(duration_ns));
+                let deadline = timeout_ns
+                    .map(|duration_ns| crate::timer::get_time_ns().saturating_add(duration_ns));
                 wait_for_multiple(&task, trapframe, fds, deadline);
             } else if let Some(wait_idx) = first_selectable_idx {
                 use crate::timer::get_time_ns;

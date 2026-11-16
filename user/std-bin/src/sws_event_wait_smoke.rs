@@ -73,7 +73,10 @@ mod native {
         let idle = Duration::from_millis(25);
         let started = Instant::now();
         assert_eq!(poll(&mut handles, idle.as_nanos() as i64).unwrap(), 0);
-        assert!(started.elapsed() >= idle, "multipoll restarted/shortened deadline");
+        assert!(
+            started.elapsed() >= idle,
+            "multipoll restarted/shortened deadline"
+        );
         let closer = thread::spawn(move || {
             thread::sleep(Duration::from_millis(2));
             drop(sender);
@@ -81,7 +84,9 @@ mod native {
         assert_eq!(poll(&mut handles, WAIT.as_nanos() as i64).unwrap(), 1);
         assert_ne!(handles[1].revents & POLLHUP, 0);
         closer.join().expect("multipoll closer");
-        println!("[sws-event-wait-smoke] PASS socket+pipe 64 wakes/rearms, idle deadline, pipe close");
+        println!(
+            "[sws-event-wait-smoke] PASS socket+pipe 64 wakes/rearms, idle deadline, pipe close"
+        );
     }
 
     fn send(peer: &Socket, message: u32, payload: &[u8]) {

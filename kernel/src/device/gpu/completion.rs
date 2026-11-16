@@ -18,8 +18,8 @@ use crate::object::capability::ControlOps;
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
-use crate::sync::{IrqSpinLock, ReadinessRegistration};
 use crate::sync::waker::{WaitResult, Waker};
+use crate::sync::{IrqSpinLock, ReadinessRegistration};
 
 /// Reason an accepted submission cannot report successful retirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,12 +280,23 @@ mod tests {
     fn native_readiness_broadcast_reaches_each_completion_observer() {
         for failure in [None, Some(GpuCompletionFailure::DeviceLost)] {
             let (observer, signal) = GpuCompletion::pair();
-            let first = alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("completion-first"));
-            let second = alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("completion-second"));
-            let read = observer.subscribe_readiness(ReadyInterest::read(), &first).unwrap();
-            let except = observer.subscribe_readiness(
-                ReadyInterest { read: false, write: false, except: true }, &second,
-            ).unwrap();
+            let first =
+                alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("completion-first"));
+            let second =
+                alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("completion-second"));
+            let read = observer
+                .subscribe_readiness(ReadyInterest::read(), &first)
+                .unwrap();
+            let except = observer
+                .subscribe_readiness(
+                    ReadyInterest {
+                        read: false,
+                        write: false,
+                        except: true,
+                    },
+                    &second,
+                )
+                .unwrap();
             assert_eq!(read.len(), 1);
             assert_eq!(except.len(), 1);
             assert_eq!(read[0].generation(), 0);
@@ -303,11 +314,19 @@ mod tests {
     fn late_completion_subscription_observes_terminal_level_and_write_is_constant() {
         let (observer, signal) = GpuCompletion::pair();
         signal.complete();
-        let waiter = alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("completion-late"));
-        let read = observer.subscribe_readiness(ReadyInterest::read(), &waiter).unwrap();
+        let waiter =
+            alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("completion-late"));
+        let read = observer
+            .subscribe_readiness(ReadyInterest::read(), &waiter)
+            .unwrap();
         assert_eq!(read[0].generation(), 0);
         assert!(observer.current_ready(ReadyInterest::read()).read);
-        assert!(observer.subscribe_readiness(ReadyInterest::write(), &waiter).unwrap().is_empty());
+        assert!(
+            observer
+                .subscribe_readiness(ReadyInterest::write(), &waiter)
+                .unwrap()
+                .is_empty()
+        );
         assert!(!observer.current_ready(ReadyInterest::write()).write);
     }
 

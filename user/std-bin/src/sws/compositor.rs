@@ -2916,7 +2916,9 @@ impl Compositor {
             backend,
             gpu_compositor,
             pending_gpu_present: None,
-            damage_profile: super::trace::DamageProfile::new(super::trace::frame_profile_requested()),
+            damage_profile: super::trace::DamageProfile::new(
+                super::trace::frame_profile_requested(),
+            ),
             deferred_gpu_ipc: Vec::new(),
             deferred_gpu_remote: Vec::new(),
             window_manager,
@@ -4526,7 +4528,8 @@ impl Compositor {
                 for release in releases {
                     send_sgfx_buffer_released(release);
                 }
-                self.capture_session.frame_presented(&Some(vec![(x as i32, y as i32, width, height)]));
+                self.capture_session
+                    .frame_presented(&Some(vec![(x as i32, y as i32, width, height)]));
                 self.cursor.mark_drawn();
                 self.full_redraw_needed = false;
                 self.pending_damage.clear();
@@ -4538,7 +4541,9 @@ impl Compositor {
             Err(super::gpu_compositor::GpuCompositionError::Pending) => {
                 // Snapshot the submitted generation of damage and cursor.
                 // New input accumulates independently while the GPU retires.
-                let (x, y, width, height) = self.gpu_compositor.as_ref()
+                let (x, y, width, height) = self
+                    .gpu_compositor
+                    .as_ref()
                     .and_then(|gpu| gpu.pending_logical_damage())
                     .ok_or("Missing admitted GPU damage snapshot")?;
                 self.pending_gpu_present = Some(Some(vec![(x as i32, y as i32, width, height)]));
@@ -4556,8 +4561,7 @@ impl Compositor {
                 // exact outstanding damage: a full redraw here would turn
                 // ordinary scanout backpressure into a full-screen repaint
                 // and invalidate otherwise reusable backdrop materials.
-                self.gpu_admission_retry
-                    .defer_display();
+                self.gpu_admission_retry.defer_display();
                 Ok(GpuPresentResult::Retry)
             }
             Err(super::gpu_compositor::GpuCompositionError::Busy) => {
@@ -4599,16 +4603,26 @@ impl Compositor {
     }
 
     fn gpu_frame_pending(&self) -> bool {
-        self.gpu_compositor.as_ref().is_some_and(|gpu| gpu.has_pending_frame())
+        self.gpu_compositor
+            .as_ref()
+            .is_some_and(|gpu| gpu.has_pending_frame())
     }
 
     fn retire_gpu_frame(&mut self) -> Result<(), &'static str> {
-        if !self.gpu_frame_pending() { return Ok(()); }
-        let result = self.gpu_compositor.as_mut().unwrap().retire_pending_frame(&self.display);
+        if !self.gpu_frame_pending() {
+            return Ok(());
+        }
+        let result = self
+            .gpu_compositor
+            .as_mut()
+            .unwrap()
+            .retire_pending_frame(&self.display);
         match result {
             Ok(None) => {}
             Ok(Some(releases)) => {
-                for release in releases { send_sgfx_buffer_released(release); }
+                for release in releases {
+                    send_sgfx_buffer_released(release);
+                }
                 if let Some(damage) = self.pending_gpu_present.take() {
                     self.capture_session.frame_presented(&damage);
                 }
@@ -7617,11 +7631,16 @@ impl Compositor {
             self.cursor.advance_animation(monotonic_time_ns());
         }
 
-        if !self.gpu_frame_pending() { self.check_display_resize()?; }
+        if !self.gpu_frame_pending() {
+            self.check_display_resize()?;
+        }
 
         // Process IPC events from global queue (non-blocking)
-        let mut ipc_events = if self.gpu_frame_pending() { Vec::new() }
-            else { core::mem::take(&mut self.deferred_gpu_ipc) };
+        let mut ipc_events = if self.gpu_frame_pending() {
+            Vec::new()
+        } else {
+            core::mem::take(&mut self.deferred_gpu_ipc)
+        };
         ipc_events.extend(self.ipc_server.process_messages()?);
         // if !ipc_events.is_empty() {
         //     println!("[Compositor] Processing {} IPC events", ipc_events.len());
@@ -7652,13 +7671,18 @@ impl Compositor {
 
         // Remote capture and virtual input use a separate privileged protocol,
         // but converge on the same compositor thread and input pipeline.
-        let mut remote_events = if self.gpu_frame_pending() { Vec::new() }
-            else { core::mem::take(&mut self.deferred_gpu_remote) };
+        let mut remote_events = if self.gpu_frame_pending() {
+            Vec::new()
+        } else {
+            core::mem::take(&mut self.deferred_gpu_remote)
+        };
         remote_events.extend(self.remote_server.process_messages());
         for event in remote_events {
             if self.gpu_frame_pending() && !matches!(&event, RemoteEvent::Input { .. }) {
                 self.deferred_gpu_remote.push(event);
-            } else { self.handle_remote_event(event)?; }
+            } else {
+                self.handle_remote_event(event)?;
+            }
         }
 
         self.sync_gamepad_focus();
@@ -7907,7 +7931,8 @@ impl Compositor {
                 Ok(true) => self.gpu_admission_retry.display_ready(),
                 Ok(false) => {}
                 Err(_) => self.disable_gpu_after_runtime_failure(
-                    "SWS_BACKEND=sgfx display completion failed")?,
+                    "SWS_BACKEND=sgfx display completion failed",
+                )?,
             }
         }
         if self.gpu_frame_pending() {
@@ -7927,7 +7952,10 @@ impl Compositor {
         if self.gpu_compositor.is_some()
             && self.has_pending_redraw()
             && (self.gpu_admission_retry.waiting_for_display()
-                || self.gpu_admission_retry.remaining_ns(monotonic_time_ns()).is_some())
+                || self
+                    .gpu_admission_retry
+                    .remaining_ns(monotonic_time_ns())
+                    .is_some())
         {
             // Input/IPC wakes still reach process_pending_events above. They
             // must not bypass admission backoff and encode the same frame
@@ -10337,7 +10365,13 @@ impl Compositor {
             .is_some_and(|window| window.owner_client_id == Some(client_id))
     }
 
-    fn queue_frame_callback(&mut self, client_id: usize, window_id: u32, callback_id: u64, is_credit: bool) {
+    fn queue_frame_callback(
+        &mut self,
+        client_id: usize,
+        window_id: u32,
+        callback_id: u64,
+        is_credit: bool,
+    ) {
         if !self.client_owns_window(client_id, window_id) {
             send_message_to_client(
                 client_id,
@@ -10363,8 +10397,8 @@ impl Compositor {
             .window_manager
             .get_window(window_id)
             .and_then(|window| window.last_frame_submission_counter);
-        let requested_after_present = (!is_credit).then(||
-            frame_callback_target(self.event_counter, last_submission_counter));
+        let requested_after_present = (!is_credit)
+            .then(|| frame_callback_target(self.event_counter, last_submission_counter));
         self.pending_frame_callbacks.push(PendingFrameCallback {
             client_id,
             window_id,
@@ -10377,15 +10411,26 @@ impl Compositor {
         });
     }
 
-    fn next_frame_credit_deadline(&self, window: &super::window::Window, now_ns: u64) -> Option<u64> {
+    fn next_frame_credit_deadline(
+        &self,
+        window: &super::window::Window,
+        now_ns: u64,
+    ) -> Option<u64> {
         if !frame_credit_is_eligible(
-            window.is_logically_presented(), window.has_presented_frame,
-            self.pending_workspace_scenes.contains(&window.id) && window.visible && !window.minimized,
+            window.is_logically_presented(),
+            window.has_presented_frame,
+            self.pending_workspace_scenes.contains(&window.id)
+                && window.visible
+                && !window.minimized,
             window.prepares_while_workspace_hidden(),
         ) {
             return None;
         }
-        frame_credit_deadline(window.last_frame_credit_tick, now_ns, FRAME_BATCH_INTERVAL_NS)
+        frame_credit_deadline(
+            window.last_frame_credit_tick,
+            now_ns,
+            FRAME_BATCH_INTERVAL_NS,
+        )
     }
 
     fn grant_pending_frame_callbacks(&mut self) {
@@ -10406,12 +10451,14 @@ impl Compositor {
                     window.is_logically_presented(),
                     window.has_presented_frame,
                     self.pending_workspace_scenes.contains(&callback.window_id)
-                        && window.visible && !window.minimized,
+                        && window.visible
+                        && !window.minimized,
                     self.event_counter,
                     requested,
                     window.prepares_while_workspace_hidden(),
                 ),
-                None => self.next_frame_credit_deadline(window, now_ns)
+                None => self
+                    .next_frame_credit_deadline(window, now_ns)
                     .is_some_and(|deadline| deadline <= now_ns),
             };
             if !ready {
@@ -12130,12 +12177,23 @@ impl Compositor {
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         let independent_credit = matches!(&event, IpcEvent::RequestFrame { window_id, is_credit: true, .. }
             if self.window_manager.get_window(*window_id).is_some());
-        if self.gpu_frame_pending() && !independent_credit && (!self.deferred_gpu_ipc.is_empty() || !matches!(&event,
-            IpcEvent::RequestFrame { .. } | IpcEvent::GetScreenSize { .. }
-            | IpcEvent::GetOutputScale { .. } | IpcEvent::GetWindowList { .. }
-            | IpcEvent::RequestMove { .. } | IpcEvent::MoveWindow { .. }
-            | IpcEvent::SetPointerLock { .. } | IpcEvent::SetCursorIcon { .. }
-            | IpcEvent::Clipboard { .. } | IpcEvent::InputPanelKey { .. })) {
+        if self.gpu_frame_pending()
+            && !independent_credit
+            && (!self.deferred_gpu_ipc.is_empty()
+                || !matches!(
+                    &event,
+                    IpcEvent::RequestFrame { .. }
+                        | IpcEvent::GetScreenSize { .. }
+                        | IpcEvent::GetOutputScale { .. }
+                        | IpcEvent::GetWindowList { .. }
+                        | IpcEvent::RequestMove { .. }
+                        | IpcEvent::MoveWindow { .. }
+                        | IpcEvent::SetPointerLock { .. }
+                        | IpcEvent::SetCursorIcon { .. }
+                        | IpcEvent::Clipboard { .. }
+                        | IpcEvent::InputPanelKey { .. }
+                ))
+        {
             // Keep resource mutations and commit order intact. These owned
             // events retain transferred handles/mappings until GPU retirement.
             self.deferred_gpu_ipc.push(event);
@@ -12793,29 +12851,53 @@ impl Compositor {
                 match result {
                     Ok(damage) => {
                         if self.damage_profile.enabled {
-                            let wire_pixels = damage_rects.iter().fold(0u64, |sum, rect|
-                                sum.saturating_add(u64::from(rect.width) * u64::from(rect.height)));
-                            self.damage_profile.native(window_id, commit_serial, damage.extent, wire_pixels, &damage.rects);
+                            let wire_pixels = damage_rects.iter().fold(0u64, |sum, rect| {
+                                sum.saturating_add(u64::from(rect.width) * u64::from(rect.height))
+                            });
+                            self.damage_profile.native(
+                                window_id,
+                                commit_serial,
+                                damage.extent,
+                                wire_pixels,
+                                &damage.rects,
+                            );
                         }
                         if let Some((presented, projections)) =
                             self.window_manager.get_window(window_id).map(|window| {
-                                let mut projections = vec![(window.presentation_geometry(), window.presentation_clip)];
-                                projections.extend(window.presentation_instances.iter().map(|instance| {
-                                    let transform = instance.transform;
-                                    ((transform.x, transform.y, transform.width, transform.height),
-                                        instance.clip.or(window.presentation_clip))
-                                }));
+                                let mut projections = vec![(
+                                    window.presentation_geometry(),
+                                    window.presentation_clip,
+                                )];
+                                projections.extend(window.presentation_instances.iter().map(
+                                    |instance| {
+                                        let transform = instance.transform;
+                                        (
+                                            (
+                                                transform.x,
+                                                transform.y,
+                                                transform.width,
+                                                transform.height,
+                                            ),
+                                            instance.clip.or(window.presentation_clip),
+                                        )
+                                    },
+                                ));
                                 (window.is_presented(), projections)
                             })
                             && presented
                         {
                             for (geometry, clip) in projections {
                                 for rect in crate::sgfx_ir_support::projected_image_damage(
-                                    damage.extent, geometry, clip,
-                                    (self.screen_width, self.screen_height), &damage.rects,
+                                    damage.extent,
+                                    geometry,
+                                    clip,
+                                    (self.screen_width, self.screen_height),
+                                    &damage.rects,
                                 ) {
                                     if self.damage_profile.enabled {
-                                        self.damage_profile.native_projected_pixels = self.damage_profile.native_projected_pixels
+                                        self.damage_profile.native_projected_pixels = self
+                                            .damage_profile
+                                            .native_projected_pixels
                                             .saturating_add(u64::from(rect.2) * u64::from(rect.3));
                                     }
                                     self.add_window_content_damage(window_id, rect);

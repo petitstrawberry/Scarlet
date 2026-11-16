@@ -85,26 +85,48 @@ mod tests {
     }
     impl Fake {
         fn new(reads: &[u32]) -> Self {
-            Self { routed: false, disabled: true, synced: true,
-                reads: RefCell::new(reads.to_vec()), events: RefCell::new(Vec::new()) }
+            Self {
+                routed: false,
+                disabled: true,
+                synced: true,
+                reads: RefCell::new(reads.to_vec()),
+                events: RefCell::new(Vec::new()),
+            }
         }
         fn event(&self, name: &'static str, value: u32) {
             self.events.borrow_mut().push((name, value));
         }
     }
     impl BankIo for Fake {
-        fn routed(&self) -> bool { self.routed }
-        fn disable(&self) -> bool { self.event("disable", 0); self.disabled }
-        fn synchronize_disabled(&self) -> bool { self.event("sync", 0); self.synced }
+        fn routed(&self) -> bool {
+            self.routed
+        }
+        fn disable(&self) -> bool {
+            self.event("disable", 0);
+            self.disabled
+        }
+        fn synchronize_disabled(&self) -> bool {
+            self.event("sync", 0);
+            self.synced
+        }
         fn status(&self) -> u32 {
             let mut reads = self.reads.borrow_mut();
             let value = reads[0];
-            if reads.len() > 1 { reads.remove(0); }
-            self.event("read", value); value
+            if reads.len() > 1 {
+                reads.remove(0);
+            }
+            self.event("read", value);
+            value
         }
-        fn record(&self, value: u32) { self.event("record", value); }
-        fn acknowledge(&self, value: u32) { self.event("ack", value); }
-        fn barrier(&self) { self.event("barrier", 0); }
+        fn record(&self, value: u32) {
+            self.event("record", value);
+        }
+        fn acknowledge(&self, value: u32) {
+            self.event("ack", value);
+        }
+        fn barrier(&self) {
+            self.event("barrier", 0);
+        }
     }
 
     #[cfg_attr(target_os = "none", test_case)]
@@ -114,7 +136,15 @@ mod tests {
             let io = Fake::new(&[status]);
             assert!(!pending(status));
             assert_eq!(prepare_reuse(&io), Ok(()));
-            assert_eq!(*io.events.borrow(), vec![("disable", 0), ("read", status), ("sync", 0), ("read", status)]);
+            assert_eq!(
+                *io.events.borrow(),
+                vec![
+                    ("disable", 0),
+                    ("read", status),
+                    ("sync", 0),
+                    ("read", status)
+                ]
+            );
         }
     }
 
@@ -123,10 +153,19 @@ mod tests {
     fn records_original_fault_before_w1c_and_checks_readback() {
         let io = Fake::new(&[0x80000402, 0x80000402, 0x400]);
         assert_eq!(prepare_reuse(&io), Ok(()));
-        assert_eq!(*io.events.borrow(), vec![
-            ("disable", 0), ("read", 0x80000402), ("record", 0x80000402),
-            ("sync", 0), ("read", 0x80000402), ("ack", 0x80000002), ("barrier", 0), ("read", 0x400),
-        ]);
+        assert_eq!(
+            *io.events.borrow(),
+            vec![
+                ("disable", 0),
+                ("read", 0x80000402),
+                ("record", 0x80000402),
+                ("sync", 0),
+                ("read", 0x80000402),
+                ("ack", 0x80000002),
+                ("barrier", 0),
+                ("read", 0x400),
+            ]
+        );
     }
 
     #[cfg_attr(target_os = "none", test_case)]
@@ -134,7 +173,10 @@ mod tests {
     fn stalled_bank_is_not_acknowledged_or_resumed() {
         let io = Fake::new(&[STALLED | 0x402]);
         assert_eq!(prepare_reuse(&io), Err(ReuseError::Stalled));
-        assert_eq!(io.events.borrow().last(), Some(&("record", STALLED | 0x402)));
+        assert_eq!(
+            io.events.borrow().last(),
+            Some(&("record", STALLED | 0x402))
+        );
         assert!(!io.events.borrow().iter().any(|e| e.0 == "ack"));
     }
 
@@ -156,7 +198,12 @@ mod tests {
             (false, false, true, ReuseError::Disable),
             (false, true, false, ReuseError::Synchronize),
         ] {
-            let io = Fake { routed, disabled, synced, ..Fake::new(&[0x402]) };
+            let io = Fake {
+                routed,
+                disabled,
+                synced,
+                ..Fake::new(&[0x402])
+            };
             assert_eq!(prepare_reuse(&io), Err(expected));
             assert!(!io.events.borrow().iter().any(|e| e.0 == "ack"));
             if routed || !disabled {
@@ -170,9 +217,18 @@ mod tests {
     fn fault_arriving_during_disabled_sync_is_recorded_before_clear() {
         let io = Fake::new(&[0x400, 0x408, 0x400]);
         assert_eq!(prepare_reuse(&io), Ok(()));
-        assert_eq!(*io.events.borrow(), vec![
-            ("disable", 0), ("read", 0x400), ("sync", 0), ("read", 0x408),
-            ("record", 0x408), ("ack", 8), ("barrier", 0), ("read", 0x400),
-        ]);
+        assert_eq!(
+            *io.events.borrow(),
+            vec![
+                ("disable", 0),
+                ("read", 0x400),
+                ("sync", 0),
+                ("read", 0x408),
+                ("record", 0x408),
+                ("ack", 8),
+                ("barrier", 0),
+                ("read", 0x400),
+            ]
+        );
     }
 }

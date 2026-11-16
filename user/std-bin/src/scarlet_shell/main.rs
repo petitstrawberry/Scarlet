@@ -76,10 +76,10 @@ use clap::Parser;
 use console::{ConsoleAction, ConsoleSnapshot, ConsoleState, PowerAction};
 use control_center::{
     ArmedPowerAction, AudioOutputSnapshot, AudioSnapshot, ControlCenterAction,
-    ControlCenterMetrics, ControlCenterPresentation, ControlCenterSession, ControlCenterSettingsLink,
-    ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot, NetworkInterfaceSnapshot,
-    NetworkInterfaceState, NetworkSnapshot, PercentWriteState, SystemSnapshot, boxed,
-    build_control_center_view,
+    ControlCenterMetrics, ControlCenterPresentation, ControlCenterSession,
+    ControlCenterSettingsLink, ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot,
+    NetworkInterfaceSnapshot, NetworkInterfaceState, NetworkSnapshot, PercentWriteState,
+    SystemSnapshot, boxed, build_control_center_view,
 };
 use home_catalog::{ApplicationEntry, HomeApplication};
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
@@ -1070,10 +1070,7 @@ impl ShellApp {
             status_snapshot: State::new(StateId::new(10), status_snapshot),
             windows: State::new(StateId::new(14), Vec::new()),
             overview_page: State::new(StateId::new(15), 0),
-            control_center_session: State::new(
-                StateId::new(16),
-                ControlCenterSession::default(),
-            ),
+            control_center_session: State::new(StateId::new(16), ControlCenterSession::default()),
             control_center_window: State::new(StateId::new(17), None),
             control_center_volume: State::new(StateId::new(18), initial_volume),
             control_center_brightness: State::new(StateId::new(40), 0.0),
@@ -1327,7 +1324,10 @@ fn collect_audio_snapshot(
     if audio_client.is_none() {
         *audio_client = SasClient::connect().ok();
     }
-    let Some(outputs) = audio_client.as_mut().and_then(|client| client.list_outputs().ok()) else {
+    let Some(outputs) = audio_client
+        .as_mut()
+        .and_then(|client| client.list_outputs().ok())
+    else {
         // The next scheduled sample or action establishes a fresh transport.
         // Never retain a connection after a failed/partial protocol response.
         *audio_client = None;
@@ -1416,7 +1416,9 @@ fn collect_network_snapshot(status: &NetworkStatus) -> NetworkSnapshot {
     }
 }
 
-fn input_environment_snapshot(environment: Option<sws::InputEnvironment>) -> InputEnvironmentSnapshot {
+fn input_environment_snapshot(
+    environment: Option<sws::InputEnvironment>,
+) -> InputEnvironmentSnapshot {
     match environment {
         Some(environment) => InputEnvironmentSnapshot {
             available: true,
@@ -3465,7 +3467,11 @@ impl ShellApp {
     fn control_center_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
         let screen_width = self.screen_width.get();
         let shell_layout = self.shell_layout.get();
-        let control_center_snapshot = self.control_center_session.get().snapshot.unwrap_or_default();
+        let control_center_snapshot = self
+            .control_center_session
+            .get()
+            .snapshot
+            .unwrap_or_default();
         let control_center_presentation = if shell_layout.tablet_mode {
             ControlCenterPresentation::TabletSheet
         } else {
@@ -3761,7 +3767,8 @@ impl Application for ShellApp {
 
     fn on_window_close_requested(&mut self, ctx: &WindowContext) -> bool {
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
-            self.control_center_session.update(ControlCenterSession::close);
+            self.control_center_session
+                .update(ControlCenterSession::close);
             self.control_center_window.set(None);
             self.control_center_armed_power.set(None);
         }
@@ -3787,9 +3794,10 @@ impl Application for ShellApp {
         }
         if session.open
             && session.snapshot.is_some()
-            && self.control_center_window.get().is_none_or(|(generation, _)| {
-                generation != session.generation()
-            })
+            && self
+                .control_center_window
+                .get()
+                .is_none_or(|(generation, _)| generation != session.generation())
         {
             // Both the declaration and initial layout now consume a completed
             // sample. The command is handled on this same application tick.
@@ -3871,7 +3879,11 @@ impl Application for ShellApp {
             } else {
                 ControlCenterPresentation::LaptopPopover
             };
-            let snapshot = self.control_center_session.get().snapshot.unwrap_or_default();
+            let snapshot = self
+                .control_center_session
+                .get()
+                .snapshot
+                .unwrap_or_default();
             let desired = ControlCenterMetrics::resolve(presentation, snapshot.audio.outputs.len())
                 .body_size();
             if status_bar_resize_needed(window.managed_size(), desired) {
@@ -4080,7 +4092,8 @@ impl ShellApp {
             && app_name != "Control Center"
         {
             dismiss_window(CONTROL_CENTER_SCENE_KEY);
-            self.control_center_session.update(ControlCenterSession::close);
+            self.control_center_session
+                .update(ControlCenterSession::close);
             self.control_center_window.set(None);
             self.control_center_armed_power.set(None);
         }

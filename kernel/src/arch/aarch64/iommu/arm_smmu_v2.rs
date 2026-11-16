@@ -249,7 +249,8 @@ impl fault::BankIo for ReuseBank<'_> {
     }
 
     fn disable(&self) -> bool {
-        self.hardware.context_write(self.context, CONTEXT_CONTROL, 0);
+        self.hardware
+            .context_write(self.context, CONTEXT_CONTROL, 0);
         arch::io_wmb();
         self.hardware.context_read(self.context, CONTEXT_CONTROL) & CONTEXT_CONTROL_MMU_ENABLE == 0
     }
@@ -261,21 +262,27 @@ impl fault::BankIo for ReuseBank<'_> {
     }
 
     fn status(&self) -> u32 {
-        self.hardware.context_read(self.context, CONTEXT_FAULT_STATUS)
+        self.hardware
+            .context_read(self.context, CONTEXT_FAULT_STATUS)
     }
 
     fn record(&self, status: u32) {
         println!(
             "[arm-smmu-v2] context reuse fault CB {}: fsr={:#x} far={:#x} fsynr0={:#x} fsynr1={:#x}",
-            self.context, status,
-            self.hardware.context_read64(self.context, CONTEXT_FAULT_ADDRESS),
-            self.hardware.context_read(self.context, CONTEXT_FAULT_SYNDROME_0),
-            self.hardware.context_read(self.context, CONTEXT_FAULT_SYNDROME_1),
+            self.context,
+            status,
+            self.hardware
+                .context_read64(self.context, CONTEXT_FAULT_ADDRESS),
+            self.hardware
+                .context_read(self.context, CONTEXT_FAULT_SYNDROME_0),
+            self.hardware
+                .context_read(self.context, CONTEXT_FAULT_SYNDROME_1),
         );
     }
 
     fn acknowledge(&self, bits: u32) {
-        self.hardware.context_write(self.context, CONTEXT_FAULT_STATUS, bits);
+        self.hardware
+            .context_write(self.context, CONTEXT_FAULT_STATUS, bits);
     }
 
     fn barrier(&self) {
@@ -364,7 +371,10 @@ impl SmmuHardware {
         self.reserve_context_for_reclaim(false)
     }
 
-    fn reserve_context_for_reclaim(&self, quiet_capacity_miss: bool) -> Result<ContextLease, IommuError> {
+    fn reserve_context_for_reclaim(
+        &self,
+        quiet_capacity_miss: bool,
+    ) -> Result<ContextLease, IommuError> {
         // Routing state is protected by `lock`. Always acquire it before the
         // allocation bitmap so selection is atomic with attach/detach and all
         // paths use one lock order.
@@ -394,10 +404,16 @@ impl SmmuHardware {
             // it does not establish ownership. Reinitializing this bank is safe
             // because no valid SMR selects it and SCTLR.M is clear.
             allocated[index] = true;
-            if let Err(reason) = fault::prepare_reuse(&ReuseBank { hardware: self, context: index }) {
+            if let Err(reason) = fault::prepare_reuse(&ReuseBank {
+                hardware: self,
+                context: index,
+            }) {
                 // No lease is returned, so allocation rollback cannot restore
                 // configuration over an unhandled fault or release this bank.
-                println!("[arm-smmu-v2] context lease stage=quarantined CB {}: reuse {:?}", index, reason);
+                println!(
+                    "[arm-smmu-v2] context lease stage=quarantined CB {}: reuse {:?}",
+                    index, reason
+                );
                 continue;
             }
             #[cfg(debug_assertions)]
@@ -409,12 +425,12 @@ impl SmmuHardware {
         }
         if !quiet_capacity_miss {
             println!(
-            "[arm-smmu-v2] domain alloc failed stage=context: range={}..{} software-reserved={} firmware-routed={} enabled={}",
-            self.stage1_context_start,
-            self.context_bank_count,
-            software_reserved,
-            firmware_routed,
-            enabled,
+                "[arm-smmu-v2] domain alloc failed stage=context: range={}..{} software-reserved={} firmware-routed={} enabled={}",
+                self.stage1_context_start,
+                self.context_bank_count,
+                software_reserved,
+                firmware_routed,
+                enabled,
             );
         }
         Err(IommuError::DomainAllocationFailed)
@@ -430,7 +446,10 @@ impl SmmuHardware {
             );
             return false;
         }
-        if let Err(reason) = fault::prepare_reuse(&ReuseBank { hardware: self, context }) {
+        if let Err(reason) = fault::prepare_reuse(&ReuseBank {
+            hardware: self,
+            context,
+        }) {
             println!(
                 "[arm-smmu-v2] context lease stage=quarantined CB {}: release {:?}",
                 context, reason,
@@ -1361,7 +1380,9 @@ impl IommuDomain for DmaDomain {
                 }
                 tables.sync_dirty();
                 if let Some(context) = context.as_ref() {
-                    let _ = self.hardware.invalidate_context(context.index, context_asid(context.index));
+                    let _ = self
+                        .hardware
+                        .invalidate_context(context.index, context_asid(context.index));
                 }
                 return Err(error);
             }
@@ -1548,7 +1569,10 @@ impl Drop for DmaDomain {
             }
             println!(
                 "[arm-smmu-v2] retaining translated CB {} and page tables after teardown or restore failure",
-                context.as_ref().map(|lease| lease.index).unwrap_or(usize::MAX),
+                context
+                    .as_ref()
+                    .map(|lease| lease.index)
+                    .unwrap_or(usize::MAX),
             );
         }
     }
@@ -1617,8 +1641,11 @@ impl IommuController for ArmSmmuV2 {
         }
         let iova_address_limit = address_limit(iova_address_bits);
         validate_dma_range(
-            config.iova_base, config.iova_size, iova_address_limit,
-            config.iova_base, PAGE_SIZE,
+            config.iova_base,
+            config.iova_size,
+            iova_address_limit,
+            config.iova_base,
+            PAGE_SIZE,
         )?;
         let tables = DmaPageTables::new(self.hardware.table_address_limit)?;
         Ok(Arc::new(DmaDomain {
