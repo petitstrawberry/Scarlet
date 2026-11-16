@@ -23,11 +23,12 @@ use crate::{
             PendingIrq,
         },
     },
+    sync::IrqSpinLock,
 };
 
 use alloc::{boxed::Box, vec};
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// Maximum number of interrupts supported by this implementation.
 const MAX_INTERRUPTS: InterruptId = 1020;
@@ -71,6 +72,7 @@ const GICR_ISENABLER0: usize = 0x0100;
 const GICR_ICENABLER0: usize = 0x0180;
 const GICR_ISPENDR0: usize = 0x0200;
 const GICR_ICACTIVER0: usize = 0x0380;
+const GICR_ICFGR0: usize = 0x0c00;
 const GICR_IPRIORITYR: usize = 0x0400;
 const GICR_CTLR_RWP: u32 = 1 << 3;
 
@@ -248,6 +250,8 @@ pub struct GicV3 {
     max_interrupts: InterruptId,
     max_cpus: CpuId,
     cpu_mpidr_affinity: [AtomicU64; MAX_CPUS as usize],
+    trigger: [AtomicU8; MAX_INTERRUPTS as usize],
+    config_lock: IrqSpinLock<()>,
 }
 
 impl GicV3 {
@@ -264,6 +268,8 @@ impl GicV3 {
             max_cpus: max_cpus.min(MAX_CPUS),
             cpu_mpidr_affinity: [const { AtomicU64::new(INVALID_MPIDR_AFFINITY) };
                 MAX_CPUS as usize],
+            trigger: [const { AtomicU8::new(0) }; MAX_INTERRUPTS as usize],
+            config_lock: IrqSpinLock::new(()),
         }
     }
 
@@ -485,6 +491,48 @@ impl GicV3 {
     fn dist_priority_addr(&self, interrupt_id: InterruptId) -> usize {
         self.dist_reg_addr(GICD_IPRIORITYR + interrupt_id as usize)
     }
+    fn configure_trigger(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+        let Some(trigger) = self.trigger.get(interrupt_id as usize) else {
+            return Err(InterruptError::InvalidInterruptId);
+        };
+        let trigger = trigger.load(Ordering::Acquire);
+        if trigger == 0 {
+            return Ok(());
+        }
+        if interrupt_id < 16 {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+        let _guard = self.config_lock.lock();
+        let (config, enabled) = if interrupt_id < 32 {
+            (
+                self.redist_sgi_reg_addr(cpu_id, GICR_ICFGR0 + interrupt_id as usize / 16 * 4),
+                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
+            )
+        } else {
+            (
+                self.dist_reg_addr(GICD_ICFGR + interrupt_id as usize / 16 * 4),
+                self.dist_enable_addr(interrupt_id),
+            )
+        };
+        // A trigger change is only valid before enabling the line. Preserve
+        // neighboring interrupts in the shared ICFGR word across CPUs.
+        unsafe {
+            let old = mmio::read32(config);
+            let bit = 2u32 << ((interrupt_id % 16) * 2);
+            let new = if trigger == 1 { old | bit } else { old & !bit };
+            if old != new {
+                if mmio::read32(enabled) & (1 << (interrupt_id % 32)) != 0 {
+                    return Err(InterruptError::InvalidOperation);
+                }
+                mmio::write32(config, new);
+                crate::arch::io_mb();
+                if mmio::read32(config) & bit != new & bit {
+                    return Err(InterruptError::HardwareError);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ExternalInterruptController for GicV3 {
@@ -501,6 +549,7 @@ impl ExternalInterruptController for GicV3 {
     fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
+        self.configure_trigger(interrupt_id, cpu_id)?;
 
         let bit = 1u32 << (interrupt_id % 32);
 
@@ -684,6 +733,30 @@ impl ExternalInterruptController for GicV3 {
 
     fn map_irq_resource(&self, resource: &PlatformDeviceResource) -> InterruptResult<IrqMapping> {
         let hwirq = self.translate_irq_resource(resource)?;
+        let trigger = self
+            .trigger
+            .get(hwirq as usize)
+            .ok_or(InterruptError::InvalidInterruptId)?;
+        if let Some(metadata) = resource.irq_metadata {
+            let raw_flags = (metadata.irq_flags & 0xf) as u8;
+            // PPI polarity is implementation defined; ICFGR controls only
+            // edge versus level. DTs commonly describe timer PPIs as level-low.
+            let flags = if hwirq < 32 && raw_flags == 8 {
+                4
+            } else {
+                raw_flags
+            };
+            if flags != 0 {
+                if !matches!(flags, 1 | 4) {
+                    return Err(InterruptError::NotSupported);
+                }
+                match trigger.compare_exchange(0, flags, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => {}
+                    Err(previous) if previous == flags => {}
+                    Err(_) => return Err(InterruptError::InvalidOperation),
+                }
+            }
+        }
         Ok(IrqMapping::legacy(hwirq, IrqFlow::FastEoi))
     }
 
