@@ -150,7 +150,7 @@ const _: () = {
 };
 
 /// Layout version of [`DisplayOutputInfo`] this library understands.
-pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 1;
+pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 2;
 /// A monitor is attached to the connector and enabled.
 pub const DISPLAY_OUTPUT_FLAG_CONNECTED: u32 = 1 << 0;
 /// The endpoint is `/dev/display0`, the primary output.
@@ -165,6 +165,10 @@ pub const DISPLAY_CONNECTOR_KIND_EXTERNAL: u32 = 2;
 pub const DISPLAY_CONNECTOR_KIND_VIRTUAL: u32 = 3;
 /// Bytes reserved for the NUL-padded connector name.
 pub const DISPLAY_CONNECTOR_NAME_LEN: usize = 32;
+/// The original record prefix remains accepted by newer kernels.
+pub const DISPLAY_OUTPUT_INFO_V1_SIZE: usize = 80;
+/// Stable firmware/bus identity; an empty key means persistence is unavailable.
+pub const DISPLAY_DEVICE_KEY_LEN: usize = 96;
 
 /// Output and connector description returned by `DISPLAY_GET_OUTPUT_INFO`.
 ///
@@ -201,11 +205,13 @@ pub struct DisplayOutputInfo {
     pub reserved: u32,
     /// NUL-padded connector name.
     pub name: [u8; DISPLAY_CONNECTOR_NAME_LEN],
+    /// Version 2: NUL-padded stable device identity, independent of enumeration.
+    pub device_key: [u8; DISPLAY_DEVICE_KEY_LEN],
 }
 
 // DISPLAY_GET_OUTPUT_INFO writes this fixed-width kernel record.
 const _: () = {
-    assert!(core::mem::size_of::<DisplayOutputInfo>() == 80);
+    assert!(core::mem::size_of::<DisplayOutputInfo>() == 176);
     assert!(core::mem::offset_of!(DisplayOutputInfo, name) == 48);
 };
 
@@ -225,6 +231,7 @@ impl DisplayOutputInfo {
             physical_height_mm: 0,
             reserved: 0,
             name: [0; DISPLAY_CONNECTOR_NAME_LEN],
+            device_key: [0; DISPLAY_DEVICE_KEY_LEN],
         }
     }
 
@@ -236,6 +243,31 @@ impl DisplayOutputInfo {
             .position(|byte| *byte == 0)
             .unwrap_or(self.name.len());
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+
+    /// Stable device identity when a version 2 record supplied the complete
+    /// tail. Callers must not persist a fallback based on `/dev/displayN`.
+    pub fn device_key(&self) -> Option<&str> {
+        if (self.size as usize) < core::mem::size_of::<Self>() {
+            return None;
+        }
+        let end = self
+            .device_key
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.device_key.len());
+        let key = core::str::from_utf8(&self.device_key[..end]).ok()?;
+        (!key.is_empty() && !key.chars().any(char::is_control)).then_some(key)
+    }
+
+    /// Stable connector identity for display profiles and retained workspaces.
+    pub fn connector_key(&self) -> Option<alloc::string::String> {
+        let device = self.device_key()?;
+        Some(alloc::format!(
+            "{}/connector-{}",
+            device,
+            self.connector_index
+        ))
     }
 
     /// Whether a monitor is attached and enabled.

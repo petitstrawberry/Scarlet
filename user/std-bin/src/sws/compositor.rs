@@ -3017,6 +3017,15 @@ impl Compositor {
         // the first-frame filtering policy.
         let _ = gesture_recognizer.set_tablet_mode(input_environment.tablet_mode());
 
+        let primary_connector_key = display
+            .get_output_info()
+            .ok()
+            .and_then(|info| info.connector_key())
+            .unwrap_or_else(|| String::from("session:primary"));
+        let mut workspace_manager = super::workspace::WorkspaceManager::with_auto_remove_empty(
+            auto_remove_empty_workspaces,
+        );
+        workspace_manager.attach_output(PRIMARY_OUTPUT_ID, &primary_connector_key);
         let primary_output = Output::new(
             PRIMARY_OUTPUT_ID,
             OutputRect::new(0, 0, screen_width, screen_height),
@@ -3030,7 +3039,8 @@ impl Compositor {
                 cpu_backdrops: Vec::new(),
                 full_redraw: false,
             },
-        );
+        )
+        .with_connector_key(primary_connector_key);
 
         let secondary_endpoints = discover_secondary_endpoints();
         println!(
@@ -3117,9 +3127,7 @@ impl Compositor {
             input_modality: InputModality::default(),
             tablet_mode: input_environment.tablet_mode(),
             windowing_mode: input_environment.windowing_mode(),
-            workspace_manager: super::workspace::WorkspaceManager::with_auto_remove_empty(
-                auto_remove_empty_workspaces,
-            ),
+            workspace_manager,
             last_shell_presentation: sws_protocol::workspace::ShellPresentation::Workspace,
             pending_workspace_scenes: Vec::new(),
             window_policy_pending: false,
@@ -4815,22 +4823,38 @@ impl Compositor {
         let backbuffer = vec![0; backbuffer_stride as usize * height as usize];
         let id = self.next_output_id;
         self.next_output_id += 1;
+        let connector_key = self.secondary_endpoints[index]
+            .control
+            .get_output_info()
+            .ok()
+            .and_then(|info| info.connector_key())
+            .unwrap_or_else(|| format!("session:{}", path));
+        if !self.workspace_manager.attach_output(id, &connector_key) {
+            println!(
+                "[Compositor] {}: no workspace available for this output",
+                path
+            );
+            return false;
+        }
         let rect = self.outputs.next_placement(width, height);
         let scale_milli = self.output_scale_milli();
-        self.outputs.push(Output::new(
-            id,
-            rect,
-            scale_milli,
-            DisplayTarget {
-                display,
-                bytes_per_pixel,
-                backbuffer,
-                backbuffer_stride,
-                presented_damage: Vec::new(),
-                cpu_backdrops: Vec::new(),
-                full_redraw: true,
-            },
-        ));
+        self.outputs.push(
+            Output::new(
+                id,
+                rect,
+                scale_milli,
+                DisplayTarget {
+                    display,
+                    bytes_per_pixel,
+                    backbuffer,
+                    backbuffer_stride,
+                    presented_damage: Vec::new(),
+                    cpu_backdrops: Vec::new(),
+                    full_redraw: true,
+                },
+            )
+            .with_connector_key(connector_key),
+        );
         self.secondary_endpoints[index].output = Some(id);
         println!(
             "[Compositor] Output {} attached: {} {}x{} at ({}, {})",
@@ -4845,6 +4869,7 @@ impl Compositor {
         if let Some(id) = self.secondary_endpoints[index].output.take()
             && let Some(output) = self.outputs.remove(id)
         {
+            self.workspace_manager.detach_output(id);
             println!(
                 "[Compositor] Output {} detached: {}",
                 output.id, self.secondary_endpoints[index].path

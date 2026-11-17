@@ -24,6 +24,7 @@ use std::vec::Vec;
 
 pub mod clipboard;
 pub mod input_panel;
+pub mod outputs;
 pub mod surface_regions;
 pub mod surface_scene;
 pub mod workspace;

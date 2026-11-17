@@ -122,6 +122,9 @@ impl OutputRect {
 /// One display output and the compositor state that belongs to it.
 pub(super) struct Output<T> {
     pub(super) id: OutputId,
+    /// Firmware/bus device and connector identity. A `session:` prefix marks
+    /// old drivers without a persistent hardware identity.
+    pub(super) connector_key: String,
     /// Placement in global compositor coordinates. `width`/`height` are the
     /// output's current pixel size.
     pub(super) rect: OutputRect,
@@ -150,11 +153,17 @@ impl<T> Output<T> {
     pub(super) fn new(id: OutputId, rect: OutputRect, scale_milli: u32, target: T) -> Self {
         Self {
             id,
+            connector_key: format!("session:output{}", id),
             rect,
             scale_milli,
             present_counter: 0,
             target,
         }
+    }
+
+    pub(super) fn with_connector_key(mut self, connector_key: String) -> Self {
+        self.connector_key = connector_key;
+        self
     }
 
     /// Output width in pixels.

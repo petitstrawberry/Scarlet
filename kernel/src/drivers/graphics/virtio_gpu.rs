@@ -1770,6 +1770,7 @@ impl VirtioDevice for VirtioGpuControl {
 }
 
 pub struct VirtioGpuDevice {
+    display_identity: Option<alloc::string::String>,
     core: Arc<CoreLock<VirtioGpuDeviceCore>>,
     interrupt_state: Arc<asynchronous::InterruptState>,
 }
@@ -2297,6 +2298,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         let core = VirtioGpuDeviceCore::new(base_addr);
         Self {
+            display_identity: None,
             interrupt_state: Arc::clone(&core.interrupt_state),
             core: Arc::new(CoreLock::new(core)),
         }
@@ -2314,9 +2316,15 @@ impl VirtioGpuDevice {
     pub fn new_pci(transport: VirtioPciTransport) -> Self {
         let core = VirtioGpuDeviceCore::new_pci(transport);
         Self {
+            display_identity: None,
             interrupt_state: Arc::clone(&core.interrupt_state),
             core: Arc::new(CoreLock::new(core)),
         }
+    }
+    /// Set the stable physical/bus location supplied by the probing transport.
+    pub fn with_display_identity(mut self, identity: alloc::string::String) -> Self {
+        self.display_identity = Some(identity);
+        self
     }
 }
 
@@ -3039,6 +3047,10 @@ impl GpuBackend for VirtioGpuBackend {
 }
 
 impl GraphicsDevice for VirtioGpuDevice {
+    fn display_device_key(&self) -> Option<alloc::string::String> {
+        self.display_identity.clone()
+    }
+
     fn get_display_name(&self) -> &'static str {
         "virtio-gpu"
     }

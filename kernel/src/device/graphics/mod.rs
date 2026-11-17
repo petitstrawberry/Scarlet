@@ -577,6 +577,13 @@ pub trait GraphicsDevice: Device {
     /// Get the device display name
     fn get_display_name(&self) -> &'static str;
 
+    /// Stable bus or firmware device location for persistent output profiles.
+    /// A virtual mapping, DeviceManager ID or boot enumeration number is not
+    /// stable. Drivers without such an identity return `None`.
+    fn display_device_key(&self) -> Option<alloc::string::String> {
+        None
+    }
+
     /// Return the current display backlight level as a percentage.
     ///
     /// Implementations that expose a physical display backlight must return a

@@ -1,19 +1,23 @@
-//! Authoritative compositor-side workspace state machine.
+//! Authoritative session workspace registry and output-scoped state machines.
 
-use std::vec::Vec;
+use std::{
+    collections::BTreeMap,
+    ops::Deref,
+    string::{String, ToString},
+    vec::Vec,
+};
+use sws_protocol::outputs::OutputId;
 use sws_protocol::workspace::{
     MAX_WORKSPACES, ShellPresentation, TabletLayout, TransitionSpec, WorkspaceId,
     WorkspaceSnapshot, WorkspaceState, WorkspaceTransaction, validate_workspaces,
 };
 
-/// Result of accepting one system-shell transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AppliedTransaction {
     pub(super) state: WorkspaceState,
     pub(super) transition: TransitionSpec,
 }
 
-/// Typed transaction rejection used to select a stable protocol error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ApplyError {
     StaleGeneration,
@@ -26,144 +30,145 @@ struct DesktopWorkspaceRestore {
     workspaces: Vec<WorkspaceSnapshot>,
 }
 
-/// Workspace selection and shell presentation owned by one output.
-///
-/// `docs/desktop/workspace-shell.md` makes these per output: each connected
-/// output has exactly one active workspace and its own presentation. SWS
-/// drives a single output today, so the manager holds one instance.
 #[derive(Debug, Clone, Copy)]
 struct OutputWorkspace {
     active_workspace: WorkspaceId,
-    /// Shell-navigation return target when leaving Home or Overview.
     normal_workspace: WorkspaceId,
     presentation: ShellPresentation,
 }
 
-/// Live workspace state retained independently of the shell connection.
-pub(super) struct WorkspaceManager {
+/// One partition of the session registry. A detached connector retains this
+/// partition, but has no active output until that same connector returns.
+struct WorkspacePartition {
+    output: Option<OutputId>,
+    connector_key: String,
+    state: OutputWorkspaces,
+}
+
+pub(super) struct OutputWorkspaces {
     generation: u32,
-    /// Per-output state for the primary output.
-    primary_output: OutputWorkspace,
+    tablet_experience: bool,
+    selection: OutputWorkspace,
     workspaces: Vec<WorkspaceSnapshot>,
-    next_workspace_id: WorkspaceId,
     desktop_restore: Option<DesktopWorkspaceRestore>,
     auto_remove_empty: bool,
 }
 
-impl WorkspaceManager {
-    /// Construct the mandatory initial empty workspace.
-    pub(super) fn new() -> Self {
-        Self::with_auto_remove_empty(false)
-    }
+/// IDs and scene ownership are shared across all partitions, including those
+/// retained for disconnected outputs. They cannot be minted independently by
+/// per-monitor shell instances. Reservations survive tablet restoration.
+struct WorkspaceNamespace {
+    next_id: WorkspaceId,
+    ids: BTreeMap<WorkspaceId, usize>,
+    window_owners: BTreeMap<u32, (usize, WorkspaceId)>,
+    workspace_count: usize,
+}
 
-    /// Construct a workspace manager with an explicit empty-space policy.
-    ///
-    /// # Arguments
-    ///
-    /// * `auto_remove_empty` - Remove unselected empty workspaces after scene
-    ///   membership changes. The default product policy is `false`.
-    pub(super) fn with_auto_remove_empty(auto_remove_empty: bool) -> Self {
+impl WorkspaceNamespace {
+    fn allocate(&mut self, group: usize) -> WorkspaceId {
+        loop {
+            let id = self.next_id.max(1);
+            self.next_id = id.wrapping_add(1).max(1);
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.ids.entry(id) {
+                entry.insert(group);
+                return id;
+            }
+        }
+    }
+}
+
+/// Explicit mutable output scope. No process-global or mutable "current output"
+/// exists. Queries borrow their partition without copying scene snapshots.
+pub(super) struct WorkspaceScope<'a> {
+    state: &'a mut OutputWorkspaces,
+    namespace: &'a mut WorkspaceNamespace,
+    group: usize,
+    original_count: usize,
+    membership_dirty: bool,
+}
+
+impl Deref for WorkspaceScope<'_> {
+    type Target = OutputWorkspaces;
+    fn deref(&self) -> &Self::Target {
+        self.state
+    }
+}
+
+impl Drop for WorkspaceScope<'_> {
+    fn drop(&mut self) {
+        if !self.membership_dirty {
+            return;
+        }
+        self.namespace.ids.retain(|_, owner| *owner != self.group);
+        for workspace in &self.state.workspaces {
+            self.namespace.ids.insert(workspace.id, self.group);
+        }
+        if let Some(restore) = &self.state.desktop_restore {
+            for workspace in &restore.workspaces {
+                self.namespace.ids.insert(workspace.id, self.group);
+            }
+        }
+        self.namespace.workspace_count =
+            self.namespace.workspace_count - self.original_count + self.state.workspaces.len();
+        self.namespace
+            .window_owners
+            .retain(|_, (owner, _)| *owner != self.group);
+        for workspace in &self.state.workspaces {
+            for window in &workspace.window_ids {
+                self.namespace
+                    .window_owners
+                    .insert(*window, (self.group, workspace.id));
+            }
+        }
+    }
+}
+
+/// The single authoritative registry. Storage is partitioned by stable
+/// connector so mode changes and pruning never rewrite another output's data.
+pub(super) struct WorkspaceManager {
+    partitions: Vec<WorkspacePartition>,
+    namespace: WorkspaceNamespace,
+    auto_remove_empty: bool,
+}
+
+impl OutputWorkspaces {
+    fn initial(id: WorkspaceId, auto_remove_empty: bool) -> Self {
         Self {
             generation: 1,
-            primary_output: OutputWorkspace {
-                active_workspace: 1,
-                normal_workspace: 1,
+            tablet_experience: false,
+            selection: OutputWorkspace {
+                active_workspace: id,
+                normal_workspace: id,
                 presentation: ShellPresentation::Workspace,
             },
             workspaces: vec![WorkspaceSnapshot {
-                id: 1,
+                id,
                 window_ids: Vec::new(),
                 tablet_layout: TabletLayout::Empty,
             }],
-            next_workspace_id: 2,
             desktop_restore: None,
             auto_remove_empty,
         }
     }
-
     /// Return a complete owned compositor snapshot.
     pub(super) fn snapshot(&self) -> WorkspaceState {
         WorkspaceState {
             generation: self.generation,
-            active_workspace: self.primary_output.active_workspace,
-            normal_workspace: self.primary_output.normal_workspace,
-            presentation: self.primary_output.presentation,
+            active_workspace: self.selection.active_workspace,
+            normal_workspace: self.selection.normal_workspace,
+            presentation: self.selection.presentation,
             workspaces: self.workspaces.clone(),
         }
     }
 
     /// Return the currently selected workspace.
-    pub(super) const fn active_workspace(&self) -> WorkspaceId {
-        self.primary_output.active_workspace
+    pub(super) fn active_workspace(&self) -> WorkspaceId {
+        self.selection.active_workspace
     }
 
     /// Return the committed workspace restored when shell navigation closes.
-    pub(super) const fn normal_workspace(&self) -> WorkspaceId {
-        self.primary_output.normal_workspace
-    }
-
-    /// Append one explicitly requested empty workspace.
-    ///
-    /// The new workspace is selected immediately and becomes the committed
-    /// return destination even when it is created from shell navigation.
-    ///
-    /// # Returns
-    ///
-    /// The new stable workspace identifier, or `None` at the protocol limit.
-    pub(super) fn create_workspace(&mut self) -> Option<WorkspaceId> {
-        if self.workspaces.len() >= MAX_WORKSPACES {
-            return None;
-        }
-        let id = self.allocate_workspace_id();
-        self.workspaces.push(WorkspaceSnapshot {
-            id,
-            window_ids: Vec::new(),
-            tablet_layout: TabletLayout::Empty,
-        });
-        self.primary_output.active_workspace = id;
-        self.primary_output.normal_workspace = id;
-        self.bump_generation();
-        Some(id)
-    }
-
-    /// Create a workspace and move one scene into it atomically.
-    ///
-    /// This backs drops onto the non-workspace `+` tile in Overview. No
-    /// intermediate empty workspace is published.
-    ///
-    /// # Arguments
-    ///
-    /// * `window_id` - Existing scene-root identifier to move.
-    ///
-    /// # Returns
-    ///
-    /// The new workspace identifier, or `None` when the scene is unknown or
-    /// the workspace limit has been reached.
-    pub(super) fn move_window_to_new_workspace(&mut self, window_id: u32) -> Option<WorkspaceId> {
-        if self.workspaces.len() >= MAX_WORKSPACES {
-            return None;
-        }
-        let source_index = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.window_ids.contains(&window_id))?;
-        self.workspaces[source_index]
-            .window_ids
-            .retain(|candidate| *candidate != window_id);
-        self.workspaces[source_index].tablet_layout =
-            repaired_layout(&self.workspaces[source_index], window_id);
-
-        let id = self.allocate_workspace_id();
-        self.workspaces.push(WorkspaceSnapshot {
-            id,
-            window_ids: vec![window_id],
-            tablet_layout: TabletLayout::Single { window_id },
-        });
-        self.primary_output.active_workspace = id;
-        self.primary_output.normal_workspace = id;
-        self.ensure_manual_workspace_invariants();
-        self.bump_generation();
-        Some(id)
+    pub(super) fn normal_workspace(&self) -> WorkspaceId {
+        self.selection.normal_workspace
     }
 
     /// Return whether one workspace can be explicitly removed safely.
@@ -217,6 +222,106 @@ impl WorkspaceManager {
         )
     }
 
+    /// Return the current shell presentation.
+    pub(super) fn presentation(&self) -> ShellPresentation {
+        self.selection.presentation
+    }
+
+    pub(super) fn tablet_experience(&self) -> bool {
+        self.tablet_experience
+    }
+
+    /// Return the retained tablet layout for a workspace.
+    pub(super) fn tablet_layout(&self, workspace_id: WorkspaceId) -> TabletLayout {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .map_or(TabletLayout::Empty, |workspace| workspace.tablet_layout)
+    }
+
+    /// Return the workspace containing one scene root.
+    pub(super) fn workspace_for_window(&self, window_id: u32) -> Option<WorkspaceId> {
+        self.workspaces.iter().find_map(|workspace| {
+            workspace
+                .window_ids
+                .contains(&window_id)
+                .then_some(workspace.id)
+        })
+    }
+}
+
+impl WorkspaceScope<'_> {
+    /// Append one explicitly requested empty workspace.
+    ///
+    /// The new workspace is selected immediately and becomes the committed
+    /// return destination even when it is created from shell navigation.
+    ///
+    /// # Returns
+    ///
+    /// The new stable workspace identifier, or `None` at the protocol limit.
+    pub(super) fn create_workspace(&mut self) -> Option<WorkspaceId> {
+        self.membership_dirty = true;
+        if self.namespace.workspace_count - self.original_count + self.state.workspaces.len()
+            >= MAX_WORKSPACES
+        {
+            return None;
+        }
+        let id = self.allocate_workspace_id();
+        self.state.workspaces.push(WorkspaceSnapshot {
+            id,
+            window_ids: Vec::new(),
+            tablet_layout: TabletLayout::Empty,
+        });
+        self.state.selection.active_workspace = id;
+        self.state.selection.normal_workspace = id;
+        self.bump_generation();
+        Some(id)
+    }
+
+    /// Create a workspace and move one scene into it atomically.
+    ///
+    /// This backs drops onto the non-workspace `+` tile in Overview. No
+    /// intermediate empty workspace is published.
+    ///
+    /// # Arguments
+    ///
+    /// * `window_id` - Existing scene-root identifier to move.
+    ///
+    /// # Returns
+    ///
+    /// The new workspace identifier, or `None` when the scene is unknown or
+    /// the workspace limit has been reached.
+    pub(super) fn move_window_to_new_workspace(&mut self, window_id: u32) -> Option<WorkspaceId> {
+        self.membership_dirty = true;
+        if self.namespace.workspace_count - self.original_count + self.state.workspaces.len()
+            >= MAX_WORKSPACES
+        {
+            return None;
+        }
+        let source_index = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.window_ids.contains(&window_id))?;
+        self.state.workspaces[source_index]
+            .window_ids
+            .retain(|candidate| *candidate != window_id);
+        self.state.workspaces[source_index].tablet_layout =
+            repaired_layout(&self.state.workspaces[source_index], window_id);
+
+        let id = self.allocate_workspace_id();
+        self.state.workspaces.push(WorkspaceSnapshot {
+            id,
+            window_ids: vec![window_id],
+            tablet_layout: TabletLayout::Single { window_id },
+        });
+        self.state.selection.active_workspace = id;
+        self.state.selection.normal_workspace = id;
+        self.ensure_manual_workspace_invariants();
+        self.bump_generation();
+        Some(id)
+    }
+
     /// Explicitly remove one workspace without destroying any scene.
     ///
     /// See [`Self::can_remove_workspace`] for the migration constraints.
@@ -225,10 +330,12 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         allow_freeform_merge: bool,
     ) -> bool {
+        self.membership_dirty = true;
         if !self.can_remove_workspace(workspace_id, allow_freeform_merge) {
             return false;
         }
         let Some(source_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.id == workspace_id)
@@ -240,11 +347,11 @@ impl WorkspaceManager {
         } else {
             1
         };
-        let target_id = self.workspaces[target_index].id;
-        let source_members = self.workspaces[source_index].window_ids.clone();
-        let source_layout = self.workspaces[source_index].tablet_layout;
-        let target_members = self.workspaces[target_index].window_ids.clone();
-        let target_layout = self.workspaces[target_index].tablet_layout;
+        let target_id = self.state.workspaces[target_index].id;
+        let source_members = self.state.workspaces[source_index].window_ids.clone();
+        let source_layout = self.state.workspaces[source_index].tablet_layout;
+        let target_members = self.state.workspaces[target_index].window_ids.clone();
+        let target_layout = self.state.workspaces[target_index].tablet_layout;
 
         if !source_members.is_empty() {
             let merged_layout = if target_members.is_empty() {
@@ -270,49 +377,28 @@ impl WorkspaceManager {
                 }
             };
             for window_id in source_members {
-                if !self.workspaces[target_index]
+                if !self.state.workspaces[target_index]
                     .window_ids
                     .contains(&window_id)
                 {
-                    self.workspaces[target_index].window_ids.push(window_id);
+                    self.state.workspaces[target_index]
+                        .window_ids
+                        .push(window_id);
                 }
             }
-            self.workspaces[target_index].tablet_layout = merged_layout;
+            self.state.workspaces[target_index].tablet_layout = merged_layout;
         }
 
-        self.workspaces.remove(source_index);
-        if self.primary_output.active_workspace == workspace_id {
-            self.primary_output.active_workspace = target_id;
+        self.state.workspaces.remove(source_index);
+        if self.state.selection.active_workspace == workspace_id {
+            self.state.selection.active_workspace = target_id;
         }
-        if self.primary_output.normal_workspace == workspace_id {
-            self.primary_output.normal_workspace = target_id;
+        if self.state.selection.normal_workspace == workspace_id {
+            self.state.selection.normal_workspace = target_id;
         }
         self.ensure_manual_workspace_invariants();
         self.bump_generation();
         true
-    }
-
-    /// Return the current shell presentation.
-    pub(super) const fn presentation(&self) -> ShellPresentation {
-        self.primary_output.presentation
-    }
-
-    /// Return the retained tablet layout for a workspace.
-    pub(super) fn tablet_layout(&self, workspace_id: WorkspaceId) -> TabletLayout {
-        self.workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id)
-            .map_or(TabletLayout::Empty, |workspace| workspace.tablet_layout)
-    }
-
-    /// Return the workspace containing one scene root.
-    pub(super) fn workspace_for_window(&self, window_id: u32) -> Option<WorkspaceId> {
-        self.workspaces.iter().find_map(|workspace| {
-            workspace
-                .window_ids
-                .contains(&window_id)
-                .then_some(workspace.id)
-        })
     }
 
     /// Assign a newly created scene root to the active manual workspace.
@@ -322,24 +408,32 @@ impl WorkspaceManager {
     /// presented single scene without silently creating another workspace;
     /// existing members remain retained for the desktop projection.
     pub(super) fn add_window(&mut self, window_id: u32, tablet_experience: bool) -> WorkspaceId {
+        self.membership_dirty = true;
+        if let Some((owner, workspace)) = self.namespace.window_owners.get(&window_id) {
+            if *owner != self.group {
+                return *workspace;
+            }
+        }
+
         if let Some(workspace_id) = self.workspace_for_window(window_id) {
             return workspace_id;
         }
 
         let active_index = self
+            .state
             .workspaces
             .iter()
-            .position(|workspace| workspace.id == self.primary_output.active_workspace)
+            .position(|workspace| workspace.id == self.state.selection.active_workspace)
             .unwrap_or(0);
-        let workspace = &mut self.workspaces[active_index];
+        let workspace = &mut self.state.workspaces[active_index];
         workspace.window_ids.push(window_id);
         if tablet_experience || matches!(workspace.tablet_layout, TabletLayout::Empty) {
             workspace.tablet_layout = TabletLayout::Single { window_id };
         }
         let workspace_id = workspace.id;
-        self.primary_output.active_workspace = workspace_id;
-        self.primary_output.normal_workspace = workspace_id;
-        self.primary_output.presentation = ShellPresentation::Workspace;
+        self.state.selection.active_workspace = workspace_id;
+        self.state.selection.normal_workspace = workspace_id;
+        self.state.selection.presentation = ShellPresentation::Workspace;
         self.ensure_manual_workspace_invariants();
         self.bump_generation();
         workspace_id
@@ -371,6 +465,13 @@ impl WorkspaceManager {
         tablet_experience: bool,
         focused_layout: bool,
     ) -> WorkspaceId {
+        self.membership_dirty = true;
+        if let Some((owner, workspace)) = self.namespace.window_owners.get(&window_id) {
+            if *owner != self.group {
+                return *workspace;
+            }
+        }
+
         if let Some(workspace_id) = self.workspace_for_window(window_id) {
             return workspace_id;
         }
@@ -379,23 +480,28 @@ impl WorkspaceManager {
         }
 
         let active_index = self
+            .state
             .workspaces
             .iter()
-            .position(|workspace| workspace.id == self.primary_output.active_workspace)
+            .position(|workspace| workspace.id == self.state.selection.active_workspace)
             .unwrap_or(0);
-        if self.workspaces[active_index].window_ids.is_empty() {
+        if self.state.workspaces[active_index].window_ids.is_empty() {
             return self.add_window(window_id, true);
         }
 
-        let target_index = if self.workspaces.len() < MAX_WORKSPACES {
+        let target_index = if self.namespace.workspace_count - self.original_count
+            + self.state.workspaces.len()
+            < MAX_WORKSPACES
+        {
             let id = self.allocate_workspace_id();
-            self.workspaces.push(WorkspaceSnapshot {
+            self.state.workspaces.push(WorkspaceSnapshot {
                 id,
                 window_ids: Vec::new(),
                 tablet_layout: TabletLayout::Empty,
             });
-            self.workspaces.len() - 1
+            self.state.workspaces.len() - 1
         } else if let Some(index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.window_ids.is_empty())
@@ -405,13 +511,13 @@ impl WorkspaceManager {
             return self.add_window(window_id, true);
         };
 
-        let workspace = &mut self.workspaces[target_index];
+        let workspace = &mut self.state.workspaces[target_index];
         workspace.window_ids.push(window_id);
         workspace.tablet_layout = TabletLayout::Single { window_id };
         let workspace_id = workspace.id;
-        self.primary_output.active_workspace = workspace_id;
-        self.primary_output.normal_workspace = workspace_id;
-        self.primary_output.presentation = ShellPresentation::Workspace;
+        self.state.selection.active_workspace = workspace_id;
+        self.state.selection.normal_workspace = workspace_id;
+        self.state.selection.presentation = ShellPresentation::Workspace;
         self.ensure_manual_workspace_invariants();
         self.bump_generation();
         workspace_id
@@ -419,8 +525,9 @@ impl WorkspaceManager {
 
     /// Remove a destroyed scene root and repair every referencing layout.
     pub(super) fn remove_window(&mut self, window_id: u32) -> bool {
+        self.membership_dirty = true;
         let mut changed = false;
-        for workspace in &mut self.workspaces {
+        for workspace in &mut self.state.workspaces {
             let previous_len = workspace.window_ids.len();
             workspace
                 .window_ids
@@ -446,21 +553,23 @@ impl WorkspaceManager {
     /// every workspace is empty, the active workspace remains as a placeholder.
     /// Desktop experience retains manually created empty workspaces.
     pub(super) fn settle_after_close(&mut self, tablet_experience: bool) -> bool {
+        self.membership_dirty = true;
         let mut changed = self.ensure_manual_workspace_invariants();
         if tablet_experience {
             changed |= prune_empty_workspaces(
-                &mut self.workspaces,
-                &mut self.primary_output.active_workspace,
-                &mut self.primary_output.normal_workspace,
+                &mut self.state.workspaces,
+                &mut self.state.selection.active_workspace,
+                &mut self.state.selection.normal_workspace,
             );
 
             // Keep original desktop groups while any of their scenes survive,
             // even when the group's original tablet card has been removed.
             // Empty saved groups must not resurrect pruned cards on mode exit.
-            if let Some(restore) = &mut self.desktop_restore {
+            if let Some(restore) = &mut self.state.desktop_restore {
                 for workspace in &mut restore.workspaces {
                     workspace.window_ids.retain(|window_id| {
-                        self.workspaces
+                        self.state
+                            .workspaces
                             .iter()
                             .any(|current| current.window_ids.contains(window_id))
                     });
@@ -472,11 +581,12 @@ impl WorkspaceManager {
                     .iter()
                     .all(|workspace| workspace.window_ids.is_empty())
                 {
-                    restore.active_workspace = self.primary_output.active_workspace;
+                    restore.active_workspace = self.state.selection.active_workspace;
                     restore.workspaces = vec![
-                        self.workspaces
+                        self.state
+                            .workspaces
                             .iter()
-                            .find(|workspace| workspace.id == self.primary_output.active_workspace)
+                            .find(|workspace| workspace.id == self.state.selection.active_workspace)
                             .unwrap()
                             .clone(),
                     ];
@@ -504,21 +614,22 @@ impl WorkspaceManager {
     /// focused.
     pub(super) fn activate_window(&mut self, window_id: u32, tablet_experience: bool) -> bool {
         let Some(index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.window_ids.contains(&window_id))
         else {
             return false;
         };
-        let workspace_id = self.workspaces[index].id;
-        let mut changed = self.primary_output.active_workspace != workspace_id
-            || self.primary_output.normal_workspace != workspace_id
-            || self.primary_output.presentation != ShellPresentation::Workspace;
-        self.primary_output.active_workspace = workspace_id;
-        self.primary_output.normal_workspace = workspace_id;
-        self.primary_output.presentation = ShellPresentation::Workspace;
+        let workspace_id = self.state.workspaces[index].id;
+        let mut changed = self.state.selection.active_workspace != workspace_id
+            || self.state.selection.normal_workspace != workspace_id
+            || self.state.selection.presentation != ShellPresentation::Workspace;
+        self.state.selection.active_workspace = workspace_id;
+        self.state.selection.normal_workspace = workspace_id;
+        self.state.selection.presentation = ShellPresentation::Workspace;
         if tablet_experience {
-            let layout_contains_window = match self.workspaces[index].tablet_layout {
+            let layout_contains_window = match self.state.workspaces[index].tablet_layout {
                 TabletLayout::Empty => false,
                 TabletLayout::Single {
                     window_id: presented,
@@ -530,7 +641,7 @@ impl WorkspaceManager {
                 } => first_window_id == window_id || second_window_id == window_id,
             };
             if !layout_contains_window {
-                self.workspaces[index].tablet_layout = TabletLayout::Single { window_id };
+                self.state.workspaces[index].tablet_layout = TabletLayout::Single { window_id };
                 changed = true;
             }
         }
@@ -542,24 +653,24 @@ impl WorkspaceManager {
 
     /// Change the global presentation without altering workspace membership.
     pub(super) fn set_presentation(&mut self, presentation: ShellPresentation) -> bool {
-        let previous_presentation = self.primary_output.presentation;
-        let previous_active = self.primary_output.active_workspace;
-        let previous_normal = self.primary_output.normal_workspace;
+        let previous_presentation = self.state.selection.presentation;
+        let previous_active = self.state.selection.active_workspace;
+        let previous_normal = self.state.selection.normal_workspace;
         if presentation == ShellPresentation::Overview
             && previous_presentation == ShellPresentation::Workspace
         {
-            self.primary_output.normal_workspace = self.primary_output.active_workspace;
+            self.state.selection.normal_workspace = self.state.selection.active_workspace;
         } else if presentation == ShellPresentation::Workspace {
-            self.primary_output.active_workspace = self.primary_output.normal_workspace;
+            self.state.selection.active_workspace = self.state.selection.normal_workspace;
         } else if presentation == ShellPresentation::Home
             && previous_presentation == ShellPresentation::Workspace
         {
-            self.primary_output.normal_workspace = self.primary_output.active_workspace;
+            self.state.selection.normal_workspace = self.state.selection.active_workspace;
         }
-        self.primary_output.presentation = presentation;
-        if self.primary_output.presentation == previous_presentation
-            && self.primary_output.active_workspace == previous_active
-            && self.primary_output.normal_workspace == previous_normal
+        self.state.selection.presentation = presentation;
+        if self.state.selection.presentation == previous_presentation
+            && self.state.selection.active_workspace == previous_active
+            && self.state.selection.normal_workspace == previous_normal
         {
             return false;
         }
@@ -576,7 +687,7 @@ impl WorkspaceManager {
     ///
     /// `true` when the presentation or active workspace changed.
     pub(super) fn toggle_overview(&mut self) -> bool {
-        if self.primary_output.presentation == ShellPresentation::Workspace {
+        if self.state.selection.presentation == ShellPresentation::Workspace {
             self.set_presentation(ShellPresentation::Overview)
         } else {
             self.return_to_workspace()
@@ -589,12 +700,12 @@ impl WorkspaceManager {
     /// complete normal destination and is restored exactly like an occupied
     /// workspace.
     pub(super) fn return_to_workspace(&mut self) -> bool {
-        let previous_workspace = self.primary_output.active_workspace;
-        let previous_presentation = self.primary_output.presentation;
-        self.primary_output.active_workspace = self.primary_output.normal_workspace;
-        self.primary_output.presentation = ShellPresentation::Workspace;
-        let changed = self.primary_output.active_workspace != previous_workspace
-            || self.primary_output.presentation != previous_presentation;
+        let previous_workspace = self.state.selection.active_workspace;
+        let previous_presentation = self.state.selection.presentation;
+        self.state.selection.active_workspace = self.state.selection.normal_workspace;
+        self.state.selection.presentation = ShellPresentation::Workspace;
+        let changed = self.state.selection.active_workspace != previous_workspace
+            || self.state.selection.presentation != previous_presentation;
         if changed {
             self.bump_generation();
         }
@@ -607,10 +718,11 @@ impl WorkspaceManager {
     /// status-bar Home control remains available when an empty workspace needs
     /// its first application.
     pub(super) fn select_workspace_from_overview(&mut self, workspace_id: WorkspaceId) -> bool {
-        if self.primary_output.presentation == ShellPresentation::Workspace {
+        if self.state.selection.presentation == ShellPresentation::Workspace {
             return false;
         }
         let Some(_workspace) = self
+            .state
             .workspaces
             .iter()
             .find(|workspace| workspace.id == workspace_id)
@@ -618,27 +730,28 @@ impl WorkspaceManager {
             return false;
         };
         let presentation = ShellPresentation::Workspace;
-        if self.primary_output.active_workspace == workspace_id
-            && self.primary_output.presentation == presentation
+        if self.state.selection.active_workspace == workspace_id
+            && self.state.selection.presentation == presentation
         {
             return false;
         }
-        self.primary_output.active_workspace = workspace_id;
-        self.primary_output.normal_workspace = workspace_id;
-        self.primary_output.presentation = presentation;
+        self.state.selection.active_workspace = workspace_id;
+        self.state.selection.normal_workspace = workspace_id;
+        self.state.selection.presentation = presentation;
         self.bump_generation();
         true
     }
 
     /// Select an adjacent ordered workspace without wrapping at either edge.
     pub(super) fn cycle_workspace(&mut self, direction: i32) -> bool {
-        if self.workspaces.len() < 2 || direction == 0 {
+        if self.state.workspaces.len() < 2 || direction == 0 {
             return false;
         }
         let index = self
+            .state
             .workspaces
             .iter()
-            .position(|workspace| workspace.id == self.primary_output.active_workspace)
+            .position(|workspace| workspace.id == self.state.selection.active_workspace)
             .unwrap_or(0);
         let next = if direction < 0 {
             let Some(previous) = index.checked_sub(1) else {
@@ -647,14 +760,14 @@ impl WorkspaceManager {
             previous
         } else {
             let next = index.saturating_add(1);
-            if next >= self.workspaces.len() {
+            if next >= self.state.workspaces.len() {
                 return false;
             }
             next
         };
-        self.primary_output.active_workspace = self.workspaces[next].id;
-        self.primary_output.normal_workspace = self.primary_output.active_workspace;
-        self.primary_output.presentation = ShellPresentation::Workspace;
+        self.state.selection.active_workspace = self.state.workspaces[next].id;
+        self.state.selection.normal_workspace = self.state.selection.active_workspace;
+        self.state.selection.presentation = ShellPresentation::Workspace;
         self.bump_generation();
         true
     }
@@ -683,6 +796,7 @@ impl WorkspaceManager {
         direction: i32,
     ) -> bool {
         let Some(source_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.window_ids.contains(&window_id))
@@ -697,7 +811,7 @@ impl WorkspaceManager {
         } else {
             source_index.saturating_add(1)
         };
-        if target_index >= self.workspaces.len() {
+        if target_index >= self.state.workspaces.len() {
             return false;
         }
 
@@ -724,6 +838,7 @@ impl WorkspaceManager {
         target_workspace_id: WorkspaceId,
     ) -> bool {
         let Some(source_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.window_ids.contains(&window_id))
@@ -731,6 +846,7 @@ impl WorkspaceManager {
             return false;
         };
         let Some(target_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.id == target_workspace_id)
@@ -761,7 +877,9 @@ impl WorkspaceManager {
         window_id: u32,
         target_workspace_id: WorkspaceId,
     ) -> bool {
+        self.membership_dirty = true;
         let Some(source_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.window_ids.contains(&window_id))
@@ -769,6 +887,7 @@ impl WorkspaceManager {
             return false;
         };
         let Some(target_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.id == target_workspace_id)
@@ -780,23 +899,25 @@ impl WorkspaceManager {
         }
         let TabletLayout::Single {
             window_id: destination_window_id,
-        } = self.workspaces[target_index].tablet_layout
+        } = self.state.workspaces[target_index].tablet_layout
         else {
             return false;
         };
 
-        self.workspaces[source_index]
+        self.state.workspaces[source_index]
             .window_ids
             .retain(|candidate| *candidate != window_id);
-        self.workspaces[source_index].tablet_layout =
-            repaired_layout(&self.workspaces[source_index], window_id);
-        if !self.workspaces[target_index]
+        self.state.workspaces[source_index].tablet_layout =
+            repaired_layout(&self.state.workspaces[source_index], window_id);
+        if !self.state.workspaces[target_index]
             .window_ids
             .contains(&window_id)
         {
-            self.workspaces[target_index].window_ids.push(window_id);
+            self.state.workspaces[target_index]
+                .window_ids
+                .push(window_id);
         }
-        self.workspaces[target_index].tablet_layout = TabletLayout::Split {
+        self.state.workspaces[target_index].tablet_layout = TabletLayout::Split {
             axis: sws_protocol::workspace::SplitAxis::Horizontal,
             first_window_id: destination_window_id,
             second_window_id: window_id,
@@ -815,26 +936,27 @@ impl WorkspaceManager {
         target_index: usize,
         activate_target: bool,
     ) -> bool {
+        self.membership_dirty = true;
         if source_index == target_index {
             return false;
         }
 
-        let target_id = self.workspaces[target_index].id;
-        let source = &mut self.workspaces[source_index];
+        let target_id = self.state.workspaces[target_index].id;
+        let source = &mut self.state.workspaces[source_index];
         source
             .window_ids
             .retain(|candidate| *candidate != window_id);
         source.tablet_layout = repaired_layout(source, window_id);
-        let target = &mut self.workspaces[target_index];
+        let target = &mut self.state.workspaces[target_index];
         if let TabletLayout::Empty = target.tablet_layout {
             target.tablet_layout = TabletLayout::Single { window_id };
         }
         target.window_ids.push(window_id);
 
         if activate_target {
-            self.primary_output.active_workspace = target_id;
-            self.primary_output.normal_workspace = target_id;
-            self.primary_output.presentation = ShellPresentation::Workspace;
+            self.state.selection.active_workspace = target_id;
+            self.state.selection.normal_workspace = target_id;
+            self.state.selection.presentation = ShellPresentation::Workspace;
         }
 
         self.ensure_manual_workspace_invariants();
@@ -850,27 +972,28 @@ impl WorkspaceManager {
     /// also commits the card as the destination restored when shell navigation
     /// closes.
     pub(super) fn move_overview_selection(&mut self, direction: i32) -> bool {
-        if self.primary_output.presentation == ShellPresentation::Workspace
-            || self.workspaces.len() < 2
+        if self.state.selection.presentation == ShellPresentation::Workspace
+            || self.state.workspaces.len() < 2
             || direction == 0
         {
             return false;
         }
         let index = self
+            .state
             .workspaces
             .iter()
-            .position(|workspace| workspace.id == self.primary_output.active_workspace)
+            .position(|workspace| workspace.id == self.state.selection.active_workspace)
             .unwrap_or(0);
         let next = if direction < 0 {
             index.saturating_sub(1)
         } else {
-            index.saturating_add(1).min(self.workspaces.len() - 1)
+            index.saturating_add(1).min(self.state.workspaces.len() - 1)
         };
         if next == index {
             return false;
         }
-        self.primary_output.active_workspace = self.workspaces[next].id;
-        self.primary_output.normal_workspace = self.primary_output.active_workspace;
+        self.state.selection.active_workspace = self.state.workspaces[next].id;
+        self.state.selection.normal_workspace = self.state.selection.active_workspace;
         self.bump_generation();
         true
     }
@@ -882,15 +1005,25 @@ impl WorkspaceManager {
     /// other scene becomes a reachable Single workspace. The original desktop
     /// grouping is retained for restoration.
     pub(super) fn enter_tablet_experience(&mut self, preferred_window_id: Option<u32>) -> bool {
-        if self.desktop_restore.is_some() {
+        self.membership_dirty = true;
+        if self.state.desktop_restore.is_some() {
             return false;
         }
-        self.desktop_restore = Some(DesktopWorkspaceRestore {
-            active_workspace: self.primary_output.active_workspace,
-            workspaces: self.workspaces.clone(),
+        let expanded_count = self.state.workspaces.iter().map(|workspace| {
+            let retained_split = matches!(workspace.tablet_layout, TabletLayout::Split { first_window_id, second_window_id, .. }
+                if workspace.window_ids.contains(&first_window_id) && workspace.window_ids.contains(&second_window_id));
+            workspace.window_ids.len().saturating_sub(usize::from(retained_split)).max(1)
+        }).sum::<usize>();
+        if self.namespace.workspace_count - self.original_count + expanded_count > MAX_WORKSPACES {
+            return false;
+        }
+        self.state.desktop_restore = Some(DesktopWorkspaceRestore {
+            active_workspace: self.state.selection.active_workspace,
+            workspaces: self.state.workspaces.clone(),
         });
+        self.state.tablet_experience = true;
 
-        let original = self.workspaces.clone();
+        let original = self.state.workspaces.clone();
         let mut expanded = Vec::new();
         let mut next_active = None;
         for workspace in original {
@@ -962,18 +1095,19 @@ impl WorkspaceManager {
                 });
             }
         }
-        let previous = self.workspaces.clone();
-        let previous_active = self.primary_output.active_workspace;
-        self.workspaces = expanded;
+        let previous = self.state.workspaces.clone();
+        let previous_active = self.state.selection.active_workspace;
+        self.state.workspaces = expanded;
         self.ensure_manual_workspace_invariants();
-        self.primary_output.active_workspace = next_active.unwrap_or_else(|| {
-            self.workspaces
+        self.state.selection.active_workspace = next_active.unwrap_or_else(|| {
+            self.state
+                .workspaces
                 .iter()
-                .find(|workspace| workspace.id == self.primary_output.active_workspace)
-                .map_or(self.workspaces[0].id, |workspace| workspace.id)
+                .find(|workspace| workspace.id == self.state.selection.active_workspace)
+                .map_or(self.state.workspaces[0].id, |workspace| workspace.id)
         });
-        let changed =
-            self.workspaces != previous || self.primary_output.active_workspace != previous_active;
+        let changed = self.state.workspaces != previous
+            || self.state.selection.active_workspace != previous_active;
         if changed {
             self.bump_generation();
         }
@@ -986,17 +1120,19 @@ impl WorkspaceManager {
     /// member of their current composition, or remain in a new workspace when
     /// no prior group applies. Closed scenes are simply omitted.
     pub(super) fn leave_tablet_experience(&mut self) -> bool {
-        let Some(restore) = self.desktop_restore.take() else {
+        self.membership_dirty = true;
+        let Some(restore) = self.state.desktop_restore.take() else {
             return false;
         };
-        let current = self.workspaces.clone();
+        self.state.tablet_experience = false;
+        let current = self.state.workspaces.clone();
         let live_window_ids = current
             .iter()
             .flat_map(|workspace| workspace.window_ids.iter().copied())
             .collect::<Vec<_>>();
         let active_member = current
             .iter()
-            .find(|workspace| workspace.id == self.primary_output.active_workspace)
+            .find(|workspace| workspace.id == self.state.selection.active_workspace)
             .and_then(|workspace| {
                 presented_window_id(workspace).or_else(|| workspace.window_ids.first().copied())
             });
@@ -1070,29 +1206,22 @@ impl WorkspaceManager {
             });
         }
 
-        let previous = self.workspaces.clone();
-        let previous_active = self.primary_output.active_workspace;
-        self.workspaces = restored;
-        self.primary_output.active_workspace = active_member
+        let previous = self.state.workspaces.clone();
+        let previous_active = self.state.selection.active_workspace;
+        self.state.workspaces = restored;
+        self.state.selection.active_workspace = active_member
             .and_then(|window_id| self.workspace_for_window(window_id))
             .or_else(|| {
-                self.workspaces
+                self.state
+                    .workspaces
                     .iter()
                     .any(|workspace| workspace.id == restore.active_workspace)
                     .then_some(restore.active_workspace)
             })
-            .unwrap_or(self.workspaces[0].id);
-        self.next_workspace_id = self
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
+            .unwrap_or(self.state.workspaces[0].id);
         self.ensure_manual_workspace_invariants();
-        let changed =
-            self.workspaces != previous || self.primary_output.active_workspace != previous_active;
+        let changed = self.state.workspaces != previous
+            || self.state.selection.active_workspace != previous_active;
         if changed {
             self.bump_generation();
         }
@@ -1109,10 +1238,12 @@ impl WorkspaceManager {
         source_workspace_id: WorkspaceId,
         destination_workspace_id: WorkspaceId,
     ) -> bool {
+        self.membership_dirty = true;
         if source_workspace_id == destination_workspace_id {
             return false;
         }
         let Some(source_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.id == source_workspace_id)
@@ -1120,6 +1251,7 @@ impl WorkspaceManager {
             return false;
         };
         let Some(destination_index) = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.id == destination_workspace_id)
@@ -1128,45 +1260,46 @@ impl WorkspaceManager {
         };
         let TabletLayout::Single {
             window_id: source_window_id,
-        } = self.workspaces[source_index].tablet_layout
+        } = self.state.workspaces[source_index].tablet_layout
         else {
             return false;
         };
         let TabletLayout::Single {
             window_id: destination_window_id,
-        } = self.workspaces[destination_index].tablet_layout
+        } = self.state.workspaces[destination_index].tablet_layout
         else {
             return false;
         };
 
-        self.workspaces[source_index]
+        self.state.workspaces[source_index]
             .window_ids
             .retain(|window_id| *window_id != source_window_id);
-        self.workspaces[source_index].tablet_layout =
-            repaired_layout(&self.workspaces[source_index], source_window_id);
+        self.state.workspaces[source_index].tablet_layout =
+            repaired_layout(&self.state.workspaces[source_index], source_window_id);
 
         let destination_index = self
+            .state
             .workspaces
             .iter()
             .position(|workspace| workspace.id == destination_workspace_id)
             .unwrap_or(destination_index);
-        if !self.workspaces[destination_index]
+        if !self.state.workspaces[destination_index]
             .window_ids
             .contains(&source_window_id)
         {
-            self.workspaces[destination_index]
+            self.state.workspaces[destination_index]
                 .window_ids
                 .push(source_window_id);
         }
-        self.workspaces[destination_index].tablet_layout = TabletLayout::Split {
+        self.state.workspaces[destination_index].tablet_layout = TabletLayout::Split {
             axis: sws_protocol::workspace::SplitAxis::Horizontal,
             first_window_id: destination_window_id,
             second_window_id: source_window_id,
             ratio_milli: 500,
         };
-        self.primary_output.active_workspace = destination_workspace_id;
-        self.primary_output.normal_workspace = destination_workspace_id;
-        self.primary_output.presentation = ShellPresentation::Workspace;
+        self.state.selection.active_workspace = destination_workspace_id;
+        self.state.selection.normal_workspace = destination_workspace_id;
+        self.state.selection.presentation = ShellPresentation::Workspace;
         self.ensure_manual_workspace_invariants();
         self.bump_generation();
         true
@@ -1178,7 +1311,8 @@ impl WorkspaceManager {
         transaction: WorkspaceTransaction,
         live_window_ids: &[u32],
     ) -> Result<AppliedTransaction, ApplyError> {
-        if transaction.base_generation != self.generation {
+        self.membership_dirty = true;
+        if transaction.base_generation != self.state.generation {
             return Err(ApplyError::StaleGeneration);
         }
         if validate_workspaces(transaction.active_workspace, &transaction.workspaces).is_err()
@@ -1187,41 +1321,58 @@ impl WorkspaceManager {
             return Err(ApplyError::InvalidState);
         }
 
-        let previous_active = self.primary_output.active_workspace;
-        let previous_normal = self.primary_output.normal_workspace;
-        let previous_presentation = self.primary_output.presentation;
-        self.primary_output.active_workspace = transaction.active_workspace;
-        self.primary_output.presentation = transaction.presentation;
-        self.workspaces = transaction.workspaces;
-        self.primary_output.normal_workspace = if self.primary_output.presentation
-            == ShellPresentation::Workspace
-            || self.primary_output.active_workspace != previous_active
+        // A shell may edit only this output's partition. Reserved IDs also
+        // cover retained desktop layouts, so a tablet transition cannot steal
+        // an identifier still needed by another output or by mode restoration.
+        if self.namespace.workspace_count - self.original_count + transaction.workspaces.len()
+            > MAX_WORKSPACES
+            || transaction.workspaces.iter().any(|workspace| {
+                self.namespace
+                    .ids
+                    .get(&workspace.id)
+                    .is_some_and(|owner| *owner != self.group)
+                    || workspace.window_ids.iter().any(|window| {
+                        self.namespace
+                            .window_owners
+                            .get(window)
+                            .is_some_and(|(owner, _)| *owner != self.group)
+                    })
+            })
         {
-            self.primary_output.active_workspace
+            return Err(ApplyError::InvalidState);
+        }
+        for workspace in &transaction.workspaces {
+            self.namespace.ids.insert(workspace.id, self.group);
+        }
+        let previous_active = self.state.selection.active_workspace;
+        let previous_normal = self.state.selection.normal_workspace;
+        let previous_presentation = self.state.selection.presentation;
+        self.state.selection.active_workspace = transaction.active_workspace;
+        self.state.selection.presentation = transaction.presentation;
+        self.state.workspaces = transaction.workspaces;
+        self.state.selection.normal_workspace = if self.state.selection.presentation
+            == ShellPresentation::Workspace
+            || self.state.selection.active_workspace != previous_active
+        {
+            self.state.selection.active_workspace
         } else if previous_presentation == ShellPresentation::Workspace
             && self
+                .state
                 .workspaces
                 .iter()
                 .any(|workspace| workspace.id == previous_active)
         {
             previous_active
         } else if self
+            .state
             .workspaces
             .iter()
             .any(|workspace| workspace.id == previous_normal)
         {
             previous_normal
         } else {
-            self.primary_output.active_workspace
+            self.state.selection.active_workspace
         };
-        self.next_workspace_id = self
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
         self.ensure_manual_workspace_invariants();
         self.bump_generation();
         Ok(AppliedTransaction {
@@ -1230,71 +1381,459 @@ impl WorkspaceManager {
         })
     }
 
-    fn allocate_workspace_id(&mut self) -> WorkspaceId {
-        loop {
-            let candidate = self.next_workspace_id.max(1);
-            self.next_workspace_id = candidate.wrapping_add(1).max(1);
-            if !self
-                .workspaces
-                .iter()
-                .any(|workspace| workspace.id == candidate)
-            {
-                return candidate;
-            }
-        }
-    }
-
     fn ensure_manual_workspace_invariants(&mut self) -> bool {
         let mut changed = false;
-        if self.auto_remove_empty && self.workspaces.len() > 1 {
-            let previous_len = self.workspaces.len();
-            let active_workspace = self.primary_output.active_workspace;
-            let normal_workspace = self.primary_output.normal_workspace;
-            self.workspaces.retain(|workspace| {
+        if self.state.auto_remove_empty && self.state.workspaces.len() > 1 {
+            let previous_len = self.state.workspaces.len();
+            let active_workspace = self.state.selection.active_workspace;
+            let normal_workspace = self.state.selection.normal_workspace;
+            self.state.workspaces.retain(|workspace| {
                 !workspace.window_ids.is_empty()
                     || workspace.id == active_workspace
                     || workspace.id == normal_workspace
             });
-            changed |= self.workspaces.len() != previous_len;
+            changed |= self.state.workspaces.len() != previous_len;
         }
-        if self.workspaces.is_empty() {
+        if self.state.workspaces.is_empty() {
             let id = self.allocate_workspace_id();
-            self.workspaces.push(WorkspaceSnapshot {
+            self.state.workspaces.push(WorkspaceSnapshot {
                 id,
                 window_ids: Vec::new(),
                 tablet_layout: TabletLayout::Empty,
             });
-            self.primary_output.active_workspace = id;
-            self.primary_output.normal_workspace = id;
+            self.state.selection.active_workspace = id;
+            self.state.selection.normal_workspace = id;
             changed = true;
         }
 
         if !self
+            .state
             .workspaces
             .iter()
-            .any(|workspace| workspace.id == self.primary_output.active_workspace)
+            .any(|workspace| workspace.id == self.state.selection.active_workspace)
         {
-            self.primary_output.active_workspace = self
+            self.state.selection.active_workspace = self
+                .state
                 .workspaces
                 .iter()
-                .find(|workspace| workspace.id == self.primary_output.normal_workspace)
-                .map_or(self.workspaces[0].id, |workspace| workspace.id);
+                .find(|workspace| workspace.id == self.state.selection.normal_workspace)
+                .map_or(self.state.workspaces[0].id, |workspace| workspace.id);
             changed = true;
         }
         if !self
+            .state
             .workspaces
             .iter()
-            .any(|workspace| workspace.id == self.primary_output.normal_workspace)
+            .any(|workspace| workspace.id == self.state.selection.normal_workspace)
         {
-            self.primary_output.normal_workspace = self.primary_output.active_workspace;
+            self.state.selection.normal_workspace = self.state.selection.active_workspace;
             changed = true;
         }
 
         changed
     }
-
+    fn allocate_workspace_id(&mut self) -> WorkspaceId {
+        self.namespace.allocate(self.group)
+    }
     fn bump_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1).max(1);
+        self.state.generation = self.state.generation.wrapping_add(1).max(1);
+    }
+}
+
+impl WorkspaceManager {
+    /// Construct the mandatory initial empty workspace.
+    pub(super) fn new() -> Self {
+        Self::with_auto_remove_empty(false)
+    }
+
+    /// Construct a workspace manager with an explicit empty-space policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `auto_remove_empty` - Remove unselected empty workspaces after scene
+    ///   membership changes. The default product policy is `false`.
+    pub(super) fn with_auto_remove_empty(auto_remove_empty: bool) -> Self {
+        let mut namespace = WorkspaceNamespace {
+            next_id: 1,
+            ids: BTreeMap::new(),
+            window_owners: BTreeMap::new(),
+            workspace_count: 1,
+        };
+        let id = namespace.allocate(0);
+        Self {
+            partitions: vec![WorkspacePartition {
+                output: Some(0),
+                connector_key: "primary".to_string(),
+                state: OutputWorkspaces::initial(id, auto_remove_empty),
+            }],
+            namespace,
+            auto_remove_empty,
+        }
+    }
+
+    fn primary(&self) -> &OutputWorkspaces {
+        &self.partitions[0].state
+    }
+    fn scope_at(&mut self, group: usize) -> WorkspaceScope<'_> {
+        let state = &mut self.partitions[group].state;
+        let original_count = state.workspaces.len();
+        WorkspaceScope {
+            state,
+            namespace: &mut self.namespace,
+            group,
+            original_count,
+            membership_dirty: false,
+        }
+    }
+    fn primary_mut(&mut self) -> WorkspaceScope<'_> {
+        self.scope_at(0)
+    }
+
+    pub(super) fn output(&self, output: OutputId) -> Option<&OutputWorkspaces> {
+        self.partitions
+            .iter()
+            .find(|part| part.output == Some(output))
+            .map(|part| &part.state)
+    }
+    pub(super) fn output_mut(&mut self, output: OutputId) -> Option<WorkspaceScope<'_>> {
+        let group = self
+            .partitions
+            .iter()
+            .position(|part| part.output == Some(output))?;
+        Some(self.scope_at(group))
+    }
+
+    /// Resolve posture for one output and change only its retained projection.
+    /// The external Auto policy stays Desktop while the chassis is folded.
+    pub(super) fn apply_output_experience(
+        &mut self,
+        output: OutputId,
+        experience: sws_protocol::outputs::OutputExperience,
+        internal: bool,
+        tablet_posture: bool,
+        preferred_window: Option<u32>,
+    ) -> Result<bool, ApplyError> {
+        let mut scope = self.output_mut(output).ok_or(ApplyError::InvalidState)?;
+        let tablet = experience.tablet_experience(internal, tablet_posture);
+        if tablet == scope.tablet_experience() {
+            return Ok(false);
+        }
+        if tablet {
+            scope.enter_tablet_experience(preferred_window);
+            if !scope.tablet_experience() {
+                return Err(ApplyError::InvalidState);
+            }
+        } else {
+            scope.leave_tablet_experience();
+        }
+        Ok(true)
+    }
+
+    /// Restore by connector identity, even if enumeration assigned a new ID.
+    /// An output always gets a distinct workspace on its first attachment.
+    pub(super) fn attach_output(&mut self, output: OutputId, connector_key: &str) -> bool {
+        if connector_key.is_empty() {
+            return false;
+        }
+        if let Some(group) = self
+            .partitions
+            .iter()
+            .position(|part| part.connector_key == connector_key)
+        {
+            if self.partitions[group].output == Some(output) {
+                return true;
+            }
+            if self.partitions[group].output.is_some() || self.output(output).is_some() {
+                return false;
+            }
+            self.partitions[group].output = Some(output);
+            return true;
+        }
+        if output == 0 && self.partitions[0].connector_key == "primary" {
+            self.partitions[0].connector_key = connector_key.to_string();
+            return true;
+        }
+        if self.output(output).is_some() || self.namespace.workspace_count >= MAX_WORKSPACES {
+            return false;
+        }
+        let group = self.partitions.len();
+        let id = self.namespace.allocate(group);
+        self.namespace.workspace_count += 1;
+        self.partitions.push(WorkspacePartition {
+            output: Some(output),
+            connector_key: connector_key.to_string(),
+            state: OutputWorkspaces::initial(id, self.auto_remove_empty),
+        });
+        true
+    }
+
+    pub(super) fn detach_output(&mut self, output: OutputId) -> bool {
+        if output == 0 {
+            return false;
+        }
+        let Some(part) = self
+            .partitions
+            .iter_mut()
+            .find(|part| part.output == Some(output))
+        else {
+            return false;
+        };
+        part.output = None;
+        true
+    }
+
+    pub(super) fn session_snapshot(&self) -> Vec<sws_protocol::workspace::OutputWorkspaceState> {
+        self.partitions
+            .iter()
+            .map(|partition| sws_protocol::workspace::OutputWorkspaceState {
+                output_id: partition.output,
+                connector_key: partition.connector_key.clone(),
+                tablet_experience: partition.state.tablet_experience,
+                state: partition.state.snapshot(),
+            })
+            .collect()
+    }
+
+    pub(super) fn output_for_workspace(&self, id: WorkspaceId) -> Option<OutputId> {
+        self.partitions
+            .iter()
+            .find(|part| {
+                part.state
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.id == id)
+            })
+            .and_then(|part| part.output)
+    }
+
+    pub(super) fn output_for_window(&self, window: u32) -> Option<OutputId> {
+        let (group, _) = *self.namespace.window_owners.get(&window)?;
+        self.partitions[group].output
+    }
+
+    /// Move a scene between output partitions atomically, repairing the source
+    /// composition. Neither output's selected workspace or Home state changes.
+    pub(super) fn transfer_window(&mut self, window: u32, destination: WorkspaceId) -> bool {
+        let Some(&(source, source_workspace)) = self.namespace.window_owners.get(&window) else {
+            return false;
+        };
+        if source_workspace == destination {
+            return false;
+        }
+        let Some(target) = self.partitions.iter().position(|part| {
+            part.state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == destination)
+        }) else {
+            return false;
+        };
+        if source == target {
+            return self
+                .scope_at(source)
+                .move_window_to_workspace(window, destination);
+        }
+        // Remove from the saved desktop projection too. Otherwise leaving
+        // tablet mode could restore the migrated scene onto both monitors.
+        {
+            let mut scope = self.scope_at(source);
+            scope.remove_window(window);
+            if let Some(restore) = &mut scope.state.desktop_restore {
+                for workspace in &mut restore.workspaces {
+                    workspace.window_ids.retain(|id| *id != window);
+                    workspace.tablet_layout = repaired_layout(workspace, window);
+                }
+            }
+        }
+        let mut scope = self.scope_at(target);
+        scope.membership_dirty = true;
+        let workspace = scope
+            .state
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == destination)
+            .unwrap();
+        workspace.window_ids.push(window);
+        if matches!(workspace.tablet_layout, TabletLayout::Empty) {
+            workspace.tablet_layout = TabletLayout::Single { window_id: window };
+        }
+        scope.bump_generation();
+        true
+    }
+
+    pub(super) fn snapshot(&self) -> WorkspaceState {
+        self.primary().snapshot()
+    }
+
+    pub(super) fn active_workspace(&self) -> WorkspaceId {
+        self.primary().active_workspace()
+    }
+
+    pub(super) fn normal_workspace(&self) -> WorkspaceId {
+        self.primary().normal_workspace()
+    }
+
+    pub(super) fn create_workspace(&mut self) -> Option<WorkspaceId> {
+        self.primary_mut().create_workspace()
+    }
+
+    pub(super) fn move_window_to_new_workspace(&mut self, window_id: u32) -> Option<WorkspaceId> {
+        self.primary_mut().move_window_to_new_workspace(window_id)
+    }
+
+    pub(super) fn can_remove_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        allow_freeform_merge: bool,
+    ) -> bool {
+        self.primary()
+            .can_remove_workspace(workspace_id, allow_freeform_merge)
+    }
+
+    pub(super) fn remove_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        allow_freeform_merge: bool,
+    ) -> bool {
+        self.primary_mut()
+            .remove_workspace(workspace_id, allow_freeform_merge)
+    }
+
+    pub(super) fn presentation(&self) -> ShellPresentation {
+        self.primary().presentation()
+    }
+
+    pub(super) fn tablet_layout(&self, workspace_id: WorkspaceId) -> TabletLayout {
+        self.partitions
+            .iter()
+            .find_map(|part| {
+                part.state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == workspace_id)
+            })
+            .map_or(TabletLayout::Empty, |workspace| workspace.tablet_layout)
+    }
+
+    pub(super) fn workspace_for_window(&self, window_id: u32) -> Option<WorkspaceId> {
+        self.namespace
+            .window_owners
+            .get(&window_id)
+            .map(|(_, workspace)| *workspace)
+    }
+
+    pub(super) fn add_window(&mut self, window_id: u32, tablet_experience: bool) -> WorkspaceId {
+        self.primary_mut().add_window(window_id, tablet_experience)
+    }
+
+    pub(super) fn add_scene_root(
+        &mut self,
+        window_id: u32,
+        tablet_experience: bool,
+        focused_layout: bool,
+    ) -> WorkspaceId {
+        self.primary_mut()
+            .add_scene_root(window_id, tablet_experience, focused_layout)
+    }
+
+    pub(super) fn remove_window(&mut self, window_id: u32) -> bool {
+        let Some(&(group, _)) = self.namespace.window_owners.get(&window_id) else {
+            return false;
+        };
+        self.scope_at(group).remove_window(window_id)
+    }
+
+    pub(super) fn settle_after_close(&mut self, tablet_experience: bool) -> bool {
+        self.primary_mut().settle_after_close(tablet_experience)
+    }
+
+    pub(super) fn activate_window(&mut self, window_id: u32, tablet_experience: bool) -> bool {
+        let Some(&(group, _)) = self.namespace.window_owners.get(&window_id) else {
+            return false;
+        };
+        if self.partitions[group].output.is_none() {
+            return false;
+        }
+        self.scope_at(group)
+            .activate_window(window_id, tablet_experience)
+    }
+
+    pub(super) fn set_presentation(&mut self, presentation: ShellPresentation) -> bool {
+        self.primary_mut().set_presentation(presentation)
+    }
+
+    pub(super) fn toggle_overview(&mut self) -> bool {
+        self.primary_mut().toggle_overview()
+    }
+
+    pub(super) fn return_to_workspace(&mut self) -> bool {
+        self.primary_mut().return_to_workspace()
+    }
+
+    pub(super) fn select_workspace_from_overview(&mut self, workspace_id: WorkspaceId) -> bool {
+        self.primary_mut()
+            .select_workspace_from_overview(workspace_id)
+    }
+
+    pub(super) fn cycle_workspace(&mut self, direction: i32) -> bool {
+        self.primary_mut().cycle_workspace(direction)
+    }
+
+    pub(super) fn move_window_to_adjacent_workspace(
+        &mut self,
+        window_id: u32,
+        direction: i32,
+    ) -> bool {
+        self.primary_mut()
+            .move_window_to_adjacent_workspace(window_id, direction)
+    }
+
+    pub(super) fn move_window_to_workspace(
+        &mut self,
+        window_id: u32,
+        target_workspace_id: WorkspaceId,
+    ) -> bool {
+        self.transfer_window(window_id, target_workspace_id)
+    }
+
+    pub(super) fn move_window_to_workspace_as_split(
+        &mut self,
+        window_id: u32,
+        target_workspace_id: WorkspaceId,
+    ) -> bool {
+        self.primary_mut()
+            .move_window_to_workspace_as_split(window_id, target_workspace_id)
+    }
+
+    pub(super) fn move_overview_selection(&mut self, direction: i32) -> bool {
+        self.primary_mut().move_overview_selection(direction)
+    }
+
+    pub(super) fn enter_tablet_experience(&mut self, preferred_window_id: Option<u32>) -> bool {
+        self.primary_mut()
+            .enter_tablet_experience(preferred_window_id)
+    }
+
+    pub(super) fn leave_tablet_experience(&mut self) -> bool {
+        self.primary_mut().leave_tablet_experience()
+    }
+
+    pub(super) fn merge_workspaces_as_split(
+        &mut self,
+        source_workspace_id: WorkspaceId,
+        destination_workspace_id: WorkspaceId,
+    ) -> bool {
+        self.primary_mut()
+            .merge_workspaces_as_split(source_workspace_id, destination_workspace_id)
+    }
+
+    pub(super) fn apply_transaction(
+        &mut self,
+        transaction: WorkspaceTransaction,
+        live_window_ids: &[u32],
+    ) -> Result<AppliedTransaction, ApplyError> {
+        self.primary_mut()
+            .apply_transaction(transaction, live_window_ids)
     }
 }
 
@@ -1442,6 +1981,203 @@ mod tests {
             sws_protocol::workspace::decode_state(&sws_protocol::workspace::encode_state(&state)),
             Ok(state)
         );
+    }
+
+    #[test]
+    fn output_navigation_and_tablet_projection_are_independent() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(11, false, false);
+        assert!(manager.attach_output(8, "platform:mdss/DP-1"));
+        let internal = manager.snapshot();
+        let external_workspace;
+        {
+            let mut external = manager.output_mut(8).unwrap();
+            external_workspace = external.add_scene_root(20, false, false);
+            external.add_scene_root(21, false, false);
+            external.enter_tablet_experience(Some(21));
+            external.set_presentation(ShellPresentation::Overview);
+        }
+        assert_ne!(external_workspace, internal.active_workspace);
+        assert_eq!(manager.snapshot(), internal);
+        let external = manager.output(8).unwrap().snapshot();
+        assert_eq!(external.workspaces.len(), 2);
+        assert_eq!(external.presentation, ShellPresentation::Overview);
+        manager.set_presentation(ShellPresentation::Home);
+        assert_eq!(manager.output(8).unwrap().snapshot(), external);
+        manager.output_mut(8).unwrap().leave_tablet_experience();
+        assert_eq!(manager.output(8).unwrap().snapshot().workspaces.len(), 1);
+        assert_eq!(manager.snapshot().workspaces, internal.workspaces);
+    }
+
+    #[test]
+    fn folding_the_chassis_preserves_the_external_desktop() {
+        use sws_protocol::outputs::OutputExperience;
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(11, false, false);
+        assert!(manager.attach_output(2, "external"));
+        manager
+            .output_mut(2)
+            .unwrap()
+            .add_scene_root(20, false, false);
+        let external = manager.output(2).unwrap().snapshot();
+        assert_eq!(
+            manager.apply_output_experience(0, OutputExperience::Auto, true, true, Some(11)),
+            Ok(true)
+        );
+        assert_eq!(
+            manager.apply_output_experience(2, OutputExperience::Auto, false, true, None),
+            Ok(false)
+        );
+        assert!(manager.output(0).unwrap().tablet_experience());
+        assert!(!manager.output(2).unwrap().tablet_experience());
+        assert_eq!(manager.output(2).unwrap().snapshot(), external);
+        assert_eq!(
+            manager.apply_output_experience(0, OutputExperience::Auto, true, false, None),
+            Ok(true)
+        );
+        assert_eq!(manager.snapshot().workspaces[0].window_ids, [10, 11]);
+        let internal = manager.snapshot();
+        assert_eq!(
+            manager.apply_output_experience(2, OutputExperience::Tablet, false, false, None),
+            Ok(true)
+        );
+        assert!(manager.output(2).unwrap().tablet_experience());
+        assert_eq!(manager.snapshot(), internal);
+    }
+
+    #[test]
+    fn reconnect_restores_by_connector_without_duplicate_assignments() {
+        let mut manager = WorkspaceManager::new();
+        assert!(manager.attach_output(2, "platform:mdss/DP-1"));
+        manager
+            .output_mut(2)
+            .unwrap()
+            .add_scene_root(20, false, false);
+        let before = manager.output(2).unwrap().snapshot();
+        assert!(!manager.attach_output(3, "platform:mdss/DP-1"));
+        assert!(manager.detach_output(2));
+        assert_eq!(manager.output_for_window(20), None);
+        assert_eq!(
+            manager.workspace_for_window(20),
+            Some(before.active_workspace)
+        );
+        assert!(
+            manager
+                .session_snapshot()
+                .iter()
+                .any(|p| p.output_id.is_none() && p.state == before)
+        );
+        assert!(manager.attach_output(9, "platform:mdss/DP-1"));
+        assert_eq!(manager.output(9).unwrap().snapshot(), before);
+        assert_eq!(
+            manager.output_for_workspace(before.active_workspace),
+            Some(9)
+        );
+        assert_eq!(manager.output_for_window(20), Some(9));
+    }
+
+    #[test]
+    fn scene_transfer_cannot_be_undone_by_tablet_restore() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(11, false, false);
+        manager.enter_tablet_experience(Some(10));
+        assert!(manager.attach_output(2, "external"));
+        let target = manager.output(2).unwrap().active_workspace();
+        assert!(manager.transfer_window(10, target));
+        manager.leave_tablet_experience();
+        assert_eq!(manager.output_for_window(10), Some(2));
+        assert_eq!(manager.workspace_for_window(10), Some(target));
+        assert_eq!(manager.output_for_window(11), Some(0));
+        let occurrences = manager
+            .session_snapshot()
+            .iter()
+            .flat_map(|p| &p.state.workspaces)
+            .flat_map(|w| &w.window_ids)
+            .filter(|id| **id == 10)
+            .count();
+        assert_eq!(occurrences, 1);
+    }
+
+    #[test]
+    fn shell_transaction_cannot_steal_another_outputs_workspace_or_scene() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        assert!(manager.attach_output(2, "external"));
+        manager
+            .output_mut(2)
+            .unwrap()
+            .add_scene_root(20, false, false);
+        let before = manager.output(2).unwrap().snapshot();
+        let stolen = manager.snapshot();
+        for (workspace, members) in [
+            (stolen.active_workspace, vec![20]),
+            (before.active_workspace, vec![10, 20]),
+        ] {
+            let transaction = WorkspaceTransaction {
+                base_generation: before.generation,
+                active_workspace: workspace,
+                presentation: ShellPresentation::Home,
+                workspaces: vec![WorkspaceSnapshot {
+                    id: workspace,
+                    window_ids: members.clone(),
+                    tablet_layout: TabletLayout::Empty,
+                }],
+                transition: TransitionSpec::default(),
+            };
+            assert_eq!(
+                manager
+                    .output_mut(2)
+                    .unwrap()
+                    .apply_transaction(transaction, &members),
+                Err(ApplyError::InvalidState)
+            );
+            assert_eq!(manager.output(2).unwrap().snapshot(), before);
+            assert_eq!(manager.snapshot(), stolen);
+        }
+    }
+
+    #[test]
+    fn workspace_limit_includes_other_and_disconnected_outputs() {
+        let mut manager = WorkspaceManager::new();
+        assert!(manager.attach_output(2, "external"));
+        assert!(manager.detach_output(2));
+        for _ in 0..MAX_WORKSPACES - 2 {
+            assert!(manager.create_workspace().is_some());
+        }
+        assert!(manager.create_workspace().is_none());
+        assert!(!manager.attach_output(3, "other"));
+        assert!(manager.attach_output(4, "external"));
+        assert!(manager.output_mut(4).unwrap().create_workspace().is_none());
+    }
+
+    #[test]
+    fn shared_allocator_does_not_rewind_on_tablet_restore_or_shell_transaction() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(11, false, false);
+        manager.enter_tablet_experience(Some(10));
+        assert!(manager.attach_output(2, "external"));
+        let external_id = manager.output(2).unwrap().active_workspace();
+        manager.leave_tablet_experience();
+        let state = manager.snapshot();
+        manager
+            .apply_transaction(
+                WorkspaceTransaction {
+                    base_generation: state.generation,
+                    active_workspace: state.active_workspace,
+                    presentation: state.presentation,
+                    workspaces: state.workspaces,
+                    transition: TransitionSpec::default(),
+                },
+                &[10, 11],
+            )
+            .unwrap();
+        assert_ne!(manager.create_workspace().unwrap(), external_id);
+        let external_next = manager.output_mut(2).unwrap().create_workspace().unwrap();
+        assert_ne!(external_next, manager.active_workspace());
     }
 
     #[test]
@@ -1945,7 +2681,7 @@ mod tests {
         let successor = manager.add_scene_root(11, true, true);
         let selected = manager.add_scene_root(12, true, true);
         manager.set_presentation(ShellPresentation::Overview);
-        manager.primary_output.normal_workspace = 1;
+        manager.partitions[0].state.selection.normal_workspace = 1;
         manager.remove_window(10);
 
         assert!(manager.settle_after_close(true));

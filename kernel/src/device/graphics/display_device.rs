@@ -165,7 +165,7 @@ pub struct DisplayPresentImage {
 }
 
 /// Layout version of [`DisplayOutputInfo`] written by this kernel.
-pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 1;
+pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 2;
 /// A monitor is attached to the connector and enabled.
 pub const DISPLAY_OUTPUT_FLAG_CONNECTED: u32 = 1 << 0;
 /// This endpoint is `/dev/display0`, the primary output.
@@ -180,6 +180,10 @@ pub const DISPLAY_CONNECTOR_KIND_EXTERNAL: u32 = 2;
 pub const DISPLAY_CONNECTOR_KIND_VIRTUAL: u32 = 3;
 /// Bytes reserved for the NUL-padded connector name.
 pub const DISPLAY_CONNECTOR_NAME_LEN: usize = 32;
+/// The original record prefix remains accepted by newer kernels.
+pub const DISPLAY_OUTPUT_INFO_V1_SIZE: usize = 80;
+/// Stable firmware/bus identity; an empty key means persistence is unavailable.
+pub const DISPLAY_DEVICE_KEY_LEN: usize = 96;
 
 /// Argument for `DISPLAY_GET_OUTPUT_INFO`.
 ///
@@ -220,6 +224,8 @@ pub struct DisplayOutputInfo {
     pub reserved: u32,
     /// NUL-padded connector name.
     pub name: [u8; DISPLAY_CONNECTOR_NAME_LEN],
+    /// Version 2: NUL-padded stable device identity, independent of enumeration.
+    pub device_key: [u8; DISPLAY_DEVICE_KEY_LEN],
 }
 
 /// Present the full GPU image and require zero region fields.
@@ -472,7 +478,20 @@ impl DisplayCharDevice {
             physical_height_mm: 0,
             reserved: 0,
             name: [0; DISPLAY_CONNECTOR_NAME_LEN],
+            device_key: [0; DISPLAY_DEVICE_KEY_LEN],
         };
+        if let Some(key) = device
+            .as_graphics_device()
+            .and_then(|graphics| graphics.display_device_key())
+        {
+            // Never truncate an identity: different long keys must not alias.
+            if !key.is_empty()
+                && key.len() < DISPLAY_DEVICE_KEY_LEN
+                && !key.chars().any(char::is_control)
+            {
+                info.device_key[..key.len()].copy_from_slice(key.as_bytes());
+            }
+        }
         if self.fb_resource.logical_name == "fb0" {
             info.flags |= DISPLAY_OUTPUT_FLAG_PRIMARY;
         }
@@ -538,7 +557,7 @@ impl DisplayCharDevice {
         Self::read_argument(arg, &mut size_bytes)?;
         let requested = u32::from_ne_bytes(size_bytes) as usize;
         let record_len = core::mem::size_of::<DisplayOutputInfo>();
-        if requested < record_len {
+        if requested < DISPLAY_OUTPUT_INFO_V1_SIZE {
             return Err("Display output info buffer is too small");
         }
 
@@ -1294,6 +1313,7 @@ mod tests {
             physical_height_mm: u32::MAX,
             reserved: u32::MAX,
             name: [0xff; DISPLAY_CONNECTOR_NAME_LEN],
+            device_key: [0xff; super::DISPLAY_DEVICE_KEY_LEN],
         }
     }
 
@@ -1339,7 +1359,7 @@ mod tests {
         let display = display_for_test(&manager, graphics);
         let record_len = core::mem::size_of::<DisplayOutputInfo>();
 
-        let mut short = output_info_request(record_len as u32 - 1);
+        let mut short = output_info_request(super::DISPLAY_OUTPUT_INFO_V1_SIZE as u32 - 1);
         assert_eq!(
             display
                 .control(
@@ -1350,6 +1370,19 @@ mod tests {
             "Display output info buffer is too small"
         );
         assert_eq!(short.version, 0);
+
+        // A version 1 client still provides exactly 80 bytes. Preserve its
+        // neighboring memory while publishing the unchanged prefix.
+        let mut legacy = [0xa5u8; 96];
+        legacy[..4].copy_from_slice(&(super::DISPLAY_OUTPUT_INFO_V1_SIZE as u32).to_ne_bytes());
+        display
+            .control(
+                display_commands::DISPLAY_GET_OUTPUT_INFO,
+                legacy.as_mut_ptr() as usize,
+            )
+            .expect("the version 1 prefix remains supported");
+        assert_eq!(u32::from_ne_bytes(legacy[..4].try_into().unwrap()), 80);
+        assert!(legacy[80..].iter().all(|byte| *byte == 0xa5));
 
         // A newer caller may pass a larger record; the kernel writes only the
         // fields it knows and leaves the tail untouched.
@@ -1572,8 +1605,9 @@ mod tests {
 
     #[test_case]
     fn display_output_info_record_has_fixed_layout() {
-        assert_eq!(core::mem::size_of::<DisplayOutputInfo>(), 80);
+        assert_eq!(core::mem::size_of::<DisplayOutputInfo>(), 176);
         assert_eq!(core::mem::align_of::<DisplayOutputInfo>(), 4);
+        assert_eq!(core::mem::offset_of!(DisplayOutputInfo, device_key), 80);
     }
 
     #[test_case]

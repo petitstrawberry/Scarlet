@@ -1194,7 +1194,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {
-            let dev = Arc::new(VirtioGpuDevice::new(base_addr));
+            let dev = Arc::new(
+                VirtioGpuDevice::new(base_addr)
+                    .with_display_identity(alloc::format!("virtio-mmio:{:x}", paddr)),
+            );
             if let Some(irq_resource) = device
                 .get_resources()
                 .iter()

@@ -415,7 +415,15 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             Ok(())
         }
         VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID | VIRTIO_PCI_MODERN_GPU_DEVICE_ID => {
-            let dev = Arc::new(VirtioGpuDevice::new_pci(transport));
+            let address = device.address();
+            let identity = alloc::format!(
+                "pci:{:04x}:{:02x}:{:02x}.{}",
+                address.segment,
+                address.bus,
+                address.device,
+                address.function
+            );
+            let dev = Arc::new(VirtioGpuDevice::new_pci(transport).with_display_identity(identity));
             if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
                 dev.enable_interrupts(interrupt_id);
             }

@@ -4,7 +4,7 @@
 //! one generation-checked desired state and SWS either accepts the whole state
 //! or rejects it without partial effects.
 
-use std::vec::Vec;
+use std::{string::String, vec::Vec};
 
 use crate::ProtocolError;
 
@@ -121,6 +121,16 @@ pub fn workspace_region_height(
         .max(1)
         .min(u32::MAX as u64) as u32;
     preferred.max(minimum).min(maximum).min(work_height)
+}
+
+/// One connector's partition of the session workspace registry. Disconnection
+/// clears `output_id` and retains the workspace and desktop/tablet projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputWorkspaceState {
+    pub output_id: Option<crate::outputs::OutputId>,
+    pub connector_key: String,
+    pub tablet_experience: bool,
+    pub state: WorkspaceState,
 }
 
 /// Stable identifier for one workspace.
