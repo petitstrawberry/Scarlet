@@ -6,13 +6,31 @@ pub(super) enum Layer {
     Letters,
     Symbols,
     MoreSymbols,
+    Tools,
     Function,
+}
+impl Layer {
+    /// Remember the tools preference, but retire transient symbol/Fn states.
+    pub fn for_activation(self) -> Self {
+        match self {
+            Self::Tools | Self::Function => Self::Tools,
+            _ => Self::Letters,
+        }
+    }
+    pub fn toggle_function(self) -> Self {
+        match self {
+            Self::Tools => Self::Function,
+            Self::Function => Self::Tools,
+            _ => self,
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
     Key(u16, u32),
     Modifier(u32),
     SetLayer(Layer),
+    ToggleFunction,
     Hide,
 }
 #[derive(Clone, Copy)]
@@ -93,21 +111,41 @@ fn fill_row(keys: Vec<Key>) -> KeyRow {
         inset: 0.0,
     }
 }
-fn terminal_row() -> KeyRow {
+fn terminal_row(function_keys: bool) -> KeyRow {
     use Action::Key;
     KeyRow {
-        keys: vec![
-            toolbar("esc", Key(1, 0)),
-            toolbar("tab", Key(15, 0)),
-            toolbar("home", Key(102, 0)),
-            toolbar("end", Key(107, 0)),
-            toolbar("pg up", Key(104, 0)),
-            toolbar("pg dn", Key(109, 0)),
-            toolbar("←", Key(105, 0)),
-            toolbar("↑", Key(103, 0)),
-            toolbar("↓", Key(108, 0)),
-            toolbar("→", Key(106, 0)),
-        ],
+        keys: if function_keys {
+            [
+                ("F1", 59),
+                ("F2", 60),
+                ("F3", 61),
+                ("F4", 62),
+                ("F5", 63),
+                ("F6", 64),
+                ("F7", 65),
+                ("F8", 66),
+                ("F9", 67),
+                ("F10", 68),
+                ("F11", 87),
+                ("F12", 88),
+            ]
+            .into_iter()
+            .map(|(label, code)| toolbar(label, Key(code, 0)))
+            .collect()
+        } else {
+            vec![
+                toolbar("esc", Key(1, 0)),
+                toolbar("tab", Key(15, 0)),
+                toolbar("home", Key(102, 0)),
+                toolbar("end", Key(107, 0)),
+                toolbar("pg up", Key(104, 0)),
+                toolbar("pg dn", Key(109, 0)),
+                toolbar("←", Key(105, 0)),
+                toolbar("↑", Key(103, 0)),
+                toolbar("↓", Key(108, 0)),
+                toolbar("→", Key(106, 0)),
+            ]
+        },
         height: 0.73,
         geometry: RowGeometry::Fill,
         inset: 0.0,
@@ -115,21 +153,22 @@ fn terminal_row() -> KeyRow {
 }
 pub(super) fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
     use Action::*;
-    if layer == Layer::Function {
+    if matches!(layer, Layer::Tools | Layer::Function) {
         // Keep letters available beside latched Ctrl/Alt for terminal shortcuts.
         let mut layout = rows(false, Layer::Letters);
-        layout.insert(0, terminal_row());
+        layout.insert(0, terminal_row(layer == Layer::Function));
         *layout.last_mut().unwrap() = row(vec![
             control(
                 if numeric { "123" } else { "ABC" },
                 SetLayer(Layer::Letters),
-                1.5,
+                1.75,
             ),
             control("あ/A", Key(85, 0), 1.3),
             control("ctrl", Modifier(input_panel::CTRL), 1.0),
+            control("space", Key(57, 0), 4.05),
             control("alt", Modifier(input_panel::ALT), 1.0),
-            control("space", Key(57, 0), 5.2),
-            control("123", SetLayer(Layer::Symbols), 1.3),
+            control("fn", ToggleFunction, 1.0),
+            control("123", SetLayer(Layer::Symbols), 1.05),
             control("hide", Hide, 0.85),
         ]);
         return layout;
@@ -155,7 +194,7 @@ pub(super) fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
                 key(".", ".", 52),
             ]),
             fill_row(vec![
-                control("Fn", SetLayer(Layer::Function), 0.8),
+                control("more", SetLayer(Layer::Tools), 0.8),
                 control("hide", Hide, 0.8),
                 control("0", Key(11, 0), 2.0),
                 control("return", Key(28, 0), 1.25),
@@ -343,11 +382,11 @@ fn inset_row(keys: Vec<Key>) -> KeyRow {
 fn bottom_row(label: &'static str, layer: Layer) -> KeyRow {
     use Action::*;
     row(vec![
-        control(label, SetLayer(layer), 1.5),
+        control(label, SetLayer(layer), 1.75),
         control("あ/A", Key(85, 0), 1.3),
-        control("Fn", SetLayer(Layer::Function), 1.0),
         control("space", Key(57, 0), 6.35),
-        control(label, SetLayer(layer), 1.3),
+        control("more", SetLayer(Layer::Tools), 1.0),
+        control(label, SetLayer(layer), 1.05),
         control("hide", Hide, 0.85),
     ])
 }
@@ -355,6 +394,101 @@ fn bottom_row(label: &'static str, layer: Layer) -> KeyRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn space_is_centered_without_reducing_its_width() {
+        for layer in [
+            Layer::Letters,
+            Layer::Symbols,
+            Layer::MoreSymbols,
+            Layer::Tools,
+            Layer::Function,
+        ] {
+            let layout = rows(false, layer);
+            let bottom = layout.last().unwrap();
+            let index = bottom
+                .keys
+                .iter()
+                .position(|key| key.action == Action::Key(57, 0))
+                .unwrap();
+            let space = &bottom.keys[index];
+            let center = EDGE_UNITS
+                + bottom.keys[..index]
+                    .iter()
+                    .map(|key| key.weight)
+                    .sum::<f32>()
+                + GAP_UNITS * index as f32
+                + space.weight * 0.5;
+            assert!((center - GRID_UNITS * 0.5).abs() < 0.0001);
+            assert_eq!(
+                space.weight,
+                if matches!(layer, Layer::Tools | Layer::Function) {
+                    4.05
+                } else {
+                    6.35
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fn_replaces_the_toolbar_without_adding_rows_or_changing_other_keys() {
+        for numeric in [false, true] {
+            let tools = rows(numeric, Layer::Tools);
+            let function = rows(numeric, Layer::Function);
+            assert_eq!(tools.len(), function.len());
+            assert_eq!(tools[0].height, function[0].height);
+            assert_eq!(function[0].keys.len(), 12);
+            for (key, (label, code)) in function[0].keys.iter().zip([
+                ("F1", 59),
+                ("F2", 60),
+                ("F3", 61),
+                ("F4", 62),
+                ("F5", 63),
+                ("F6", 64),
+                ("F7", 65),
+                ("F8", 66),
+                ("F9", 67),
+                ("F10", 68),
+                ("F11", 87),
+                ("F12", 88),
+            ]) {
+                assert_eq!(key.plain, label);
+                assert!(key.action == Action::Key(code, 0));
+            }
+            for (before, after) in tools.iter().skip(1).zip(function.iter().skip(1)) {
+                assert_eq!(before.height, after.height);
+                assert_eq!(before.keys.len(), after.keys.len());
+                for (before, after) in before.keys.iter().zip(&after.keys) {
+                    assert_eq!(before.plain, after.plain);
+                    assert_eq!(before.weight, after.weight);
+                    assert!(before.action == after.action);
+                }
+            }
+            assert!(
+                function
+                    .last()
+                    .unwrap()
+                    .keys
+                    .iter()
+                    .any(|key| key.action == Action::ToggleFunction)
+            );
+        }
+    }
+
+    #[test]
+    fn tools_preference_survives_close_and_reactivation_but_fn_is_transient() {
+        let mut layer = Layer::Tools;
+        layer = layer.toggle_function();
+        assert!(layer == Layer::Function);
+        layer = layer.toggle_function();
+        assert!(layer == Layer::Tools);
+        layer = layer.toggle_function().for_activation();
+        assert!(layer == Layer::Tools);
+        assert!(layer.for_activation() == Layer::Tools);
+        assert!(Layer::Letters.for_activation() == Layer::Letters);
+        assert!(Layer::Symbols.for_activation() == Layer::Letters);
+    }
 
     #[test]
     fn symbol_pages_have_bottom_abc_shortcuts_and_bidirectional_page_switches() {
@@ -482,6 +616,7 @@ mod tests {
                     Layer::Letters,
                     Layer::Symbols,
                     Layer::MoreSymbols,
+                    Layer::Tools,
                     Layer::Function,
                 ] {
                     let rows = rows(numeric, layer);
@@ -522,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn default_is_four_rows_with_terminal_controls_only_in_function_layer() {
+    fn default_is_four_rows_with_terminal_controls_only_in_tools_layer() {
         let letters = rows(false, Layer::Letters);
         assert_eq!(letters.len(), 4);
         for (row, expected) in letters.iter().zip(["qwertyuiop", "asdfghjkl", "zxcvbnm"]) {
@@ -541,7 +676,7 @@ mod tests {
                 assert_eq!(layout.len(), 4);
                 assert!(
                     keys.iter()
-                        .any(|key| key.action == Action::SetLayer(Layer::Function))
+                        .any(|key| key.action == Action::SetLayer(Layer::Tools))
                 );
                 assert!(!keys.iter().any(|key| matches!(
                     key.action,
@@ -559,6 +694,7 @@ mod tests {
                 Layer::Letters,
                 Layer::Symbols,
                 Layer::MoreSymbols,
+                Layer::Tools,
                 Layer::Function,
             ] {
                 for row in rows(numeric, layer) {
@@ -577,8 +713,8 @@ mod tests {
     }
 
     #[test]
-    fn function_layer_keeps_shortcuts_and_a_clear_exit_available() {
-        let layout = rows(false, Layer::Function);
+    fn tools_layer_keeps_shortcuts_and_a_clear_exit_available() {
+        let layout = rows(false, Layer::Tools);
         let keys: Vec<_> = layout.iter().flat_map(|row| &row.keys).collect();
         for action in [
             Action::Modifier(input_panel::CTRL),

@@ -104,6 +104,8 @@ pub mod capabilities {
     /// Shell registration may opt into menus up to MAX_MENU_TITLES_BYTES.
     /// Legacy registration and ordinary clients retain the 2048-byte limit.
     pub const FULL_APP_MENUS: u64 = 1 << 18;
+    /// Explicit keyboard close can notify opted-in editors to release focus.
+    pub const TEXT_INPUT_DISMISS: u64 = 1 << 20;
     /// Separate next-encode credits from legacy commit/presentation callbacks.
     pub const FRAME_CREDITS: u64 = 1 << 19;
 }
@@ -498,6 +500,8 @@ pub mod client_msg {
     pub const INPUT_PANEL_REGISTER: u32 = 240;
     pub const INPUT_PANEL_SET_VISIBLE: u32 = 241;
     pub const INPUT_PANEL_KEY: u32 = 242;
+    pub const INPUT_PANEL_DISMISS: u32 = 243;
+    pub const TEXT_INPUT_ACCEPT_DISMISS: u32 = 244;
 }
 
 /// Message type IDs (server -> client).
@@ -573,6 +577,7 @@ pub mod server_msg {
     pub const INPUT_PANEL_REGISTERED: u32 = 240;
     pub const INPUT_PANEL_CONTEXT: u32 = 241;
     pub const INPUT_PANEL_OCCLUSION: u32 = 242;
+    pub const TEXT_INPUT_DISMISSED: u32 = 243;
     pub const IME_REGISTERED: u32 = 220;
     pub const IME_ACTIVATE: u32 = 221;
     pub const IME_DEACTIVATE: u32 = 222;
@@ -1684,6 +1689,9 @@ pub enum ClientMessageRef<'a> {
     TextInputDisable {
         context_id: u32,
     },
+    TextInputAcceptDismiss {
+        context_id: u32,
+    },
     TextInputSetCursorRect {
         context_id: u32,
         x: i32,
@@ -1874,6 +1882,10 @@ pub enum ServerMessage {
         after_bytes: u32,
     },
     TextInputDone {
+        context_id: u32,
+        serial: u32,
+    },
+    TextInputDismissed {
         context_id: u32,
         serial: u32,
     },
@@ -3056,6 +3068,14 @@ pub fn parse_client_message<'a>(
                 context_id: read_u32(payload, 0)?,
             })
         }
+        client_msg::TEXT_INPUT_ACCEPT_DISMISS => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputAcceptDismiss {
+                context_id: read_u32(payload, 0)?,
+            })
+        }
         client_msg::TEXT_INPUT_SET_CURSOR_RECT => {
             if payload.len() != 20 {
                 return Err(ProtocolError::MalformedPayload);
@@ -3126,6 +3146,7 @@ pub fn parse_client_message<'a>(
         client_msg::INPUT_PANEL_REGISTER
         | client_msg::INPUT_PANEL_SET_VISIBLE
         | client_msg::INPUT_PANEL_KEY
+        | client_msg::INPUT_PANEL_DISMISS
         | client_msg::TEXT_INPUT_SHOW_PANEL => {
             input_panel::Request::parse(msg_type, payload).map(ClientMessageRef::InputPanel)
         }
@@ -3570,6 +3591,15 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ServerMessage::TextInputDone {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+            })
+        }
+        server_msg::TEXT_INPUT_DISMISSED => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::TextInputDismissed {
                 context_id: read_u32(payload, 0)?,
                 serial: read_u32(payload, 4)?,
             })

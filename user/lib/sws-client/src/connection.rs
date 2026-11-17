@@ -1005,6 +1005,7 @@ impl TransportState {
             | Event::TextInputCommit { context_id, .. }
             | Event::TextInputDeleteSurroundingText { context_id, .. }
             | Event::TextInputDone { context_id, .. }
+            | Event::TextInputDismissed { context_id, .. }
             | Event::TextInputStatus { context_id, .. }
             | Event::ImeDeactivate { context_id, .. }
             | Event::ImeReset { context_id, .. }
@@ -1389,6 +1390,18 @@ impl Connection {
         self.send_message(protocol::client_msg::TEXT_INPUT_DISABLE, &payload)
     }
 
+    /// Opt this editor into explicit keyboard-close focus notifications.
+    /// Older compositors keep their hide-only behavior.
+    pub fn accept_text_input_dismissal(&self, context_id: u32) -> Result<(), Error> {
+        if self.get_capabilities()?.capabilities & protocol::capabilities::TEXT_INPUT_DISMISS == 0 {
+            return Ok(());
+        }
+        self.send_message(
+            protocol::client_msg::TEXT_INPUT_ACCEPT_DISMISS,
+            &context_id.to_le_bytes(),
+        )
+    }
+
     pub fn set_text_input_cursor_rect(
         &self,
         context_id: u32,
@@ -1466,6 +1479,21 @@ impl Connection {
             context_id: context.context_id,
             generation: context.generation,
             visible,
+        }
+        .encode();
+        self.send_message(kind, &payload)
+    }
+    /// Explicitly close the keyboard and blur the current text-input context.
+    pub fn dismiss_input_panel(
+        &self,
+        context: protocol::input_panel::Context,
+    ) -> Result<(), Error> {
+        if self.get_capabilities()?.capabilities & protocol::capabilities::TEXT_INPUT_DISMISS == 0 {
+            return self.set_input_panel_visible(context, false);
+        }
+        let (kind, payload) = protocol::input_panel::Request::Dismiss {
+            context_id: context.context_id,
+            generation: context.generation,
         }
         .encode();
         self.send_message(kind, &payload)
@@ -2966,6 +2994,10 @@ impl TransportState {
             }
             ServerMessage::TextInputDone { context_id, serial } => {
                 self.push_event(Event::TextInputDone { context_id, serial });
+                true
+            }
+            ServerMessage::TextInputDismissed { context_id, serial } => {
+                self.push_event(Event::TextInputDismissed { context_id, serial });
                 true
             }
             ServerMessage::TextInputStatus {

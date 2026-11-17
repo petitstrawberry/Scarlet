@@ -93,6 +93,11 @@ pub enum Request {
         generation: u32,
         visible: bool,
     },
+    /// Explicit close: hide the panel and release the addressed editor's focus.
+    Dismiss {
+        context_id: u32,
+        generation: u32,
+    },
     Key {
         context_id: u32,
         generation: u32,
@@ -106,6 +111,10 @@ impl Request {
         match self {
             Self::Show { context_id } => (TEXT_INPUT_SHOW_PANEL, words(&[context_id])),
             Self::Register { window_id } => (INPUT_PANEL_REGISTER, words(&[window_id])),
+            Self::Dismiss {
+                context_id,
+                generation,
+            } => (INPUT_PANEL_DISMISS, words(&[context_id, generation])),
             Self::SetVisible {
                 context_id,
                 generation,
@@ -138,6 +147,13 @@ impl Request {
                 exact(bytes, 4)?;
                 Ok(Self::Register {
                     window_id: read_u32(bytes, 0)?,
+                })
+            }
+            INPUT_PANEL_DISMISS => {
+                exact(bytes, 8)?;
+                Ok(Self::Dismiss {
+                    context_id: read_u32(bytes, 0)?,
+                    generation: read_u32(bytes, 4)?,
                 })
             }
             INPUT_PANEL_SET_VISIBLE => {
@@ -185,6 +201,43 @@ fn words(values: &[u32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_dismissal_round_trips_and_rejects_truncated_or_extra_words() {
+        let request = Request::Dismiss {
+            context_id: 7,
+            generation: 9,
+        };
+        let (kind, payload) = request.encode();
+        assert_eq!(Request::parse(kind, &payload), Ok(request));
+        for size in [0, 4, 7, 9, 12] {
+            assert!(Request::parse(kind, &vec![0; size]).is_err());
+        }
+        let mut notification = 7u32.to_le_bytes().to_vec();
+        notification.extend_from_slice(&12u32.to_le_bytes());
+        assert!(matches!(
+            crate::parse_server_message(crate::server_msg::TEXT_INPUT_DISMISSED, &notification),
+            Ok(crate::ServerMessage::TextInputDismissed {
+                context_id: 7,
+                serial: 12
+            })
+        ));
+        notification.push(0);
+        assert!(
+            crate::parse_server_message(crate::server_msg::TEXT_INPUT_DISMISSED, &notification)
+                .is_err()
+        );
+        assert!(matches!(
+            crate::parse_client_message(
+                crate::client_msg::TEXT_INPUT_ACCEPT_DISMISS,
+                &7u32.to_le_bytes()
+            ),
+            Ok(crate::ClientMessageRef::TextInputAcceptDismiss { context_id: 7 })
+        ));
+        assert!(
+            crate::parse_client_message(crate::client_msg::TEXT_INPUT_ACCEPT_DISMISS, &[0; 8])
+                .is_err()
+        );
+    }
     #[test]
     fn rejects_buttons_unknown_modifiers_and_trailing_bytes() {
         for request in [

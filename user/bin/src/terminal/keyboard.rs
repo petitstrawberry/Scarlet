@@ -1,11 +1,57 @@
 //! Encode UI keyboard events for the PTY. View-only actions stay in TerminalApp.
 use scarlet_ui::{KeyCode, KeyEvent};
 
+pub(super) fn font_size_delta(event: KeyEvent) -> Option<f32> {
+    let KeyEvent::Pressed { keycode, modifiers } = event else {
+        return None;
+    };
+    if !modifiers.control || !modifiers.shift || modifiers.alt || modifiers.super_key {
+        return None;
+    }
+    match keycode {
+        KeyCode::Char('=' | '+') => Some(1.0),
+        KeyCode::Char('-' | '_') => Some(-1.0),
+        _ => None,
+    }
+}
+
 pub(super) fn write_key(event: KeyEvent, mut write: impl FnMut(&[u8])) -> bool {
     match event {
         KeyEvent::Char { c } => {
             let mut encoded = [0u8; 4];
             write(c.encode_utf8(&mut encoded).as_bytes());
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::F(number),
+            modifiers,
+        } => {
+            let mut encoded = [0u8; 8];
+            let parameter = 1
+                + u8::from(modifiers.shift)
+                + 2 * u8::from(modifiers.alt)
+                + 4 * u8::from(modifiers.control);
+            let (prefix, suffix): (&[u8], u8) = match number {
+                1..=4 if parameter == 1 => (b"\x1bO", b'P' + number - 1),
+                1..=4 => (b"\x1b[1", b'P' + number - 1),
+                5 => (b"\x1b[15", b'~'),
+                6 => (b"\x1b[17", b'~'),
+                7 => (b"\x1b[18", b'~'),
+                8 => (b"\x1b[19", b'~'),
+                9 => (b"\x1b[20", b'~'),
+                10 => (b"\x1b[21", b'~'),
+                11 => (b"\x1b[23", b'~'),
+                12 => (b"\x1b[24", b'~'),
+                _ => return false,
+            };
+            encoded[..prefix.len()].copy_from_slice(prefix);
+            let mut length = prefix.len();
+            if parameter != 1 {
+                encoded[length] = b';';
+                encoded[length + 1] = b'0' + parameter;
+                length += 2;
+            }
+            encoded[length] = suffix;
+            write(&encoded[..length + 1]);
         }
         KeyEvent::Pressed { keycode, modifiers }
             if modifiers.control && !modifiers.super_key && control_byte(keycode).is_some() =>
@@ -34,10 +80,6 @@ pub(super) fn write_key(event: KeyEvent, mut write: impl FnMut(&[u8])) -> bool {
             KeyCode::End => write(b"\x1b[F"),
             KeyCode::Insert => write(b"\x1b[2~"),
             KeyCode::Delete => write(b"\x1b[3~"),
-            KeyCode::F(1) => write(b"\x1bOP"),
-            KeyCode::F(2) => write(b"\x1bOQ"),
-            KeyCode::F(3) => write(b"\x1bOR"),
-            KeyCode::F(4) => write(b"\x1bOS"),
             _ => return false,
         },
         KeyEvent::Released { .. } => {}

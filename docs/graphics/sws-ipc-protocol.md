@@ -1499,9 +1499,12 @@ keyboard focus, and is docked at the bottom of the output.
 | Panel → SWS | 240 | INPUT_PANEL_REGISTER | window_id: u32 |
 | Panel → SWS | 241 | INPUT_PANEL_SET_VISIBLE | context_id, generation, visible: u32 |
 | Panel → SWS | 242 | INPUT_PANEL_KEY | context_id, generation, key_code, modifiers: u32 |
+| Panel → SWS | 243 | INPUT_PANEL_DISMISS | context_id, generation: u32 |
+| Editor → SWS | 244 | TEXT_INPUT_ACCEPT_DISMISS | context_id: u32 |
 | SWS → Panel | 240 | INPUT_PANEL_REGISTERED | accepted: u32 (0 or 1), routed response |
 | SWS → Panel | 241 | INPUT_PANEL_CONTEXT | context_id, window_id, generation, content_hint, content_purpose: u32 |
 | SWS → Editor | 242 | INPUT_PANEL_OCCLUSION | window_id: u32, x/y: i32, width/height: u32 |
+| SWS → Editor | 243 | TEXT_INPUT_DISMISSED | context_id, serial: u32 |
 
 All fields are little-endian; fixed payload sizes and boolean/modifier values
 are validated. `context_id = 0` means no active editor. The activation generation
@@ -1526,12 +1529,26 @@ rectangles use output coordinates; zero size means hidden. Focused-layout and
 maximized application windows are reconfigured above the panel. Other clients
 can use the notification for their own scrolling/viewport policy.
 
+Capability `TEXT_INPUT_DISMISS` (bit 20) adds explicit close with editor blur.
+Editors opt in through `TEXT_INPUT_ACCEPT_DISMISS`; legacy editors keep the
+hide-only behavior. `INPUT_PANEL_DISMISS` is revalidated on the compositor
+thread against the provider, activation generation and focused window. SWS
+disables that text-input context and sends `TEXT_INPUT_DISMISSED` to its owner;
+ScarletUI clears only the editor's focus and caret, keeping the window active.
+Automatic hides still use `INPUT_PANEL_SET_VISIBLE(false)` without blurring.
+The context/serial prevents a queued dismissal from blurring a newer editor.
+
 The desktop bundle starts `/bin/soft-keyboard`. It opens for active editors on
 touch devices, supports QWERTY and numeric layouts, one-shot Shift, toggled Ctrl
-and Alt, cursor keys, and the IME toggle key. Ctrl/Alt remain selected across
-Fn/letter/symbol page changes until toggled off, hidden, or the editor activation
-changes. Hiding it keeps the editor active. ScarletUI requests it again when a
-touch activates a text editor.
+and Alt, cursor keys, and the IME toggle key. The dots icon opens the tools
+layout. Its Fn toggle replaces the existing toolbar with F1–F12 without adding
+a row. Ctrl/Alt can be combined with these function keys. The tools layout's
+on/off preference survives closing and reopening the keyboard; transient Fn
+and modifier selections reset on close or editor activation changes. Ctrl/Alt
+remain selected across letter/symbol/tools page changes. Explicit close blurs
+the input field; touching it again focuses the editor and reopens the panel.
+Terminal sends all twelve function keys (including modifier chords) to the PTY;
+font size uses Ctrl+Shift+Plus/Minus instead of consuming F11/F12.
 
 ### Atomic extension surface scenes (protocol version 12)
 

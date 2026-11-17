@@ -75,8 +75,13 @@ mod panel {
             let context = self.context;
             let action = self.action;
             let clock = self.clock;
-            let button = if action == Action::Hide {
-                Button::icon_only(Icon::KeyboardHide)
+            let icon = match action {
+                Action::Hide => Some(Icon::KeyboardHide),
+                Action::SetLayer(Layer::Tools) => Some(Icon::Dots),
+                _ => None,
+            };
+            let button = if let Some(icon) = icon {
+                Button::icon_only(icon)
                     .icon_size(IconSize::Medium)
                     .icon_color(self.text_color)
             } else {
@@ -198,7 +203,8 @@ mod panel {
                     } else {
                         key.plain
                     };
-                    let active = matches!(key.action,Action::Modifier(flag) if modifiers & flag!=0);
+                    let active = matches!(key.action,Action::Modifier(flag) if modifiers & flag!=0)
+                        || (key.action == Action::ToggleFunction && layer == Layer::Function);
                     let (background, text_color) = if active {
                         (Color::rgb(224, 225, 229), Color::rgb(28, 29, 33))
                     } else {
@@ -214,7 +220,7 @@ mod panel {
                     let width = unit * key.weight;
                     let font_size = if row.height < 0.8 {
                         (row_height * 0.32).clamp(12.0, 16.0)
-                    } else if label.chars().count() > 2 {
+                    } else if label.chars().count() > 2 || key.action == Action::ToggleFunction {
                         (row_height * 0.25).clamp(14.0, 19.0)
                     } else {
                         (row_height * 0.41).clamp(20.0, 30.0)
@@ -358,7 +364,7 @@ mod panel {
                                 replace_tree = true;
                                 visible = false;
                                 modifiers = Modifiers::default();
-                                layer = Layer::Letters;
+                                layer = layer.for_activation();
                                 dismissed = None;
                                 pending_actions.borrow_mut().clear();
                                 held_keys.clear();
@@ -497,16 +503,22 @@ mod panel {
                         modifiers.change_layer();
                         rebuild = true;
                     }
+                    Action::ToggleFunction => {
+                        held_keys.clear();
+                        layer = layer.toggle_function();
+                        rebuild = true;
+                    }
                     Action::Hide => {
                         replace_tree = true;
                         held_keys.clear();
                         window
                             .connection()
-                            .set_input_panel_visible(context, false)
+                            .dismiss_input_panel(context)
                             .map_err(|error| format!("{error:?}"))?;
                         dismissed = Some(context.generation);
                         visible = false;
                         modifiers = Modifiers::default();
+                        layer = layer.for_activation();
                         pending_actions.borrow_mut().clear();
                         rebuild = true;
                     }

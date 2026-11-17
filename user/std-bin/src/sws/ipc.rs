@@ -143,6 +143,7 @@ struct TextInputContext {
     window_id: u32,
     seat_id: u32,
     enabled: bool,
+    accepts_dismissal: bool,
     keyboard_grabbed: bool,
     serial: u32,
     pending: TextInputState,
@@ -704,6 +705,7 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::GAMEPAD_INPUT
         | protocol::capabilities::TOUCH_INPUT
         | protocol::capabilities::INPUT_PANEL
+        | protocol::capabilities::TEXT_INPUT_DISMISS
         | protocol::capabilities::SURFACE_SCENES
         | protocol::capabilities::TEXT_CLIPBOARD
         | protocol::capabilities::FULL_APP_MENUS;
@@ -1417,6 +1419,39 @@ pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
 pub fn input_panel_state() -> super::input_panel::Panel {
     *INPUT_PANEL.lock().expect("SWS input panel mutex poisoned")
 }
+/// Only an explicit, current close request blurs the editor. Automatic hides
+/// (posture, hotplug, provider loss) retain the editor's focus.
+pub(super) fn dismiss_input_panel(
+    client_id: usize,
+    context_id: u32,
+    generation: u32,
+    focused_window: Option<u32>,
+) {
+    if !input_panel_state().can_dismiss(client_id, context_id, generation, focused_window) {
+        return;
+    }
+    let Some(context) = text_input_context(context_id) else {
+        return;
+    };
+    if !context.accepts_dismissal {
+        if INPUT_PANEL
+            .lock()
+            .expect("SWS input panel mutex poisoned")
+            .show(client_id, context_id, generation, false)
+        {
+            push_ipc_event(IpcEvent::InputPanelChanged);
+        }
+        return;
+    }
+    set_text_input_enabled(context.client_id, context_id, false);
+    let mut payload = context_id.to_le_bytes().to_vec();
+    payload.extend_from_slice(&context.serial.to_le_bytes());
+    send_message_to_client(
+        context.client_id,
+        protocol::server_msg::TEXT_INPUT_DISMISSED,
+        payload,
+    );
+}
 fn update_input_panel_context(context: Option<&TextInputContext>) {
     let state = context.map_or_else(protocol::input_panel::Context::default, |context| {
         protocol::input_panel::Context {
@@ -1604,6 +1639,7 @@ fn create_text_input_context(client_id: usize, window_id: u32, seat_id: u32) -> 
         window_id,
         seat_id,
         enabled: false,
+        accepts_dismissal: false,
         keyboard_grabbed: false,
         serial: 1,
         pending: TextInputState::new(),
@@ -4441,6 +4477,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             Ok(ClientMessageRef::TextInputDisable { context_id }) => {
                 set_text_input_enabled(client_id, context_id, false);
             }
+            Ok(ClientMessageRef::TextInputAcceptDismiss { context_id }) => {
+                if let Some(context) = TEXT_INPUT_CONTEXTS
+                    .lock()
+                    .expect("SWS mutex poisoned")
+                    .get_mut(&context_id)
+                    && context.client_id == client_id
+                {
+                    context.accepts_dismissal = true;
+                }
+            }
             Ok(ClientMessageRef::TextInputSetCursorRect {
                 context_id,
                 x,
@@ -4510,6 +4556,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             Ok(ClientMessageRef::InputPanel(request)) => {
                 use protocol::input_panel::Request;
                 match request {
+                    Request::Dismiss {
+                        context_id,
+                        generation,
+                    } => {
+                        push_ipc_event(IpcEvent::InputPanelDismiss {
+                            client_id,
+                            context_id,
+                            generation,
+                        });
+                    }
                     Request::Show { context_id } => {
                         if text_input_context(context_id).is_some_and(|context| {
                             context.client_id == client_id && context.enabled
@@ -4772,6 +4828,11 @@ pub enum IpcEvent {
         request_id: u8,
     },
     InputPanelChanged,
+    InputPanelDismiss {
+        client_id: usize,
+        context_id: u32,
+        generation: u32,
+    },
     InputPanelKey {
         client_id: usize,
         context_id: u32,

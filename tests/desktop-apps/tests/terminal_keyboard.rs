@@ -145,15 +145,87 @@ fn alt_control_prefixes_escape_and_view_shortcuts_do_not_write() {
         |bytes| sent.extend_from_slice(bytes),
     );
     assert_eq!(sent, b"\x1b\x03");
-    for key in [
-        KeyCode::PageUp,
-        KeyCode::PageDown,
-        KeyCode::F(11),
-        KeyCode::F(12),
-    ] {
+    for key in [KeyCode::PageUp, KeyCode::PageDown] {
         assert!(!keyboard::write_key(
             press(key, KeyModifiers::default()),
             |_| panic!("view action wrote to PTY")
         ));
     }
+}
+
+#[test]
+fn all_function_keys_reach_the_pty_including_f11_and_f12() {
+    for (index, expected) in [
+        b"\x1bOP".as_slice(),
+        b"\x1bOQ",
+        b"\x1bOR",
+        b"\x1bOS",
+        b"\x1b[15~",
+        b"\x1b[17~",
+        b"\x1b[18~",
+        b"\x1b[19~",
+        b"\x1b[20~",
+        b"\x1b[21~",
+        b"\x1b[23~",
+        b"\x1b[24~",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let event = press(KeyCode::F(index as u8 + 1), KeyModifiers::default());
+        assert_eq!(keyboard::font_size_delta(event), None);
+        let mut sent = Vec::new();
+        assert!(keyboard::write_key(event, |bytes| sent.extend_from_slice(bytes)));
+        assert_eq!(sent, expected);
+    }
+    let mut sent = Vec::new();
+    keyboard::write_key(
+        press(
+            KeyCode::F(5),
+            KeyModifiers {
+                control: true,
+                ..Default::default()
+            },
+        ),
+        |bytes| sent.extend_from_slice(bytes),
+    );
+    keyboard::write_key(
+        press(
+            KeyCode::F(1),
+            KeyModifiers {
+                shift: true,
+                alt: true,
+                ..Default::default()
+            },
+        ),
+        |bytes| sent.extend_from_slice(bytes),
+    );
+    assert_eq!(sent, b"\x1b[15;5~\x1b[1;4P");
+}
+
+#[test]
+fn font_size_shortcuts_use_ctrl_shift_plus_and_minus() {
+    let modifiers = KeyModifiers {
+        control: true,
+        shift: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        keyboard::font_size_delta(press(KeyCode::Char('='), modifiers)),
+        Some(1.0)
+    );
+    assert_eq!(
+        keyboard::font_size_delta(press(KeyCode::Char('-'), modifiers)),
+        Some(-1.0)
+    );
+    assert_eq!(
+        keyboard::font_size_delta(press(
+            KeyCode::Char('-'),
+            KeyModifiers {
+                shift: false,
+                ..modifiers
+            }
+        )),
+        None
+    );
 }

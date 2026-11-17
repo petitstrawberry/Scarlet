@@ -142,7 +142,8 @@ impl InputEnvironment {
 
     /// Return whether an external keyboard is connected.
     pub const fn has_external_keyboard(self) -> bool {
-        self.capability_flags & sws_protocol::input_environment_capability_flags::EXTERNAL_KEYBOARD != 0
+        self.capability_flags & sws_protocol::input_environment_capability_flags::EXTERNAL_KEYBOARD
+            != 0
     }
 
     /// Automatic input panels require tablet posture and no external keyboard.
@@ -232,6 +233,8 @@ pub enum Event {
     },
     /// End of a text-input update batch.
     TextInputDone { context_id: u32, serial: u32 },
+    /// The software keyboard was explicitly closed; blur this input context.
+    TextInputDismissed { context_id: u32, serial: u32 },
     /// IME status for a text-input context.
     TextInputStatus {
         context_id: u32,
@@ -476,8 +479,10 @@ mod tests {
 
     #[test]
     fn input_panel_tracks_posture_and_external_keyboard_hotplug() {
-        use sws_protocol::{input_environment_capability_flags as caps,
-            input_environment_known_flags as known, input_environment_state_flags as state};
+        use sws_protocol::{
+            input_environment_capability_flags as caps, input_environment_known_flags as known,
+            input_environment_state_flags as state,
+        };
         let mut environment = InputEnvironment {
             generation: 1,
             known_flags: known::TABLET_MODE,

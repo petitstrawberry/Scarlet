@@ -95,6 +95,17 @@ impl Panel {
             && self.context.context_id == context
             && self.context.generation == generation
     }
+    pub(super) fn can_dismiss(
+        &self,
+        client: usize,
+        context: u32,
+        generation: u32,
+        focused_window: Option<u32>,
+    ) -> bool {
+        self.visible
+            && self.accepts(client, context, generation)
+            && focused_window == Some(self.context.window_id)
+    }
     pub(super) fn key_action(
         &self,
         client: usize,
@@ -104,10 +115,7 @@ impl Panel {
         code: u16,
         modifiers: u32,
     ) -> Option<KeyAction> {
-        if !self.visible
-            || !self.accepts(client, context, generation)
-            || focused_window != Some(self.context.window_id)
-        {
+        if !self.can_dismiss(client, context, generation, focused_window) {
             return None;
         }
         // The panel's A/あ button is an explicit IME request, independent of

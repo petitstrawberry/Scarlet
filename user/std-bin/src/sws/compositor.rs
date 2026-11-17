@@ -12215,6 +12215,18 @@ impl Compositor {
                 super::ipc::register_input_panel(client_id, window_id, request_id, valid);
             }
             IpcEvent::InputPanelChanged => self.refresh_input_panel(),
+            IpcEvent::InputPanelDismiss {
+                client_id,
+                context_id,
+                generation,
+            } => {
+                super::ipc::dismiss_input_panel(
+                    client_id,
+                    context_id,
+                    generation,
+                    self.window_manager.get_focused_window_id(),
+                );
+            }
             IpcEvent::InputPanelKey {
                 client_id,
                 context_id,

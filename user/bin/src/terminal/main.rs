@@ -99,6 +99,7 @@ struct TerminalApp {
     window_size: Arc<Mutex<(u32, u32)>>,
     text_input: Arc<Mutex<Option<TerminalTextInput>>>,
     show_input_panel: Arc<AtomicBool>,
+    input_focused: State<bool>,
     preedit: Arc<Mutex<Option<TerminalPreedit>>>,
     child_task: Arc<OwnedChildTask>,
 }
@@ -122,6 +123,7 @@ impl TerminalApp {
             window_size: Arc::new(Mutex::new((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))),
             text_input: Arc::new(Mutex::new(None)),
             show_input_panel: Arc::new(AtomicBool::new(false)),
+            input_focused: State::new(StateId::new(4), true),
             preedit: Arc::new(Mutex::new(None)),
             child_task: Arc::new(OwnedChildTask::new()),
         }
@@ -315,7 +317,13 @@ impl View for TerminalApp {
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn scarlet_ui::Listenable> {
-        vec![&self.grid, &self.cursor, &self.metrics, &self.keyboard_pan]
+        vec![
+            &self.grid,
+            &self.cursor,
+            &self.metrics,
+            &self.keyboard_pan,
+            &self.input_focused,
+        ]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -333,6 +341,10 @@ impl Application for TerminalApp {
         let window_size = self.window_size.clone();
         let preedit = self.preedit.clone();
         let show_input_panel = self.show_input_panel.clone();
+        let input_focused = self.input_focused.clone();
+        let click_focus = self.input_focused.clone();
+        let mut terminal_cursor = self.cursor.get();
+        terminal_cursor.visible &= self.input_focused.get();
         let metrics = self.metrics.get();
         let mut text_grid = TextGrid::new(self.grid.clone());
         if let Some(font) = typography::font_stack() {
@@ -343,7 +355,7 @@ impl Application for TerminalApp {
             Window::new(
                 "Terminal",
                 viewport::TerminalViewport {
-                    caret: self.cursor.get().visible.then(|| {
+                    caret: (self.input_focused.get() && self.cursor.get().visible).then(|| {
                         Rect::from_xywh(
                             self.cursor.get().column as f32 * metrics.cell_width,
                             self.cursor.get().row as f32 * metrics.cell_height,
@@ -356,9 +368,12 @@ impl Application for TerminalApp {
                         .cell_size(metrics.cell_width, metrics.cell_height)
                         .font_size(metrics.font_size)
                         .background_color(Color::rgb(12, 14, 18))
-                        .cursor(Some(self.cursor.get()))
+                        .cursor(Some(terminal_cursor))
                         .cursor_color(Color::rgba_f32(0.85, 0.92, 1.0, 0.8))
                         .on_key(move |event| {
+                            if !input_focused.get() {
+                                return false;
+                            }
                             write_key_event(
                                 &writer,
                                 &screen,
@@ -370,7 +385,10 @@ impl Application for TerminalApp {
                                 event,
                             )
                         })
-                        .on_click(move || show_input_panel.store(true, Ordering::Release))
+                        .on_click(move || {
+                            click_focus.set(true);
+                            show_input_panel.store(true, Ordering::Release);
+                        })
                         .frame(f32::INFINITY, f32::INFINITY),
                 },
             )
@@ -406,6 +424,9 @@ impl Application for TerminalApp {
             serial,
             last_cursor_rect: None,
         });
+        let _ = window
+            .connection_mut()
+            .accept_text_input_dismissal(context_id);
 
         self.refresh_text_input_state(window);
 
@@ -452,6 +473,17 @@ impl Application for TerminalApp {
         self.clear_preedit();
         println!("[terminal] text-input commit: {}", text);
         write_bytes(&self.master_writer, text.as_bytes());
+    }
+
+    fn on_text_input_dismissed(&mut self, _ctx: &WindowContext, context_id: u32, _serial: u32) {
+        if self
+            .text_input
+            .lock()
+            .is_some_and(|input| input.context_id == context_id)
+        {
+            self.input_focused.set(false);
+            self.clear_preedit();
+        }
     }
 
     fn on_text_input_preedit(
@@ -517,6 +549,9 @@ impl Application for TerminalApp {
         if self.show_input_panel.swap(false, Ordering::AcqRel)
             && let Some(text_input) = *self.text_input.lock()
         {
+            let _ = window
+                .connection_mut()
+                .enable_text_input(text_input.context_id);
             let _ = window
                 .connection_mut()
                 .show_text_input_panel(text_input.context_id);
@@ -676,6 +711,19 @@ fn write_key_event(
     preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
     event: KeyEvent,
 ) -> bool {
+    if let Some(delta) = keyboard::font_size_delta(event) {
+        adjust_font_size(
+            metrics,
+            screen,
+            grid,
+            cursor,
+            writer,
+            window_size,
+            preedit,
+            delta,
+        );
+        return true;
+    }
     if keyboard::write_key(event, |bytes| write_bytes(writer, bytes)) {
         return true;
     }
@@ -684,26 +732,6 @@ fn write_key_event(
             match keycode {
                 KeyCode::PageUp => scroll_view(screen, grid, cursor, preedit, 10),
                 KeyCode::PageDown => scroll_view(screen, grid, cursor, preedit, -10),
-                KeyCode::F(11) => adjust_font_size(
-                    metrics,
-                    screen,
-                    grid,
-                    cursor,
-                    writer,
-                    window_size,
-                    preedit,
-                    -1.0,
-                ),
-                KeyCode::F(12) => adjust_font_size(
-                    metrics,
-                    screen,
-                    grid,
-                    cursor,
-                    writer,
-                    window_size,
-                    preedit,
-                    1.0,
-                ),
                 _ => {}
             }
             true
