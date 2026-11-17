@@ -3,7 +3,7 @@
 //! This module implements the VfsNode trait for FAT32 filesystem nodes.
 //! It provides the interface between the VFS layer and FAT32-specific node data.
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -40,8 +40,8 @@ pub struct Fat32Node {
     pub metadata: IrqRwSpinLock<FileMetadata>,
     /// Child nodes (for directories) - cached, but loaded from disk on demand
     pub children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
-    /// Parent node (weak reference to avoid cycles)
-    pub parent: IrqRwSpinLock<Option<Weak<Fat32Node>>>,
+    /// On-disk parent directory, retained across independently opened nodes.
+    pub parent_cluster: IrqRwSpinLock<u32>,
     /// Reference to filesystem
     pub filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Starting cluster number in FAT32
@@ -58,10 +58,7 @@ impl Debug for Fat32Node {
             .field("metadata", &self.metadata.read())
             .field("cluster", &self.cluster.read())
             .field("children_loaded", &self.children_loaded.read())
-            .field(
-                "parent",
-                &self.parent.read().as_ref().map(|p| p.strong_count()),
-            )
+            .field("parent_cluster", &self.parent_cluster.read())
             .finish()
     }
 }
@@ -87,7 +84,7 @@ impl Fat32Node {
                 link_count: 1,
             }),
             children: IrqRwSpinLock::new(BTreeMap::new()),
-            parent: IrqRwSpinLock::new(None),
+            parent_cluster: IrqRwSpinLock::new(0),
             filesystem: IrqRwSpinLock::new(None),
             cluster: IrqRwSpinLock::new(cluster),
             children_loaded: IrqRwSpinLock::new(false),
@@ -114,16 +111,11 @@ impl Fat32Node {
                 link_count: 1,
             }),
             children: IrqRwSpinLock::new(BTreeMap::new()),
-            parent: IrqRwSpinLock::new(None),
+            parent_cluster: IrqRwSpinLock::new(0),
             filesystem: IrqRwSpinLock::new(None),
             cluster: IrqRwSpinLock::new(cluster),
             children_loaded: IrqRwSpinLock::new(false),
         }
-    }
-
-    /// Set the parent node (weak reference)
-    pub fn set_parent(&self, parent: Option<Weak<Fat32Node>>) {
-        *self.parent.write() = parent;
     }
 
     /// Set the filesystem reference
@@ -171,7 +163,7 @@ impl Clone for Fat32Node {
             file_type: IrqRwSpinLock::new(self.file_type.read().clone()),
             metadata: IrqRwSpinLock::new(self.metadata.read().clone()),
             children: IrqRwSpinLock::new(self.children.read().clone()),
-            parent: IrqRwSpinLock::new(self.parent.read().clone()),
+            parent_cluster: IrqRwSpinLock::new(*self.parent_cluster.read()),
             filesystem: IrqRwSpinLock::new(self.filesystem.read().clone()),
             cluster: IrqRwSpinLock::new(*self.cluster.read()),
             children_loaded: IrqRwSpinLock::new(*self.children_loaded.read()),
@@ -1098,31 +1090,104 @@ impl Drop for Fat32FileObject {
 pub struct Fat32DirectoryObject {
     /// Reference to the FAT32 node
     node: Arc<Fat32Node>,
-    /// Current position in directory listing
-    position: IrqRwSpinLock<usize>,
+    // Directory I/O can block. Keep the stream cursor and snapshot serialized
+    // without disabling interrupts while reading the block device.
+    state: Mutex<DirectoryState>,
+}
+
+struct DirectoryState {
+    position: usize,
+    entries: Option<Vec<crate::fs::DirectoryEntry>>,
 }
 
 impl Fat32DirectoryObject {
     pub fn new(node: Arc<Fat32Node>) -> Self {
         Self {
             node,
-            position: IrqRwSpinLock::new(0),
+            state: Mutex::new(DirectoryState {
+                position: 0,
+                entries: None,
+            }),
         }
+    }
+
+    fn load_entries(&self, state: &mut DirectoryState) -> Result<(), StreamError> {
+        if state.entries.is_some() {
+            return Ok(());
+        }
+        let filesystem = self
+            .node
+            .filesystem()
+            .and_then(|fs| fs.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let fat32 = filesystem
+            .as_any()
+            .downcast_ref::<super::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let cluster = self.node.cluster();
+        let mut entries = Vec::new();
+        fat32
+            .read_directory_entries(
+                if cluster == 0 {
+                    fat32.root_cluster
+                } else {
+                    cluster
+                },
+                &mut entries,
+            )
+            .map_err(StreamError::from)?;
+        state.entries = Some(
+            entries
+                .iter()
+                .map(|entry| {
+                    crate::fs::DirectoryEntry::from_internal(&crate::fs::DirectoryEntryInternal {
+                        name: entry.name(),
+                        file_type: if entry.is_directory() {
+                            FileType::Directory
+                        } else {
+                            FileType::RegularFile
+                        },
+                        size: entry.size() as usize,
+                        file_id: entry.cluster() as u64,
+                        metadata: None,
+                    })
+                })
+                .collect(),
+        );
+        Ok(())
     }
 }
 
 impl Debug for Fat32DirectoryObject {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let position = self.state.lock().position;
         f.debug_struct("Fat32DirectoryObject")
             .field("node", &self.node.name.read())
-            .field("position", &self.position.read())
+            .field("position", &position)
             .finish()
     }
 }
 
 impl StreamOps for Fat32DirectoryObject {
-    fn read(&self, _buffer: &mut [u8]) -> Result<usize, StreamError> {
-        Err(StreamError::NotSupported)
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let mut state = self.state.lock();
+        self.load_entries(&mut state)?;
+        let Some(entry) = state.entries.as_ref().unwrap().get(state.position) else {
+            return Ok(0);
+        };
+        let size = entry.entry_size();
+        if buffer.len() < size {
+            return Err(StreamError::InvalidArgument);
+        }
+        // DirectoryEntry is the fixed native directory wire record. Its
+        // fields, reserved bytes and complete name buffer are initialized.
+        let bytes = unsafe { core::slice::from_raw_parts(entry as *const _ as *const u8, size) };
+        buffer[..size].copy_from_slice(bytes);
+        state.position += 1;
+        Ok(size)
     }
 
     fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
@@ -1160,29 +1225,20 @@ impl MemoryMappingOps for Fat32DirectoryObject {
 
 impl FileObject for Fat32DirectoryObject {
     fn seek(&self, from: SeekFrom) -> Result<u64, StreamError> {
-        let children = self.node.children.read();
-        let mut pos = self.position.write();
-
-        let new_pos = match from {
-            SeekFrom::Start(offset) => offset as usize,
+        let mut state = self.state.lock();
+        let position = match from {
+            SeekFrom::Start(offset) => offset as i128,
+            SeekFrom::Current(offset) => state.position as i128 + offset as i128,
             SeekFrom::End(offset) => {
-                if offset < 0 {
-                    children.len().saturating_sub((-offset) as usize)
-                } else {
-                    children.len() + offset as usize
-                }
-            }
-            SeekFrom::Current(offset) => {
-                if offset < 0 {
-                    pos.saturating_sub((-offset) as usize)
-                } else {
-                    *pos + offset as usize
-                }
+                self.load_entries(&mut state)?;
+                state.entries.as_ref().unwrap().len() as i128 + offset as i128
             }
         };
-
-        *pos = new_pos;
-        Ok(new_pos as u64)
+        state.position = usize::try_from(position).map_err(|_| StreamError::SeekError)?;
+        if matches!(from, SeekFrom::Start(0)) {
+            state.entries = None;
+        }
+        Ok(state.position as u64)
     }
 
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {

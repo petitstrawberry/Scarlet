@@ -21,7 +21,7 @@
 //! - `Fat32Driver`: Filesystem driver for registration
 //! - Data structures for FAT32 format (boot sector, directory entries, etc.)
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -78,6 +78,8 @@ pub struct Fat32FileSystem {
     next_file_id: IrqSpinLock<u64>,
     /// Cached FAT table entries
     fat_cache: IrqSpinLock<BTreeMap<u32, u32>>,
+    fat_io: Mutex<()>,
+    next_free_cluster: Mutex<u32>,
 }
 
 impl Debug for Fat32FileSystem {
@@ -119,6 +121,8 @@ impl Fat32FileSystem {
             name: "fat32".to_string(),
             next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
             fat_cache: IrqSpinLock::new(BTreeMap::new()),
+            fat_io: Mutex::new(()),
+            next_free_cluster: Mutex::new(2),
         });
 
         // Set filesystem reference in root node
@@ -216,6 +220,24 @@ impl Fat32FileSystem {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
                 "Invalid FAT32 filesystem geometry",
+            ));
+        }
+        let data_start = u64::from(boot_sector.reserved_sectors)
+            + u64::from(boot_sector.fat_count) * u64::from(boot_sector.sectors_per_fat);
+        let clusters = u64::from(boot_sector.total_sectors())
+            .checked_sub(data_start)
+            .unwrap_or(0)
+            / u64::from(boot_sector.sectors_per_cluster);
+        let fat_entries =
+            u64::from(boot_sector.sectors_per_fat) * u64::from(boot_sector.bytes_per_sector) / 4;
+        if clusters == 0
+            || clusters + 2 > fat_entries
+            || clusters + 2 >= 0x0fff_fff0
+            || u64::from(boot_sector.root_cluster) >= clusters + 2
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "FAT32 data clusters exceed volume or FAT bounds",
             ));
         }
         Ok(())
@@ -473,6 +495,12 @@ impl Fat32FileSystem {
             }
         }
 
+        // Serialize a cache miss with FAT updates so an old sector cannot
+        // overwrite a newer cached value after writeback completes.
+        let _io = self.fat_io.lock();
+        if let Some(entry) = self.fat_cache.lock().get(&cluster).copied() {
+            return Ok(entry);
+        }
         // Calculate FAT offset and sector
         let fat_offset = cluster * 4; // FAT32 uses 4 bytes per entry
         let fat_sector =
@@ -533,6 +561,7 @@ impl Fat32FileSystem {
 
     /// Write FAT entry for a given cluster
     fn write_fat_entry(&self, cluster: u32, value: u32) -> Result<(), FileSystemError> {
+        let _io = self.fat_io.lock();
         // Calculate FAT offset and sector
         let fat_offset = cluster * 4; // FAT32 uses 4 bytes per entry
         let fat_sector =
@@ -811,21 +840,6 @@ impl Fat32FileSystem {
         //     println!("[FAT32] clusters_needed={}, cluster_size={}", clusters_needed, cluster_size);
         // }
 
-        // Free existing chain if we're overwriting
-        if current_cluster != 0 {
-            // #[cfg(test)]
-            // {
-            //     use crate::println;
-            //     println!("[FAT32] freeing existing cluster chain starting from cluster {}", current_cluster);
-            // }
-            self.free_cluster_chain(current_cluster)?;
-            // #[cfg(test)]
-            // {
-            //     use crate::println;
-            //     println!("[FAT32] finished freeing cluster chain");
-            // }
-        }
-
         // Allocate new cluster chain
         let mut clusters = Vec::new();
         for cluster_index in 0..clusters_needed {
@@ -854,6 +868,12 @@ impl Fat32FileSystem {
                             e
                         );
                     }
+                    // Allocation failure must not leak a partial replacement
+                    // or destroy the file's existing chain.
+                    for &cluster in &clusters {
+                        self.write_fat_entry(cluster, 0)?;
+                    }
+                    self.update_fs_info_freed_cluster(clusters.len() as u32)?;
                     return Err(e);
                 }
             }
@@ -912,133 +932,25 @@ impl Fat32FileSystem {
         //     println!("[FAT32] write_file_content completed, start_cluster={}", clusters.first().copied().unwrap_or(0));
         // }
 
+        if current_cluster != 0 {
+            self.free_cluster_chain(current_cluster)?;
+        }
         Ok(clusters.first().copied().unwrap_or(0))
     }
 
-    /// Read FAT entry directly from disk without caching
-    fn read_fat_entry_direct(&self, cluster: u32) -> Result<u32, FileSystemError> {
-        // #[cfg(test)]
-        // {
-        //     use crate::println;
-        //     println!("[FAT32] reading FAT entry for cluster {} directly from disk", cluster);
-        // }
-
-        // Calculate FAT sector and offset
-        let fat_offset = cluster * 4; // 4 bytes per FAT32 entry
-        let fat_sector =
-            self.boot_sector.reserved_sectors as u32 + (fat_offset / self.bytes_per_sector);
-        let entry_offset = (fat_offset % self.bytes_per_sector) as usize;
-
-        // #[cfg(test)]
-        // {
-        //     use crate::println;
-        //     println!("[FAT32] fat_sector={}, entry_offset={}", fat_sector, entry_offset);
-        // }
-
-        // Read FAT sector
-        let buffer = vec![0u8; self.bytes_per_sector as usize];
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: fat_sector as usize,
-            sector_count: 1,
-            head: 0,
-            cylinder: 0,
-            buffer,
-        });
-
-        // #[cfg(test)]
-        // {
-        //     use crate::println;
-        //     println!("[FAT32] enqueuing FAT read request for sector {}", fat_sector);
-        // }
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        // #[cfg(test)]
-        // {
-        //     use crate::println;
-        //     println!("[FAT32] FAT read request completed, results.len()={}", results.len());
-        // }
-
-        if results.is_empty() || results[0].result.is_err() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "Failed to read FAT sector",
-            ));
-        }
-
-        // Get the buffer back from the result
-        let buffer = &results[0].request.buffer;
-
-        // Extract FAT entry (little-endian, mask off top 4 bits for FAT32)
-        let entry = u32::from_le_bytes([
-            buffer[entry_offset],
-            buffer[entry_offset + 1],
-            buffer[entry_offset + 2],
-            buffer[entry_offset + 3],
-        ]) & 0x0FFFFFFF;
-
-        // #[cfg(test)]
-        // {
-        //     use crate::println;
-        //     println!("[FAT32] read FAT entry for cluster {}: {:#x}", cluster, entry);
-        // }
-
-        Ok(entry)
-    }
-
-    /// Allocate a free cluster from the FAT and mark it as allocated
+    /// Allocate throughout the data region, wrapping once from a rolling hint.
     fn allocate_cluster(&self) -> Result<u32, FileSystemError> {
-        // #[cfg(test)]
-        // {
-        //     use crate::println;
-        //     println!("[FAT32] searching for free cluster...");
-        // }
-
-        // Simple allocation: find first free cluster starting from cluster 2
-        for cluster in 2..100 {
-            // Reduced search range for faster debugging
-            // #[cfg(test)]
-            // {
-            //     use crate::println;
-            //     if cluster <= 10 {
-            //         println!("[FAT32] checking cluster {}", cluster);
-            //     }
-            // }
-
-            // Read FAT entry directly without caching to avoid stale cache issues
-            let fat_entry = self.read_fat_entry_direct(cluster)?;
-
-            // #[cfg(test)]
-            // {
-            //     use crate::println;
-            //     if cluster <= 20 || fat_entry == 0 {
-            //         println!("[FAT32] cluster {} has FAT entry: {:#x}", cluster, fat_entry);
-            //     }
-            // }
-
-            if fat_entry == 0 {
-                // #[cfg(test)]
-                // {
-                //     use crate::println;
-                //     println!("[FAT32] ✓ found free cluster: {}", cluster);
-                // }
-                // Mark as allocated immediately to prevent duplicate allocation
-                self.write_fat_entry(cluster, 0x0FFFFFFF)?; // End of chain marker (will be updated later if part of chain)
-
-                // Update FS Info sector
+        let limit = self.boot_sector.cluster_count() + 2;
+        let mut hint = self.next_free_cluster.lock();
+        let start = (*hint).clamp(2, limit - 1);
+        for cluster in (start..limit).chain(2..start) {
+            if self.read_fat_entry(cluster)? == 0 {
+                self.write_fat_entry(cluster, 0x0fff_ffff)?;
+                *hint = if cluster + 1 == limit { 2 } else { cluster + 1 };
                 self.update_fs_info_allocated_cluster(cluster)?;
-
-                // #[cfg(test)]
-                // {
-                //     use crate::println;
-                //     println!("[FAT32] ✓ allocated cluster: {}", cluster);
-                // }
                 return Ok(cluster);
             }
         }
-
         Err(FileSystemError::new(
             FileSystemErrorKind::NoSpace,
             "No free clusters available",
@@ -2754,6 +2666,7 @@ impl FileSystemOperations for Fat32FileSystem {
             file_node
         };
 
+        *node.parent_cluster.write() = starting_cluster;
         Ok(Arc::new(node))
     }
 
@@ -2771,16 +2684,7 @@ impl FileSystemOperations for Fat32FileSystem {
 
         match fat32_node.file_type() {
             Ok(FileType::RegularFile) => {
-                // Get parent from parent node
-                let parent_cluster = if let Some(parent_ref) = fat32_node.parent.read().as_ref() {
-                    if let Some(parent_node) = parent_ref.upgrade() {
-                        *parent_node.cluster.read()
-                    } else {
-                        0 // Default to 0 if parent is not available
-                    }
-                } else {
-                    0 // Default to 0 if no parent reference
-                };
+                let parent_cluster = *fat32_node.parent_cluster.read();
 
                 Ok(Arc::new(Fat32FileObject::new(
                     Arc::new(fat32_node.clone()),
@@ -2876,12 +2780,9 @@ impl FileSystemOperations for Fat32FileSystem {
             }
         }
 
-        // Set parent reference
-        {
-            let parent_arc: Arc<Fat32Node> = Arc::new(fat32_parent.clone());
-            let parent_weak = Arc::downgrade(&parent_arc);
-            *new_node.parent.write() = Some(parent_weak);
-        }
+        // A weak pointer to a temporary parent clone expires immediately.
+        // Keep the actual directory cluster needed by close/sync writeback.
+        *new_node.parent_cluster.write() = actual_parent_cluster;
 
         // Write directory entry to the parent directory's cluster
         let parent_cluster = *fat32_parent.cluster.read();
