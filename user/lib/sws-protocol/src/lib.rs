@@ -55,7 +55,8 @@ pub fn menu_titles_for_client(menu_titles: &[u8], full_app_menus: bool) -> &[u8]
     }
 }
 
-/// Current SWS capability-negotiation protocol version.
+/// Compatible SWS wire version. Additive, opt-in capabilities do not change
+/// this value: existing clients require equality to enable shared GPU images.
 pub const SWS_PROTOCOL_VERSION: u32 = 14;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
@@ -66,6 +67,8 @@ pub const EXTENSION_MAX_DAMAGE_RECTS: usize = 16;
 
 /// Optional SWS capabilities returned by `GET_CAPABILITIES`.
 pub mod capabilities {
+    /// Output catalog, atomic layout, output-scoped workspaces and window scale.
+    pub const OUTPUT_MANAGEMENT: u64 = 1 << 21;
     /// Shared SGFX images may be registered and committed without CPU copies.
     pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
     /// Focused windows may capture raw relative pointer motion.
@@ -328,6 +331,10 @@ pub mod compositor_backends {
 
 /// Stable protocol error codes used by SGFX lifecycle requests.
 pub mod error_codes {
+    pub const STALE_OUTPUT_GENERATION: u32 = 121;
+    pub const INVALID_OUTPUT_CONFIGURATION: u32 = 122;
+    pub const OUTPUT_CONFIGURATION_NOT_SAVED: u32 = 123;
+    pub const UNKNOWN_OUTPUT: u32 = 124;
     /// The selected SWS backend does not accept shared SGFX images.
     pub const SGFX_UNAVAILABLE: u32 = 100;
     /// The requesting connection does not own the target window.
@@ -374,6 +381,7 @@ pub mod error_codes {
 
 /// Message type IDs (client -> server).
 pub mod client_msg {
+    pub const OUTPUT_CONTROL: u32 = 60;
     pub const CREATE_WINDOW: u32 = 1;
     pub const DESTROY_WINDOW: u32 = 2;
     pub const SET_WINDOW_TITLE: u32 = 3;
@@ -507,6 +515,7 @@ pub mod client_msg {
 
 /// Message type IDs (server -> client).
 pub mod server_msg {
+    pub const OUTPUT_CONTROL: u32 = 45;
     pub const WINDOW_CREATED: u32 = 10;
     pub const WINDOW_DESTROYED: u32 = 11;
     pub const INPUT_EVENT: u32 = 12;
@@ -1574,6 +1583,7 @@ pub enum ClientMessageRef<'a> {
 
     /// Query the current authoritative workspace snapshot.
     GetWorkspaceState {},
+    OutputControl { payload: &'a [u8] },
 
     /// Submit a complete generation-checked desired workspace state.
     ApplyWorkspaceTransaction {
@@ -1849,6 +1859,7 @@ pub enum ServerMessage {
     SystemShellRegistered,
     /// Contains an encoded [`workspace::WorkspaceState`] payload.
     WorkspaceState,
+    OutputControl,
     InputEvent {
         window_id: u32,
         time: u64,
@@ -2853,6 +2864,10 @@ pub fn parse_client_message<'a>(
             };
             Ok(ClientMessageRef::RegisterSystemShell { full_app_menus })
         }
+        client_msg::OUTPUT_CONTROL => {
+            outputs::decode_request(payload)?;
+            Ok(ClientMessageRef::OutputControl { payload })
+        }
         client_msg::GET_WORKSPACE_STATE => {
             if !payload.is_empty() {
                 return Err(ProtocolError::MalformedPayload);
@@ -3488,6 +3503,10 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
         server_msg::SYSTEM_SHELL_REGISTERED => {
             workspace::decode_state(payload)?;
             Ok(ServerMessage::SystemShellRegistered)
+        }
+        server_msg::OUTPUT_CONTROL => {
+            outputs::decode_event(payload)?;
+            Ok(ServerMessage::OutputControl)
         }
         server_msg::WORKSPACE_STATE => {
             workspace::decode_state(payload)?;

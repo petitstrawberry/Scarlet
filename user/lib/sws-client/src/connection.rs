@@ -1025,6 +1025,8 @@ impl TransportState {
             | Event::PointerLockChanged { window_id, .. }
             | Event::SgfxFrameRejected { window_id, .. }
             | Event::SgfxBufferReleased { window_id, .. } => Some(*window_id),
+            Event::Output(protocol::outputs::OutputEvent::Window { window, .. }) => Some(*window),
+            Event::Output(_) => None,
             Event::ScreenSizeChanged { .. }
             | Event::OutputScaleChanged { .. }
             | Event::InputEnvironmentChanged(_)
@@ -3238,6 +3240,11 @@ impl TransportState {
                 ));
                 true
             }
+            ServerMessage::OutputControl => {
+                let Ok(event) = protocol::outputs::decode_event(payload) else { return false; };
+                self.push_event(Event::Output(event));
+                true
+            }
             ServerMessage::WorkspaceState => {
                 let Ok(state) = protocol::workspace::decode_state(payload) else {
                     return false;
@@ -3717,6 +3724,47 @@ impl Connection {
     /// # Returns
     ///
     /// The compositor's authoritative workspace snapshot at registration time.
+    fn output_request(&self, request: protocol::outputs::OutputRequest) -> Result<protocol::outputs::OutputEvent, Error> {
+        let response = self.request(protocol::client_msg::OUTPUT_CONTROL, &protocol::outputs::encode_request(&request))?;
+        match response.message() {
+            ServerMessage::OutputControl => protocol::outputs::decode_event(response.payload()).map_err(|_| Error::InvalidResponse),
+            ServerMessage::Error { code } => Err(Error::ServerError(code)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn outputs(&self) -> Result<protocol::outputs::OutputSnapshot, Error> {
+        match self.output_request(protocol::outputs::OutputRequest::Get)? {
+            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn configure_outputs(&self, transaction: protocol::outputs::OutputTransaction) -> Result<protocol::outputs::OutputSnapshot, Error> {
+        match self.output_request(protocol::outputs::OutputRequest::Apply(transaction))? {
+            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn output_context(&self, output: u32) -> Result<protocol::outputs::OutputContext, Error> {
+        match self.output_request(protocol::outputs::OutputRequest::Context(output))? {
+            protocol::outputs::OutputEvent::Context(context) => { mutex_lock(&self.transport).output_scale = Some(context.scale_milli); Ok(context) },
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn output_workspace(&self, output: u32) -> Result<protocol::workspace::WorkspaceState, Error> {
+        match self.output_request(protocol::outputs::OutputRequest::Workspace(output))? {
+            protocol::outputs::OutputEvent::Workspace { state, .. } => Ok(state), _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn apply_output_workspace(&self, output: u32, transaction: protocol::workspace::WorkspaceTransaction) -> Result<protocol::workspace::WorkspaceState, Error> {
+        match self.output_request(protocol::outputs::OutputRequest::ApplyWorkspace { output, transaction })? {
+            protocol::outputs::OutputEvent::Workspace { state, .. } => Ok(state), _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn set_output_workarea(&self, output: u32, x: i32, y: i32, width: u32, height: u32) -> Result<(), Error> {
+        self.output_request(protocol::outputs::OutputRequest::Workarea { output, x, y, width, height }).map(|_| ())
+    }
+    pub fn bind_output(&self, window: u32, output: u32) -> Result<(), Error> {
+        self.output_request(protocol::outputs::OutputRequest::Bind { window, output }).map(|_| ())
+    }
+
     pub fn register_system_shell(&self) -> Result<protocol::workspace::WorkspaceState, Error> {
         let capabilities = self.get_capabilities()?;
         if !capabilities.supports_workspace_shell() {

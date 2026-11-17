@@ -150,7 +150,7 @@ const _: () = {
 };
 
 /// Layout version of [`DisplayOutputInfo`] this library understands.
-pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 2;
+pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 3;
 /// A monitor is attached to the connector and enabled.
 pub const DISPLAY_OUTPUT_FLAG_CONNECTED: u32 = 1 << 0;
 /// The endpoint is `/dev/display0`, the primary output.
@@ -169,6 +169,10 @@ pub const DISPLAY_CONNECTOR_NAME_LEN: usize = 32;
 pub const DISPLAY_OUTPUT_INFO_V1_SIZE: usize = 80;
 /// Stable firmware/bus identity; an empty key means persistence is unavailable.
 pub const DISPLAY_DEVICE_KEY_LEN: usize = 96;
+pub const DISPLAY_OUTPUT_INFO_V2_SIZE: usize = 176;
+pub const DISPLAY_MONITOR_KEY_LEN: usize = 96;
+pub const DISPLAY_MONITOR_NAME_LEN: usize = 64;
+pub const DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL: u32 = 1 << 2;
 
 /// Output and connector description returned by `DISPLAY_GET_OUTPUT_INFO`.
 ///
@@ -207,11 +211,14 @@ pub struct DisplayOutputInfo {
     pub name: [u8; DISPLAY_CONNECTOR_NAME_LEN],
     /// Version 2: NUL-padded stable device identity, independent of enumeration.
     pub device_key: [u8; DISPLAY_DEVICE_KEY_LEN],
+    /// Version 3: EDID display identity, independent of its connector.
+    pub monitor_key: [u8; DISPLAY_MONITOR_KEY_LEN],
+    pub monitor_name: [u8; DISPLAY_MONITOR_NAME_LEN],
 }
 
 // DISPLAY_GET_OUTPUT_INFO writes this fixed-width kernel record.
 const _: () = {
-    assert!(core::mem::size_of::<DisplayOutputInfo>() == 176);
+    assert!(core::mem::size_of::<DisplayOutputInfo>() == 336);
     assert!(core::mem::offset_of!(DisplayOutputInfo, name) == 48);
 };
 
@@ -232,6 +239,8 @@ impl DisplayOutputInfo {
             reserved: 0,
             name: [0; DISPLAY_CONNECTOR_NAME_LEN],
             device_key: [0; DISPLAY_DEVICE_KEY_LEN],
+            monitor_key: [0; DISPLAY_MONITOR_KEY_LEN],
+            monitor_name: [0; DISPLAY_MONITOR_NAME_LEN],
         }
     }
 
@@ -248,7 +257,7 @@ impl DisplayOutputInfo {
     /// Stable device identity when a version 2 record supplied the complete
     /// tail. Callers must not persist a fallback based on `/dev/displayN`.
     pub fn device_key(&self) -> Option<&str> {
-        if (self.size as usize) < core::mem::size_of::<Self>() {
+        if (self.size as usize) < DISPLAY_OUTPUT_INFO_V2_SIZE {
             return None;
         }
         let end = self
@@ -259,6 +268,19 @@ impl DisplayOutputInfo {
         let key = core::str::from_utf8(&self.device_key[..end]).ok()?;
         (!key.is_empty() && !key.chars().any(char::is_control)).then_some(key)
     }
+
+    pub fn monitor_key(&self) -> Option<&str> {
+        if self.size < 272 { return None; }
+        let end = self.monitor_key.iter().position(|byte| *byte == 0).unwrap_or(self.monitor_key.len());
+        let text = core::str::from_utf8(&self.monitor_key[..end]).ok()?;
+        (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
+    }
+    pub fn monitor_name(&self) -> &str {
+        if self.size < 336 { return ""; }
+        let end = self.monitor_name.iter().position(|byte| *byte == 0).unwrap_or(self.monitor_name.len());
+        core::str::from_utf8(&self.monitor_name[..end]).unwrap_or("")
+    }
+    pub fn monitor_has_serial(&self) -> bool { self.flags & DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL != 0 }
 
     /// Stable connector identity for display profiles and retained workspaces.
     pub fn connector_key(&self) -> Option<alloc::string::String> {

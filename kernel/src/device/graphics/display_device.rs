@@ -165,7 +165,7 @@ pub struct DisplayPresentImage {
 }
 
 /// Layout version of [`DisplayOutputInfo`] written by this kernel.
-pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 2;
+pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 3;
 /// A monitor is attached to the connector and enabled.
 pub const DISPLAY_OUTPUT_FLAG_CONNECTED: u32 = 1 << 0;
 /// This endpoint is `/dev/display0`, the primary output.
@@ -184,6 +184,10 @@ pub const DISPLAY_CONNECTOR_NAME_LEN: usize = 32;
 pub const DISPLAY_OUTPUT_INFO_V1_SIZE: usize = 80;
 /// Stable firmware/bus identity; an empty key means persistence is unavailable.
 pub const DISPLAY_DEVICE_KEY_LEN: usize = 96;
+pub const DISPLAY_OUTPUT_INFO_V2_SIZE: usize = 176;
+pub const DISPLAY_MONITOR_KEY_LEN: usize = 96;
+pub const DISPLAY_MONITOR_NAME_LEN: usize = 64;
+pub const DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL: u32 = 1 << 2;
 
 /// Argument for `DISPLAY_GET_OUTPUT_INFO`.
 ///
@@ -226,6 +230,9 @@ pub struct DisplayOutputInfo {
     pub name: [u8; DISPLAY_CONNECTOR_NAME_LEN],
     /// Version 2: NUL-padded stable device identity, independent of enumeration.
     pub device_key: [u8; DISPLAY_DEVICE_KEY_LEN],
+    /// Version 3: EDID display identity, independent of its connector.
+    pub monitor_key: [u8; DISPLAY_MONITOR_KEY_LEN],
+    pub monitor_name: [u8; DISPLAY_MONITOR_NAME_LEN],
 }
 
 /// Present the full GPU image and require zero region fields.
@@ -479,6 +486,8 @@ impl DisplayCharDevice {
             reserved: 0,
             name: [0; DISPLAY_CONNECTOR_NAME_LEN],
             device_key: [0; DISPLAY_DEVICE_KEY_LEN],
+            monitor_key: [0; DISPLAY_MONITOR_KEY_LEN],
+            monitor_name: [0; DISPLAY_MONITOR_NAME_LEN],
         };
         if let Some(key) = device
             .as_graphics_device()
@@ -491,6 +500,15 @@ impl DisplayCharDevice {
             {
                 info.device_key[..key.len()].copy_from_slice(key.as_bytes());
             }
+        }
+        if let Some(identity) = device.as_graphics_device().and_then(|graphics| graphics.connector_monitor_identity(connector_index)) {
+            if !identity.key.is_empty() && identity.key.len() < DISPLAY_MONITOR_KEY_LEN {
+                info.monitor_key[..identity.key.len()].copy_from_slice(identity.key.as_bytes());
+                if identity.has_serial { info.flags |= DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL; }
+            }
+            let mut len = identity.name.len().min(DISPLAY_MONITOR_NAME_LEN - 1);
+            while !identity.name.is_char_boundary(len) { len -= 1; }
+            info.monitor_name[..len].copy_from_slice(&identity.name.as_bytes()[..len]);
         }
         if self.fb_resource.logical_name == "fb0" {
             info.flags |= DISPLAY_OUTPUT_FLAG_PRIMARY;
@@ -1314,6 +1332,8 @@ mod tests {
             reserved: u32::MAX,
             name: [0xff; DISPLAY_CONNECTOR_NAME_LEN],
             device_key: [0xff; super::DISPLAY_DEVICE_KEY_LEN],
+            monitor_key: [0xff; super::DISPLAY_MONITOR_KEY_LEN],
+            monitor_name: [0xff; super::DISPLAY_MONITOR_NAME_LEN],
         }
     }
 
@@ -1605,7 +1625,7 @@ mod tests {
 
     #[test_case]
     fn display_output_info_record_has_fixed_layout() {
-        assert_eq!(core::mem::size_of::<DisplayOutputInfo>(), 176);
+        assert_eq!(core::mem::size_of::<DisplayOutputInfo>(), 336);
         assert_eq!(core::mem::align_of::<DisplayOutputInfo>(), 4);
         assert_eq!(core::mem::offset_of!(DisplayOutputInfo, device_key), 80);
     }

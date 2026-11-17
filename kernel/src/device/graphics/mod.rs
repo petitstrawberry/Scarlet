@@ -16,6 +16,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub mod display_device;
 pub mod framebuffer_device;
 pub mod manager;
+pub mod monitor;
 pub mod output;
 pub mod shared_image;
 
@@ -583,6 +584,10 @@ pub trait GraphicsDevice: Device {
     fn display_device_key(&self) -> Option<alloc::string::String> {
         None
     }
+
+    /// Cached monitor identity for a connector, obtained during EDID discovery.
+    /// This is a display unit identity, not a bus location or connector index.
+    fn connector_monitor_identity(&self, _connector_index: u32) -> Option<monitor::MonitorIdentity> { None }
 
     /// Return the current display backlight level as a percentage.
     ///

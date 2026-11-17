@@ -301,6 +301,7 @@ pub enum Event {
     InputEnvironmentChanged(InputEnvironment),
     /// The compositor's authoritative workspace state changed.
     WorkspaceStateChanged(sws_protocol::workspace::WorkspaceState),
+    Output(sws_protocol::outputs::OutputEvent),
     /// Display size changed.
     ScreenSizeChanged { width: u32, height: u32 },
     /// Output scale changed.
