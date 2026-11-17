@@ -3580,7 +3580,7 @@ version = "1.0.0"
 [[package]]
 name = "sbus"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=15331d9a3577bd08228a4464d9e2f3a6e9daa78d#15331d9a3577bd08228a4464d9e2f3a6e9daa78d"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00#9531dfe3ad00856095b132b694b442528317ae00"
 
 [[package]]
 name = "sbus-client"
@@ -3594,9 +3594,9 @@ dependencies = [
 [[package]]
 name = "sbus-client"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=15331d9a3577bd08228a4464d9e2f3a6e9daa78d#15331d9a3577bd08228a4464d9e2f3a6e9daa78d"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00#9531dfe3ad00856095b132b694b442528317ae00"
 dependencies = [
- "sbus 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=15331d9a3577bd08228a4464d9e2f3a6e9daa78d)",
+ "sbus 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00)",
  "scarlet-os",
  "scarlet-std",
 ]
@@ -3634,7 +3634,7 @@ dependencies = [
 [[package]]
 name = "scarlet-desktop-config"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=15331d9a3577bd08228a4464d9e2f3a6e9daa78d#15331d9a3577bd08228a4464d9e2f3a6e9daa78d"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00#9531dfe3ad00856095b132b694b442528317ae00"
 dependencies = [
  "scarlet-std",
 ]
@@ -3726,7 +3726,7 @@ dependencies = [
  "serde",
  "serde-json-core",
  "serde_json",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
  "subtle",
  "svgtypes",
  "sws-client",
@@ -3820,12 +3820,12 @@ name = "scarlet-ui-platform-sws"
 version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=0f3ad793201be3d6d692ffa210fa84ee271f1581#0f3ad793201be3d6d692ffa210fa84ee271f1581"
 dependencies = [
- "sbus-client 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=15331d9a3577bd08228a4464d9e2f3a6e9daa78d)",
- "scarlet-desktop-config 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=15331d9a3577bd08228a4464d9e2f3a6e9daa78d)",
+ "sbus-client 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00)",
+ "scarlet-desktop-config 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00)",
  "scarlet-std",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
  "sws-client",
  "sws-protocol",
 ]
@@ -3846,7 +3846,7 @@ dependencies = [
  "scarlet-ui-renderer-sgfx",
  "serde",
  "serde_json",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
  "softbuffer",
  "winit",
 ]
@@ -4013,6 +4013,23 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+dependencies = [
+ "gpu-raw",
+ "pollster",
+ "raw-window-handle",
+ "scarlet-os",
+ "scarlet-std",
+ "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
+ "sgfx-backend-loader 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
+ "sgfx-backend-wgpu 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
+ "sgfx-core",
+ "wgpu",
+]
+
+[[package]]
+name = "sgfx"
+version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81#fbfbefd6fd8593f9557d058574918b0016919f81"
 dependencies = [
  "gpu-raw",
@@ -4021,8 +4038,8 @@ dependencies = [
  "scarlet-os",
  "scarlet-std",
  "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
- "sgfx-backend-loader",
- "sgfx-backend-wgpu",
+ "sgfx-backend-loader 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
+ "sgfx-backend-wgpu 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
  "sgfx-core",
  "wgpu",
 ]
@@ -4035,7 +4052,21 @@ source = "git+https://github.com/petitstrawberry/sgfx?rev=040dbb5cf42b75489504e1
 [[package]]
 name = "sgfx-backend-abi"
 version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+
+[[package]]
+name = "sgfx-backend-abi"
+version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81#fbfbefd6fd8593f9557d058574918b0016919f81"
+
+[[package]]
+name = "sgfx-backend-loader"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+dependencies = [
+ "scarlet-std",
+ "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
+]
 
 [[package]]
 name = "sgfx-backend-loader"
@@ -4044,6 +4075,21 @@ source = "git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d05
 dependencies = [
  "scarlet-std",
  "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
+]
+
+[[package]]
+name = "sgfx-backend-wgpu"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+dependencies = [
+ "bytemuck",
+ "naga",
+ "pollster",
+ "raw-window-handle",
+ "sgfx-core",
+ "web-sys",
+ "web-time",
+ "wgpu",
 ]
 
 [[package]]
@@ -5157,7 +5203,7 @@ dependencies = [
  "scpm",
  "serde",
  "serde-json-core",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
  "sha2",
  "ssh-key",
  "subtle",
@@ -5198,7 +5244,7 @@ dependencies = [
  "scarlet-std",
  "scarlet-ui",
  "scarlet-video-client",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
  "symphonia-codec-aac",
  "symphonia-core",
 ]
@@ -5226,7 +5272,7 @@ dependencies = [
  "naga",
  "scarlet-ui",
  "scarlet-vulkan",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
  "vulkan-sgfx",
 ]
 
@@ -5239,7 +5285,7 @@ dependencies = [
  "cc",
  "naga",
  "scarlet-os",
- "sgfx",
+ "sgfx 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=fbfbefd6fd8593f9557d058574918b0016919f81)",
 ]
 
 [[package]]
