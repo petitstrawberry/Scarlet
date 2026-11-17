@@ -1517,6 +1517,9 @@ ordinary keyboard/IME arbitration. Modifiers belong to a separate keyboard
 source, so releasing a panel modifier does not release a physical keyboard's
 modifier. Unhandled keys use the existing application-key fallback. Text
 composition, candidate UI and commits keep using the existing TextInput API.
+The panel's A/あ key (code 85) sends an explicit `IME_TRIGGER::TOGGLE` to the
+active input method after the same activation/focus validation. It ignores
+latched modifiers and is independent of configured hardware IME shortcuts.
 
 The panel receives content hints/purpose but no surrounding text. Occlusion
 rectangles use output coordinates; zero size means hidden. Focused-layout and
@@ -1525,8 +1528,10 @@ can use the notification for their own scrolling/viewport policy.
 
 The desktop bundle starts `/bin/soft-keyboard`. It opens for active editors on
 touch devices, supports QWERTY and numeric layouts, one-shot Shift, toggled Ctrl
-and Alt, cursor keys, and the existing IME toggle key. Hiding it keeps the editor
-active. ScarletUI requests it again when a touch activates a text editor.
+and Alt, cursor keys, and the IME toggle key. Ctrl/Alt remain selected across
+Fn/letter/symbol page changes until toggled off, hidden, or the editor activation
+changes. Hiding it keeps the editor active. ScarletUI requests it again when a
+touch activates a text editor.
 
 ### Atomic extension surface scenes (protocol version 12)
 

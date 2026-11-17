@@ -9,7 +9,7 @@ mod keyboard_layout;
 
 #[cfg(target_os = "scarlet")]
 mod panel {
-    use super::keyboard_input::{Contact, HeldKeys, Stroke};
+    use super::keyboard_input::{Contact, HeldKeys, Modifiers, Stroke};
     use super::keyboard_layout::{
         Action, EDGE_UNITS, GAP_UNITS, GRID_UNITS, Layer, RowGeometry, Tone, VerticalGeometry,
         panel_height, rows,
@@ -315,9 +315,7 @@ mod panel {
         let mut retry_render = false;
         let mut retried_rejection = false;
         let mut dismissed = None;
-        let mut modifiers = 0;
-        let mut shift_locked = false;
-        let mut last_shift_tap_ns = 0;
+        let mut modifiers = Modifiers::default();
         let mut layer = Layer::Letters;
         let pending_actions = Rc::new(RefCell::new(Vec::<PendingAction>::new()));
         let action_clock = Instant::now();
@@ -327,7 +325,7 @@ mod panel {
         let root = keyboard_for_context(
             window.size(),
             context,
-            modifiers,
+            modifiers.flags,
             layer,
             Rc::clone(&pending_actions),
             Rc::clone(&dispatch_contact),
@@ -359,9 +357,7 @@ mod panel {
                             {
                                 replace_tree = true;
                                 visible = false;
-                                modifiers = 0;
-                                shift_locked = false;
-                                last_shift_tap_ns = 0;
+                                modifiers = Modifiers::default();
                                 layer = Layer::Letters;
                                 dismissed = None;
                                 pending_actions.borrow_mut().clear();
@@ -477,51 +473,28 @@ mod panel {
                             Stroke {
                                 context: activation,
                                 code,
-                                modifiers: modifiers | required_modifiers,
+                                modifiers: modifiers.flags | required_modifiers,
                             },
                             pending_action.time_ns,
                         );
                         window
                             .connection()
-                            .input_panel_key(context, code, modifiers | required_modifiers)
+                            .input_panel_key(context, code, modifiers.flags | required_modifiers)
                             .map_err(|error| format!("{error:?}"))?;
                         // A single Shift is one-shot. A fast double tap locks it.
-                        if modifiers & input_panel::SHIFT != 0 && !shift_locked {
-                            modifiers &= !input_panel::SHIFT;
-                            last_shift_tap_ns = 0;
+                        if modifiers.consume_stroke() {
                             rebuild = true;
                         }
                     }
                     Action::Modifier(flag) => {
-                        if flag == input_panel::SHIFT {
-                            const DOUBLE_TAP_NS: u64 = 350_000_000;
-                            let double_tap = last_shift_tap_ns != 0
-                                && pending_action.time_ns.saturating_sub(last_shift_tap_ns)
-                                    <= DOUBLE_TAP_NS;
-                            if shift_locked {
-                                shift_locked = false;
-                                modifiers &= !input_panel::SHIFT;
-                                last_shift_tap_ns = 0;
-                            } else if double_tap {
-                                shift_locked = true;
-                                modifiers |= input_panel::SHIFT;
-                                last_shift_tap_ns = 0;
-                            } else {
-                                modifiers ^= input_panel::SHIFT;
-                                last_shift_tap_ns = pending_action.time_ns;
-                            }
-                        } else {
-                            modifiers ^= flag;
-                        }
+                        modifiers.toggle(flag, pending_action.time_ns);
                         rebuild = true;
                     }
                     Action::SetLayer(next) => {
                         replace_tree = true;
                         held_keys.clear();
                         layer = next;
-                        modifiers = 0;
-                        shift_locked = false;
-                        last_shift_tap_ns = 0;
+                        modifiers.change_layer();
                         rebuild = true;
                     }
                     Action::Hide => {
@@ -533,9 +506,7 @@ mod panel {
                             .map_err(|error| format!("{error:?}"))?;
                         dismissed = Some(context.generation);
                         visible = false;
-                        modifiers = 0;
-                        shift_locked = false;
-                        last_shift_tap_ns = 0;
+                        modifiers = Modifiers::default();
                         pending_actions.borrow_mut().clear();
                         rebuild = true;
                     }
@@ -563,7 +534,7 @@ mod panel {
                 let root = keyboard_for_context(
                     window.size(),
                     context,
-                    modifiers,
+                    modifiers.flags,
                     layer,
                     Rc::clone(&pending_actions),
                     Rc::clone(&dispatch_contact),

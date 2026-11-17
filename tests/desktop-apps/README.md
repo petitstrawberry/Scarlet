@@ -24,6 +24,15 @@ services and are cross-checked separately. Host applications use Winit and SGFX;
 unsupported native services report their absence. Explicit Screenshot, Logs and
 Applications fixtures are never presented as live native data.
 
+`terminal_keyboard` exercises the production Terminal PTY encoder, including
+Ctrl+C through a mounted TextGrid, Ctrl+A–Z, control symbols, and ordinary text.
+Run it with `cargo test --locked --manifest-path tests/desktop-apps/Cargo.toml
+--test terminal_keyboard`. Native validation must also click Fn → Ctrl → C in
+the software keyboard while a foreground command runs in Terminal; verify that
+the command exits and the shell resumes. On 2026-11-17 this passed in AArch64
+QEMU with `/bin/watch /bin/date`, followed by the fixture's `SOFT_CTRL_C_OK`
+message and shell prompt.
+
 For joint UI development, use Cargo's `[patch."https://github.com/petitstrawberry/scarlet-ui"]`
 configuration to point its crates at an adjacent checkout. The published pins
 are the reproducible default; a local patch is not required after integration.

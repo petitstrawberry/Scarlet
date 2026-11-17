@@ -12224,12 +12224,27 @@ impl Compositor {
             } => {
                 let panel = super::ipc::input_panel_state();
                 // Validate again on the compositor thread: focus can change after IPC receipt.
-                if !panel.visible
-                    || !panel.accepts(client_id, context_id, generation)
-                    || self.window_manager.get_focused_window_id() != Some(panel.context.window_id)
-                {
+                let Some(action) = panel.key_action(
+                    client_id,
+                    context_id,
+                    generation,
+                    self.window_manager.get_focused_window_id(),
+                    code,
+                    modifiers,
+                ) else {
                     return Ok(false);
-                }
+                };
+                let (code, modifiers) = match action {
+                    super::input_panel::KeyAction::ToggleIme => {
+                        super::ipc::send_input_method_trigger(
+                            panel.context.window_id,
+                            0,
+                            key_codes::KEY_ZENKAKUHANKAKU,
+                        );
+                        return Ok(false);
+                    }
+                    super::input_panel::KeyAction::Stroke { code, modifiers } => (code, modifiers),
+                };
                 let source = KeyboardSource::InputPanel(client_id);
                 let keys = [
                     (sws_protocol::input_panel::CTRL, key_codes::KEY_LEFTCTRL),

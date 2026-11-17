@@ -1,6 +1,12 @@
 //! Input-panel ownership and activation lifetime, independent of IME selection.
 use sws_protocol::input_panel::Context;
 use sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyAction {
+    ToggleIme,
+    Stroke { code: u16, modifiers: u32 },
+}
 #[derive(Clone, Copy, Debug)]
 pub struct Panel {
     pub provider: Option<(usize, u32)>,
@@ -89,6 +95,29 @@ impl Panel {
             && self.context.context_id == context
             && self.context.generation == generation
     }
+    pub(super) fn key_action(
+        &self,
+        client: usize,
+        context: u32,
+        generation: u32,
+        focused_window: Option<u32>,
+        code: u16,
+        modifiers: u32,
+    ) -> Option<KeyAction> {
+        if !self.visible
+            || !self.accepts(client, context, generation)
+            || focused_window != Some(self.context.window_id)
+        {
+            return None;
+        }
+        // The panel's A/あ button is an explicit IME request, independent of
+        // configurable hardware shortcuts and any latched panel modifiers.
+        Some(if code == 85 {
+            KeyAction::ToggleIme
+        } else {
+            KeyAction::Stroke { code, modifiers }
+        })
+    }
     pub fn show(&mut self, client: usize, context: u32, generation: u32, visible: bool) -> bool {
         if !self.accepts(client, context, generation) {
             return false;
@@ -162,6 +191,76 @@ impl OcclusionTracker {
 mod tests {
     use super::*;
     use sws_protocol::input_panel::Occlusion;
+
+    #[test]
+    fn ime_button_requests_a_toggle_even_with_latched_modifiers() {
+        let mut panel = Panel::new();
+        panel.register(1, 50);
+        panel.update(editor(3));
+        let context = panel.context;
+        panel.show(1, 3, context.generation, true);
+        for modifiers in 0..=sws_protocol::input_panel::MODIFIERS {
+            assert_eq!(
+                panel.key_action(
+                    1,
+                    3,
+                    context.generation,
+                    Some(context.window_id),
+                    85,
+                    modifiers
+                ),
+                Some(KeyAction::ToggleIme)
+            );
+            assert_eq!(
+                panel.key_action(
+                    1,
+                    3,
+                    context.generation,
+                    Some(context.window_id),
+                    46,
+                    modifiers
+                ),
+                Some(KeyAction::Stroke {
+                    code: 46,
+                    modifiers
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn shortcuts_and_ime_requests_require_a_visible_current_focused_provider() {
+        let mut panel = Panel::new();
+        panel.register(1, 50);
+        panel.update(editor(3));
+        let context = panel.context;
+        for code in [46, 85] {
+            assert_eq!(
+                panel.key_action(1, 3, context.generation, Some(context.window_id), code, 2),
+                None
+            );
+        }
+        panel.show(1, 3, context.generation, true);
+        for code in [46, 85] {
+            for (client, context_id, generation, focus) in [
+                (2, 3, context.generation, Some(context.window_id)),
+                (1, 4, context.generation, Some(context.window_id)),
+                (1, 3, context.generation + 1, Some(context.window_id)),
+                (1, 3, context.generation, None),
+                (1, 3, context.generation, Some(context.window_id + 1)),
+            ] {
+                assert_eq!(
+                    panel.key_action(client, context_id, generation, focus, code, 2),
+                    None
+                );
+            }
+        }
+        panel.update(editor(4));
+        assert_eq!(
+            panel.key_action(1, 3, context.generation, Some(context.window_id), 85, 0),
+            None
+        );
+    }
 
     fn keyboard(window_id: u32) -> Occlusion {
         Occlusion {

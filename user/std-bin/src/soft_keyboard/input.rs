@@ -1,5 +1,51 @@
 //! Held-key lifetime is independent of the render tree. No UI or OS dependency.
 use sws_protocol::input_panel::Context;
+use sws_protocol::input_panel::{ALT, CTRL, SHIFT};
+
+#[derive(Default)]
+pub(super) struct Modifiers {
+    pub flags: u32,
+    shift_locked: bool,
+    last_shift_tap_ns: u64,
+}
+impl Modifiers {
+    pub fn toggle(&mut self, flag: u32, time_ns: u64) {
+        if flag != SHIFT {
+            self.flags ^= flag;
+            return;
+        }
+        const DOUBLE_TAP_NS: u64 = 350_000_000;
+        let double_tap = self.last_shift_tap_ns != 0
+            && time_ns.saturating_sub(self.last_shift_tap_ns) <= DOUBLE_TAP_NS;
+        if self.shift_locked {
+            self.shift_locked = false;
+            self.flags &= !SHIFT;
+            self.last_shift_tap_ns = 0;
+        } else if double_tap {
+            self.shift_locked = true;
+            self.flags |= SHIFT;
+            self.last_shift_tap_ns = 0;
+        } else {
+            self.flags ^= SHIFT;
+            self.last_shift_tap_ns = time_ns;
+        }
+    }
+    pub fn consume_stroke(&mut self) -> bool {
+        if self.flags & SHIFT == 0 || self.shift_locked {
+            return false;
+        }
+        self.flags &= !SHIFT;
+        self.last_shift_tap_ns = 0;
+        true
+    }
+    pub fn change_layer(&mut self) {
+        // Ctrl/Alt may be selected on Fn before choosing a letter or symbol
+        // on another page. Only Shift belongs to the old page's labels.
+        self.flags &= CTRL | ALT;
+        self.shift_locked = false;
+        self.last_shift_tap_ns = 0;
+    }
+}
 
 /// Automatic visibility policy, independent of text-input/IME enablement.
 /// Explicit show requests arrive with only the suppression bit cleared.
@@ -97,6 +143,46 @@ impl HeldKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ctrl_and_alt_survive_page_changes_and_multiple_shortcuts() {
+        let mut modifiers = Modifiers::default();
+        modifiers.toggle(CTRL, 1);
+        modifiers.toggle(ALT, 2);
+        modifiers.toggle(SHIFT, 3);
+        modifiers.change_layer();
+        assert_eq!(modifiers.flags, CTRL | ALT);
+        assert!(!modifiers.consume_stroke());
+        modifiers.change_layer();
+        assert_eq!(modifiers.flags, CTRL | ALT);
+        modifiers.toggle(CTRL, 4);
+        modifiers.toggle(ALT, 5);
+        assert_eq!(modifiers.flags, 0);
+    }
+    #[test]
+    fn shift_is_one_shot_or_double_tap_locked_without_clearing_ctrl() {
+        let mut modifiers = Modifiers::default();
+        modifiers.toggle(CTRL, 1);
+        modifiers.toggle(SHIFT, 2);
+        assert_eq!(modifiers.flags, CTRL | SHIFT);
+        assert!(modifiers.consume_stroke());
+        assert_eq!(modifiers.flags, CTRL);
+        modifiers.toggle(SHIFT, 10);
+        modifiers.toggle(SHIFT, 20);
+        assert!(!modifiers.consume_stroke());
+        assert_eq!(modifiers.flags, CTRL | SHIFT);
+        modifiers.toggle(SHIFT, 30);
+        assert_eq!(modifiers.flags, CTRL);
+    }
+    #[test]
+    fn page_change_clears_shift_lock_and_double_tap_history() {
+        let mut modifiers = Modifiers::default();
+        modifiers.toggle(SHIFT, 1);
+        modifiers.toggle(SHIFT, 2);
+        modifiers.change_layer();
+        assert_eq!(modifiers.flags, 0);
+        modifiers.toggle(SHIFT, 3);
+        assert!(modifiers.consume_stroke());
+    }
     const CONTACT: Contact = Contact {
         seat: 1,
         id: 2,

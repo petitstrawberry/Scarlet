@@ -6,6 +6,7 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
+mod keyboard;
 mod typography;
 mod viewport;
 mod vt;
@@ -675,36 +676,14 @@ fn write_key_event(
     preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
     event: KeyEvent,
 ) -> bool {
+    if keyboard::write_key(event, |bytes| write_bytes(writer, bytes)) {
+        return true;
+    }
     match event {
-        KeyEvent::Char { c } => {
-            let mut encoded = [0u8; 4];
-            write_bytes(writer, c.encode_utf8(&mut encoded).as_bytes());
-            true
-        }
         KeyEvent::Pressed { keycode, .. } => {
             match keycode {
-                KeyCode::Char(c) if c.is_control() => {
-                    let mut encoded = [0u8; 4];
-                    write_bytes(writer, c.encode_utf8(&mut encoded).as_bytes());
-                }
-                KeyCode::Enter => write_bytes(writer, b"\r"),
-                KeyCode::Tab => write_bytes(writer, b"\t"),
-                KeyCode::Backspace => write_bytes(writer, &[0x7f]),
-                KeyCode::Escape => write_bytes(writer, &[0x1b]),
-                KeyCode::Left => write_bytes(writer, b"\x1b[D"),
-                KeyCode::Right => write_bytes(writer, b"\x1b[C"),
-                KeyCode::Up => write_bytes(writer, b"\x1b[A"),
-                KeyCode::Down => write_bytes(writer, b"\x1b[B"),
-                KeyCode::Home => write_bytes(writer, b"\x1b[H"),
-                KeyCode::End => write_bytes(writer, b"\x1b[F"),
                 KeyCode::PageUp => scroll_view(screen, grid, cursor, preedit, 10),
                 KeyCode::PageDown => scroll_view(screen, grid, cursor, preedit, -10),
-                KeyCode::Insert => write_bytes(writer, b"\x1b[2~"),
-                KeyCode::Delete => write_bytes(writer, b"\x1b[3~"),
-                KeyCode::F(1) => write_bytes(writer, b"\x1bOP"),
-                KeyCode::F(2) => write_bytes(writer, b"\x1bOQ"),
-                KeyCode::F(3) => write_bytes(writer, b"\x1bOR"),
-                KeyCode::F(4) => write_bytes(writer, b"\x1bOS"),
                 KeyCode::F(11) => adjust_font_size(
                     metrics,
                     screen,
@@ -729,7 +708,7 @@ fn write_key_event(
             }
             true
         }
-        KeyEvent::Released { .. } => true,
+        KeyEvent::Char { .. } | KeyEvent::Released { .. } => true,
     }
 }
 
