@@ -45,19 +45,21 @@ pub(super) struct Editor {
     pub selected: usize,
     pub status: String,
     pub dirty: bool,
+    // View callbacks are replaced on rebuild; contact ownership must outlive them.
+    touch_contact: Option<(u32, u64)>,
     drag_snap: (Option<AxisSnap>, Option<AxisSnap>),
     drag_before: Option<Vec<OutputConfiguration>>,
     drag: Option<(u32, i32, i32, i32, i32, (f32, f32, f32))>,
 }
 impl Default for Editor { fn default() -> Self { Self::new() } }
 impl Editor {
-    pub fn new() -> Self { Self { snapshot: None, draft: Vec::new(), selected: 0, status: String::from("Loading displays…"), dirty: false, drag: None, drag_before: None, drag_snap: (None, None) } }
+    pub fn new() -> Self { Self { snapshot: None, draft: Vec::new(), selected: 0, status: String::from("Loading displays…"), dirty: false, drag: None, drag_before: None, drag_snap: (None, None), touch_contact: None } }
     fn adopt(&mut self, snapshot: OutputSnapshot) {
         let selected_id = self.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(self.selected)).map(|output| output.monitor_key.clone());
         self.selected = selected_id.and_then(|key| snapshot.outputs.iter().position(|output| output.monitor_key == key)).unwrap_or(0);
         self.draft = snapshot.configuration.clone();
         self.snapshot = Some(snapshot);
-        self.dirty = false; self.drag = None; self.drag_before = None; self.drag_snap = (None, None);
+        self.dirty = false; self.drag = None; self.drag_before = None; self.drag_snap = (None, None); self.touch_contact = None;
     }
     fn geometry(&self, viewport_width: f32) -> Option<(f32, f32, f32)> {
         // Keep the preview coordinate system fixed while the pointer moves.
@@ -161,7 +163,6 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
     let paint = state.clone();
     let viewport = Rc::new(Cell::new(WIDTH));
     let paint_viewport = viewport.clone();
-    let contact = Cell::new(None);
     scarlet_ui::views::CanvasView::new(WIDTH, HEIGHT, Rc::new(move |buffer, width, height| {
         let editor = paint.get();
         let mut canvas = scarlet_ui::graphics::Canvas::new(buffer, width, height);
@@ -194,19 +195,26 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
         let viewport_width = viewport.get();
         // Canvas owns a single contact; a second finger cannot move or finish
         // the first finger's display arrangement.
+        let owner = state.get().touch_contact;
+        if matches!(event, Event::Mouse(_)) && owner.is_some() { return false; }
+        let touch_contact = match *event {
+            Event::Touch(change) => Some((change.seat_id, change.id)),
+            _ => None,
+        };
         let input = match *event {
             Event::Mouse(MouseEvent::ButtonPressed { button: MouseButton::Left, x, y, .. }) => (0, x, y),
             Event::Mouse(MouseEvent::Moved { x, y }) => (1, x, y),
             Event::Mouse(MouseEvent::ButtonReleased { button: MouseButton::Left, x, y, .. }) => (2, x, y),
             Event::Mouse(MouseEvent::ButtonCancelled { .. }) => (3, 0, 0),
             Event::Touch(change) => {
-                if change.phase == TouchPhase::Down && contact.get().is_none() { contact.set(Some(change.id)); }
-                if contact.get() != Some(change.id) { return false; }
+                if change.phase == TouchPhase::Down {
+                    if owner.is_some() { return false; }
+                } else if owner != touch_contact { return false; }
                 let phase = match change.phase { TouchPhase::Down => 0, TouchPhase::Move => 1, TouchPhase::Up => 2, TouchPhase::Cancel => 3 };
-                if phase >= 2 { contact.set(None); }
                 (phase, change.x, change.y)
             }
-            Event::TouchGesture(TouchGesture::Pinch { .. }) => { contact.set(None); (3, 0, 0) }
+            Event::TouchGesture(TouchGesture::Pinch { first_id, second_id, .. })
+                if owner.is_some_and(|(_, id)| id == first_id || id == second_id) => (3, 0, 0),
             _ => return false,
         };
         match input {
@@ -219,7 +227,7 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                         let id = editor.snapshot.as_ref().unwrap().outputs[index].id;
                         let config = editor.draft.iter().find(|config| config.id == id).copied().unwrap();
                         let geometry = editor.geometry(viewport_width).unwrap();
-                        state.update(|editor| { editor.selected = index; editor.drag_snap = (None, None); editor.drag_before = Some(editor.draft.clone()); editor.drag = Some((id, x, y, config.x, config.y, geometry)); });
+                        state.update(|editor| { editor.selected = index; editor.touch_contact = touch_contact; editor.drag_snap = (None, None); editor.drag_before = Some(editor.draft.clone()); editor.drag = Some((id, x, y, config.x, config.y, geometry)); });
                         return true;
                     }
                 }
@@ -236,11 +244,11 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
             }
             (2, _, _) => {
                 let Some((id, ..)) = state.get().drag else { return false; };
-                state.update(|editor| { editor.drag = None; editor.drag_snap = (None, None); editor.settle(id); editor.drag_before = None; }); true
+                state.update(|editor| { editor.drag = None; editor.touch_contact = None; editor.drag_snap = (None, None); editor.settle(id); editor.drag_before = None; }); true
             }
             (3, _, _) => {
                 if state.get().drag.is_none() { return false; }
-                state.update(|editor| { editor.drag = None; editor.drag_snap = (None, None); if let Some(draft) = editor.drag_before.take() { editor.draft = draft; } }); true
+                state.update(|editor| { editor.drag = None; editor.touch_contact = None; editor.drag_snap = (None, None); if let Some(draft) = editor.drag_before.take() { editor.draft = draft; } }); true
             }
             _ => false,
         }
