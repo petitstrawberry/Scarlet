@@ -249,7 +249,7 @@ impl FrameProfile {
         for column in DAMAGE_COLUMNS {
             write!(file, "\t{column}")?;
         }
-        writeln!(file)
+        writeln!(file, "\toutput\tother_outputs_pending_at_admission")
     }
 
     pub(crate) fn record(
@@ -259,6 +259,8 @@ impl FrameProfile {
         quads: usize,
         damage_pixels: u64,
         damage: Option<&DamageProfile>,
+        output: usize,
+        other_outputs_pending_at_admission: usize,
     ) -> std::io::Result<()> {
         let [start, synced, encoded, submitted, presented, end] = stages;
         self.frame += 1;
@@ -285,7 +287,7 @@ impl FrameProfile {
         for value in damage.values(timings) {
             write!(self.file, "\t{value}")?;
         }
-        writeln!(self.file)?;
+        writeln!(self.file, "\t{}\t{}", output, other_outputs_pending_at_admission)?;
         if self.frame % 60 == 0 {
             self.file.flush()?;
         }

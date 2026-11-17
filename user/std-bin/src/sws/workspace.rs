@@ -1826,13 +1826,20 @@ impl WorkspaceManager {
         self.transfer_window(window_id, target_workspace_id)
     }
 
-    pub(super) fn move_window_to_workspace_as_split(
-        &mut self,
-        window_id: u32,
-        target_workspace_id: WorkspaceId,
-    ) -> bool {
-        self.primary_mut()
-            .move_window_to_workspace_as_split(window_id, target_workspace_id)
+    pub(super) fn move_window_to_workspace_as_split(&mut self, window: u32, target: WorkspaceId) -> bool {
+        let Some(&(source, _)) = self.namespace.window_owners.get(&window) else { return false; };
+        let Some(destination) = self.partitions.iter().position(|part| part.state.workspaces.iter().any(|workspace| workspace.id == target)) else { return false; };
+        if source == destination { return self.scope_at(source).move_window_to_workspace_as_split(window, target); }
+        let TabletLayout::Single { window_id: first } = self.tablet_layout(target) else { return false; };
+        if !self.transfer_window(window, target) { return false; }
+        let mut scope = self.scope_at(destination);
+        let workspace = scope.state.workspaces.iter_mut().find(|workspace| workspace.id == target).unwrap();
+        workspace.tablet_layout = TabletLayout::Split {
+            axis: sws_protocol::workspace::SplitAxis::Horizontal, first_window_id: first,
+            second_window_id: window, ratio_milli: 500,
+        };
+        scope.bump_generation();
+        true
     }
 
     pub(super) fn move_overview_selection(&mut self, direction: i32) -> bool {

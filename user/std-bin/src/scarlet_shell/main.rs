@@ -2642,11 +2642,15 @@ fn maintain_workspace_shell_role(
                             None => Ok(state),
                         }
                     });
+                    let retry = matches!(&result, Err(sws::Error::ServerError(code)) if *code == sws_protocol::error_codes::STALE_WORKSPACE_GENERATION);
                     match result {
                         Ok(state) => endpoint.workspace.set(Some(state)),
+                        Err(_) if retry => {},
                         Err(error) => println!("[Shell] Output {} workspace command failed: {:?}", endpoint.id, error),
                     }
-                    endpoint.commands.update(|pending| { if pending.first().copied() == Some(command) { pending.remove(0); } });
+                    // Launch/focus and global Overview may change membership
+                    // between query and apply. Re-read on the next service tick.
+                    if !retry { endpoint.commands.update(|pending| { if pending.first().copied() == Some(command) { pending.remove(0); } }); }
                 }
             }
             if let Some(command) = commands.get().first().copied() {
@@ -2657,20 +2661,22 @@ fn maintain_workspace_shell_role(
                     Some(transaction) => connection.apply_workspace_transaction(&transaction),
                     None => Ok(snapshot.clone()),
                 };
+                let retry = matches!(&result, Err(sws::Error::ServerError(code)) if *code == sws_protocol::error_codes::STALE_WORKSPACE_GENERATION);
                 match result {
                     Ok(updated) => {
                         snapshot = updated;
                         state.set(Some(snapshot.clone()));
                     }
+                    Err(_) if retry => {},
                     Err(error) => {
                         println!("[Shell] Workspace command failed: {:?}", error);
                     }
                 }
-                commands.update(|pending| {
+                if !retry { commands.update(|pending| {
                     if pending.first().copied() == Some(command) {
                         pending.remove(0);
                     }
-                });
+                }); }
             }
             if connection.dispatch().is_err() {
                 full_app_menus.set(false);

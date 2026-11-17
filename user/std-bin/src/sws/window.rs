@@ -235,6 +235,7 @@ pub struct Window {
     pub presentation_transform: Option<PresentationTransform>,
     /// A retained outgoing card may draw during task switching, but takes no input.
     pub(super) presentation_exiting: bool,
+    pub(super) presentation_cross_output: bool,
     /// Additional compositor-only projections of the retained backing.
     pub presentation_instances: Vec<PresentationInstance>,
     /// Optional compositor-only clip for Overview workspace actors.
@@ -747,6 +748,7 @@ impl Window {
             workspace_visible: true,
             presentation_transform: None,
             presentation_exiting: false,
+            presentation_cross_output: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -827,6 +829,7 @@ impl Window {
             workspace_visible: true,
             presentation_transform: None,
             presentation_exiting: false,
+            presentation_cross_output: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -935,6 +938,7 @@ impl Window {
             workspace_visible: true,
             presentation_transform: None,
             presentation_exiting: false,
+            presentation_cross_output: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -1743,6 +1747,7 @@ impl WindowManager {
             workspace_visible: true,
             presentation_transform: None,
             presentation_exiting: false,
+            presentation_cross_output: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -1843,6 +1848,7 @@ impl WindowManager {
             workspace_visible: true,
             presentation_transform: None,
             presentation_exiting: false,
+            presentation_cross_output: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,

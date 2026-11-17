@@ -173,6 +173,7 @@ pub(super) struct Output<T> {
     /// against this counter.
     pub(super) present_counter: u64,
     pub(super) restore_focus: Option<u32>,
+    pub(super) last_presentation: sws_protocol::workspace::ShellPresentation,
     pub(super) overview_add_selected: bool,
     pub(super) overview_scroll_step_ns: u64,
     /// Display device, backing store and present history for this output.
@@ -209,6 +210,7 @@ impl<T> Output<T> {
             scale_milli,
             present_counter: 0,
             restore_focus: None,
+            last_presentation: sws_protocol::workspace::ShellPresentation::Workspace,
             overview_add_selected: false,
             overview_scroll_step_ns: 0,
             target,

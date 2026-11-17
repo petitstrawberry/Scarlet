@@ -26,6 +26,8 @@ pub(super) enum Mode {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Contact {
     mode: Mode,
+    dismiss_enabled: bool,
+    direct_drag: bool,
     cancelled: bool,
     left_slop: bool,
     scale: u32,
@@ -45,6 +47,8 @@ impl Contact {
     pub(super) fn new(x: i32, y: i32, now: u64, scale: u32) -> Self {
         Self {
             mode: Mode::Pending,
+            dismiss_enabled: true,
+            direct_drag: false,
             cancelled: scale == 0,
             left_slop: false,
             scale,
@@ -58,6 +62,12 @@ impl Contact {
             last_motion_ns: now,
             velocity: 0.0,
         }
+    }
+
+    pub(super) fn with_desktop_drag(mut self, desktop: bool, spread: bool) -> Self {
+        self.dismiss_enabled = !desktop;
+        self.direct_drag = desktop && spread;
+        self
     }
 
     pub(super) fn update(&mut self, x: i32, y: i32, now: u64) {
@@ -88,10 +98,14 @@ impl Contact {
             // Inspect the new position before considering a long press. A late
             // movement event is not proof the finger was still at the deadline.
             if self.left_slop && dx * dx + dy * dy > slop * slop {
-                if dx.abs() * 5.0 >= dy.abs() * 6.0 {
+                if self.direct_drag {
+                    self.mode = Mode::Move;
+                } else if dx.abs() * 5.0 >= dy.abs() * 6.0 {
                     self.mode = Mode::Scroll;
                 } else if dy.abs() * 5.0 >= dx.abs() * 6.0 {
-                    if dy < 0.0 {
+                    if !self.dismiss_enabled {
+                        self.mode = Mode::Move;
+                    } else if dy < 0.0 {
                         self.mode = Mode::Dismiss;
                     } else {
                         self.cancel();
@@ -217,6 +231,20 @@ impl Contact {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_upward_swipe_moves_instead_of_closing() {
+        let mut contact = super::Contact::new(100, 300, 0, 1000).with_desktop_drag(true, false);
+        contact.update(100, 50, 50_000_000);
+        assert_eq!(contact.mode(), super::Mode::Move);
+        assert!(!contact.dismiss_committed(300));
+    }
+    #[test]
+    fn desktop_spread_can_drag_horizontally_to_another_output() {
+        let mut contact = super::Contact::new(100, 300, 0, 1000).with_desktop_drag(true, true);
+        contact.update(350, 300, 50_000_000);
+        assert_eq!(contact.mode(), super::Mode::Move);
+    }
+
     use super::*;
 
     const MS: u64 = 1_000_000;

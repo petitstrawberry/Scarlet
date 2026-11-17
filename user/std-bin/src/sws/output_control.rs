@@ -31,8 +31,10 @@ impl Compositor {
         if self.window_manager.get_window(root).is_none() { return false; }
         let group: Vec<_> = self.window_manager.get_windows().iter()
             .filter(|w| self.top_level_window_id(w.id) == root).map(|w| w.id).collect();
-        if let Some(destination) = self.workspace_manager.output(output).map(|state| state.active_workspace()) {
-            self.workspace_manager.transfer_window(root, destination);
+        if self.workspace_manager.output_for_window(root) != Some(output) {
+            if let Some(destination) = self.workspace_manager.output(output).map(|state| state.active_workspace()) {
+                self.workspace_manager.transfer_window(root, destination);
+            }
         }
         let counter = self.outputs.get(output).unwrap().present_counter;
         for id in group {

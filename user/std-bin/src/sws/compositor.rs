@@ -2406,6 +2406,17 @@ struct ExtensionBuffer {
 }
 
 /// Display device state owned by one output.
+fn ipc_frame_window(event: &IpcEvent) -> Option<u32> {
+    match event {
+        IpcEvent::BufferUpdated { window_id, .. }
+        | IpcEvent::CommitSgfxFrame { window_id, .. }
+        | IpcEvent::ExtensionUpdateBuffer { window_id, .. }
+        | IpcEvent::ExtensionCommitBuffer { window_id, .. } => Some(*window_id),
+        IpcEvent::ExtensionCommitScene { scene, .. } => Some(scene.window_id),
+        _ => None,
+    }
+}
+
 struct DisplayTarget {
     display: DisplaySurface,
     bytes_per_pixel: u32,
@@ -2480,7 +2491,6 @@ pub struct Compositor {
     next_output_poll_ns: u64,
     backend: SwsBackend,
     gpu_compositor: Option<GpuCompositor>,
-    pending_gpu_present: Option<PresentDamage>,
     damage_profile: super::trace::DamageProfile,
     deferred_gpu_ipc: Vec<IpcEvent>,
     deferred_gpu_remote: Vec<RemoteEvent>,
@@ -2558,6 +2568,7 @@ pub struct Compositor {
     windowing_mode: sws_protocol::WindowingMode,
     workspace_manager: super::workspace::WorkspaceManager,
     /// Shell presentation observed by the previous policy application.
+    overview_session_active: bool,
     last_shell_presentation: sws_protocol::workspace::ShellPresentation,
     /// Normal surfaces awaiting a definitive top-level/transient relationship.
     ///
@@ -3069,7 +3080,6 @@ impl Compositor {
             next_output_poll_ns: 0,
             backend,
             gpu_compositor,
-            pending_gpu_present: None,
             damage_profile: super::trace::DamageProfile::new(
                 super::trace::frame_profile_requested(),
             ),
@@ -3140,6 +3150,7 @@ impl Compositor {
             tablet_mode: input_environment.tablet_mode(),
             windowing_mode: input_environment.windowing_mode(),
             workspace_manager,
+            overview_session_active: false,
             last_shell_presentation: sws_protocol::workspace::ShellPresentation::Workspace,
             pending_workspace_scenes: Vec::new(),
             window_policy_pending: false,
@@ -5139,11 +5150,6 @@ impl Compositor {
             Err(super::gpu_compositor::GpuCompositionError::Pending) => {
                 // Snapshot the submitted generation of damage and cursor.
                 // New input accumulates independently while the GPU retires.
-                self.pending_gpu_present = self
-                    .gpu_compositor
-                    .as_ref()
-                    .and_then(|gpu| gpu.pending_logical_damage())
-                    .map(|(x, y, width, height)| Some(vec![(x as i32, y as i32, width, height)]));
                 for (index, (id, damage)) in output_damage.iter().enumerate() {
                     if let Some(output) = self.outputs.get_mut(*id) {
                         output.target.full_redraw = !admitted.contains(&index) && *damage == OutputDamage::Full;
@@ -5243,8 +5249,8 @@ impl Compositor {
                 for release in releases {
                     send_sgfx_buffer_released(release);
                 }
-                if let Some(damage) = self.pending_gpu_present.take() {
-                    self.capture_session.frame_presented(&damage);
+                for (x, y, width, height) in self.gpu_compositor.as_mut().unwrap().take_completed_primary_damage() {
+                    self.capture_session.frame_presented(&Some(vec![(x as i32, y as i32, width, height)]));
                 }
                 // Do not clear current damage/cursor: input may have changed
                 // them since admission of this exact completed frame.
@@ -5255,7 +5261,6 @@ impl Compositor {
             }
             Err(error) => {
                 println!("[Compositor] GPU completion failed: {}", error);
-                self.pending_gpu_present = None;
                 self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx GPU completion failed")?;
             }
         }
@@ -6687,97 +6692,58 @@ impl Compositor {
     ) -> Option<(i32, i32)> {
         let window = self.window_manager.get_window(window_id)?;
         let preview = window.presentation_transform?;
-        let workarea = self
-            .workarea
-            .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
+        let workarea = self.output_workarea(self.pointer_output_id(target_card.0, target_card.1));
+        let (_, _, width, height) = window.window_geometry();
         Some(map_overview_drop_position(
             (preview.x, preview.y),
             target_card,
             workarea,
-            (window.width, window.height),
+            (width, height),
         ))
     }
 
     fn finish_overview_window_drag(&mut self, drag: OverviewWindowDrag) -> bool {
-        let dx = drag.current_x.saturating_sub(drag.start_x);
-        let dy = drag.current_y.saturating_sub(drag.start_y);
-        let threshold = self.overview_window_drag_threshold();
-        let crossed_threshold = dx.unsigned_abs().max(dy.unsigned_abs()) >= threshold;
-        let target_workspace_id = self.workspace_card_at_point(drag.current_x, drag.current_y);
-        let add_workspace_target =
-            self.point_in_overview_add_workspace(drag.current_x, drag.current_y);
-        let target_card = if add_workspace_target {
-            self.overview_add_workspace_rect()
-        } else {
-            target_workspace_id.and_then(|target| {
-                self.overview_card_rects()
-                    .into_iter()
-                    .find_map(|(workspace_id, rect)| (workspace_id == target).then_some(rect))
-            })
-        };
-        let freeform_drop_position = (crossed_threshold
-            && self.windowing_mode == sws_protocol::WindowingMode::Freeform)
-            .then(|| {
-                target_card
-                    .and_then(|card| self.overview_drop_position_for_window(drag.window_id, card))
-            })
-            .flatten();
-
-        let changed = if crossed_threshold {
-            if add_workspace_target {
-                self.workspace_manager
-                    .move_window_to_new_workspace(drag.window_id)
-                    .is_some()
+        let crossed = drag.current_x.saturating_sub(drag.start_x).unsigned_abs()
+            .max(drag.current_y.saturating_sub(drag.start_y).unsigned_abs()) >= self.overview_window_drag_threshold();
+        let destination = self.pointer_output_id(drag.current_x, drag.current_y);
+        let source = self.window_output_id(drag.window_id);
+        let tablet = self.output_context_for(destination).is_some_and(|context| context.tablet);
+        let adding = self.point_in_overview_add_workspace(drag.current_x, drag.current_y);
+        let card = self.overview_layout_for_output(destination).into_iter().find_map(|(id, rect)|
+            ((adding && id == 0) || Some(id) == self.workspace_card_at_point(drag.current_x, drag.current_y)).then_some(rect));
+        let position = if crossed && !tablet {
+            card.and_then(|card| self.overview_drop_position_for_window(drag.window_id, card))
+                .or_else(|| (destination != source).then(|| {
+                    let (_, _, width, height) = self.window_manager.get_window(drag.window_id).unwrap().window_geometry();
+                    self.output_window_position(destination, width, height, true)
+                }))
+        } else { None };
+        let changed = if crossed {
+            let target = if adding {
+                self.workspace_manager.output_mut(destination).and_then(|mut state| state.create_workspace())
             } else {
-                target_workspace_id
-                    .filter(|target| *target != drag.source_workspace_id)
-                    .is_some_and(|target| {
-                        if self.windowing_mode == sws_protocol::WindowingMode::Focused {
-                            match self.workspace_manager.tablet_layout(target) {
-                                sws_protocol::workspace::TabletLayout::Empty => self
-                                    .workspace_manager
-                                    .move_window_to_workspace(drag.window_id, target),
-                                sws_protocol::workspace::TabletLayout::Single { .. } => self
-                                    .workspace_manager
-                                    .move_window_to_workspace_as_split(drag.window_id, target),
-                                sws_protocol::workspace::TabletLayout::Split { .. } => false,
-                            }
-                        } else {
-                            self.workspace_manager
-                                .move_window_to_workspace(drag.window_id, target)
-                        }
-                    })
-            }
-        } else if !self.tablet_mode
-            && !self.point_in_overview_workspace_region(drag.start_x, drag.start_y)
-        {
-            self.overview_restore_focus = Some(drag.window_id);
-            self.workspace_manager
-                .select_workspace_from_overview(drag.source_workspace_id)
+                self.workspace_card_at_point(drag.current_x, drag.current_y).or_else(||
+                    (destination != source).then(|| self.workspace_manager.output(destination).unwrap().active_workspace()))
+            };
+            target.filter(|target| *target != drag.source_workspace_id).is_some_and(|target| {
+                let layout = self.workspace_manager.tablet_layout(target);
+                if tablet && matches!(layout, sws_protocol::workspace::TabletLayout::Split { .. }) { return false; }
+                let moved = if tablet && matches!(layout, sws_protocol::workspace::TabletLayout::Single { .. }) {
+                    self.workspace_manager.move_window_to_workspace_as_split(drag.window_id, target)
+                } else { self.workspace_manager.move_window_to_workspace(drag.window_id, target) };
+                if moved && destination != source { self.bind_window_output(drag.window_id, destination); }
+                moved
+            })
         } else {
-            target_workspace_id
-                .filter(|target| *target == drag.source_workspace_id)
-                .is_some_and(|workspace_id| {
-                    self.workspace_manager
-                        .select_workspace_from_overview(workspace_id)
-                })
+            self.overview_restore_focus = Some(drag.window_id);
+            if let Some(output) = self.outputs.get_mut(source) { output.restore_focus = Some(drag.window_id); }
+            self.workspace_manager.select_workspace_from_overview(drag.source_workspace_id)
         };
-
-        if changed && let Some((x, y)) = freeform_drop_position {
-            self.set_window_position_with_damage(drag.window_id, x, y);
-        }
-
-        if changed && self.tablet_mode {
-            self.workspace_manager.settle_after_close(true);
-        }
-        // Clearing the drag before recomputing presentation restores the
-        // actor's card-relative transform or applies its destination card.
+        if changed && let Some((x, y)) = position { self.set_window_position_with_damage(drag.window_id, x, y); }
         self.overview_window_drag = None;
-        self.outputs.primary_mut().overview_add_selected = false;
-        self.apply_workspace_presentation_policy();
-        if changed {
-            self.publish_workspace_state();
-        }
+        for output in self.outputs.iter_mut() { output.overview_add_selected = false; }
+        self.apply_workspace_presentation_policy_on(Some(destination));
+        if changed { self.publish_workspace_state(); }
         self.full_redraw_needed = true;
         self.damage_profile.full(line!());
         changed
@@ -7646,6 +7612,9 @@ impl Compositor {
                 screen_y,
                 frame.time_ns,
                 self.output_scale_milli(),
+            ).with_desktop_drag(
+                !self.output_context_for(self.pointer_output_id(screen_x, screen_y)).is_some_and(|context| context.tablet),
+                over_laptop_spread,
             ),
             pan_origin: self.overview_pan,
         });
@@ -8321,11 +8290,7 @@ impl Compositor {
         }
 
         // Process IPC events from global queue (non-blocking)
-        let mut ipc_events = if self.gpu_frame_pending() {
-            Vec::new()
-        } else {
-            core::mem::take(&mut self.deferred_gpu_ipc)
-        };
+        let mut ipc_events = core::mem::take(&mut self.deferred_gpu_ipc);
         ipc_events.extend(self.ipc_server.process_messages()?);
         // if !ipc_events.is_empty() {
         //     println!("[Compositor] Processing {} IPC events", ipc_events.len());
@@ -8501,7 +8466,9 @@ impl Compositor {
     }
 
     fn has_pending_redraw(&self) -> bool {
-        self.full_redraw_needed || !self.pending_damage.is_empty() || self.cursor.needs_redraw() || self.outputs.iter().any(|output| output.target.full_redraw || output.target.deferred_gpu_damage.is_some())
+        self.full_redraw_needed || !self.pending_damage.is_empty() || self.cursor.needs_redraw()
+            || self.gpu_compositor.as_ref().is_some_and(|gpu| gpu.needs_redraw())
+            || self.outputs.iter().any(|output| output.target.full_redraw || output.target.deferred_gpu_damage.is_some())
     }
 
     fn wait_for_frame_batch(&mut self) -> Result<(), &'static str> {
@@ -8623,18 +8590,13 @@ impl Compositor {
                 )?,
             }
         }
-        if self.gpu_frame_pending() {
-            // Drain an already-coalesced wake before checking receipts again.
-            // A completion racing the check publishes a fresh wake byte.
+        // Only global resource/topology mutations require quiescence. A
+        // submitted frame on another output does not block normal composition.
+        if self.gpu_frame_pending() && (!self.deferred_gpu_remote.is_empty()
+            || self.deferred_gpu_ipc.iter().any(|event| ipc_frame_window(event).is_none())) {
             self.consume_event_signal_if_ready();
             self.retire_gpu_frame()?;
-            if self.gpu_frame_pending() && !self.has_queued_event_work() {
-                super::trace::set_compositor_stage(super::trace::STAGE_WAIT_SIGNAL);
-                self.wait_for_event_signal();
-                super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
-            }
-            // If retirement raced input dispatch, process ordered deferred
-            // lifecycle/commit IPC before constructing another GPU frame.
+            if self.gpu_frame_pending() && !self.has_queued_event_work() { self.wait_for_event_signal(); }
             return Ok(());
         }
         if self.gpu_compositor.is_some()
@@ -11716,7 +11678,7 @@ impl Compositor {
         };
         match presentation {
             sws_protocol::workspace::ShellPresentation::Workspace => {
-                if self
+                if window.output_id == self.outputs.primary_id() && self
                     .tablet_motion
                     .as_ref()
                     .is_some_and(|motion| motion.exit_target(window_id).is_some())
@@ -11819,10 +11781,6 @@ impl Compositor {
             }
         }
         Ok(())
-    }
-
-    fn overview_workspace_region(&self) -> (i32, i32, u32, u32) {
-        self.overview_region_for_output(self.outputs.primary_id())
     }
 
     fn overview_region_for_output(&self, output: u32) -> (i32, i32, u32, u32) {
@@ -12155,13 +12113,29 @@ impl Compositor {
             .overview_window_drag
             .filter(|drag| drag.window_id == root_id);
         let rect = if let Some(drag) = dragging {
-            let thumbnail = self.overview_card_transform_for_window(root_id, false)?;
-            let workspace_region = self.overview_workspace_region();
+            let destination = self.pointer_output_id(drag.current_x, drag.current_y);
+            let source_workarea = self.output_workarea(root.output_id);
+            let target_workarea = self.output_workarea(destination);
+            let workspace_region = self.overview_region_for_output(destination);
             let rail_bottom = workspace_region.1.saturating_add(workspace_region.3 as i32);
-            let progress = overview_drag_progress_milli(drag.start_y, drag.current_y, rail_bottom);
+            // Progress and thumbnail size must both use the destination output.
+            // Translate the initial grab height into that output's workarea so
+            // a monitor above the primary does not collapse the preview on the
+            // first upward movement. Within one output this is the original y.
+            let start_y = i64::from(target_workarea.1)
+                + (i64::from(drag.start_y) - i64::from(source_workarea.1))
+                    * i64::from(target_workarea.3) / i64::from(source_workarea.3.max(1));
+            let progress = overview_drag_progress_milli(
+                start_y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                drag.current_y, rail_bottom);
+            let card = self.overview_layout_for_output(destination).first()?.1;
+            let thumbnail_size = (
+                (u64::from(root_geometry.2) * u64::from(card.2) / u64::from(target_workarea.2.max(1))) as u32,
+                (u64::from(root_geometry.3) * u64::from(card.3) / u64::from(target_workarea.3.max(1))) as u32,
+            );
             let dragged_root = overview_dragged_root_rect(
                 slot.rect,
-                (thumbnail.width, thumbnail.height),
+                thumbnail_size,
                 (drag.start_x, drag.start_y),
                 (drag.current_x, drag.current_y),
                 progress,
@@ -12227,6 +12201,8 @@ impl Compositor {
 
     fn update_overview_transforms(&mut self) -> bool {
         let cards = self.overview_card_rects();
+        let shell_foreground = self.outputs.iter().any(|output| self.workspace_manager.output(output.id)
+            .is_some_and(|state| state.presentation() != sws_protocol::workspace::ShellPresentation::Workspace));
         let transforms = self
             .window_manager
             .get_windows()
@@ -12288,7 +12264,10 @@ impl Compositor {
                     || self
                         .pending_card_close
                         .is_some_and(|close| close.drag.window_id == root_id);
-                let clip = if animating.is_some() {
+                let clip = if shell_foreground && !shell_presentation && !dragging
+                    && workspace_id.is_some() {
+                    self.outputs.get(window.output_id).map(|output| (output.rect.x, output.rect.y, output.rect.width, output.rect.height))
+                } else if animating.is_some() {
                     transform.map(|rect| (rect.x, rect.y, rect.width, rect.height))
                 } else {
                     (!dragging)
@@ -12320,6 +12299,12 @@ impl Compositor {
             .collect::<Vec<_>>();
         let mut changed = false;
         for (window_id, transform, instances, clip, clip_radius) in transforms {
+            let root = self.top_level_window_id(window_id);
+            let cross_output = self.overview_window_drag.is_some_and(|drag| drag.window_id == root);
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                changed |= window.presentation_cross_output != cross_output;
+                window.presentation_cross_output = cross_output;
+            }
             let exiting = self
                 .tablet_motion
                 .as_ref()
@@ -12380,6 +12365,31 @@ impl Compositor {
     fn apply_workspace_presentation_policy(&mut self) -> bool { self.apply_workspace_presentation_policy_on(None) }
 
     fn apply_workspace_presentation_policy_on(&mut self, focus_output: Option<u32>) -> bool {
+        use sws_protocol::workspace::ShellPresentation;
+        let transitions: Vec<_> = self.outputs.iter().filter_map(|output| {
+            let current = self.workspace_manager.output(output.id)?.presentation();
+            (current != output.last_presentation).then_some((output.id, output.last_presentation, current))
+        }).collect();
+        let entering = transitions.iter().any(|(_, _, current)| *current == ShellPresentation::Overview);
+        let leaving = self.overview_session_active && transitions.iter().any(|(_, previous, current)|
+            *previous == ShellPresentation::Overview && *current != ShellPresentation::Overview);
+        if !self.console_shell_present() && (entering || leaving) {
+            let ids: Vec<_> = self.outputs.iter().map(|output| output.id).collect();
+            for id in ids {
+                let mut state = self.workspace_manager.output_mut(id).unwrap();
+                if leaving {
+                    if state.presentation() == ShellPresentation::Overview { state.return_to_workspace(); }
+                } else {
+                    state.set_presentation(ShellPresentation::Overview);
+                }
+            }
+            self.overview_session_active = !leaving;
+        }
+        for output in self.outputs.iter_mut() {
+            if let Some(state) = self.workspace_manager.output(output.id) {
+                output.last_presentation = state.presentation();
+            }
+        }
         // Console Home owns the application/workspace switcher. Normalize
         // gestures and external Overview requests before visibility, focus or
         // transforms can expose an intermediate desktop Overview frame.
@@ -12728,30 +12738,24 @@ impl Compositor {
     }
 
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
-        let independent_credit = matches!(&event, IpcEvent::RequestFrame { window_id, is_credit: true, .. }
-            if self.window_manager.get_window(*window_id).is_some());
-        if self.gpu_frame_pending()
-            && !independent_credit
-            && (!self.deferred_gpu_ipc.is_empty()
-                || !matches!(
-                    &event,
-                    IpcEvent::PrepareWindowCreation { .. }
-                        | IpcEvent::RequestFrame { .. }
-                        | IpcEvent::GetScreenSize { .. }
-                        | IpcEvent::GetOutputScale { .. }
-                        | IpcEvent::GetWindowList { .. }
-                        | IpcEvent::RequestMove { .. }
-                        | IpcEvent::MoveWindow { .. }
-                        | IpcEvent::SetPointerLock { .. }
-                        | IpcEvent::SetCursorIcon { .. }
-                        | IpcEvent::Clipboard { .. }
-                        | IpcEvent::InputPanelKey { .. }
-                ))
-        {
-            // Keep resource mutations and commit order intact. These owned
-            // events retain transferred handles/mappings until GPU retirement.
-            self.deferred_gpu_ipc.push(event);
-            return Ok(false);
+        let independent = matches!(&event,
+            IpcEvent::PrepareWindowCreation { .. } | IpcEvent::RequestFrame { .. }
+                | IpcEvent::GetScreenSize { .. } | IpcEvent::GetOutputScale { .. }
+                | IpcEvent::GetWindowList { .. } | IpcEvent::RequestMove { .. }
+                | IpcEvent::MoveWindow { .. } | IpcEvent::SetPointerLock { .. }
+                | IpcEvent::SetCursorIcon { .. } | IpcEvent::Clipboard { .. }
+                | IpcEvent::InputPanelKey { .. });
+        if self.gpu_frame_pending() && !independent {
+            let window = ipc_frame_window(&event);
+            let blocked = window.is_none_or(|id| self.gpu_compositor.as_ref().unwrap().window_in_flight(id))
+                || self.deferred_gpu_ipc.iter().any(|earlier| {
+                    let earlier_window = ipc_frame_window(earlier);
+                    earlier_window.is_none() || earlier_window == window
+                });
+            if blocked {
+                self.deferred_gpu_ipc.push(event);
+                return Ok(false);
+            }
         }
         match event {
             IpcEvent::InputPanelRegister {
@@ -15151,13 +15155,16 @@ impl Compositor {
                     );
                     return Ok(false);
                 }
-                let live_window_ids = self.live_workspace_window_ids();
+                let primary = self.outputs.primary_id();
+                let live_window_ids = self.live_workspace_window_ids().into_iter()
+                    .filter(|window| self.workspace_manager.output_for_window(*window) == Some(primary)).collect::<Vec<_>>();
                 match self
                     .workspace_manager
                     .apply_transaction(transaction, &live_window_ids)
                 {
                     Ok(_) => {
                         self.apply_workspace_presentation_policy();
+                        self.publish_workspace_state();
                         let payload = sws_protocol::workspace::encode_state(
                             &self.workspace_manager.snapshot(),
                         );

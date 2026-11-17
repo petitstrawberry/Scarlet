@@ -261,7 +261,7 @@ pub(crate) struct MappedTarget {
 }
 
 /// Nested wall-time components of the compositor's current frame.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct FrameTimings {
     pub(crate) encode_submit_ns: u128,
     pub(crate) backend_admit_ns: u128,
@@ -327,10 +327,9 @@ impl MappedTarget {
         }
         failure.map_or(Ok(()), Err)
     }
-    pub(crate) fn poll_output_gpu_completion(&mut self, index: usize) -> Result<bool, &'static str> {
-        let elapsed = self.gpu_completion.as_mut().and_then(|queues| queues.get_mut(index)).ok_or("GPU output completion unavailable")?.poll()?;
-        if let (Some(elapsed), Some(timings)) = (elapsed, &mut self.frame_timings) { timings.gpu_wait_ns += elapsed.as_nanos(); }
-        Ok(elapsed.is_some())
+    pub(crate) fn poll_output_gpu_completion(&mut self, index: usize) -> Result<Option<std::time::Duration>, &'static str> {
+        self.gpu_completion.as_mut().and_then(|queues| queues.get_mut(index))
+            .ok_or("GPU output completion unavailable")?.poll()
     }
 
     pub(crate) fn supports_tracked_submission(&self) -> bool {
