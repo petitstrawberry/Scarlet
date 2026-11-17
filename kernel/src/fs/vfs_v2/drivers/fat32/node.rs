@@ -946,13 +946,11 @@ impl FileObject for Fat32FileObject {
 
         let current_cluster = self.node.cluster();
         let old_cache_id = self.cache_id();
-        let new_cluster = if buffer.is_empty() {
-            0
-        } else {
-            fat32_fs
-                .write_file_content(current_cluster, &buffer)
-                .map_err(|_| StreamError::IoError)?
-        };
+        // Empty replacement content must release the old chain too. Otherwise
+        // every O_TRUNC update leaks the entire previous file on the volume.
+        let new_cluster = fat32_fs
+            .write_file_content(current_cluster, &buffer)
+            .map_err(|_| StreamError::IoError)?;
 
         if new_cluster != current_cluster {
             *self.node.cluster.write() = new_cluster;
