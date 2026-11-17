@@ -706,7 +706,7 @@ mod tests {
             width: 8,
             height: 9,
         };
-        let requests = presentation_requests(7, 40, 30, rect, true).expect("CPU presentation");
+        let requests = presentation_requests(7, 40, 30, rect, true, 0).expect("CPU presentation");
         assert_eq!(requests.len(), 3);
         let kinds: alloc::vec::Vec<_> = requests
             .iter()
@@ -728,6 +728,19 @@ mod tests {
             unsafe { &*(requests[1].command.as_ptr() as *const VirtioGpuTransferToHost2d) };
         assert_eq!(transfer.offset, (3 * 40 + 12) * 4);
         assert_eq!(transfer.resource_id, 7);
+        // SAFETY: the first request is the real repr(C) SET_SCANOUT command.
+        let set_scanout = unsafe {
+            &*(requests[0].command.as_ptr()
+                as *const crate::drivers::graphics::virtio_gpu::VirtioGpuSetScanout)
+        };
+        assert_eq!(set_scanout.scanout_id, 0);
+        let secondary = presentation_requests(9, 40, 30, rect, true, 1).expect("scanout 1");
+        // SAFETY: the first request is the real repr(C) SET_SCANOUT command.
+        let set_scanout = unsafe {
+            &*(secondary[0].command.as_ptr()
+                as *const crate::drivers::graphics::virtio_gpu::VirtioGpuSetScanout)
+        };
+        assert_eq!((set_scanout.scanout_id, set_scanout.resource_id), (1, 9));
         let mut queue = ControlQueue::new();
         queue
             .enqueue_batch(&requests, 0)
@@ -756,7 +769,7 @@ mod tests {
             queue.ring.free_descriptors.len(),
             VIRTIO_GPU_CONTROL_QUEUE_SIZE
         );
-        let gpu = presentation_requests(7, 40, 30, rect, false).expect("GPU presentation");
+        let gpu = presentation_requests(7, 40, 30, rect, false, 0).expect("GPU presentation");
         assert_eq!(gpu.len(), 2, "GPU scanout must not upload CPU pixels");
     }
 

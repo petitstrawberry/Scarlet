@@ -12,6 +12,8 @@ mod input;
 mod input_environment;
 #[path = "../input_panel.rs"]
 mod input_panel;
+#[path = "../output.rs"]
+mod output;
 #[path = "../shell_presentation.rs"]
 mod shell_presentation;
 #[path = "../tablet_cards.rs"]

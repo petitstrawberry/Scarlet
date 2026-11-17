@@ -17,6 +17,7 @@ rustc --edition=2024 --test user/std-bin/src/sws/tests/tablet_geometry.rs --exte
 "$out/tests" frame_callback::tests::
 "$out/tests" window::rounded_geometry_tests::
 "$out/tests" input_panel::tests::
+"$out/tests" output::tests::
 "$out/tests" workspace_geometry::tests::
 "$out/tests" workspace::tests::
 "$out/tests" input::tests::

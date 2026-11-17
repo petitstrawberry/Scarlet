@@ -58,73 +58,41 @@ impl DisplayRegion {
     }
 }
 
-/// A single display connector / output (panel, DP port, HDMI, etc.)
-pub trait DisplayOutput: Send + Sync {
-    /// Human-readable name (e.g. "internal-panel", "dp0")
-    fn name(&self) -> &str;
-
-    /// Whether a display is connected (may require HPD detect)
-    fn is_connected(&self) -> bool;
-
-    /// Present a framebuffer on this output.
-    ///
-    /// `fb_paddr` is the physical address of the framebuffer memory.
-    /// For direct-mapped displays (e.g. simple-fb) this is a no-op.
-    /// For coprocessor-driven displays (e.g. DCPext) this triggers DMA/scanout.
-    fn present(&self, config: &FramebufferConfig, fb_paddr: u64) -> Result<(), &'static str>;
-
-    /// Present a framebuffer region on this output.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Framebuffer configuration.
-    /// * `fb_paddr` - Physical address of the framebuffer memory.
-    /// * `region` - Updated display region.
-    ///
-    /// # Returns
-    ///
-    /// Success or an error describing why presentation failed.
-    fn present_region(
-        &self,
-        config: &FramebufferConfig,
-        fb_paddr: u64,
-        _region: DisplayRegion,
-    ) -> Result<(), &'static str> {
-        self.present(config, fb_paddr)
-    }
+/// Physical or virtual nature of a display connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectorKind {
+    /// The driver cannot tell.
+    Unknown,
+    /// A panel built into the machine.
+    Internal,
+    /// A port for an external monitor (DisplayPort, HDMI, ...).
+    External,
+    /// An output of a virtual display device such as virtio-gpu.
+    Virtual,
 }
 
-/// A display mode (resolution + refresh rate)
-#[derive(Debug, Clone)]
-pub struct DisplayMode {
-    pub width: u32,
-    pub height: u32,
-    pub refresh_rate: u32,
+/// One display connector exposed by a graphics device.
+///
+/// A connector is a place a monitor can be attached, whether or not one is.
+/// Connectors are indexed from zero within their device; index 0 is the
+/// connector the device's primary-output methods (`get_framebuffer_config`,
+/// `present_*`) drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorInfo {
+    /// Index within the owning device.
+    pub index: u32,
+    /// Driver-chosen name, unique within the device (e.g. `"virtual-1"`).
     pub name: String,
-}
-
-pub struct SimpleFbOutput {
-    name: String,
-}
-
-impl SimpleFbOutput {
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: String::from(name),
-        }
-    }
-}
-
-impl DisplayOutput for SimpleFbOutput {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn is_connected(&self) -> bool {
-        true
-    }
-
-    fn present(&self, _config: &FramebufferConfig, _fb_paddr: u64) -> Result<(), &'static str> {
-        Ok(())
-    }
+    /// Connector kind.
+    pub kind: ConnectorKind,
+    /// Whether a monitor is attached and enabled.
+    pub connected: bool,
+    /// Current mode width in pixels, or 0 when not connected.
+    pub width: u32,
+    /// Current mode height in pixels, or 0 when not connected.
+    pub height: u32,
+    /// Refresh rate in millihertz, or 0 when unknown.
+    pub refresh_mhz: u32,
+    /// Physical size in millimetres, when the monitor reports it.
+    pub physical_size_mm: Option<(u32, u32)>,
 }

@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 
-use self::output::{DisplayOutput, DisplayRegion};
+use self::output::{ConnectorInfo, ConnectorKind, DisplayRegion};
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
@@ -813,12 +813,158 @@ pub trait GraphicsDevice: Device {
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;
 
-    /// Get display outputs provided by this device.
+    /// Return the framebuffer backing one connector presents.
     ///
-    /// Default returns empty — devices that don't support multi-output
-    /// don't need to override this.
-    fn get_outputs(&self) -> Vec<&dyn DisplayOutput> {
-        Vec::new()
+    /// Connector 0 is the primary output and uses
+    /// [`GraphicsDevice::get_framebuffer_info`]. Multi-connector drivers
+    /// override this for their other connectors; the default has none.
+    ///
+    /// # Arguments
+    ///
+    /// * `connector` - Connector index from [`GraphicsDevice::connectors`].
+    ///
+    /// # Returns
+    ///
+    /// Configuration and physical address of the connector's backing store,
+    /// or an error while the connector has no monitor attached.
+    fn connector_framebuffer_info(
+        &self,
+        connector: u32,
+    ) -> Result<(FramebufferConfig, u64), &'static str> {
+        if connector == 0 {
+            self.get_framebuffer_info()
+        } else {
+            Err("Display connector is not connected")
+        }
+    }
+
+    /// Begin presenting a region of one connector's framebuffer.
+    ///
+    /// Same contract as [`GraphicsDevice::begin_framebuffer_present`], for
+    /// the backing returned by [`GraphicsDevice::connector_framebuffer_info`].
+    fn begin_connector_framebuffer_present(
+        &self,
+        connector: u32,
+        config: FramebufferConfig,
+        physical_addr: u64,
+        region: DisplayRegion,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        if connector == 0 {
+            self.begin_framebuffer_present(config, physical_addr, region, owners)
+        } else {
+            // Drivers with synchronous connector presentation use the fallback below.
+            Ok(None)
+        }
+    }
+
+    /// Synchronously present a region of one connector's framebuffer.
+    ///
+    /// Used when [`GraphicsDevice::begin_connector_framebuffer_present`]
+    /// returns `None`.
+    fn present_connector_framebuffer_region(
+        &self,
+        connector: u32,
+        region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        if connector == 0 {
+            self.present_current_framebuffer_region(region)
+        } else {
+            Err("Display connector is not connected")
+        }
+    }
+
+    /// Begin presenting a GPU resource on one connector.
+    ///
+    /// Same contract as [`GraphicsDevice::begin_gpu_resource_present`], for
+    /// the given connector. Connector 0 delegates to that method.
+    fn begin_connector_gpu_resource_present(
+        &self,
+        connector: u32,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+        options: GpuPresentOptions,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        if connector == 0 {
+            self.begin_gpu_resource_present(resource, region, options, owners)
+        } else {
+            // The synchronous connector method rejects unsupported connectors.
+            Ok(None)
+        }
+    }
+
+    /// Synchronously present a GPU resource on one connector.
+    ///
+    /// Used when [`GraphicsDevice::begin_connector_gpu_resource_present`]
+    /// returns `None`. Connector 0 delegates to
+    /// [`GraphicsDevice::present_gpu_resource_region_with_options`].
+    fn present_connector_gpu_resource_region(
+        &self,
+        connector: u32,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+        options: GpuPresentOptions,
+    ) -> Result<(), &'static str> {
+        if connector == 0 {
+            self.present_gpu_resource_region_with_options(resource, region, options)
+        } else {
+            Err("GPU resource presentation is not supported on this connector")
+        }
+    }
+
+    /// Backlight level of one connector, as a percentage.
+    ///
+    /// Connector 0 delegates to [`GraphicsDevice::get_brightness_percent`].
+    fn connector_brightness_percent(&self, connector: u32) -> Result<u8, &'static str> {
+        if connector == 0 {
+            self.get_brightness_percent()
+        } else {
+            Err("Display brightness control is not supported")
+        }
+    }
+
+    /// Set the backlight level of one connector.
+    ///
+    /// Connector 0 delegates to [`GraphicsDevice::set_brightness_percent`].
+    fn set_connector_brightness_percent(
+        &self,
+        connector: u32,
+        percent: u8,
+    ) -> Result<(), &'static str> {
+        if connector == 0 {
+            self.set_brightness_percent(percent)
+        } else {
+            Err("Display brightness control is not supported")
+        }
+    }
+
+    /// Enumerate the display connectors this device exposes.
+    ///
+    /// Connector 0 is the one the primary-output methods above drive. The
+    /// default reports that single connector from the current framebuffer
+    /// configuration, so single-output drivers need not override this.
+    /// Drivers with several connectors list all of them, including ones with
+    /// no monitor attached.
+    ///
+    /// # Returns
+    ///
+    /// The device's connectors in index order, or an empty list before the
+    /// device has a display configuration.
+    fn connectors(&self) -> Vec<ConnectorInfo> {
+        let Ok(config) = self.get_framebuffer_config() else {
+            return Vec::new();
+        };
+        alloc::vec![ConnectorInfo {
+            index: 0,
+            name: alloc::string::String::from(self.get_display_name()),
+            kind: ConnectorKind::Unknown,
+            connected: true,
+            width: config.width,
+            height: config.height,
+            refresh_mhz: 0,
+            physical_size_mm: None,
+        }]
     }
 }
 

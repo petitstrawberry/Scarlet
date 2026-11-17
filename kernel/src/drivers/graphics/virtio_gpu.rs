@@ -33,7 +33,8 @@ use crate::{
         },
         graphics::{
             FramebufferConfig, GpuDisplayResource, GpuPresentOptions, GraphicsDevice, PixelFormat,
-            PresentationOwners, PresentationWait, output::DisplayRegion,
+            PresentationOwners, PresentationWait,
+            output::{ConnectorInfo, ConnectorKind, DisplayRegion},
         },
     },
     drivers::virtio::{device::VirtioDevice, pci::VirtioPciTransport, queue::VirtQueue},
@@ -94,6 +95,7 @@ const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
 const VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET: usize = 0;
 const VIRTIO_GPU_CONFIG_EVENTS_CLEAR_OFFSET: usize = 4;
 const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1;
+const VIRTIO_GPU_CONFIG_NUM_SCANOUTS_OFFSET: usize = 8;
 const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
@@ -165,6 +167,38 @@ struct VirtioGpuDisplayOne {
     r: VirtioGpuRect,
     enabled: u32,
     flags: u32,
+}
+
+/// Describe each scanout of a `GET_DISPLAY_INFO` response as a connector.
+///
+/// A scanout counts as connected only while the host reports it enabled with
+/// a non-empty rectangle.
+///
+/// # Arguments
+///
+/// * `pmodes` - Display modes for the device's scanouts, in scanout order.
+///
+/// # Returns
+///
+/// One connector per scanout.
+fn connectors_from_pmodes(pmodes: &[VirtioGpuDisplayOne]) -> Vec<ConnectorInfo> {
+    pmodes
+        .iter()
+        .enumerate()
+        .map(|(index, mode)| {
+            let connected = mode.enabled != 0 && mode.r.width != 0 && mode.r.height != 0;
+            ConnectorInfo {
+                index: index as u32,
+                name: alloc::format!("virtual-{}", index),
+                kind: ConnectorKind::Virtual,
+                connected,
+                width: if connected { mode.r.width } else { 0 },
+                height: if connected { mode.r.height } else { 0 },
+                refresh_mhz: 0,
+                physical_size_mm: None,
+            }
+        })
+        .collect()
 }
 
 /// VirtIO GPU resource create 2D
@@ -536,6 +570,25 @@ pub struct VirtioGpuControl {
     initialized: IrqSpinLock<bool>,
     // Track resources and their associated memory
     resources: IrqSpinLock<alloc::collections::BTreeMap<u32, (u64, usize)>>, // resource_id -> (addr, size)
+    /// Framebuffers for scanouts other than 0, keyed by scanout index.
+    secondary_scanouts: IrqSpinLock<alloc::collections::BTreeMap<u32, ScanoutFramebuffer>>,
+}
+
+/// CPU-written framebuffer bound to a non-primary scanout.
+struct ScanoutFramebuffer {
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    physical_addr: u64,
+    /// Keeps the backing alive; replaced allocations are retired, never freed,
+    /// because a client may still map them.
+    _alloc: ContiguousPages,
+}
+
+impl ScanoutFramebuffer {
+    fn config(&self) -> FramebufferConfig {
+        FramebufferConfig::new(self.width, self.height, PixelFormat::BGRA8888)
+    }
 }
 
 impl VirtioGpuDeviceCore {
@@ -601,6 +654,7 @@ impl VirtioGpuControl {
             transport_ready: IrqRwSpinLock::new(false),
             initialized: IrqSpinLock::new(false),
             resources: IrqSpinLock::new(alloc::collections::BTreeMap::new()),
+            secondary_scanouts: IrqSpinLock::new(alloc::collections::BTreeMap::new()),
         };
 
         // init may install a ring even if later negotiation fails. Without a
@@ -1415,6 +1469,89 @@ impl VirtioGpuControl {
         Ok(())
     }
 
+    /// Return the framebuffer for a non-primary scanout, creating or
+    /// replacing it to match the host's current mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `scanout` - Scanout index, at least 1.
+    ///
+    /// # Returns
+    ///
+    /// Configuration and physical address of the scanout's backing, or an
+    /// error while the host reports the scanout disabled.
+    fn secondary_framebuffer(
+        &self,
+        scanout: u32,
+    ) -> Result<(FramebufferConfig, u64), &'static str> {
+        let index = scanout as usize;
+        if scanout == 0 || index >= VIRTIO_GPU_MAX_SCANOUTS {
+            return Err("Invalid secondary scanout");
+        }
+        let mode = {
+            let display_info = self.display_info.read();
+            display_info
+                .as_ref()
+                .ok_or("Device not initialized")?
+                .pmodes[index]
+        };
+        let connected = mode.enabled != 0 && mode.r.width != 0 && mode.r.height != 0;
+        let mut scanouts = self.secondary_scanouts.lock();
+        if !connected {
+            if let Some(old) = scanouts.remove(&scanout) {
+                self.retired_framebuffer_allocs.lock().push(old._alloc);
+            }
+            return Err("Display connector is not connected");
+        }
+        if let Some(existing) = scanouts.get(&scanout) {
+            if existing.width == mode.r.width && existing.height == mode.r.height {
+                return Ok((existing.config(), existing.physical_addr));
+            }
+        }
+
+        let (width, height) = (mode.r.width, mode.r.height);
+        let resource_id =
+            self.create_2d_resource(width, height, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)?;
+        let size = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("Scanout framebuffer size overflow")?;
+        let alloc = ContiguousPages::new(size.div_ceil(4096))
+            .ok_or("Failed to allocate scanout framebuffer memory")?;
+        let physical_addr = alloc.as_paddr();
+        self.attach_backing_to_resource(resource_id, physical_addr, size)?;
+        // SAFETY: the allocation is owned here and spans `size` bytes.
+        unsafe {
+            ptr::write_bytes(
+                crate::vm::addr::phys_to_virt(physical_addr) as *mut u8,
+                0,
+                size,
+            )
+        };
+        self.resources
+            .lock()
+            .insert(resource_id, (physical_addr, size));
+        crate::println!(
+            "[virtio-gpu] scanout {} framebuffer {}x{} (resource {})",
+            scanout,
+            width,
+            height,
+            resource_id
+        );
+        let framebuffer = ScanoutFramebuffer {
+            resource_id,
+            width,
+            height,
+            physical_addr,
+            _alloc: alloc,
+        };
+        let config = framebuffer.config();
+        if let Some(old) = scanouts.insert(scanout, framebuffer) {
+            self.retired_framebuffer_allocs.lock().push(old._alloc);
+        }
+        Ok((config, physical_addr))
+    }
+
     fn poll_display_resize(&self) -> Result<(), &'static str> {
         if !self.display_update_needed() {
             return Ok(());
@@ -1458,6 +1595,22 @@ impl VirtioGpuControl {
 
         self.display_update_pending.store(false, Ordering::Release);
         Ok(())
+    }
+
+    /// Enumerate scanouts reported by the last `GET_DISPLAY_INFO`.
+    ///
+    /// # Returns
+    ///
+    /// One connector per scanout the device advertises, or an empty list
+    /// before display information has been read.
+    fn connectors(&self) -> Vec<ConnectorInfo> {
+        let display_info = self.display_info.read();
+        let Some(display_info) = display_info.as_ref() else {
+            return Vec::new();
+        };
+        let scanouts = (self.read_config_u32(VIRTIO_GPU_CONFIG_NUM_SCANOUTS_OFFSET) as usize)
+            .clamp(1, VIRTIO_GPU_MAX_SCANOUTS);
+        connectors_from_pmodes(&display_info.pmodes[..scanouts])
     }
 
     fn display_update_needed(&self) -> bool {
@@ -1651,11 +1804,15 @@ fn dead_presentations(owners: &[(u64, Weak<crate::task::Task>)]) -> Vec<u64> {
 
 enum PresentTarget {
     Gpu {
+        /// Scanout to present on; 0 is the primary output.
+        scanout: u32,
         resource: GpuDisplayResource,
         region: DisplayRegion,
         producer_complete: bool,
     },
     Framebuffer {
+        /// Scanout to present on; 0 is the primary framebuffer.
+        scanout: u32,
         config: FramebufferConfig,
         physical_addr: u64,
         region: DisplayRegion,
@@ -1775,8 +1932,24 @@ fn prepare_present_target(
 ) -> Result<Vec<Arc<ControlRequest>>, &'static str> {
     match target {
         PresentTarget::Gpu {
-            resource, region, ..
+            scanout,
+            resource,
+            region,
+            ..
         } => {
+            if *scanout != 0 {
+                let display = core.display_info.read();
+                let mode = display
+                    .as_ref()
+                    .ok_or("Device not initialized")?
+                    .pmodes
+                    .get(*scanout as usize)
+                    .copied()
+                    .ok_or("Invalid scanout")?;
+                if mode.enabled == 0 {
+                    return Err("Display connector is not connected");
+                }
+            }
             if resource.backend_cookie() != core.backend_cookie() {
                 return Err("GPU display resource belongs to a different VirtIO GPU device");
             }
@@ -1796,12 +1969,42 @@ fn prepare_present_target(
                 resource.height(),
                 rect,
                 false,
+                *scanout,
             )
+        }
+        PresentTarget::Framebuffer {
+            scanout,
+            config,
+            physical_addr,
+            region,
+        } if *scanout != 0 => {
+            let (resource_id, width, height) = {
+                let scanouts = core.secondary_scanouts.lock();
+                let framebuffer = scanouts
+                    .get(scanout)
+                    .ok_or("Display connector is not connected")?;
+                if framebuffer.physical_addr != *physical_addr
+                    || framebuffer.width != config.width
+                    || framebuffer.height != config.height
+                {
+                    return Err("Framebuffer does not match the current scanout framebuffer");
+                }
+                (
+                    framebuffer.resource_id,
+                    framebuffer.width,
+                    framebuffer.height,
+                )
+            };
+            let Some(rect) = VirtioGpuControl::clamp_region_to_rect(*region, width, height) else {
+                return Ok(Vec::new());
+            };
+            presentation_requests(resource_id, width, height, rect, true, *scanout)
         }
         PresentTarget::Framebuffer {
             config,
             physical_addr,
             region,
+            ..
         } => {
             let current_config = core.get_framebuffer_config()?;
             if core.get_framebuffer_address()? != *physical_addr {
@@ -1830,7 +2033,14 @@ fn prepare_present_target(
                 .current_resource_id
                 .read()
                 .ok_or("No framebuffer resource found")?;
-            presentation_requests(resource_id, primary.r.width, primary.r.height, rect, true)
+            presentation_requests(
+                resource_id,
+                primary.r.width,
+                primary.r.height,
+                rect,
+                true,
+                0,
+            )
         }
     }
 }
@@ -1841,6 +2051,7 @@ fn presentation_requests(
     height: u32,
     rect: VirtioGpuRect,
     transfer: bool,
+    scanout_id: u32,
 ) -> Result<Vec<Arc<ControlRequest>>, &'static str> {
     fn header(hdr_type: u32) -> VirtioGpuCtrlHdr {
         VirtioGpuCtrlHdr {
@@ -1868,7 +2079,7 @@ fn presentation_requests(
             width,
             height,
         },
-        scanout_id: 0,
+        scanout_id,
         resource_id,
     })?);
     if transfer {
@@ -2832,6 +3043,13 @@ impl GraphicsDevice for VirtioGpuDevice {
         "virtio-gpu"
     }
 
+    fn connectors(&self) -> Vec<ConnectorInfo> {
+        let core = self.core.lock();
+        // Hotplug is reported through the display event; refresh before listing.
+        let _ = core.poll_display_resize();
+        core.connectors()
+    }
+
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
         self.core.lock().get_framebuffer_config()
     }
@@ -2856,6 +3074,7 @@ impl GraphicsDevice for VirtioGpuDevice {
     ) -> Result<(), &'static str> {
         self.begin_present(
             PresentTarget::Framebuffer {
+                scanout: 0,
                 config: config.clone(),
                 physical_addr,
                 region,
@@ -2874,6 +3093,42 @@ impl GraphicsDevice for VirtioGpuDevice {
     ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
         self.begin_present(
             PresentTarget::Framebuffer {
+                scanout: 0,
+                config,
+                physical_addr,
+                region,
+            },
+            Some(owners),
+        )
+        .map(Some)
+    }
+
+    fn connector_framebuffer_info(
+        &self,
+        connector: u32,
+    ) -> Result<(FramebufferConfig, u64), &'static str> {
+        if connector == 0 {
+            return self.get_framebuffer_info();
+        }
+        let core = self.core.lock();
+        let _ = core.poll_display_resize();
+        core.secondary_framebuffer(connector)
+    }
+
+    fn begin_connector_framebuffer_present(
+        &self,
+        connector: u32,
+        config: FramebufferConfig,
+        physical_addr: u64,
+        region: DisplayRegion,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        if connector == 0 {
+            return self.begin_framebuffer_present(config, physical_addr, region, owners);
+        }
+        self.begin_present(
+            PresentTarget::Framebuffer {
+                scanout: connector,
                 config,
                 physical_addr,
                 region,
@@ -2890,6 +3145,7 @@ impl GraphicsDevice for VirtioGpuDevice {
     ) -> Result<(), &'static str> {
         self.begin_present(
             PresentTarget::Gpu {
+                scanout: 0,
                 resource,
                 region,
                 producer_complete: false,
@@ -2908,6 +3164,27 @@ impl GraphicsDevice for VirtioGpuDevice {
     ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
         self.begin_present(
             PresentTarget::Gpu {
+                scanout: 0,
+                resource,
+                region,
+                producer_complete: options.is_producer_complete(),
+            },
+            Some(owners),
+        )
+        .map(Some)
+    }
+
+    fn begin_connector_gpu_resource_present(
+        &self,
+        connector: u32,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+        options: GpuPresentOptions,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        self.begin_present(
+            PresentTarget::Gpu {
+                scanout: connector,
                 resource,
                 region,
                 producer_complete: options.is_producer_complete(),
@@ -2960,6 +3237,7 @@ impl VirtioGpuDevice {
         let core = self.core.lock();
         assert!(core.presentations.is_empty());
         let target = PresentTarget::Framebuffer {
+            scanout: 0,
             config: core.get_framebuffer_config()?,
             physical_addr: core.get_framebuffer_address()?,
             region,
@@ -3170,6 +3448,65 @@ mod tests {
         assert!(!device.display_update_needed());
         registers[config + VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET / 4] = VIRTIO_GPU_EVENT_DISPLAY;
         assert!(device.display_update_needed());
+    }
+
+    fn display_one(width: u32, height: u32, enabled: u32) -> VirtioGpuDisplayOne {
+        VirtioGpuDisplayOne {
+            r: VirtioGpuRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            enabled,
+            flags: 0,
+        }
+    }
+
+    #[test_case]
+    fn connectors_list_every_scanout_and_mark_disabled_heads() {
+        let connectors = connectors_from_pmodes(&[
+            display_one(1280, 800, 1),
+            display_one(1024, 768, 0),
+            display_one(0, 0, 1),
+        ]);
+        assert_eq!(connectors.len(), 3);
+        assert_eq!(connectors[0].name, "virtual-0");
+        assert_eq!(connectors[0].kind, ConnectorKind::Virtual);
+        assert!(connectors[0].connected);
+        assert_eq!((connectors[0].width, connectors[0].height), (1280, 800));
+        assert_eq!(connectors[1].index, 1);
+        assert!(!connectors[1].connected);
+        assert_eq!((connectors[1].width, connectors[1].height), (0, 0));
+        assert!(!connectors[2].connected);
+        assert_eq!(connectors[2].refresh_mhz, 0);
+    }
+
+    #[test_case]
+    fn connectors_follow_num_scanouts_after_display_info() {
+        use crate::drivers::virtio::device::Register;
+        let mut registers = [0u32; 128];
+        let device = VirtioGpuDeviceCore::new(registers.as_mut_ptr() as usize);
+        assert!(device.connectors().is_empty());
+
+        let config = Register::DeviceConfig.offset() / 4;
+        registers[config + VIRTIO_GPU_CONFIG_NUM_SCANOUTS_OFFSET / 4] = 2;
+        let mut pmodes = [display_one(0, 0, 0); VIRTIO_GPU_MAX_SCANOUTS];
+        pmodes[0] = display_one(1280, 800, 1);
+        *device.display_info.write() = Some(VirtioGpuRespDisplayInfo {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            pmodes,
+        });
+        let connectors = device.connectors();
+        assert_eq!(connectors.len(), 2);
+        assert!(connectors[0].connected);
+        assert!(!connectors[1].connected);
     }
 
     #[test_case]

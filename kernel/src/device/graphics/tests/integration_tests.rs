@@ -277,6 +277,7 @@ mod integration_tests {
             size: invalid_config.size(),
             created_char_device_id: IrqRwSpinLock::new(None),
             created_display_device_id: IrqRwSpinLock::new(None),
+            connector_index: 0,
         });
 
         let char_device = FramebufferCharDevice::new(invalid_resource);
@@ -301,6 +302,7 @@ mod integration_tests {
             size: crate::environment::PAGE_SIZE,
             created_char_device_id: IrqRwSpinLock::new(None),
             created_display_device_id: IrqRwSpinLock::new(None),
+            connector_index: 0,
         });
         let char_device = FramebufferCharDevice::new(resource);
 

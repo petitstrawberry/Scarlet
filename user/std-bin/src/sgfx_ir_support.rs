@@ -220,6 +220,28 @@ struct TargetSlot {
     last_present: Option<u64>,
 }
 
+/// Presentable images for one display output within a mapped target.
+#[cfg(target_os = "scarlet")]
+struct TargetSurface {
+    width: u32,
+    height: u32,
+    /// Image the next frame renders into.
+    texture: TextureId,
+    presented_texture: Option<TextureId>,
+    slots: Vec<TargetSlot>,
+    current_slot: usize,
+    present_sequence: u64,
+    presentation: Option<PresentationQueue<DisplayPresentRegion>>,
+    pending_damage: Option<PixelRect>,
+}
+
+/// GPU context, resource table and presentable images for one or more
+/// display outputs.
+///
+/// Every output's images belong to the same session, so window textures are
+/// shared across outputs. [`MappedTarget::select_surface`] chooses the output
+/// that rendering and presentation address; `texture`, `width` and `height`
+/// always describe that selected output.
 #[cfg(target_os = "scarlet")]
 pub(crate) struct MappedTarget {
     /// The device actually opened by SGFX, including automatic selection.
@@ -228,14 +250,10 @@ pub(crate) struct MappedTarget {
     pub(crate) texture: TextureId,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    presented_texture: Option<TextureId>,
-    slots: Vec<TargetSlot>,
-    current_slot: usize,
-    present_sequence: u64,
-    presentation: Option<PresentationQueue<DisplayPresentRegion>>,
+    surfaces: Vec<TargetSurface>,
+    active: usize,
     display_completion_wake: CompletionWake,
     gpu_completion: Option<GpuCompletionQueue<sgfx::Submission>>,
-    pending_damage: Option<PixelRect>,
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
     tracked_submission: bool,
@@ -299,8 +317,9 @@ impl MappedTarget {
     /// Test display capacity and exact image retirement before constructing
     /// another frame. A busy display must not hold the compositor/input loop.
     pub(crate) fn try_acquire_render_target(&mut self) -> Result<bool, &'static str> {
-        let previous = self.slots[self.current_slot].last_present;
-        match self.presentation.as_mut() {
+        let surface = &mut self.surfaces[self.active];
+        let previous = surface.slots[surface.current_slot].last_present;
+        match surface.presentation.as_mut() {
             Some(presentation) => presentation.ready(previous),
             None => Ok(true),
         }
@@ -314,21 +333,34 @@ impl MappedTarget {
     }
 
     pub(crate) fn open(width: u32, height: u32) -> Result<Self, Error> {
-        Self::open_with_target_count(width, height, 1, false)
+        Self::open_with_target_count(&[(width, height)], 1, false)
     }
 
     /// Open a three-image presentation target for tear-free direct scanout.
     pub(crate) fn open_swapchain(width: u32, height: u32) -> Result<Self, Error> {
+        Self::open_swapchains(&[(width, height)])
+    }
+
+    /// Open three-image presentation targets for several outputs that share
+    /// one GPU context and resource table.
+    ///
+    /// # Arguments
+    ///
+    /// * `extents` - Width and height of each output, in output order.
+    ///
+    /// # Returns
+    ///
+    /// A target with output 0 selected.
+    pub(crate) fn open_swapchains(extents: &[(u32, u32)]) -> Result<Self, Error> {
         // Readback is an optional remote-capture capability, not a prerequisite
         // for local GPU composition or presentation. Backends such as native
         // Adreno can therefore keep the desktop on the GPU while an attempted
         // capture reports its own unsupported readback operation.
-        Self::open_with_target_count(width, height, 3, false)
+        Self::open_with_target_count(extents, 3, false)
     }
 
     fn open_with_target_count(
-        width: u32,
-        height: u32,
+        extents: &[(u32, u32)],
         target_count: usize,
         require_readback: bool,
     ) -> Result<Self, Error> {
@@ -346,62 +378,68 @@ impl MappedTarget {
             return Err(Error::UnsupportedCapabilities);
         }
         let context = device.create_context()?;
-        Self::from_context(context, backend, width, height, target_count)
+        Self::from_context(context, backend, extents, target_count)
     }
 
     fn from_context(
         context: Context,
         backend: sgfx::BackendKind,
-        width: u32,
-        height: u32,
+        extents: &[(u32, u32)],
         target_count: usize,
     ) -> Result<Self, Error> {
-        let resources = Rc::new(ResourceTable::new());
-        let extent = Extent2D::new(width, height)?;
-        let define_target = || -> Result<TextureId, Error> {
-            Ok(resources
-                .define_texture(TextureDesc::new(
-                    TextureFormat::Bgra8Unorm,
-                    extent,
-                    TextureUsage::RENDER_ATTACHMENT
-                        | TextureUsage::PRESENT
-                        | TextureUsage::COPY_SRC
-                        | TextureUsage::COPY_DST,
-                )?)?
-                .id())
-        };
-        if !matches!(target_count, 1 | 3) {
+        if extents.is_empty() || !matches!(target_count, 1 | 3) {
             return Err(ir::Error::InvalidValue.into());
         }
-        let mut targets = Vec::with_capacity(target_count);
-        let mut slots = Vec::with_capacity(target_count);
-        for _ in 0..target_count {
-            let texture = define_target()?;
-            targets.push(texture);
-            slots.push(TargetSlot {
-                texture,
-                initialized: false,
-                damage: None,
-                last_present: None,
+        let resources = Rc::new(ResourceTable::new());
+        let mut targets = Vec::with_capacity(extents.len() * target_count);
+        let mut surfaces = Vec::with_capacity(extents.len());
+        for &(width, height) in extents {
+            let extent = Extent2D::new(width, height)?;
+            let mut slots = Vec::with_capacity(target_count);
+            for _ in 0..target_count {
+                let texture = resources
+                    .define_texture(TextureDesc::new(
+                        TextureFormat::Bgra8Unorm,
+                        extent,
+                        TextureUsage::RENDER_ATTACHMENT
+                            | TextureUsage::PRESENT
+                            | TextureUsage::COPY_SRC
+                            | TextureUsage::COPY_DST,
+                    )?)?
+                    .id();
+                targets.push(texture);
+                slots.push(TargetSlot {
+                    texture,
+                    initialized: false,
+                    damage: None,
+                    last_present: None,
+                });
+            }
+            surfaces.push(TargetSurface {
+                width,
+                height,
+                texture: slots[0].texture,
+                presented_texture: None,
+                slots,
+                current_slot: 0,
+                present_sequence: 0,
+                presentation: None,
+                pending_damage: None,
             });
         }
-        let texture = targets[0];
         let mut session = context.create_mapped_target_session(Rc::clone(&resources), &targets)?;
         let tracked_submission = session.executor().supports_async_submission();
+        let first = &surfaces[0];
         Ok(Self {
             backend,
             resources,
-            texture,
-            width,
-            height,
-            presented_texture: None,
-            slots,
-            current_slot: 0,
-            present_sequence: 0,
-            presentation: None,
+            texture: first.texture,
+            width: first.width,
+            height: first.height,
+            surfaces,
+            active: 0,
             display_completion_wake: CompletionWake::default(),
             gpu_completion: None,
-            pending_damage: None,
             session,
             reusable_imports: Vec::new(),
             tracked_submission,
@@ -409,30 +447,62 @@ impl MappedTarget {
         })
     }
 
+    /// Number of outputs this target presents.
+    pub(crate) fn surface_count(&self) -> usize {
+        self.surfaces.len()
+    }
+
+    /// Width and height of each output, in output order.
+    pub(crate) fn surface_extents(&self) -> Vec<(u32, u32)> {
+        self.surfaces
+            .iter()
+            .map(|surface| (surface.width, surface.height))
+            .collect()
+    }
+
+    /// Choose the output that rendering and presentation address.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Output index, in the order given at creation.
+    ///
+    /// # Returns
+    ///
+    /// An error for an unknown output.
+    pub(crate) fn select_surface(&mut self, index: usize) -> Result<(), Error> {
+        let surface = self.surfaces.get(index).ok_or(ir::Error::InvalidValue)?;
+        self.active = index;
+        self.texture = surface.texture;
+        self.width = surface.width;
+        self.height = surface.height;
+        Ok(())
+    }
+
     /// Expand logical damage by the age of the current swapchain image.
     pub(crate) fn prepare_render_area(&mut self, requested: PixelRect) -> Result<PixelRect, Error> {
-        let full = PixelRect::new(0, 0, self.width, self.height)?;
-        if requested.x().saturating_add(requested.width()) > self.width
-            || requested.y().saturating_add(requested.height()) > self.height
+        let surface = &mut self.surfaces[self.active];
+        let full = PixelRect::new(0, 0, surface.width, surface.height)?;
+        if requested.x().saturating_add(requested.width()) > surface.width
+            || requested.y().saturating_add(requested.height()) > surface.height
         {
             return Err(ir::Error::InvalidValue.into());
         }
-        self.pending_damage = Some(match self.pending_damage {
+        surface.pending_damage = Some(match surface.pending_damage {
             Some(pending) => union_pixel_rect(pending, requested)?,
             None => requested,
         });
         if let Some(timings) = &mut self.frame_timings {
-            let slot = &self.slots[self.current_slot];
-            timings.damage_slot = self.current_slot as u64;
+            let slot = &surface.slots[surface.current_slot];
+            timings.damage_slot = surface.current_slot as u64;
             timings.damage_initialized = u64::from(slot.initialized);
             timings.damage_history_pixels = slot
                 .damage
                 .map_or(0, |rect| u64::from(rect.width()) * u64::from(rect.height()));
         }
-        if self.slots.len() == 1 {
+        if surface.slots.len() == 1 {
             return Ok(requested);
         }
-        let slot = &self.slots[self.current_slot];
+        let slot = &surface.slots[surface.current_slot];
         if !slot.initialized {
             return Ok(full);
         }
@@ -442,11 +512,12 @@ impl MappedTarget {
         }
     }
 
-    fn finish_present(&mut self, sequence: u64) -> Result<(), Error> {
-        let full = PixelRect::new(0, 0, self.width, self.height)?;
-        let logical_damage = self.pending_damage.take().unwrap_or(full);
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if index == self.current_slot {
+    fn finish_present(surface: &mut TargetSurface, sequence: u64) -> Result<(), Error> {
+        let full = PixelRect::new(0, 0, surface.width, surface.height)?;
+        let logical_damage = surface.pending_damage.take().unwrap_or(full);
+        let current_slot = surface.current_slot;
+        for (index, slot) in surface.slots.iter_mut().enumerate() {
+            if index == current_slot {
                 slot.initialized = true;
                 slot.damage = None;
                 slot.last_present = Some(sequence);
@@ -509,16 +580,21 @@ impl MappedTarget {
         Ok(())
     }
 
+    /// Present the selected output's current image on `display`.
+    ///
+    /// The display must stay the same for a given output; its presentation
+    /// queue is created on the first present.
     pub(crate) fn present(
         &mut self,
         display: &DisplaySurface,
         region: Option<DisplayPresentRegion>,
     ) -> Result<(), &'static str> {
-        let presented_texture = self.texture;
-        if self.slots.len() > 1 {
-            if self.presentation.is_none() {
-                let mut images = Vec::with_capacity(self.slots.len());
-                for slot in &self.slots {
+        let surface = &mut self.surfaces[self.active];
+        let presented_texture = surface.texture;
+        if surface.slots.len() > 1 {
+            if surface.presentation.is_none() {
+                let mut images = Vec::with_capacity(surface.slots.len());
+                for slot in &surface.slots {
                     images.push(
                         self.session
                             .image(slot.texture)
@@ -528,17 +604,18 @@ impl MappedTarget {
                             .map_err(|_| "Failed to retain SGFX swapchain image")?,
                     );
                 }
-                self.presentation = Some(PresentationQueue::new(
+                surface.presentation = Some(PresentationQueue::new(
                     display,
                     images,
                     self.display_completion_wake.clone(),
                 )?);
                 println!(
-                    "sgfx: asynchronous display presentation with {} images",
-                    self.slots.len()
+                    "sgfx: asynchronous display presentation with {} images (output {})",
+                    surface.slots.len(),
+                    self.active
                 );
             }
-            let sequence = self
+            let sequence = surface
                 .present_sequence
                 .checked_add(1)
                 .ok_or("SGFX presentation sequence exhausted")?;
@@ -546,22 +623,22 @@ impl MappedTarget {
                 .frame_timings
                 .as_ref()
                 .map(|_| std::time::Instant::now());
-            self.presentation
-                .as_mut()
-                .unwrap()
-                .present(sequence, self.current_slot, region)?;
+            surface.presentation.as_mut().unwrap().present(
+                sequence,
+                surface.current_slot,
+                region,
+            )?;
             if let (Some(start), Some(timings)) = (enqueue_start, &mut self.frame_timings) {
                 timings.display_enqueue_ns += start.elapsed().as_nanos();
             }
-            self.present_sequence = sequence;
-            self.finish_present(sequence)
+            surface.present_sequence = sequence;
+            Self::finish_present(surface, sequence)
                 .map_err(|_| "Failed to track SGFX swapchain damage")?;
-            let next = (self.current_slot + 1) % self.slots.len();
-            // Acquiring the next image belongs to the NEXT frame. GPU reads
-            // for this frame already retired, so its client releases must not
-            // be delayed by an unrelated future scanout fence.
-            self.current_slot = next;
-            self.texture = self.slots[next].texture;
+            let next = (surface.current_slot + 1) % surface.slots.len();
+            // Acquire the next image at the next frame's admission boundary,
+            // keeping input and completed client releases independent of vblank.
+            surface.current_slot = next;
+            surface.texture = surface.slots[next].texture;
         } else {
             let image = self
                 .session
@@ -570,21 +647,23 @@ impl MappedTarget {
             display
                 .present_image(image.shared_handle(), region)
                 .map_err(|_| "Failed to present mapped SGFX target")?;
-            self.pending_damage = None;
+            surface.pending_damage = None;
         }
-        self.presented_texture = Some(presented_texture);
+        surface.presented_texture = Some(presented_texture);
+        self.texture = surface.texture;
         Ok(())
     }
 
-    /// Read the most recently composed and queued image. GPU work has retired;
-    /// the independent display worker may still be waiting for its scanout flip.
+    /// Read the most recently composed and queued image of output 0. GPU work
+    /// has retired; the independent display worker may still be waiting for
+    /// its scanout flip.
     pub(crate) fn readback_bgra(
         &self,
         destination: &mut [u8],
         destination_stride: u32,
         damage: &[PixelRect],
     ) -> Result<(), &'static str> {
-        let texture = self
+        let texture = self.surfaces[0]
             .presented_texture
             .ok_or("SGFX target has not presented a capturable frame")?;
         for rect in damage {
@@ -602,7 +681,9 @@ impl Drop for MappedTarget {
         // Join accepted display flips before releasing session images or
         // replacing this compositor with CPU composition after an error.
         self.gpu_completion.take();
-        self.presentation.take();
+        for surface in &mut self.surfaces {
+            surface.presentation.take();
+        }
     }
 }
 
@@ -991,6 +1072,16 @@ pub(crate) struct BackdropPass<'a> {
     pub(crate) radius: u32,
 }
 
+/// One output recorded into a shared logical GPU frame.
+pub(crate) struct QuadOutput<'a> {
+    pub(crate) texture: TextureId,
+    pub(crate) extent: (u32, u32),
+    pub(crate) area: PixelRect,
+    pub(crate) load: LoadOp,
+    pub(crate) operations: &'a [Quad],
+    pub(crate) backdrops: &'a [BackdropPass<'a>],
+}
+
 /// Failure while recording or executing one quad-composition submission.
 #[derive(Debug)]
 pub(crate) enum QuadSubmitError<E = sgfx::Error> {
@@ -1274,6 +1365,32 @@ impl QuadRenderer {
         Vec<sgfx::Submission>,
         QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>,
     > {
+        self.submit_outputs_with_uploads_tracked(
+            target,
+            uploads,
+            &[QuadOutput {
+                texture,
+                extent,
+                area,
+                load,
+                operations,
+                backdrops,
+            }],
+        )
+    }
+
+    /// All outputs share one receipt owner. Admission failure retires the
+    /// accepted prefix across outputs before any imported image can be reused.
+    #[cfg(target_os = "scarlet")]
+    pub(crate) fn submit_outputs_with_uploads_tracked(
+        &self,
+        target: &mut MappedTarget,
+        uploads: &[TextureUpload<'_>],
+        outputs: &[QuadOutput<'_>],
+    ) -> Result<
+        Vec<sgfx::Submission>,
+        QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>,
+    > {
         let encode_start = target
             .frame_timings
             .as_ref()
@@ -1284,18 +1401,23 @@ impl QuadRenderer {
             inner: &mut executor,
             elapsed_ns: target.frame_timings.as_ref().map(|_| &mut backend_admit_ns),
         };
-        let encoded = self.encode_scene_with_uploads(
-            &mut timed,
-            Rc::clone(&target.resources),
-            texture,
-            extent.0,
-            extent.1,
-            area,
-            load,
-            uploads,
-            operations,
-            backdrops,
-        );
+        let encoded = (|| {
+            for (index, output) in outputs.iter().enumerate() {
+                self.encode_scene_with_uploads(
+                    &mut timed,
+                    Rc::clone(&target.resources),
+                    output.texture,
+                    output.extent.0,
+                    output.extent.1,
+                    output.area,
+                    output.load,
+                    if index == 0 { uploads } else { &[] },
+                    output.operations,
+                    output.backdrops,
+                )?;
+            }
+            Ok(())
+        })();
         drop(timed);
         if let Some(timings) = &mut target.frame_timings {
             timings.backend_admit_ns += backend_admit_ns;

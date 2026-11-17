@@ -8,14 +8,14 @@
 //! - Managing framebuffer resources from graphics devices
 //! - Coordinating with DeviceManager for device discovery
 //! - Creating and managing character devices for framebuffer access
-//! - Future support for multi-display configurations and mmap operations
 //!
 //! ## Key Components
 //!
 //! - `GraphicsManager`: The main graphics management system
 //! - `FramebufferResource`: Resource information extracted from graphics devices
-//! - `DisplayConfiguration`: Configuration for display setups (future use)
-//! - `MmapRegion`: Memory mapping region tracking (future use)
+//!
+//! Multi-display layout policy lives in the window system, not here; see
+//! `docs/graphics/multi-display.md`.
 
 extern crate alloc;
 
@@ -28,10 +28,9 @@ use alloc::{
 };
 use hashbrown::HashMap;
 
-use super::output::DisplayOutput;
 use crate::device::{
     DeviceType,
-    graphics::FramebufferConfig,
+    graphics::{FramebufferConfig, GraphicsDevice},
     manager::{DeviceManager, SharedDevice},
 };
 use crate::vm::addr::phys_to_virt;
@@ -57,6 +56,11 @@ pub struct FramebufferResource {
     pub created_char_device_id: IrqRwSpinLock<Option<usize>>,
     /// ID of the created /dev/displayX character device (if any)
     pub created_display_device_id: IrqRwSpinLock<Option<usize>>,
+    /// Connector of the source device this resource presents.
+    ///
+    /// Connector 0 is the device's primary output and also backs `/dev/fbX`.
+    /// Other connectors only get a `/dev/displayX` endpoint.
+    pub connector_index: u32,
 }
 
 impl FramebufferResource {
@@ -76,36 +80,40 @@ impl FramebufferResource {
             size,
             created_char_device_id: IrqRwSpinLock::new(None),
             created_display_device_id: IrqRwSpinLock::new(None),
+            connector_index: 0,
         }
     }
-}
 
-/// Display configuration for multi-display setups (future use)
-#[derive(Debug, Clone)]
-pub struct DisplayConfiguration {
-    /// Display identifier
-    pub display_id: String,
-    /// Associated framebuffer logical name
-    pub framebuffer_name: String,
-    /// Display position in multi-display setup
-    pub position: (u32, u32),
-    /// Display resolution
-    pub resolution: (u32, u32),
-    /// Whether this display is the primary display
-    pub is_primary: bool,
-}
-
-/// Memory mapped region tracking (future use)
-#[derive(Debug, Clone)]
-pub struct MmapRegion {
-    /// Virtual address of the mapped region
-    pub virtual_addr: usize,
-    /// Physical address of the mapped region  
-    pub physical_addr: u64,
-    /// Size of the mapped region
-    pub size: usize,
-    /// Associated framebuffer name
-    pub framebuffer_name: String,
+    /// Create a resource for a non-primary connector of a graphics device.
+    ///
+    /// Its backing is resolved from the device on every access, because the
+    /// connector may have no monitor (and no backing) when it is registered.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_device_id` - DeviceManager ID of the graphics device.
+    /// * `logical_name` - Reserved `fbN` name; no `/dev/fbN` is created.
+    /// * `connector_index` - Connector index within the device (non-zero).
+    ///
+    /// # Returns
+    ///
+    /// A resource with an empty static configuration.
+    pub fn new_connector(
+        source_device_id: usize,
+        logical_name: String,
+        connector_index: u32,
+    ) -> Self {
+        Self {
+            source_device_id,
+            logical_name,
+            config: FramebufferConfig::new(0, 0, super::PixelFormat::BGRA8888),
+            physical_addr: 0,
+            size: 0,
+            created_char_device_id: IrqRwSpinLock::new(None),
+            created_display_device_id: IrqRwSpinLock::new(None),
+            connector_index,
+        }
+    }
 }
 
 /// Graphics Manager - singleton for managing graphics resources
@@ -114,12 +122,6 @@ pub struct GraphicsManager {
     framebuffers: IrqSpinLock<Option<HashMap<String, Arc<FramebufferResource>>>>,
     /// Coordinates firmware boot framebuffer publication with native takeover.
     takeover_state: IrqSpinLock<FramebufferTakeoverState>,
-    /// Multi-display configuration (future use)
-    #[allow(dead_code)]
-    display_configs: IrqSpinLock<Vec<DisplayConfiguration>>,
-    /// Active mmap regions (future use)
-    #[allow(dead_code)]
-    active_mappings: IrqSpinLock<Vec<MmapRegion>>,
     #[cfg(test)]
     endpoint_publication_failure: IrqSpinLock<Option<EndpointPublicationFailure>>,
 }
@@ -154,8 +156,6 @@ impl GraphicsManager {
         Self {
             framebuffers: IrqSpinLock::new(None),
             takeover_state: IrqSpinLock::new(FramebufferTakeoverState::BootAllowed),
-            display_configs: IrqSpinLock::new(Vec::new()),
-            active_mappings: IrqSpinLock::new(Vec::new()),
             #[cfg(test)]
             endpoint_publication_failure: IrqSpinLock::new(None),
         }
@@ -432,6 +432,11 @@ impl GraphicsManager {
                 &retired_boot_framebuffers,
                 device_manager,
             );
+            self.register_secondary_connectors_with_manager(
+                device_id,
+                graphics_device,
+                device_manager,
+            );
         } else {
             // Keep ordinary framebuffer registration best-effort. Native
             // takeover uses the transactional branch above instead.
@@ -462,9 +467,72 @@ impl GraphicsManager {
                     error
                 );
             }
+            self.register_secondary_connectors_with_manager(
+                device_id,
+                graphics_device,
+                device_manager,
+            );
         }
 
         Ok(())
+    }
+
+    /// Publish a `/dev/displayN` endpoint for every connector after the first.
+    ///
+    /// Endpoints exist whether or not a monitor is attached, like DRM
+    /// connectors; clients read the connection state from
+    /// `DISPLAY_GET_OUTPUT_INFO`. Failures are logged and do not affect the
+    /// already-published primary connector.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - DeviceManager ID of the graphics device.
+    /// * `graphics_device` - The graphics device.
+    /// * `device_manager` - DeviceManager to publish endpoints in.
+    fn register_secondary_connectors_with_manager(
+        &self,
+        device_id: usize,
+        graphics_device: &dyn GraphicsDevice,
+        device_manager: &DeviceManager,
+    ) {
+        for connector in graphics_device.connectors().into_iter().skip(1) {
+            let logical_name = {
+                let mut framebuffers = self.framebuffers.lock();
+                let map = framebuffers.get_or_insert_with(HashMap::new);
+                let index = (0usize..)
+                    .find(|index| !map.contains_key(&format!("fb{}", index)))
+                    .expect("framebuffer index space exhausted");
+                let logical_name = format!("fb{}", index);
+                map.insert(
+                    logical_name.clone(),
+                    Arc::new(FramebufferResource::new_connector(
+                        device_id,
+                        logical_name.clone(),
+                        connector.index,
+                    )),
+                );
+                logical_name
+            };
+            match self.create_display_char_device_with_manager(&logical_name, device_manager) {
+                Ok(()) => crate::println!(
+                    "[GraphicsManager] Connector {} ({}) of device {} -> display for {}",
+                    connector.index,
+                    connector.name,
+                    device_id,
+                    logical_name
+                ),
+                Err(error) => {
+                    crate::println!(
+                        "[GraphicsManager] Warning: no display endpoint for connector {}: {}",
+                        connector.index,
+                        error
+                    );
+                    if let Some(map) = self.framebuffers.lock().as_mut() {
+                        map.remove(&logical_name);
+                    }
+                }
+            }
+        }
     }
 
     fn is_source_device_registered(&self, device_id: usize) -> bool {
@@ -1010,76 +1078,6 @@ impl GraphicsManager {
         Ok(bytes_to_write)
     }
 
-    /// Present a framebuffer on all connected outputs across all graphics devices.
-    ///
-    /// This is the "mirror" operation — every connected display gets the same content.
-    pub fn mirror_all(&self, fb_name: &str) -> Result<(), &'static str> {
-        let fb = self
-            .get_framebuffer(fb_name)
-            .ok_or("mirror: framebuffer not found")?;
-
-        let device_manager = DeviceManager::get_manager();
-
-        let mut presented = 0u32;
-        let mut last_error: Option<&'static str> = None;
-
-        for (_, device) in device_manager.get_devices_with_ids() {
-            let graphics = match device.as_graphics_device() {
-                Some(g) => g,
-                None => continue,
-            };
-
-            let outputs: Vec<&dyn DisplayOutput> = graphics.get_outputs();
-            for output in outputs {
-                if !output.is_connected() {
-                    continue;
-                }
-                match output.present(&fb.config, fb.physical_addr) {
-                    Ok(()) => presented += 1,
-                    Err(e) => {
-                        crate::println!(
-                            "[GraphicsManager] mirror failed on '{}': {}",
-                            output.name(),
-                            e
-                        );
-                        last_error = Some(e);
-                    }
-                }
-            }
-        }
-
-        if presented == 0 {
-            return Err(last_error.unwrap_or("mirror: no connected outputs"));
-        }
-
-        Ok(())
-    }
-
-    /// Present a framebuffer on a specific output by name.
-    pub fn mirror_to(&self, fb_name: &str, output_name: &str) -> Result<(), &'static str> {
-        let fb = self
-            .get_framebuffer(fb_name)
-            .ok_or("mirror: framebuffer not found")?;
-
-        let device_manager = DeviceManager::get_manager();
-
-        for (_, device) in device_manager.get_devices_with_ids() {
-            let graphics = match device.as_graphics_device() {
-                Some(g) => g,
-                None => continue,
-            };
-
-            let outputs: Vec<&dyn DisplayOutput> = graphics.get_outputs();
-            for output in outputs {
-                if output.name() == output_name {
-                    return output.present(&fb.config, fb.physical_addr);
-                }
-            }
-        }
-
-        Err("mirror: output not found")
-    }
-
     /// Clear all framebuffers (for testing only)
     /// This allows tests to start with a clean GraphicsManager state
     #[cfg(test)]
@@ -1092,12 +1090,6 @@ impl GraphicsManager {
             *framebuffers = None;
         }
         *self.takeover_state.lock() = FramebufferTakeoverState::BootAllowed;
-
-        let mut display_configs = self.display_configs.lock();
-        display_configs.clear();
-
-        let mut active_mappings = self.active_mappings.lock();
-        active_mappings.clear();
 
         // Also clear DeviceManager state to ensure test isolation
         DeviceManager::get_manager().clear_for_test();

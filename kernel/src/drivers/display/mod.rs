@@ -7,7 +7,8 @@
 //! - DART IOMMU setup that coexists with m1n1's pre-initialized page tables
 //!
 //! The driver code itself is complete (I2C → EFUSE → ASC → RTKit → AFK → EPIC
-//! → DCPext → DPXBAR → ATC PHY DP → DisplayOutput). What's missing is the kernel
+//! → DCPext → DPXBAR → ATC PHY DP). When re-enabled it should expose its
+//! panel and DP ports as `GraphicsDevice::connectors()`. What is missing is the kernel
 //! infrastructure to initialize coprocessors safely after the boot interrupt
 //! and scheduler are ready.
 //!

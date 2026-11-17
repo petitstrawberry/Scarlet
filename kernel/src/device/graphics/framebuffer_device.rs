@@ -1757,6 +1757,7 @@ mod tests {
             size: 300,
             created_char_device_id: IrqRwSpinLock::new(None),
             created_display_device_id: IrqRwSpinLock::new(None),
+            connector_index: 0,
         });
         let invalid_device = FramebufferCharDevice::new(invalid_resource);
 

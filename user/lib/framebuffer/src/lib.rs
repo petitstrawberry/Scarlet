@@ -11,17 +11,17 @@ extern crate scarlet_std as std;
 
 use alloc::{format, vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
-#[cfg(feature = "std")]
 use scarlet_os::handle::capability::SeekFrom;
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, munmap, prot},
         Handle, HandleError, HandleResult,
+        capability::memory_mapping::{flags, munmap, prot},
     },
     io::SeekFrom,
 };
@@ -93,6 +93,11 @@ pub mod display_commands {
     ///
     /// The requested percentage is passed as the scalar control argument.
     pub const DISPLAY_SET_BRIGHTNESS: u32 = 0x5007;
+    /// Describe the output a display endpoint presents and its connector.
+    ///
+    /// The argument points to a [`super::DisplayOutputInfo`] whose `size` is
+    /// set to the bytes the caller provides.
+    pub const DISPLAY_GET_OUTPUT_INFO: u32 = 0x5008;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -143,6 +148,119 @@ const _: () = {
     assert!(core::mem::size_of::<DisplayInfo>() == 32);
     assert!(core::mem::offset_of!(DisplayInfo, backing_id) == 24);
 };
+
+/// Layout version of [`DisplayOutputInfo`] this library understands.
+pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 1;
+/// A monitor is attached to the connector and enabled.
+pub const DISPLAY_OUTPUT_FLAG_CONNECTED: u32 = 1 << 0;
+/// The endpoint is `/dev/display0`, the primary output.
+pub const DISPLAY_OUTPUT_FLAG_PRIMARY: u32 = 1 << 1;
+/// Connector kind is unknown.
+pub const DISPLAY_CONNECTOR_KIND_UNKNOWN: u32 = 0;
+/// Built-in panel.
+pub const DISPLAY_CONNECTOR_KIND_INTERNAL: u32 = 1;
+/// External monitor port.
+pub const DISPLAY_CONNECTOR_KIND_EXTERNAL: u32 = 2;
+/// Output of a virtual display device.
+pub const DISPLAY_CONNECTOR_KIND_VIRTUAL: u32 = 3;
+/// Bytes reserved for the NUL-padded connector name.
+pub const DISPLAY_CONNECTOR_NAME_LEN: usize = 32;
+
+/// Output and connector description returned by `DISPLAY_GET_OUTPUT_INFO`.
+///
+/// The caller sets `size` to the bytes it provides; the kernel rejects
+/// requests smaller than version 1, writes at most `size` bytes, and reports
+/// the bytes written in `size` and its layout in `version`. Unknown values
+/// are 0.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayOutputInfo {
+    /// In: bytes provided. Out: bytes written.
+    pub size: u32,
+    /// Layout version written by the kernel.
+    pub version: u32,
+    /// `DISPLAY_OUTPUT_FLAG_*` values.
+    pub flags: u32,
+    /// Connector this endpoint presents, within its graphics device.
+    pub connector_index: u32,
+    /// Connectors the graphics device exposes, whether connected or not.
+    pub connector_count: u32,
+    /// `DISPLAY_CONNECTOR_KIND_*` value.
+    pub kind: u32,
+    /// Current mode width in pixels.
+    pub width: u32,
+    /// Current mode height in pixels.
+    pub height: u32,
+    /// Refresh rate in millihertz.
+    pub refresh_mhz: u32,
+    /// Physical width in millimetres.
+    pub physical_width_mm: u32,
+    /// Physical height in millimetres.
+    pub physical_height_mm: u32,
+    /// Reserved.
+    pub reserved: u32,
+    /// NUL-padded connector name.
+    pub name: [u8; DISPLAY_CONNECTOR_NAME_LEN],
+}
+
+// DISPLAY_GET_OUTPUT_INFO writes this fixed-width kernel record.
+const _: () = {
+    assert!(core::mem::size_of::<DisplayOutputInfo>() == 80);
+    assert!(core::mem::offset_of!(DisplayOutputInfo, name) == 48);
+};
+
+impl DisplayOutputInfo {
+    fn request() -> Self {
+        Self {
+            size: core::mem::size_of::<Self>() as u32,
+            version: 0,
+            flags: 0,
+            connector_index: 0,
+            connector_count: 0,
+            kind: DISPLAY_CONNECTOR_KIND_UNKNOWN,
+            width: 0,
+            height: 0,
+            refresh_mhz: 0,
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            reserved: 0,
+            name: [0; DISPLAY_CONNECTOR_NAME_LEN],
+        }
+    }
+
+    /// Connector name up to the first NUL, if it is valid UTF-8.
+    pub fn name(&self) -> &str {
+        let len = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.name.len());
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+
+    /// Whether a monitor is attached and enabled.
+    pub fn is_connected(&self) -> bool {
+        self.flags & DISPLAY_OUTPUT_FLAG_CONNECTED != 0
+    }
+
+    /// Whether this endpoint is the primary output.
+    pub fn is_primary(&self) -> bool {
+        self.flags & DISPLAY_OUTPUT_FLAG_PRIMARY != 0
+    }
+}
+
+fn get_output_info(file: &File) -> HandleResult<DisplayOutputInfo> {
+    let mut info = DisplayOutputInfo::request();
+    // SAFETY: The record has this query's exact ABI layout, its size field
+    // covers the whole record, and it stays exclusively borrowed until return.
+    unsafe {
+        file.as_handle().control(
+            display_commands::DISPLAY_GET_OUTPUT_INFO,
+            &mut info as *mut DisplayOutputInfo as usize,
+        )
+    }?;
+    Ok(info)
+}
 
 /// Region argument for DISPLAY_PRESENT_REGION.
 #[repr(C)]
@@ -598,6 +716,16 @@ impl DisplayControl {
     pub fn set_brightness_percent(&self, percent: u8) -> HandleResult<()> {
         set_brightness_percent(&self.file, percent)
     }
+
+    /// Describe the output this endpoint presents.
+    ///
+    /// # Returns
+    ///
+    /// The output and connector description, or a handle error when the
+    /// kernel does not support the query.
+    pub fn get_output_info(&self) -> HandleResult<DisplayOutputInfo> {
+        get_output_info(&self.file)
+    }
 }
 
 impl DisplaySurface {
@@ -982,6 +1110,16 @@ impl DisplaySurface {
             self.scratch_line.resize(line_bytes, 0);
         }
         Ok(info)
+    }
+
+    /// Describe the output this surface presents.
+    ///
+    /// # Returns
+    ///
+    /// The output and connector description, or a handle error when the
+    /// kernel does not support the query.
+    pub fn get_output_info(&self) -> HandleResult<DisplayOutputInfo> {
+        get_output_info(&self.file)
     }
 
     /// Get display surface information.
@@ -2463,7 +2601,7 @@ impl Drop for DisplaySurface {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightness_percent_from_control, HandleError};
+    use super::{HandleError, brightness_percent_from_control};
 
     #[test]
     fn brightness_control_result_accepts_inclusive_range() {

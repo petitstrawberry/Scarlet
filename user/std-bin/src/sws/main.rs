@@ -18,6 +18,7 @@ mod input_environment;
 mod input_environment_sbus;
 mod input_panel;
 mod ipc;
+mod output;
 mod pointer_lock;
 mod remote;
 #[path = "../sgfx_ir_support.rs"]

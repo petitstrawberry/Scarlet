@@ -16,9 +16,9 @@ use std::time::Instant;
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    BackdropPass, BackdropTextures, CopiedRect, MappedTarget, MaterialDamage, Quad, QuadRenderer,
-    QuadSubmitError, SampledRect, TextureUpload, define_bgra_texture, define_scene_texture,
-    retarget_backdrops, upload_bgra,
+    BackdropPass, BackdropTextures, CopiedRect, MappedTarget, MaterialDamage, Quad, QuadOutput,
+    QuadRenderer, QuadSubmitError, SampledRect, TextureUpload, define_bgra_texture,
+    define_scene_texture, retarget_backdrops, upload_bgra,
 };
 
 use crate::sgfx_ir_support::clipped_scaled_image as clipped_scaled_rect;
@@ -30,8 +30,8 @@ type DamageRect = (u32, u32, u32, u32);
 /// Every composition target, including resource-table/extent replacements,
 /// must own its receipt worker BEFORE any final asynchronous frame is admitted.
 /// Target drop still joins that worker before releasing images/session state.
-fn open_composition_target(width: u32, height: u32) -> Result<MappedTarget, &'static str> {
-    let mut target = MappedTarget::open_swapchain(width, height)
+fn open_composition_target(extents: &[(u32, u32)]) -> Result<MappedTarget, &'static str> {
+    let mut target = MappedTarget::open_swapchains(extents)
         .map_err(|_| "Failed to create mapped GPU swapchain")?;
     // Synchronous GPU executors still hand flips to the display worker.
     target.prepare_display_completion(super::ipc::wake_compositor);
@@ -306,7 +306,7 @@ struct ScenePublication {
 }
 
 struct PendingComposition {
-    region: Option<DisplayPresentRegion>,
+    outputs: Vec<(usize, Option<DisplayPresentRegion>)>,
     logical_damage: DamageRect,
     damage_profile: Option<super::trace::DamageProfile>,
     shared: Vec<SharedWindowState>,
@@ -317,9 +317,40 @@ struct PendingComposition {
     damage_pixels: u64,
 }
 
+/// What one output needs redrawn this frame, in output-local pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutputDamage {
+    /// Nothing changed on this output.
+    Skip,
+    /// Redraw the whole output.
+    Full,
+    /// Redraw this output-local rectangle.
+    Region(DamageRect),
+}
+
+/// One display output to compose in a GPU frame.
+pub(super) struct GpuOutputFrame<'a> {
+    pub(super) display: &'a DisplaySurface,
+    /// Top-left of the output in global compositor coordinates.
+    pub(super) origin: (i32, i32),
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) damage: OutputDamage,
+}
+
+fn translate_rect(rect: (i32, i32, u32, u32), origin: (i32, i32)) -> (i32, i32, u32, u32) {
+    (
+        rect.0.saturating_sub(origin.0),
+        rect.1.saturating_sub(origin.1),
+        rect.2,
+        rect.3,
+    )
+}
+
 /// GPU resources and texture cache used by the internal SWS compositor.
 pub(super) struct GpuCompositor {
     operations: RefCell<Vec<Quad>>,
+    output_operations: Vec<Vec<Quad>>,
     frame_profile: Option<super::trace::FrameProfile>,
     pending_frame: Option<PendingComposition>,
     deferred_window_removals: Vec<WindowId>,
@@ -335,7 +366,10 @@ pub(super) struct GpuCompositor {
     shared_textures: Vec<SharedWindowTexture>,
     shared_windows: Vec<SharedWindowState>,
     rebuild_pending: bool,
-    rebuild_extent: Option<(u32, u32)>,
+    /// Output extents to recreate the target with on the next rebuild.
+    rebuild_extents: Option<Vec<(u32, u32)>>,
+    /// Global rectangles of the outputs composed by the latest frame.
+    output_rects: Vec<(i32, i32, u32, u32)>,
     force_full_repaint: bool,
     backdrops: Vec<(WindowId, BackdropGeometry, BackdropTextures)>,
 }
@@ -353,7 +387,7 @@ impl GpuCompositor {
 
     pub(super) fn retire_pending_frame(
         &mut self,
-        display: &DisplaySurface,
+        displays: &[&DisplaySurface],
     ) -> Result<Option<Vec<SgfxCommitToken>>, GpuCompositionError> {
         if self.pending_frame.is_none() {
             return Ok(None);
@@ -366,7 +400,7 @@ impl GpuCompositor {
             return Ok(None);
         }
         let frame = self.pending_frame.take().unwrap();
-        self.publish_completed_frame(display, frame).map(Some)
+        self.publish_completed_frame(displays, frame).map(Some)
     }
 
     pub(super) fn is_accelerated(&self) -> bool {
@@ -378,7 +412,7 @@ impl GpuCompositor {
 
     /// Create the optional GPU compositor after confirming required capabilities.
     pub(super) fn new(width: u32, height: u32, cursor: &Cursor) -> Result<Self, &'static str> {
-        let mut target = open_composition_target(width, height)?;
+        let mut target = open_composition_target(&[(width, height)])?;
         let quad_renderer =
             QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
                 .map_err(|_| "Failed to define GPU composition resources")?;
@@ -409,6 +443,7 @@ impl GpuCompositor {
 
         Ok(Self {
             operations: RefCell::new(Vec::with_capacity(COMPOSITION_QUAD_CAPACITY)),
+            output_operations: Vec::new(),
             target,
             pending_frame: None,
             deferred_window_removals: Vec::new(),
@@ -424,7 +459,8 @@ impl GpuCompositor {
             shared_textures: Vec::new(),
             shared_windows: Vec::new(),
             rebuild_pending: false,
-            rebuild_extent: None,
+            rebuild_extents: None,
+            output_rects: vec![(0, 0, width, height)],
             force_full_repaint: false,
             backdrops: Vec::new(),
         })
@@ -844,9 +880,35 @@ impl GpuCompositor {
         if width == 0 || height == 0 {
             return Err("Invalid GPU composition target extent");
         }
+        let mut extents = self
+            .rebuild_extents
+            .clone()
+            .unwrap_or_else(|| self.target.surface_extents());
+        extents[0] = (width, height);
         self.rebuild_pending = true;
-        self.rebuild_extent = Some((width, height));
+        self.rebuild_extents = Some(extents);
         Ok(())
+    }
+
+    /// Recreate the presentation targets on the next frame because an output
+    /// was attached, detached or replaced, even if the extents still match.
+    pub(super) fn outputs_changed(&mut self) {
+        self.rebuild_pending = true;
+    }
+
+    /// Match the presentation targets to the current outputs.
+    ///
+    /// A changed output count or size recreates the session on the next
+    /// frame, like a resize of the primary output does.
+    fn set_output_extents(&mut self, extents: Vec<(u32, u32)>) {
+        let current = self
+            .rebuild_extents
+            .clone()
+            .unwrap_or_else(|| self.target.surface_extents());
+        if current != extents {
+            self.rebuild_pending = true;
+            self.rebuild_extents = Some(extents);
+        }
     }
 
     /// Read damaged regions from the most recently presented SGFX target.
@@ -966,12 +1028,15 @@ impl GpuCompositor {
         Ok(())
     }
 
+    /// Append the quads that draw one window (or presentation instance) on
+    /// the selected output, whose top-left is `origin` in global coordinates.
     fn append_window_projection(
         &self,
         operations: &mut Vec<Quad>,
         window: &Window,
         instance: Option<PresentationInstance>,
         damage_clip: Option<PixelRect>,
+        origin: (i32, i32),
     ) -> Result<(), &'static str> {
         let trace_home = window.title.as_deref() == Some(b"Home");
         if trace_home {
@@ -994,7 +1059,8 @@ impl GpuCompositor {
         }
         let presentation_clip = instance
             .and_then(|instance| instance.clip)
-            .or(window.presentation_clip);
+            .or(window.presentation_clip)
+            .map(|rect| translate_rect(rect, origin));
         let clip_radius = instance.map_or(window.presentation_clip_radius, |instance| {
             instance.clip_radius
         });
@@ -1053,13 +1119,29 @@ impl GpuCompositor {
             );
         }
         let directly_imported_shm = imported_shm_texture.is_some();
-        let visual_geometry = instance.map_or_else(
-            || window.presentation_geometry(),
-            |instance| {
-                let transform = instance.transform;
-                (transform.x, transform.y, transform.width, transform.height)
-            },
+        let visual_geometry = translate_rect(
+            instance.map_or_else(
+                || window.presentation_geometry(),
+                |instance| {
+                    let transform = instance.transform;
+                    (transform.x, transform.y, transform.width, transform.height)
+                },
+            ),
+            origin,
         );
+        // Nothing of this window is on the selected output.
+        if clipped_rect(
+            visual_geometry.0,
+            visual_geometry.1,
+            visual_geometry.2,
+            visual_geometry.3,
+            self.target.width,
+            self.target.height,
+        )
+        .is_none()
+        {
+            return Ok(());
+        }
         let opacity = instance.map_or_else(
             || window.presentation_opacity(),
             |instance| (window.opacity * instance.transform.opacity).clamp(0.0, 1.0),
@@ -1246,9 +1328,15 @@ impl GpuCompositor {
     }
 
     /// Upload all changed window textures, compose the complete scene, and present it.
+    /// Compose the scene on every output and present each damaged output.
+    ///
+    /// `outputs[0]` must be the primary output. Window textures and scene
+    /// caches are prepared once and shared; each output is then rendered with
+    /// its own origin and presented on its own display. Backdrop caches are
+    /// clipped to each output and addressed in that output's local pixel grid.
     pub(super) fn compose_and_present(
         &mut self,
-        display: &DisplaySurface,
+        outputs: &[GpuOutputFrame<'_>],
         windows: &[Window],
         scenes: &[SceneView<'_>],
         cursor: &Cursor,
@@ -1259,7 +1347,6 @@ impl GpuCompositor {
         resize_outline: Option<(i32, i32, u32, u32)>,
         navigation_indicator: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
-        damage: Option<DamageRect>,
         scene_damage: Option<&[BackdropDamage]>,
         backdrops: &[(WindowId, BackdropGeometry)],
         mut damage_profile: Option<super::trace::DamageProfile>,
@@ -1270,19 +1357,21 @@ impl GpuCompositor {
         if let Some(profile) = &mut damage_profile {
             profile.gpu_forced = if self.force_full_repaint { 4 } else { 0 };
         }
+        if outputs.is_empty() {
+            return Err("GPU composition has no outputs".into());
+        }
+        self.set_output_extents(outputs.iter().map(|f| (f.width, f.height)).collect());
+        self.output_rects = outputs
+            .iter()
+            .map(|f| (f.origin.0, f.origin.1, f.width, f.height))
+            .collect();
+        let damage = match outputs[0].damage {
+            OutputDamage::Region(rect) => Some(rect),
+            _ => None,
+        };
         let profiling = super::trace::profile_enabled() || self.frame_profile.is_some();
         let profile_start = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
-        // Reject before uploads, cache publication or GPU admission. Do not
-        // spend a vblank inside present() before returning completed client
-        // leases; the normal retry path keeps input handling and credits live.
-        if !self
-            .target
-            .try_acquire_render_target()
-            .map_err(GpuCompositionError::Backend)?
-        {
-            return Err(GpuCompositionError::DisplayBusy);
-        }
         // Match individual material allocations, not absolute screen geometry.
         // A window may own several regions with identical extents: consume each
         // cached allocation once. Moving a region only invalidates its content;
@@ -1322,6 +1411,31 @@ impl GpuCompositor {
         if let Some(profile) = &mut damage_profile {
             profile.gpu_forced |= u64::from(rebuilt);
         }
+        // Rebuild changed output targets before acquiring their swapchain slots.
+        // Reject before uploads or GPU admission. Do not
+        // spend a vblank inside present() before returning completed client
+        // leases; the normal retry path keeps input handling and credits live.
+        for (index, output) in outputs.iter().enumerate() {
+            if output.damage == OutputDamage::Skip && !self.force_full_repaint {
+                continue;
+            }
+            self.target
+                .select_surface(index)
+                .map_err(|_| "GPU output is missing")?;
+            if !self
+                .target
+                .try_acquire_render_target()
+                .map_err(GpuCompositionError::Backend)?
+            {
+                self.target
+                    .select_surface(0)
+                    .map_err(|_| "GPU output is missing")?;
+                return Err(GpuCompositionError::DisplayBusy);
+            }
+        }
+        self.target
+            .select_surface(0)
+            .map_err(|_| "GPU output is missing")?;
         self.target.frame_timings = profiling.then(Default::default);
         let mut texture_uploads = Vec::new();
         self.prepare_scene_textures(scenes, windows, &mut texture_uploads)?;
@@ -1424,7 +1538,6 @@ impl GpuCompositor {
             );
         }
         let force_full_repaint = self.force_full_repaint;
-        let damage = if force_full_repaint { None } else { damage };
         let mut uploaded_texture_indices = Vec::new();
         for window in windows {
             super::trace::set_gpu_window(window.id);
@@ -1449,214 +1562,311 @@ impl GpuCompositor {
         let profile_synced = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_ENCODE);
         let clear_color = bgra_color(background);
-        let requested_clip = damage
-            .map(|(x, y, width, height)| PixelRect::new(x, y, width, height))
-            .transpose()
-            .map_err(|_| "Invalid GPU composition damage")?;
-        let full_area = PixelRect::new(0, 0, self.target.width, self.target.height)
-            .map_err(|_| "Invalid GPU composition target area")?;
-        // Only changed filter OUTPUT enters swapchain age history and capture
-        // damage. A read halo is temporary coverage for rebuilding that cache.
-        let logical_area =
-            MaterialDamage::logical_region(requested_clip.unwrap_or(full_area), &materials)
-                .map_err(|_| "Invalid backdrop logical damage")?;
-        let aged_area = self
-            .target
-            .prepare_render_area(logical_area)
-            .map_err(|_| "Failed to prepare GPU swapchain damage")?;
-        let render_area = MaterialDamage::repair_region(aged_area, &materials)
-            .map_err(|_| "Invalid backdrop repair damage")?;
-        if let Some(profile) = &mut damage_profile {
-            profile.logical_pixels =
-                u64::from(logical_area.width()) * u64::from(logical_area.height());
-            profile.aged_pixels = u64::from(aged_area.width()) * u64::from(aged_area.height());
-        }
-        let damage_clip = (render_area != full_area).then_some(render_area);
-        let mut operations = self.operations.borrow_mut();
-        operations.clear();
-        let mut backdrop_splits = Vec::new();
-        let mut overview_backplates_drawn = false;
-        for window in windows {
-            if !window.is_presented() {
-                continue;
+        let mut recorded = Vec::with_capacity(outputs.len());
+        let mut logical_damage = (0, 0, 0, 0);
+        let mut published_backdrops = Vec::new();
+        for (output_index, frame) in outputs.iter().enumerate() {
+            let damage = match frame.damage {
+                _ if force_full_repaint => None,
+                OutputDamage::Skip => continue,
+                OutputDamage::Full => None,
+                OutputDamage::Region(rect) => Some(rect),
+            };
+            let origin = frame.origin;
+            let is_primary = output_index == 0;
+            self.target
+                .select_surface(output_index)
+                .map_err(|_| "GPU output is missing")?;
+            let local_materials;
+            let output_materials: &[_] = if outputs.len() == 1 {
+                &materials
+            } else {
+                local_materials = self
+                    .backdrops
+                    .iter()
+                    .filter(|(id, geometry, _)| backdrops.contains(&(*id, *geometry)))
+                    .filter_map(|(_, geometry, textures)| {
+                        geometry
+                            .relative_to(origin, frame.width, frame.height)
+                            .map(|g| (g, textures))
+                    })
+                    .map(|(g, textures)| {
+                        Ok(MaterialDamage {
+                            source: PixelRect::new(
+                                g.source.0 as u32,
+                                g.source.1 as u32,
+                                g.source.2,
+                                g.source.3,
+                            )?,
+                            output: PixelRect::new(
+                                g.output.0 as u32,
+                                g.output.1 as u32,
+                                g.output.2,
+                                g.output.3,
+                            )?,
+                            refresh: !textures.valid,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, sgfx::ir::Error>>()
+                    .map_err(|_| "Invalid output backdrop geometry")?;
+                &local_materials
+            };
+            let output_shadows: Vec<_> = overview_shadows
+                .iter()
+                .map(|&(r, rad, c)| (translate_rect(r, origin), rad, c))
+                .collect();
+            let output_cards: Vec<_> = overview_cards
+                .iter()
+                .map(|&(r, a, b)| (translate_rect(r, origin), a, b))
+                .collect();
+            let output_remove_buttons: Vec<_> = overview_remove_buttons
+                .iter()
+                .map(|&(id, r, h)| (id, translate_rect(r, origin), h))
+                .collect();
+            let requested_clip = damage
+                .map(|(x, y, width, height)| PixelRect::new(x, y, width, height))
+                .transpose()
+                .map_err(|_| "Invalid GPU composition damage")?;
+            let full_area = PixelRect::new(0, 0, self.target.width, self.target.height)
+                .map_err(|_| "Invalid GPU composition target area")?;
+            // Only changed filter OUTPUT enters swapchain age history and capture
+            // damage. A read halo is temporary coverage for rebuilding that cache.
+            let logical_area = MaterialDamage::logical_region(
+                requested_clip.unwrap_or(full_area),
+                output_materials,
+            )
+            .map_err(|_| "Invalid backdrop logical damage")?;
+            let aged_area = self
+                .target
+                .prepare_render_area(logical_area)
+                .map_err(|_| "Failed to prepare GPU swapchain damage")?;
+            let render_area = MaterialDamage::repair_region(aged_area, output_materials)
+                .map_err(|_| "Invalid backdrop repair damage")?;
+            if let Some(profile) = &mut damage_profile {
+                profile.logical_pixels =
+                    u64::from(logical_area.width()) * u64::from(logical_area.height());
+                profile.aged_pixels = u64::from(aged_area.width()) * u64::from(aged_area.height());
             }
-            if !overview_backplates_drawn
-                && !matches!(
-                    window.window_type,
-                    WindowType::Desktop | WindowType::ShellBackground
-                )
-            {
+            let damage_clip = (render_area != full_area).then_some(render_area);
+            let mut operations = if output_index == 0 {
+                std::mem::take(&mut *self.operations.borrow_mut())
+            } else {
+                self.output_operations
+                    .resize_with(outputs.len() - 1, Vec::new);
+                std::mem::take(&mut self.output_operations[output_index - 1])
+            };
+            operations.clear();
+            let mut backdrop_splits = Vec::new();
+            let mut overview_backplates_drawn = false;
+            for window in windows {
+                if !window.is_presented() {
+                    continue;
+                }
+                if !overview_backplates_drawn
+                    && !matches!(
+                        window.window_type,
+                        WindowType::Desktop | WindowType::ShellBackground
+                    )
+                {
+                    append_overview_shadows(
+                        &mut operations,
+                        &output_shadows,
+                        self.target.width,
+                        self.target.height,
+                        damage_clip,
+                    )?;
+                    append_overview_backplates(
+                        &mut operations,
+                        &output_cards,
+                        self.target.width,
+                        self.target.height,
+                        damage_clip,
+                    )?;
+                    overview_backplates_drawn = true;
+                }
+                for (index, (id, global_geometry, _)) in self.backdrops.iter().enumerate() {
+                    let Some(geometry) =
+                        global_geometry.relative_to(origin, frame.width, frame.height)
+                    else {
+                        continue;
+                    };
+                    if *id == window.id
+                        && backdrops.contains(&(*id, *global_geometry))
+                        && intersect_pixel_rects(
+                            PixelRect::new(
+                                geometry.output.0 as u32,
+                                geometry.output.1 as u32,
+                                geometry.output.2,
+                                geometry.output.3,
+                            )
+                            .map_err(|_| "Invalid backdrop output")?,
+                            render_area,
+                        )
+                        .is_some()
+                    {
+                        backdrop_splits.push((index, operations.len()));
+                    }
+                }
+                self.append_window_projection(&mut operations, window, None, damage_clip, origin)?;
+                for instance in &window.presentation_instances {
+                    self.append_window_projection(
+                        &mut operations,
+                        window,
+                        Some(*instance),
+                        damage_clip,
+                        origin,
+                    )?;
+                }
+            }
+            if !overview_backplates_drawn {
                 append_overview_shadows(
                     &mut operations,
-                    overview_shadows,
+                    &output_shadows,
                     self.target.width,
                     self.target.height,
                     damage_clip,
                 )?;
                 append_overview_backplates(
                     &mut operations,
-                    overview_cards,
+                    &output_cards,
                     self.target.width,
                     self.target.height,
                     damage_clip,
                 )?;
-                overview_backplates_drawn = true;
             }
-            for (index, (id, geometry, _)) in self.backdrops.iter().enumerate() {
-                if *id == window.id
-                    && backdrops.contains(&(*id, *geometry))
-                    && intersect_pixel_rects(
-                        PixelRect::new(
-                            geometry.output.0 as u32,
-                            geometry.output.1 as u32,
-                            geometry.output.2,
-                            geometry.output.3,
-                        )
-                        .map_err(|_| "Invalid backdrop output")?,
-                        render_area,
-                    )
-                    .is_some()
-                {
-                    backdrop_splits.push((index, operations.len()));
-                }
-            }
-            self.append_window_projection(&mut operations, window, None, damage_clip)?;
-            for instance in &window.presentation_instances {
-                self.append_window_projection(
+            append_overview_remove_buttons(
+                &mut operations,
+                &output_remove_buttons,
+                self.target.width,
+                self.target.height,
+                damage_clip,
+            )?;
+
+            if let Some(outline) = resize_outline {
+                append_outline(
                     &mut operations,
-                    window,
-                    Some(*instance),
+                    translate_rect(outline, origin),
+                    self.target.width,
+                    self.target.height,
                     damage_clip,
                 )?;
             }
-        }
-        if !overview_backplates_drawn {
-            append_overview_shadows(
-                &mut operations,
-                overview_shadows,
-                self.target.width,
-                self.target.height,
-                damage_clip,
-            )?;
-            append_overview_backplates(
-                &mut operations,
-                overview_cards,
-                self.target.width,
-                self.target.height,
-                damage_clip,
-            )?;
-        }
-        append_overview_remove_buttons(
-            &mut operations,
-            overview_remove_buttons,
-            self.target.width,
-            self.target.height,
-            damage_clip,
-        )?;
-
-        if let Some(outline) = resize_outline {
-            append_outline(
-                &mut operations,
-                outline,
-                self.target.width,
-                self.target.height,
-                damage_clip,
-            )?;
-        }
-        if let Some(rect) = navigation_indicator {
-            append_overview_shadows(
-                &mut operations,
-                &[(rect, rect.3 / 2, [96, 96, 96, 210])],
-                self.target.width,
-                self.target.height,
-                damage_clip,
-            )?;
-        }
-        let (cursor_texture, cursor_width, cursor_height) = {
-            let cursor_image = self
-                .cursor_images
-                .get(cursor.active_image_index())
-                .ok_or("GPU cursor image is missing")?;
-            let texture = cursor_image
-                .frames
-                .get(cursor.active_frame_index())
-                .copied()
-                .ok_or("GPU cursor frame texture is missing")?;
-            (texture, cursor_image.width, cursor_image.height)
-        };
-        let (cursor_x, cursor_y) = cursor.draw_position();
-        if cursor_visible
-            && let Some((destination, source)) = clipped_rect(
-                cursor_x,
-                cursor_y,
-                cursor_width,
-                cursor_height,
-                self.target.width,
-                self.target.height,
-            )
-            && damage_clip.is_none_or(|clip| pixel_rects_intersect(destination, clip))
-        {
-            operations.push(Quad::Sampled(SampledRect {
-                texture: cursor_texture,
-                texture_width: cursor_width,
-                texture_height: cursor_height,
-                destination,
-                source,
-                tint: Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid cursor tint")?,
-                ignore_source_alpha: false,
-                clip: damage_clip,
-            }));
-        }
-
-        super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
-        let mut backdrop_passes = Vec::new();
-        for &(index, split) in &backdrop_splits {
-            let (_, geometry, textures) = &self.backdrops[index];
-            let source = geometry.source;
-            let output = geometry.output;
-            let mut clips = Vec::new();
-            let mut y = 0;
-            while y < output.3 {
-                let (x, width) = geometry.row_span(y);
-                let mut end = y + 1;
-                while end < output.3 && geometry.row_span(end) == (x, width) {
-                    end += 1;
-                }
-                if width > 0 {
-                    clips.push(
-                        PixelRect::new(x, output.1 as u32 + y, width, end - y)
-                            .map_err(|_| "Invalid rounded backdrop mask")?,
-                    );
-                }
-                y = end;
+            if let Some(rect) = navigation_indicator {
+                append_overview_shadows(
+                    &mut operations,
+                    &[(translate_rect(rect, origin), rect.3 / 2, [96, 96, 96, 210])],
+                    self.target.width,
+                    self.target.height,
+                    damage_clip,
+                )?;
             }
-            backdrop_passes.push(BackdropPass {
-                refresh: !textures.valid,
-                textures,
-                split,
-                clips,
-                radius: geometry.radius,
-                source: PixelRect::new(source.0 as u32, source.1 as u32, source.2, source.3)
-                    .map_err(|_| "Invalid backdrop source")?,
-                output: PixelRect::new(output.0 as u32, output.1 as u32, output.2, output.3)
-                    .map_err(|_| "Invalid backdrop output")?,
-            });
+            let (cursor_texture, cursor_width, cursor_height) = {
+                let cursor_image = self
+                    .cursor_images
+                    .get(cursor.active_image_index())
+                    .ok_or("GPU cursor image is missing")?;
+                let texture = cursor_image
+                    .frames
+                    .get(cursor.active_frame_index())
+                    .copied()
+                    .ok_or("GPU cursor frame texture is missing")?;
+                (texture, cursor_image.width, cursor_image.height)
+            };
+            let (cursor_x, cursor_y) = cursor.draw_position();
+            if cursor_visible
+                && let Some((destination, source)) = clipped_rect(
+                    cursor_x.saturating_sub(origin.0),
+                    cursor_y.saturating_sub(origin.1),
+                    cursor_width,
+                    cursor_height,
+                    self.target.width,
+                    self.target.height,
+                )
+                && damage_clip.is_none_or(|clip| pixel_rects_intersect(destination, clip))
+            {
+                operations.push(Quad::Sampled(SampledRect {
+                    texture: cursor_texture,
+                    texture_width: cursor_width,
+                    texture_height: cursor_height,
+                    destination,
+                    source,
+                    tint: Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid cursor tint")?,
+                    ignore_source_alpha: false,
+                    clip: damage_clip,
+                }));
+            }
+
+            super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
+            let mut backdrop_passes = Vec::new();
+            for &(index, split) in &backdrop_splits {
+                let (_, global_geometry, textures) = &self.backdrops[index];
+                let geometry = global_geometry
+                    .relative_to(origin, frame.width, frame.height)
+                    .ok_or("Backdrop belongs to a different output")?;
+                let source = geometry.source;
+                let output = geometry.output;
+                let mut clips = Vec::new();
+                let mut y = 0;
+                while y < output.3 {
+                    let (x, width) = geometry.row_span(y);
+                    let mut end = y + 1;
+                    while end < output.3 && geometry.row_span(end) == (x, width) {
+                        end += 1;
+                    }
+                    if width > 0 {
+                        clips.push(
+                            PixelRect::new(x, output.1 as u32 + y, width, end - y)
+                                .map_err(|_| "Invalid rounded backdrop mask")?,
+                        );
+                    }
+                    y = end;
+                }
+                backdrop_passes.push(BackdropPass {
+                    refresh: !textures.valid,
+                    textures,
+                    split,
+                    clips,
+                    radius: geometry.radius,
+                    source: PixelRect::new(source.0 as u32, source.1 as u32, source.2, source.3)
+                        .map_err(|_| "Invalid backdrop source")?,
+                    output: PixelRect::new(output.0 as u32, output.1 as u32, output.2, output.3)
+                        .map_err(|_| "Invalid backdrop output")?,
+                });
+            }
+
+            if is_primary {
+                logical_damage = (
+                    logical_area.x(),
+                    logical_area.y(),
+                    logical_area.width(),
+                    logical_area.height(),
+                );
+            }
+            published_backdrops.extend(
+                backdrop_splits
+                    .iter()
+                    .map(|&(i, _)| (i, self.backdrops[i].1)),
+            );
+            recorded.push((
+                output_index,
+                self.target.texture,
+                (self.target.width, self.target.height),
+                render_area,
+                (render_area != full_area).then_some(DisplayPresentRegion {
+                    x: render_area.x(),
+                    y: render_area.y(),
+                    width: render_area.width(),
+                    height: render_area.height(),
+                }),
+                operations,
+                backdrop_passes,
+            ));
         }
         let profile_encoded = profiling.then(Instant::now);
         let mut publication = PendingComposition {
             damage_profile,
-            logical_damage: (
-                logical_area.x(),
-                logical_area.y(),
-                logical_area.width(),
-                logical_area.height(),
-            ),
-            region: (render_area != full_area).then_some(DisplayPresentRegion {
-                x: render_area.x(),
-                y: render_area.y(),
-                width: render_area.width(),
-                height: render_area.height(),
-            }),
+            logical_damage,
+            outputs: recorded.iter().map(|r| (r.0, r.4)).collect(),
             shared: self
                 .shared_windows
                 .iter()
@@ -1667,10 +1877,7 @@ impl GpuCompositor {
                 })
                 .cloned()
                 .collect(),
-            backdrops: backdrop_splits
-                .iter()
-                .map(|&(index, _)| (index, self.backdrops[index].1))
-                .collect(),
+            backdrops: published_backdrops,
             scenes: scenes
                 .iter()
                 .filter_map(|view| {
@@ -1701,48 +1908,67 @@ impl GpuCompositor {
                 })
                 .collect(),
             profile: [profile_start, profile_synced, profile_encoded, None],
-            quads: operations.len(),
-            damage_pixels: u64::from(render_area.width()) * u64::from(render_area.height()),
+            quads: recorded.iter().map(|r| r.5.len()).sum(),
+            damage_pixels: recorded
+                .iter()
+                .map(|r| u64::from(r.3.width()) * u64::from(r.3.height()))
+                .sum(),
         };
-        let receipts = if self.target.supports_tracked_submission() {
+        let passes: Vec<_> = recorded
+            .iter()
+            .map(|r| QuadOutput {
+                texture: r.1,
+                extent: r.2,
+                area: r.3,
+                load: LoadOp::Clear(clear_color),
+                operations: &r.5,
+                backdrops: &r.6,
+            })
+            .collect();
+        let submitted = if self.target.supports_tracked_submission() {
             self.quad_renderer
-                .submit_region_with_uploads_tracked(
-                    &mut self.target,
-                    render_area,
-                    LoadOp::Clear(clear_color),
-                    &texture_uploads,
-                    &operations,
-                    &backdrop_passes,
-                )
+                .submit_outputs_with_uploads_tracked(&mut self.target, &texture_uploads, &passes)
                 .map_err(|error| match error {
                     QuadSubmitError::Busy => GpuCompositionError::Busy,
-                    // Recording can fail after an earlier batch was accepted.
-                    // Conservatively invalidate rather than reuse an uncertain
-                    // target or acknowledge release of its imported sources.
                     QuadSubmitError::Recording(error) => GpuCompositionError::Backend(error),
                     QuadSubmitError::Execution(error) => {
                         GpuCompositionError::TrackedExecution(error)
                     }
-                })?
+                })
         } else {
-            // Older backends without negotiated asynchronous admission use
-            // synchronous execution with the same presentation contract.
-            self.quad_renderer.submit_region_with_uploads(
-                &mut self.target,
-                render_area,
-                LoadOp::Clear(clear_color),
-                &texture_uploads,
-                &operations,
-                &backdrop_passes,
-            )?;
-            Vec::new()
+            (|| {
+                for (index, pass) in passes.iter().enumerate() {
+                    self.target
+                        .select_surface(recorded[index].0)
+                        .map_err(|_| "GPU output is missing")?;
+                    self.quad_renderer.submit_region_with_uploads(
+                        &mut self.target,
+                        pass.area,
+                        pass.load,
+                        if index == 0 { &texture_uploads } else { &[] },
+                        pass.operations,
+                        pass.backdrops,
+                    )?;
+                }
+                Ok(Vec::new())
+            })()
         };
+        drop(passes);
+        for (index, _, _, _, _, operations, _) in recorded {
+            if index == 0 {
+                *self.operations.borrow_mut() = operations;
+            } else {
+                self.output_operations[index - 1] = operations;
+            }
+        }
+        self.target
+            .select_surface(0)
+            .map_err(|_| "GPU output is missing")?;
+        let receipts = submitted?;
         for texture_index in uploaded_texture_indices {
             self.textures[texture_index].pending_damage = None;
         }
         publication.profile[3] = profiling.then(Instant::now);
-        drop(backdrop_passes);
-        drop(operations);
         if self.target.supports_tracked_submission() {
             self.target
                 .queue_gpu_completion(receipts)
@@ -1751,22 +1977,36 @@ impl GpuCompositor {
             return Err(GpuCompositionError::Pending);
         }
         let logical_damage = publication.logical_damage;
-        self.publish_completed_frame(display, publication)
-            .map(|releases| (releases, logical_damage))
+        self.publish_completed_frame(
+            &outputs.iter().map(|f| f.display).collect::<Vec<_>>(),
+            publication,
+        )
+        .map(|releases| (releases, logical_damage))
     }
 
     fn publish_completed_frame(
         &mut self,
-        display: &DisplaySurface,
+        displays: &[&DisplaySurface],
         frame: PendingComposition,
     ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
         // Preserve the existing stage-file wall intervals: submit spans fence
         // retirement (now overlapped with input), present measures enqueue only.
         let gpu_retired = frame.profile[3].map(|_| Instant::now());
+        for &(index, region) in &frame.outputs {
+            let display = displays.get(index).ok_or(GpuCompositionError::Backend(
+                "GPU output disappeared before presentation",
+            ))?;
+            self.target
+                .select_surface(index)
+                .map_err(|_| GpuCompositionError::Backend("GPU output is missing"))?;
+            self.target
+                .present(display, region)
+                .map_err(GpuCompositionError::Backend)?;
+        }
         self.target
-            .present(display, frame.region)
-            .map_err(GpuCompositionError::Backend)?;
+            .select_surface(0)
+            .map_err(|_| GpuCompositionError::Backend("GPU primary output is missing"))?;
         let presented = self.frame_profile.as_ref().map(|_| Instant::now());
         for (index, geometry) in frame.backdrops {
             if let Some((_, current, textures)) = self.backdrops.get_mut(index) {
@@ -1987,10 +2227,12 @@ impl GpuCompositor {
                         && window.presentation_opacity() == 1.0
                         && width == scene.width
                         && height == scene.height
-                        && x >= 0
-                        && y >= 0
-                        && u64::from(x as u32) + u64::from(width) <= u64::from(self.target.width)
-                        && u64::from(y as u32) + u64::from(height) <= u64::from(self.target.height)
+                        && self.output_rects.iter().any(|&(ox, oy, ow, oh)| {
+                            i64::from(x) >= i64::from(ox)
+                                && i64::from(y) >= i64::from(oy)
+                                && i64::from(x) + i64::from(width) <= i64::from(ox) + i64::from(ow)
+                                && i64::from(y) + i64::from(height) <= i64::from(oy) + i64::from(oh)
+                        })
                 });
             let entry = &self.scene_textures[index];
             if entry.serial == Some(scene.serial) && entry.direct == inline {
@@ -2241,10 +2483,11 @@ impl GpuCompositor {
             return Ok(false);
         }
 
-        let (width, height) = self
-            .rebuild_extent
-            .unwrap_or((self.target.width, self.target.height));
-        let mut target = open_composition_target(width, height)?;
+        let extents = self
+            .rebuild_extents
+            .clone()
+            .unwrap_or_else(|| self.target.surface_extents());
+        let mut target = open_composition_target(&extents)?;
         let quad_renderer =
             QuadRenderer::define(target.resources.as_ref(), COMPOSITION_QUAD_CAPACITY)
                 .map_err(|_| "Failed to redefine GPU composition resources")?;
@@ -2322,7 +2565,7 @@ impl GpuCompositor {
             shared.texture = texture;
         }
         self.rebuild_pending = false;
-        self.rebuild_extent = None;
+        self.rebuild_extents = None;
         self.force_full_repaint = true;
         Ok(true)
     }

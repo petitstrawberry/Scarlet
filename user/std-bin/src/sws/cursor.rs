@@ -788,7 +788,8 @@ impl Cursor {
     /// * `screen_height` - Destination height in pixels.
     /// * `bytes_per_pixel` - Destination bytes per pixel; values below four are ignored.
     /// * `stride` - Destination row stride in bytes.
-    /// * `clip_rect` - Optional screen-space clip rectangle.
+    /// * `clip_rect` - Optional clip rectangle in global coordinates.
+    /// * `origin` - Global position of the buffer's top-left pixel.
     pub fn draw_to_buffer_direct_clipped(
         &self,
         buffer: &mut [u8],
@@ -797,6 +798,7 @@ impl Cursor {
         bytes_per_pixel: u32,
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
+        origin: (i32, i32),
     ) {
         if bytes_per_pixel < 4 {
             return;
@@ -820,20 +822,22 @@ impl Cursor {
                     continue;
                 }
 
-                let screen_x = cursor_x.saturating_add(x as i32);
-                let screen_y = cursor_y.saturating_add(y as i32);
+                let global_x = cursor_x.saturating_add(x as i32);
+                let global_y = cursor_y.saturating_add(y as i32);
+                if let Some((clip_x0, clip_y0, clip_x1, clip_y1)) = clip
+                    && (global_x < clip_x0
+                        || global_x >= clip_x1
+                        || global_y < clip_y0
+                        || global_y >= clip_y1)
+                {
+                    continue;
+                }
+                let screen_x = global_x.saturating_sub(origin.0);
+                let screen_y = global_y.saturating_sub(origin.1);
                 if screen_x < 0
                     || screen_x >= screen_width as i32
                     || screen_y < 0
                     || screen_y >= screen_height as i32
-                {
-                    continue;
-                }
-                if let Some((clip_x0, clip_y0, clip_x1, clip_y1)) = clip
-                    && (screen_x < clip_x0
-                        || screen_x >= clip_x1
-                        || screen_y < clip_y0
-                        || screen_y >= clip_y1)
                 {
                     continue;
                 }

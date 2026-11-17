@@ -7,7 +7,10 @@ use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_g
 use super::frame_callback::{
     frame_callback_is_ready, frame_callback_target, frame_credit_deadline, frame_credit_is_eligible,
 };
-use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
+use super::gpu_compositor::{
+    GpuCompositor, GpuOutputFrame, OutputDamage, SgfxBufferError, SgfxBufferIdentity,
+    SgfxCommitToken,
+};
 use super::input::{
     CompositorInputEvent, ConsumedKeys, GestureEvent, GestureRecognizer, HeldKeys, InputManager,
     KeyRepeatState, KeyboardSource, ModifierTapState, PointerSource, TOUCH_COORD_MAX, TouchFrame,
@@ -16,6 +19,7 @@ use super::input::{
 };
 use super::input_environment;
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
+use super::output::{Output, OutputId, OutputRect, OutputSet, PRIMARY_OUTPUT_ID};
 use super::pointer_lock::{
     CorrelatedReply, PointerInteractionState, PointerLockDenial, PointerLockState, captured_window,
     confirmed_lock_state, correlated_reply, cursor_visible, input_route, validate_request,
@@ -29,7 +33,7 @@ use super::window::{
 };
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
-use framebuffer::{DisplayPresentRegion, DisplaySurface};
+use framebuffer::{DisplayControl, DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
 use scarlet_os::handle::capability::memory_mapping::{flags as mmap_flags, munmap};
 use scarlet_os::ipc::permissions;
@@ -2398,9 +2402,76 @@ struct ExtensionBuffer {
     last_commit_serial: u64,
 }
 
+/// Display device state owned by one output.
+struct DisplayTarget {
+    display: DisplaySurface,
+    bytes_per_pixel: u32,
+    /// CPU composition target, `backbuffer_stride` bytes per row.
+    backbuffer: Vec<u8>,
+    backbuffer_stride: u32,
+    /// Damage of recent presents, used to repair aged swapchain buffers.
+    presented_damage: Vec<PresentDamage>,
+    cpu_backdrops: Vec<(u32, CpuBackdrop)>,
+    /// The whole output must be recomposed (newly added or resized).
+    full_redraw: bool,
+}
+
+/// A non-primary `/dev/displayN` endpoint SWS watches for a monitor.
+struct SecondaryEndpoint {
+    path: String,
+    control: DisplayControl,
+    /// Output created while a monitor is connected.
+    output: Option<OutputId>,
+}
+
+/// Highest `/dev/displayN` index probed for secondary outputs.
+const SECONDARY_DISPLAY_SCAN_LIMIT: usize = 16;
+/// How often secondary connectors are checked for attach/detach.
+const SECONDARY_OUTPUT_POLL_INTERVAL_NS: u64 = 250_000_000;
+
+/// Open every non-primary display endpoint for connection polling.
+///
+/// Endpoints exist for each connector whether or not a monitor is attached.
+/// Opening a control handle never maps scanout memory.
+fn discover_secondary_endpoints() -> Vec<SecondaryEndpoint> {
+    let mut endpoints = Vec::new();
+    for index in 0..SECONDARY_DISPLAY_SCAN_LIMIT {
+        let path = format!("/dev/display{}", index);
+        let Ok(control) = DisplayControl::open(&path) else {
+            continue;
+        };
+        match control.get_output_info() {
+            Ok(info) if !info.is_primary() => {
+                println!(
+                    "[Compositor] Watching {} ({}, {})",
+                    path,
+                    info.name(),
+                    if info.is_connected() {
+                        "connected"
+                    } else {
+                        "disconnected"
+                    }
+                );
+                endpoints.push(SecondaryEndpoint {
+                    path,
+                    control,
+                    output: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    endpoints
+}
+
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
-    display: DisplaySurface,
+    /// Display outputs: the primary plus any connected secondary displays.
+    outputs: OutputSet<DisplayTarget>,
+    /// Non-primary display endpoints, connected or not.
+    secondary_endpoints: Vec<SecondaryEndpoint>,
+    next_output_id: OutputId,
+    next_output_poll_ns: u64,
     backend: SwsBackend,
     gpu_compositor: Option<GpuCompositor>,
     pending_gpu_present: Option<PresentDamage>,
@@ -2414,19 +2485,11 @@ pub struct Compositor {
     capture_session: CaptureSession,
     wake_read: Handle,
     cursor: Cursor,
-    screen_width: u32,
-    screen_height: u32,
-    output_scale_milli: u32,
     bg_color: [u8; 4],
-    bytes_per_pixel: u32,
-    backbuffer: Vec<u8>,
-    backbuffer_stride: u32,
     backdrops: Vec<(u32, CpuBackdrop)>,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
     pending_backdrop_damage: Vec<BackdropDamage>,
-    presented_damage: Vec<PresentDamage>,
-    event_counter: u64,
     pending_frame_callbacks: Vec<PendingFrameCallback>,
     extension_shm_pools: BTreeMap<ExtensionResourceKey, ExtensionShmPool>,
     extension_buffers: BTreeMap<ExtensionResourceKey, ExtensionBuffer>,
@@ -2754,6 +2817,49 @@ struct ActivationRecord {
 }
 
 impl Compositor {
+    /// Primary output width in pixels.
+    ///
+    /// Whole-screen semantics (window placement limits, maximize, fullscreen,
+    /// `SCREEN_SIZE`) still resolve to the primary output. Multi-output
+    /// support replaces each use with the relevant output's geometry.
+    fn screen_width(&self) -> u32 {
+        self.outputs.primary().width()
+    }
+
+    /// Primary output height in pixels. See [`Compositor::screen_width`].
+    fn screen_height(&self) -> u32 {
+        self.outputs.primary().height()
+    }
+
+    /// Primary output's preferred client buffer scale in thousandths.
+    fn output_scale_milli(&self) -> u32 {
+        self.outputs.primary().scale_milli
+    }
+
+    /// Size of the pointer space: from the origin to the far edges of every
+    /// output. Outputs are laid out from `(0, 0)` rightwards.
+    fn pointer_bounds(&self) -> (u32, u32) {
+        let bounds = self.outputs.bounds();
+        (
+            (i64::from(bounds.x) + i64::from(bounds.width)).max(1) as u32,
+            (i64::from(bounds.y) + i64::from(bounds.height)).max(1) as u32,
+        )
+    }
+
+    /// Move the cursor off any space between outputs of different sizes.
+    fn confine_cursor_to_outputs(&mut self) {
+        let (x, y) = self.outputs.clamp_point(self.cursor.x, self.cursor.y);
+        if (x, y) != (self.cursor.x, self.cursor.y) {
+            let (width, height) = self.pointer_bounds();
+            self.cursor.set_position(x, y, width, height);
+        }
+    }
+
+    /// Frames accepted by the primary output; paces frame callbacks.
+    fn present_counter(&self) -> u64 {
+        self.outputs.primary().present_counter
+    }
+
     /// Create a new compositor
     pub fn new() -> Result<Self, &'static str> {
         println!("[Compositor] Starting initialization...");
@@ -2911,8 +3017,32 @@ impl Compositor {
         // the first-frame filtering policy.
         let _ = gesture_recognizer.set_tablet_mode(input_environment.tablet_mode());
 
+        let primary_output = Output::new(
+            PRIMARY_OUTPUT_ID,
+            OutputRect::new(0, 0, screen_width, screen_height),
+            output_scale_milli,
+            DisplayTarget {
+                display,
+                bytes_per_pixel,
+                backbuffer,
+                backbuffer_stride,
+                presented_damage: Vec::new(),
+                cpu_backdrops: Vec::new(),
+                full_redraw: false,
+            },
+        );
+
+        let secondary_endpoints = discover_secondary_endpoints();
+        println!(
+            "[Compositor] Secondary display endpoints: {}",
+            secondary_endpoints.len()
+        );
+
         Ok(Self {
-            display,
+            outputs: OutputSet::single(primary_output),
+            secondary_endpoints,
+            next_output_id: PRIMARY_OUTPUT_ID + 1,
+            next_output_poll_ns: 0,
             backend,
             gpu_compositor,
             pending_gpu_present: None,
@@ -2928,19 +3058,11 @@ impl Compositor {
             capture_session: CaptureSession::new(screen_width, screen_height),
             wake_read,
             cursor,
-            screen_width,
-            screen_height,
-            output_scale_milli,
             bg_color,
-            bytes_per_pixel,
-            backbuffer,
-            backbuffer_stride,
             backdrops: Vec::new(),
             full_redraw_needed: true,
             pending_damage: Vec::new(),
             pending_backdrop_damage: Vec::new(),
-            presented_damage: Vec::new(),
-            event_counter: 0,
             pending_frame_callbacks: Vec::new(),
             extension_shm_pools: BTreeMap::new(),
             extension_buffers: BTreeMap::new(),
@@ -3566,6 +3688,9 @@ impl Compositor {
 
     fn check_display_resize(&mut self) -> Result<bool, &'static str> {
         let var_info = self
+            .outputs
+            .primary()
+            .target
             .display
             .get_var_screen_info()
             .map_err(|_| "Failed to get screen info")?;
@@ -3574,27 +3699,34 @@ impl Compositor {
 
         if new_width == 0
             || new_height == 0
-            || (new_width == self.screen_width && new_height == self.screen_height)
+            || (new_width == self.screen_width() && new_height == self.screen_height())
         {
             return Ok(false);
         }
 
         println!(
             "[Compositor] Display resize: {}x{} -> {}x{}",
-            self.screen_width, self.screen_height, new_width, new_height
+            self.screen_width(),
+            self.screen_height(),
+            new_width,
+            new_height
         );
 
-        self.display
+        let output = self.outputs.primary_mut();
+        output
+            .target
+            .display
             .refresh_mapping()
             .map_err(|_| "Failed to refresh display mapping")?;
 
-        self.screen_width = new_width;
-        self.screen_height = new_height;
-        self.backbuffer_stride = new_width.saturating_mul(self.bytes_per_pixel);
+        output.rect.width = new_width;
+        output.rect.height = new_height;
+        let target = &mut output.target;
+        target.backbuffer_stride = new_width.saturating_mul(target.bytes_per_pixel);
         let buffer_size = new_width
             .saturating_mul(new_height)
-            .saturating_mul(self.bytes_per_pixel) as usize;
-        self.backbuffer.resize(buffer_size, 0);
+            .saturating_mul(target.bytes_per_pixel) as usize;
+        target.backbuffer.resize(buffer_size, 0);
         super::input::set_screen_size(new_width, new_height);
         self.cursor
             .set_position(self.cursor.x, self.cursor.y, new_width, new_height);
@@ -3702,13 +3834,17 @@ impl Compositor {
 
         // Backbuffer lives on the heap; log its virtual range and fingerprint.
         // This helps detect accidental aliasing/corruption and confirms it doesn't overlap VRAM.
-        let bb_start = self.backbuffer.as_ptr() as usize;
-        let bb_len = self.backbuffer.len();
+        let bb_start = self.outputs.primary().target.backbuffer.as_ptr() as usize;
+        let bb_len = self.outputs.primary().target.backbuffer.len();
         let bb_end = bb_start.saturating_add(bb_len);
-        let bb_fp = Self::buffer_fingerprint(&self.backbuffer);
+        let bb_fp = Self::buffer_fingerprint(&self.outputs.primary().target.backbuffer);
         println!(
             "[Compositor] backbuffer: 0x{:x}..0x{:x} ({} bytes) stride={} fp=0x{:08x}",
-            bb_start, bb_end, bb_len, self.backbuffer_stride, bb_fp
+            bb_start,
+            bb_end,
+            bb_len,
+            self.outputs.primary().target.backbuffer_stride,
+            bb_fp
         );
 
         // Best-effort stack location hint: address of a local variable.
@@ -3717,7 +3853,7 @@ impl Compositor {
         let sp_hint = (&stack_marker as *const u8) as usize;
         println!("[Compositor] stack marker addr: 0x{:x}", sp_hint);
 
-        if let Some((addr, size)) = self.display.get_mapping_info() {
+        if let Some((addr, size)) = self.outputs.primary().target.display.get_mapping_info() {
             let vram_start = addr;
             let vram_end = addr.saturating_add(size);
             println!(
@@ -3752,7 +3888,9 @@ impl Compositor {
                     w.id, shm_addr, end, buffer_size
                 );
 
-                if let Some((vram_start, vram_size)) = self.display.get_mapping_info() {
+                if let Some((vram_start, vram_size)) =
+                    self.outputs.primary().target.display.get_mapping_info()
+                {
                     let vram_end = vram_start.saturating_add(vram_size);
                     let overlap = shm_addr < vram_end && vram_start < end;
                     if overlap {
@@ -3783,7 +3921,9 @@ impl Compositor {
                     w.id, start, end, len, fp
                 );
 
-                if let Some((vram_start, vram_size)) = self.display.get_mapping_info() {
+                if let Some((vram_start, vram_size)) =
+                    self.outputs.primary().target.display.get_mapping_info()
+                {
                     let vram_end = vram_start.saturating_add(vram_size);
                     let overlap = start < vram_end && vram_start < end;
                     if overlap {
@@ -3883,14 +4023,14 @@ impl Compositor {
             return None;
         }
 
-        let sx0 = x.max(0).min(self.screen_width as i32);
-        let sy0 = y.max(0).min(self.screen_height as i32);
+        let sx0 = x.max(0).min(self.screen_width() as i32);
+        let sy0 = y.max(0).min(self.screen_height() as i32);
         let sx1 = (x.saturating_add(w as i32))
             .max(0)
-            .min(self.screen_width as i32);
+            .min(self.screen_width() as i32);
         let sy1 = (y.saturating_add(h as i32))
             .max(0)
-            .min(self.screen_height as i32);
+            .min(self.screen_height() as i32);
 
         let cw = (sx1 - sx0).max(0) as u32;
         let ch = (sy1 - sy0).max(0) as u32;
@@ -3899,6 +4039,13 @@ impl Compositor {
         } else {
             Some((sx0, sy0, cw, ch))
         }
+    }
+
+    fn clamp_rect_to_outputs(&self, rect: (i32, i32, u32, u32)) -> Option<DamageRect> {
+        let (width, height) = self.pointer_bounds();
+        OutputRect::new(rect.0, rect.1, rect.2, rect.3)
+            .intersect(OutputRect::new(0, 0, width, height))
+            .map(|r| (r.x, r.y, r.width, r.height))
     }
 
     fn rect_area(rect: (i32, i32, u32, u32)) -> u64 {
@@ -3987,20 +4134,26 @@ impl Compositor {
             return;
         }
 
-        let Some((sx0, sy0, w, h)) = self.clamp_rect_to_screen(rect) else {
+        let (bounds_width, bounds_height) = self.pointer_bounds();
+        let Some(clamped) = OutputRect::new(rect.0, rect.1, rect.2, rect.3)
+            .intersect(OutputRect::new(0, 0, bounds_width, bounds_height))
+        else {
             return;
         };
 
         self.damage_profile.added(
-            (sx0, sy0, w, h),
+            (clamped.x, clamped.y, clamped.width, clamped.height),
             foreground.is_some(),
             std::panic::Location::caller().line(),
         );
-        Self::push_damage_rect(&mut self.pending_damage, (sx0, sy0, w, h));
+        Self::push_damage_rect(
+            &mut self.pending_damage,
+            (clamped.x, clamped.y, clamped.width, clamped.height),
+        );
         BackdropDamage::push_bounded(
             &mut self.pending_backdrop_damage,
             BackdropDamage {
-                rect: (sx0, sy0, w, h),
+                rect: (clamped.x, clamped.y, clamped.width, clamped.height),
                 foreground,
             },
             MAX_PENDING_DAMAGE_RECTS,
@@ -4204,14 +4357,15 @@ impl Compositor {
     }
 
     fn present_damage(&mut self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
-        if self.display.has_swapchain() {
-            let age = self.display.buffer_age().unwrap_or(0) as usize;
+        if self.outputs.primary().target.display.has_swapchain() {
+            let target = &self.outputs.primary().target;
+            let age = target.display.buffer_age().unwrap_or(0) as usize;
             let mut copy_damage = dirty_rects.clone();
-            if age == 0 || age > self.presented_damage.len() {
+            if age == 0 || age > target.presented_damage.len() {
                 copy_damage = None;
             } else {
-                let first = self.presented_damage.len() - age;
-                for damage in &self.presented_damage[first..] {
+                let first = target.presented_damage.len() - age;
+                for damage in &target.presented_damage[first..] {
                     Self::merge_present_damage(&mut copy_damage, damage.clone());
                 }
             }
@@ -4219,6 +4373,9 @@ impl Compositor {
             self.copy_backbuffer_damage_to_scanout(&copy_damage)?;
             match &copy_damage {
                 None => self
+                    .outputs
+                    .primary_mut()
+                    .target
                     .display
                     .present()
                     .map_err(|_| "Failed to swap display buffer")?,
@@ -4235,16 +4392,20 @@ impl Compositor {
                             height,
                         });
                     }
-                    self.display
+                    self.outputs
+                        .primary_mut()
+                        .target
+                        .display
                         .present_regions(&regions)
                         .map_err(|_| "Failed to swap damaged display buffer")?;
                 }
             }
 
-            self.presented_damage.push(dirty_rects);
-            let capacity = self.display.swapchain_buffer_count();
-            if self.presented_damage.len() > capacity {
-                self.presented_damage.remove(0);
+            let target = &mut self.outputs.primary_mut().target;
+            target.presented_damage.push(dirty_rects);
+            let capacity = target.display.swapchain_buffer_count();
+            if target.presented_damage.len() > capacity {
+                target.presented_damage.remove(0);
             }
             return Ok(());
         }
@@ -4253,6 +4414,9 @@ impl Compositor {
         // clients keep their own full-frame compatibility path.
         match dirty_rects {
             None => self
+                .outputs
+                .primary_mut()
+                .target
                 .display
                 .present()
                 .map_err(|_| "Failed to present display")?,
@@ -4263,7 +4427,10 @@ impl Compositor {
                     else {
                         continue;
                     };
-                    self.display
+                    self.outputs
+                        .primary_mut()
+                        .target
+                        .display
                         .present_region(x as u32, y as u32, width, height)
                         .map_err(|_| "Failed to present display region")?;
                 }
@@ -4277,30 +4444,31 @@ impl Compositor {
         &self,
         damage: &PresentDamage,
     ) -> Result<(), &'static str> {
-        let (address, length) = self
+        let target = &self.outputs.primary().target;
+        let (address, length) = target
             .display
             .get_mapping_info()
             .ok_or("Back scanout buffer is not mapped")?;
 
         match damage {
             None => {
-                if self.backbuffer.len() > length {
+                if target.backbuffer.len() > length {
                     return Err("Full scanout copy exceeds buffer bounds");
                 }
-                let copy_len = self.backbuffer.len();
+                let copy_len = target.backbuffer.len();
                 // SAFETY: DisplaySurface owns the writable mmap for the current
                 // non-visible scanout buffer and reports its exact size.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        self.backbuffer.as_ptr(),
+                        target.backbuffer.as_ptr(),
                         address as *mut u8,
                         copy_len,
                     );
                 }
             }
             Some(rects) => {
-                let stride = self.backbuffer_stride as usize;
-                let bytes_per_pixel = self.bytes_per_pixel as usize;
+                let stride = target.backbuffer_stride as usize;
+                let bytes_per_pixel = target.bytes_per_pixel as usize;
                 for rect in rects.iter().copied() {
                     let Some((x, y, width, height)) = self.clamp_rect_to_screen(rect) else {
                         continue;
@@ -4310,7 +4478,7 @@ impl Compositor {
                         let offset = (y as usize + row)
                             .saturating_mul(stride)
                             .saturating_add(x as usize * bytes_per_pixel);
-                        if offset.saturating_add(row_bytes) > self.backbuffer.len()
+                        if offset.saturating_add(row_bytes) > target.backbuffer.len()
                             || offset.saturating_add(row_bytes) > length
                         {
                             return Err("Scanout damage copy exceeds buffer bounds");
@@ -4320,7 +4488,7 @@ impl Compositor {
                         // compositor-owned backbuffer.
                         unsafe {
                             core::ptr::copy_nonoverlapping(
-                                self.backbuffer.as_ptr().add(offset),
+                                target.backbuffer.as_ptr().add(offset),
                                 (address as *mut u8).add(offset),
                                 row_bytes,
                             );
@@ -4349,8 +4517,339 @@ impl Compositor {
             GpuPresentResult::Retry => return Ok(false),
             GpuPresentResult::CpuFallback => {}
         }
+        // Split before the primary pass consumes the shared pending damage.
+        let output_damage = self.output_damage(&self.pending_present_damage());
         let dirty_rects = self.composite_pending_to_display()?;
-        self.present_damage(dirty_rects).map(|()| true)
+        self.present_damage(dirty_rects)?;
+        self.composite_secondary_outputs_cpu(&output_damage)?;
+        Ok(true)
+    }
+
+    /// Split global present damage into each output's local damage.
+    ///
+    /// # Arguments
+    ///
+    /// * `damage` - Global damage; `None` (or no rectangles) redraws all.
+    ///
+    /// # Returns
+    ///
+    /// One entry per output, primary first, in output order.
+    fn output_damage(&self, damage: &PresentDamage) -> Vec<(OutputId, OutputDamage)> {
+        let rects = damage.as_ref();
+        self.outputs
+            .iter()
+            .map(|output| {
+                let Some(rects) = rects.filter(|_| !output.target.full_redraw) else {
+                    return (output.id, OutputDamage::Full);
+                };
+                let local = rects
+                    .iter()
+                    .filter_map(|&(x, y, width, height)| {
+                        OutputRect::new(x, y, width, height).intersect(output.rect)
+                    })
+                    .map(|rect| {
+                        (
+                            rect.x - output.rect.x,
+                            rect.y - output.rect.y,
+                            rect.width,
+                            rect.height,
+                        )
+                    })
+                    .reduce(Self::union_damage_rect);
+                let damage = match local {
+                    Some((x, y, width, height)) => {
+                        OutputDamage::Region((x as u32, y as u32, width, height))
+                    }
+                    None => OutputDamage::Skip,
+                };
+                (output.id, damage)
+            })
+            .collect()
+    }
+
+    /// Compose and present every non-primary output on the CPU path.
+    fn composite_secondary_outputs_cpu(
+        &mut self,
+        damage: &[(OutputId, OutputDamage)],
+    ) -> Result<(), &'static str> {
+        let primary = self.outputs.primary_id();
+        for &(id, output_damage) in damage {
+            if id == primary {
+                continue;
+            }
+            let Some(output) = self.outputs.get(id) else {
+                continue;
+            };
+            let (local_x, local_y, width, height) = match output_damage {
+                OutputDamage::Skip => continue,
+                OutputDamage::Full => (0, 0, output.rect.width, output.rect.height),
+                OutputDamage::Region(rect) => rect,
+            };
+            let global = (
+                output.rect.x + local_x as i32,
+                output.rect.y + local_y as i32,
+                width,
+                height,
+            );
+            self.compose_output_region_cpu(id, global)?;
+            let output = self.outputs.get_mut(id).ok_or("Output disappeared")?;
+            output
+                .target
+                .display
+                .present()
+                .map_err(|_| "Failed to present secondary display")?;
+            output.target.full_redraw = false;
+        }
+        Ok(())
+    }
+
+    /// Compose one global rectangle of a non-primary output into its
+    /// backbuffer and copy it to the display mapping.
+    fn compose_output_region_cpu(
+        &mut self,
+        id: OutputId,
+        global: (i32, i32, u32, u32),
+    ) -> Result<(), &'static str> {
+        let draw_cursor =
+            cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch;
+        let Some(rect) = self.outputs.get(id).map(|output| output.rect) else {
+            return Ok(());
+        };
+        let backdrops: Vec<_> = self
+            .window_backdrops()
+            .into_iter()
+            .filter_map(|(id, geometry)| {
+                geometry
+                    .relative_to((rect.x, rect.y), rect.width, rect.height)
+                    .map(|g| (id, g))
+            })
+            .collect();
+        let Some(output) = self.outputs.get_mut(id) else {
+            return Ok(());
+        };
+        let Some(clip) =
+            OutputRect::new(global.0, global.1, global.2, global.3).intersect(output.rect)
+        else {
+            return Ok(());
+        };
+        let origin = (output.rect.x, output.rect.y);
+        let (screen_width, screen_height) = (output.rect.width, output.rect.height);
+        let target = &mut output.target;
+        target
+            .cpu_backdrops
+            .retain(|(id, filter)| backdrops.contains(&(*id, filter.geometry)));
+        for &(id, geometry) in &backdrops {
+            if !target
+                .cpu_backdrops
+                .iter()
+                .any(|(cached_id, filter)| *cached_id == id && filter.geometry == geometry)
+            {
+                target.cpu_backdrops.push((id, CpuBackdrop::new(geometry)));
+            }
+        }
+        let stride = target.backbuffer_stride;
+        let bytes_per_pixel = target.bytes_per_pixel;
+        let local_x = (clip.x - origin.0) as usize;
+        let local_y = (clip.y - origin.1) as usize;
+        let row_len = clip.width as usize * bytes_per_pixel as usize;
+        for row in 0..clip.height as usize {
+            let offset = (local_y + row) * stride as usize + local_x * bytes_per_pixel as usize;
+            if let Some(pixels) = target.backbuffer.get_mut(offset..offset + row_len) {
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&self.bg_color);
+                }
+            }
+        }
+        let clip_rect = Some((clip.x, clip.y, clip.width, clip.height));
+        for window in self.window_manager.get_windows() {
+            if !window.is_presented() {
+                continue;
+            }
+            let local_damage = (local_x as i32, local_y as i32, clip.width, clip.height);
+            for (id, filter) in &mut target.cpu_backdrops {
+                if *id == window.id && filter.geometry.intersects_source(local_damage) {
+                    filter.prepare(&target.backbuffer, stride);
+                }
+            }
+            for (id, filter) in &target.cpu_backdrops {
+                if *id == window.id && filter.geometry.intersects_source(local_damage) {
+                    filter.composite(&mut target.backbuffer, stride);
+                }
+            }
+            Self::draw_window_instance_to_buffer_clipped(
+                screen_width,
+                screen_height,
+                bytes_per_pixel,
+                window,
+                None,
+                &mut target.backbuffer,
+                stride,
+                clip_rect,
+                origin,
+            );
+            for instance in &window.presentation_instances {
+                Self::draw_window_instance_to_buffer_clipped(
+                    screen_width,
+                    screen_height,
+                    bytes_per_pixel,
+                    window,
+                    Some(*instance),
+                    &mut target.backbuffer,
+                    stride,
+                    clip_rect,
+                    origin,
+                );
+            }
+        }
+        if draw_cursor {
+            self.cursor.draw_to_buffer_direct_clipped(
+                &mut target.backbuffer,
+                screen_width,
+                screen_height,
+                bytes_per_pixel,
+                stride,
+                clip_rect,
+                origin,
+            );
+        }
+        // Secondary endpoints may expose a changing back framebuffer without
+        // a CPU swapchain. Refresh it after each flip and copy the retained
+        // complete image so alternating buffers cannot lose earlier damage.
+        target
+            .display
+            .refresh_mapping()
+            .map_err(|_| "Failed to refresh secondary framebuffer")?;
+        target
+            .display
+            .write_bgra_strided(
+                0,
+                0,
+                screen_width,
+                screen_height,
+                &target.backbuffer,
+                stride as usize,
+            )
+            .map_err(|_| "Failed to write secondary backbuffer")?;
+        Ok(())
+    }
+
+    /// Attach, resize or detach secondary outputs as monitors come and go.
+    ///
+    /// Throttled to [`SECONDARY_OUTPUT_POLL_INTERVAL_NS`].
+    ///
+    /// # Returns
+    ///
+    /// `true` when the set of outputs or their sizes changed.
+    fn poll_secondary_outputs(&mut self) -> Result<bool, &'static str> {
+        if self.secondary_endpoints.is_empty() {
+            return Ok(false);
+        }
+        let now = monotonic_time_ns();
+        if now < self.next_output_poll_ns {
+            return Ok(false);
+        }
+        self.next_output_poll_ns = now.saturating_add(SECONDARY_OUTPUT_POLL_INTERVAL_NS);
+        let mut changed = false;
+        for index in 0..self.secondary_endpoints.len() {
+            let mode = self.secondary_endpoints[index]
+                .control
+                .get_output_info()
+                .ok()
+                .filter(|info| info.is_connected() && info.width != 0 && info.height != 0)
+                .map(|info| (info.width, info.height));
+            let attached = self.secondary_endpoints[index].output;
+            match (mode, attached) {
+                (Some(_), None) => {
+                    changed |= self.attach_secondary_output(index);
+                }
+                (Some((width, height)), Some(id)) => {
+                    let current = self
+                        .outputs
+                        .get(id)
+                        .map(|output| (output.rect.width, output.rect.height));
+                    if current != Some((width, height)) {
+                        self.detach_secondary_output(index);
+                        self.attach_secondary_output(index);
+                        changed = true;
+                    }
+                }
+                (None, Some(_)) => {
+                    self.detach_secondary_output(index);
+                    changed = true;
+                }
+                (None, None) => {}
+            }
+        }
+        if changed {
+            if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
+                gpu_compositor.outputs_changed();
+            }
+            let cursor_rect = self.cursor_rect();
+            self.confine_cursor_to_outputs();
+            self.add_pending_damage(cursor_rect);
+            self.add_pending_damage(self.cursor_rect());
+        }
+        Ok(changed)
+    }
+
+    /// Open a connected secondary display and place it right of the layout.
+    fn attach_secondary_output(&mut self, index: usize) -> bool {
+        let path = self.secondary_endpoints[index].path.clone();
+        let display = match DisplaySurface::open(&path) {
+            Ok(display) => display,
+            Err(error) => {
+                println!("[Compositor] {}: open failed: {:?}", path, error);
+                return false;
+            }
+        };
+        let Ok(var_info) = display.get_var_screen_info() else {
+            println!("[Compositor] {}: no screen info", path);
+            return false;
+        };
+        let (width, height) = (var_info.xres, var_info.yres);
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let bytes_per_pixel = 4u32;
+        let backbuffer_stride = width.saturating_mul(bytes_per_pixel);
+        let backbuffer = vec![0; backbuffer_stride as usize * height as usize];
+        let id = self.next_output_id;
+        self.next_output_id += 1;
+        let rect = self.outputs.next_placement(width, height);
+        let scale_milli = self.output_scale_milli();
+        self.outputs.push(Output::new(
+            id,
+            rect,
+            scale_milli,
+            DisplayTarget {
+                display,
+                bytes_per_pixel,
+                backbuffer,
+                backbuffer_stride,
+                presented_damage: Vec::new(),
+                cpu_backdrops: Vec::new(),
+                full_redraw: true,
+            },
+        ));
+        self.secondary_endpoints[index].output = Some(id);
+        println!(
+            "[Compositor] Output {} attached: {} {}x{} at ({}, {})",
+            id, path, width, height, rect.x, rect.y
+        );
+        self.add_pending_damage((rect.x, rect.y, rect.width, rect.height));
+        true
+    }
+
+    /// Drop a secondary output whose monitor went away.
+    fn detach_secondary_output(&mut self, index: usize) {
+        if let Some(id) = self.secondary_endpoints[index].output.take()
+            && let Some(output) = self.outputs.remove(id)
+        {
+            println!(
+                "[Compositor] Output {} detached: {}",
+                output.id, self.secondary_endpoints[index].path
+            );
+        }
     }
 
     /// Disable the failed GPU backend and apply the selected fallback policy.
@@ -4376,7 +4875,7 @@ impl Compositor {
         self.damage_profile.full(line!());
         self.pending_damage.clear();
         self.pending_backdrop_damage.clear();
-        self.presented_damage.clear();
+        self.outputs.primary_mut().target.presented_damage.clear();
         super::ipc::notify_sgfx_backend_lost();
         if self.backend == SwsBackend::Sgfx {
             Err(strict_error)
@@ -4450,7 +4949,7 @@ impl Compositor {
                 .map(|rect| u64::from(rect.2) * u64::from(rect.3))
                 .sum();
             profile.pending_bbox_pixels = damage.map_or(
-                u64::from(self.screen_width) * u64::from(self.screen_height),
+                u64::from(self.screen_width()) * u64::from(self.screen_height()),
                 |rect| u64::from(rect.2) * u64::from(rect.3),
             );
             profile.cursor_pixels = if self.cursor.needs_redraw() {
@@ -4462,6 +4961,7 @@ impl Compositor {
             profile.main_full = u64::from(self.full_redraw_needed);
             profile
         });
+        let output_damage = self.output_damage(&self.pending_present_damage());
         // Keep source damage separate from cursor and swapchain repair damage.
         // Materials only need a fresh capture when their sampling halo changes.
         let scene_damage =
@@ -4486,8 +4986,20 @@ impl Compositor {
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
             return Ok(GpuPresentResult::CpuFallback);
         };
+        let frames: Vec<GpuOutputFrame<'_>> = self
+            .outputs
+            .iter()
+            .zip(&output_damage)
+            .map(|(output, &(_, damage))| GpuOutputFrame {
+                display: &output.target.display,
+                origin: (output.rect.x, output.rect.y),
+                width: output.rect.width,
+                height: output.rect.height,
+                damage,
+            })
+            .collect();
         let result = gpu_compositor.compose_and_present(
-            &self.display,
+            &frames,
             self.window_manager.get_windows(),
             &scenes,
             &self.cursor,
@@ -4498,11 +5010,11 @@ impl Compositor {
             self.resize_outline,
             navigation_indicator,
             cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch,
-            damage,
             scene_damage,
             &backdrops,
             damage_profile,
         );
+        drop(frames);
         drop(scenes);
         match result {
             Ok((releases, (x, y, width, height))) => {
@@ -4534,8 +5046,13 @@ impl Compositor {
                 self.full_redraw_needed = false;
                 self.pending_damage.clear();
                 self.pending_backdrop_damage.clear();
-                self.presented_damage.clear();
                 self.damage_profile.reset();
+                self.outputs.primary_mut().target.presented_damage.clear();
+                for (id, _) in output_damage {
+                    if let Some(output) = self.outputs.get_mut(id) {
+                        output.target.full_redraw = false;
+                    }
+                }
                 Ok(GpuPresentResult::Presented)
             }
             Err(super::gpu_compositor::GpuCompositionError::Pending) => {
@@ -4547,11 +5064,16 @@ impl Compositor {
                     .and_then(|gpu| gpu.pending_logical_damage())
                     .ok_or("Missing admitted GPU damage snapshot")?;
                 self.pending_gpu_present = Some(Some(vec![(x as i32, y as i32, width, height)]));
+                for (id, _) in &output_damage {
+                    if let Some(output) = self.outputs.get_mut(*id) {
+                        output.target.full_redraw = false;
+                    }
+                }
                 self.cursor.mark_drawn();
                 self.full_redraw_needed = false;
                 self.pending_damage.clear();
                 self.pending_backdrop_damage.clear();
-                self.presented_damage.clear();
+                self.outputs.primary_mut().target.presented_damage.clear();
                 self.damage_profile.reset();
                 self.gpu_admission_retry.clear();
                 Ok(GpuPresentResult::Retry)
@@ -4612,11 +5134,17 @@ impl Compositor {
         if !self.gpu_frame_pending() {
             return Ok(());
         }
+        let displays: Vec<_> = self
+            .outputs
+            .iter()
+            .map(|output| &output.target.display)
+            .collect();
         let result = self
             .gpu_compositor
             .as_mut()
             .unwrap()
-            .retire_pending_frame(&self.display);
+            .retire_pending_frame(&displays);
+        drop(displays);
         match result {
             Ok(None) => {}
             Ok(Some(releases)) => {
@@ -4629,7 +5157,7 @@ impl Compositor {
                 // Do not clear current damage/cursor: input may have changed
                 // them since admission of this exact completed frame.
                 self.note_frame_presented();
-                self.event_counter += 1;
+                self.outputs.primary_mut().present_counter += 1;
                 super::trace::compositor_present();
                 self.grant_pending_frame_callbacks();
             }
@@ -4658,15 +5186,19 @@ impl Compositor {
         let mut samples: Vec<(u32, u32, &'static str)> = Vec::new();
         samples.push((0, 0, "bg top-left"));
         samples.push((10, 10, "bg near top-left"));
-        samples.push((self.screen_width / 2, self.screen_height / 2, "bg center"));
         samples.push((
-            self.screen_width.saturating_sub(20),
-            self.screen_height / 2,
+            self.screen_width() / 2,
+            self.screen_height() / 2,
+            "bg center",
+        ));
+        samples.push((
+            self.screen_width().saturating_sub(20),
+            self.screen_height() / 2,
             "bg mid-right",
         ));
         samples.push((
-            self.screen_width.saturating_sub(20),
-            self.screen_height.saturating_sub(20),
+            self.screen_width().saturating_sub(20),
+            self.screen_height().saturating_sub(20),
             "bg bottom-right",
         ));
 
@@ -4692,7 +5224,7 @@ impl Compositor {
         }
 
         for (x, y, label) in samples {
-            if x >= self.screen_width || y >= self.screen_height {
+            if x >= self.screen_width() || y >= self.screen_height() {
                 continue;
             }
 
@@ -4719,9 +5251,9 @@ impl Compositor {
                 }
             }
 
-            let off = (y as usize)
-                .saturating_mul(stride as usize)
-                .saturating_add((x as usize).saturating_mul(self.bytes_per_pixel as usize));
+            let off = (y as usize).saturating_mul(stride as usize).saturating_add(
+                (x as usize).saturating_mul(self.outputs.primary().target.bytes_per_pixel as usize),
+            );
             if off + 4 > vram.len() {
                 println!(
                     "[Compositor] skip {} ({},{}) out of VRAM range off=0x{:x}",
@@ -4901,9 +5433,13 @@ impl Compositor {
             buffer,
             stride,
             clip_rect,
+            (0, 0),
         );
     }
 
+    /// Draw a window (or one presentation instance of it) into a buffer that
+    /// holds the `screen_width` x `screen_height` area starting at global
+    /// position `origin`. Clip rectangles are in global coordinates.
     fn draw_window_instance_to_buffer_clipped(
         screen_width: u32,
         screen_height: u32,
@@ -4913,6 +5449,7 @@ impl Compositor {
         buffer: &mut [u8],
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
+        origin: (i32, i32),
     ) {
         let presentation_clip = instance
             .and_then(|instance| instance.clip)
@@ -4957,6 +5494,7 @@ impl Compositor {
                 rounded_clip,
                 visual_geometry,
                 presentation_opacity,
+                origin,
             );
         } else {
             // No buffer: draw placeholder
@@ -4970,6 +5508,7 @@ impl Compositor {
                 clip_rect,
                 rounded_clip,
                 visual_geometry,
+                origin,
             );
         }
     }
@@ -4987,6 +5526,7 @@ impl Compositor {
         rounded_clip: Option<((i32, i32, u32, u32), u32)>,
         visual_geometry: (i32, i32, u32, u32),
         presentation_opacity: f32,
+        origin: (i32, i32),
     ) {
         let (win_x0, win_y0, visual_width, visual_height) = visual_geometry;
         if visual_width == 0 || visual_height == 0 {
@@ -4994,11 +5534,12 @@ impl Compositor {
         }
         let win_x1 = win_x0.saturating_add(visual_width as i32);
         let win_y1 = win_y0.saturating_add(visual_height as i32);
+        let (origin_x, origin_y) = origin;
 
-        let mut x0 = win_x0.max(0);
-        let mut y0 = win_y0.max(0);
-        let mut x1 = win_x1.min(screen_width as i32);
-        let mut y1 = win_y1.min(screen_height as i32);
+        let mut x0 = win_x0.max(origin_x);
+        let mut y0 = win_y0.max(origin_y);
+        let mut x1 = win_x1.min(origin_x.saturating_add(screen_width as i32));
+        let mut y1 = win_y1.min(origin_y.saturating_add(screen_height as i32));
 
         if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
             let clip_x1 = clip_x.saturating_add(clip_w as i32);
@@ -5047,13 +5588,14 @@ impl Compositor {
                 }
                 let wy = ((i64::from(sy - win_y0) * i64::from(source_height))
                     / i64::from(visual_height)) as u32;
-                let screen_row_off = (sy as u32 * stride) as usize;
+                let screen_row_off = ((sy - origin_y) as u32 * stride) as usize;
                 for sx in row_x0..row_x1 {
                     let wx = sample_x[(sx - x0) as usize];
                     let window_offset = base_offset
                         .saturating_add(wy as usize * row_stride)
                         .saturating_add(wx as usize * 4);
-                    let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
+                    let screen_offset =
+                        screen_row_off + ((sx - origin_x) as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
                         && screen_offset + 4 <= screen_buffer.len()
@@ -5090,13 +5632,14 @@ impl Compositor {
                 }
                 let wy = ((i64::from(sy - win_y0) * i64::from(source_height))
                     / i64::from(visual_height)) as u32;
-                let screen_row_off = (sy as u32 * stride) as usize;
+                let screen_row_off = ((sy - origin_y) as u32 * stride) as usize;
                 for sx in row_x0..row_x1 {
                     let wx = sample_x[(sx - x0) as usize];
                     let window_offset = base_offset
                         .saturating_add(wy as usize * row_stride)
                         .saturating_add(wx as usize * 4);
-                    let screen_offset = screen_row_off + (sx as u32 * bytes_per_pixel) as usize;
+                    let screen_offset =
+                        screen_row_off + ((sx - origin_x) as u32 * bytes_per_pixel) as usize;
 
                     if window_offset + 4 <= window_buffer.len()
                         && screen_offset + 4 <= screen_buffer.len()
@@ -5154,7 +5697,9 @@ impl Compositor {
         clip_rect: Option<(i32, i32, u32, u32)>,
         rounded_clip: Option<((i32, i32, u32, u32), u32)>,
         visual_geometry: (i32, i32, u32, u32),
+        origin: (i32, i32),
     ) {
+        let (origin_x, origin_y) = origin;
         let window_color = if window.focused {
             [150, 150, 200, 255]
         } else {
@@ -5163,14 +5708,14 @@ impl Compositor {
 
         // Pre-calculate visible area to reduce per-pixel checks
         let (visual_x, visual_y, visual_width, visual_height) = visual_geometry;
-        let win_x0 = visual_x.max(0);
-        let win_y0 = visual_y.max(0);
+        let win_x0 = visual_x.max(origin_x);
+        let win_y0 = visual_y.max(origin_y);
         let win_x1 = visual_x
             .saturating_add(visual_width as i32)
-            .min(screen_width as i32);
+            .min(origin_x.saturating_add(screen_width as i32));
         let win_y1 = visual_y
             .saturating_add(visual_height as i32)
-            .min(screen_height as i32);
+            .min(origin_y.saturating_add(screen_height as i32));
 
         let (x0, y0, x1, y1) = if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
             let clip_x1 = clip_x.saturating_add(clip_w as i32);
@@ -5203,7 +5748,9 @@ impl Compositor {
             if row_x1 <= row_x0 {
                 continue;
             }
-            let screen_row_off = (sy as u32 * stride + row_x0 as u32 * bytes_per_pixel) as usize;
+            let screen_row_off = ((sy - origin_y) as u32 * stride
+                + (row_x0 - origin_x) as u32 * bytes_per_pixel)
+                as usize;
             for sx in row_x0..row_x1 {
                 let offset = screen_row_off + ((sx - row_x0) as u32 * bytes_per_pixel) as usize;
                 if offset + 4 <= buffer.len() {
@@ -5218,24 +5765,24 @@ impl Compositor {
         &mut self,
         dirty: Option<(i32, i32, u32, u32)>,
     ) -> Result<(), &'static str> {
-        let backbuffer_len = self.backbuffer.len();
-        let stride = self.backbuffer_stride;
+        let backbuffer_len = self.outputs.primary().target.backbuffer.len();
+        let stride = self.outputs.primary().target.backbuffer_stride;
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
 
         // Clip dirty region to screen bounds.
         let (x0, y0, w, h) = match dirty {
-            None => (0i32, 0i32, self.screen_width, self.screen_height),
+            None => (0i32, 0i32, self.screen_width(), self.screen_height()),
             Some((dx, dy, dw, dh)) => {
-                let sx0 = dx.max(0).min(self.screen_width as i32);
-                let sy0 = dy.max(0).min(self.screen_height as i32);
+                let sx0 = dx.max(0).min(self.screen_width() as i32);
+                let sy0 = dy.max(0).min(self.screen_height() as i32);
                 let sx1 = (dx.saturating_add(dw as i32))
                     .max(0)
-                    .min(self.screen_width as i32);
+                    .min(self.screen_width() as i32);
                 let sy1 = (dy.saturating_add(dh as i32))
                     .max(0)
-                    .min(self.screen_height as i32);
+                    .min(self.screen_height() as i32);
                 let cw = (sx1 - sx0).max(0) as u32;
                 let ch = (sy1 - sy0).max(0) as u32;
                 (sx0, sy0, cw, ch)
@@ -5247,7 +5794,15 @@ impl Compositor {
             return Ok(());
         }
 
-        let backdrops = self.window_backdrops();
+        let backdrops: Vec<_> = self
+            .window_backdrops()
+            .into_iter()
+            .filter_map(|(id, geometry)| {
+                geometry
+                    .relative_to((0, 0), self.screen_width(), self.screen_height())
+                    .map(|g| (id, g))
+            })
+            .collect();
         self.backdrops
             .retain(|(id, filter)| backdrops.contains(&(*id, filter.geometry)));
         for &(id, geometry) in &backdrops {
@@ -5264,7 +5819,10 @@ impl Compositor {
         // Mutate backbuffer within a limited scope so we can immutably borrow `self`
         // afterwards for validation/present.
         {
-            let backbuffer = &mut self.backbuffer;
+            let screen_width = self.screen_width();
+            let screen_height = self.screen_height();
+            let bytes_per_pixel = self.outputs.primary().target.bytes_per_pixel;
+            let backbuffer = &mut self.outputs.primary_mut().target.backbuffer;
 
             // Layer 1: Fill background (only within dirty region).
             // Pre-calculate values outside the loop
@@ -5273,7 +5831,7 @@ impl Compositor {
             let w_usize = w as usize;
             let h_usize = h as usize;
             let stride_usize = stride as usize;
-            let bytes_per_pixel_usize = self.bytes_per_pixel as usize;
+            let bytes_per_pixel_usize = bytes_per_pixel as usize;
             let row_len = w_usize.saturating_mul(bytes_per_pixel_usize);
 
             for yy in 0..h_usize {
@@ -5295,9 +5853,6 @@ impl Compositor {
             } else {
                 None
             };
-            let screen_width = self.screen_width;
-            let screen_height = self.screen_height;
-            let bytes_per_pixel = self.bytes_per_pixel;
             let mut overview_backplates_drawn = false;
             for window in self.window_manager.get_windows() {
                 if !window.is_presented() {
@@ -5360,6 +5915,7 @@ impl Compositor {
                         backbuffer,
                         stride,
                         clip,
+                        (0, 0),
                     );
                 }
             }
@@ -5429,24 +5985,35 @@ impl Compositor {
                     bytes_per_pixel,
                     stride,
                     clip,
+                    (0, 0),
                 );
             }
         }
 
         // Validate composition against expected pixels before presenting.
-        self.validate_vram_samples(&self.backbuffer, stride, dirty, "after display composite");
+        self.validate_vram_samples(
+            &self.outputs.primary().target.backbuffer,
+            stride,
+            dirty,
+            "after display composite",
+        );
 
-        if !self.display.has_swapchain() {
+        if !self.outputs.primary().target.display.has_swapchain() {
             // Present only the dirty region when direct scanout is unavailable.
             let src_off = (y0 as usize)
                 .saturating_mul(stride as usize)
-                .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
+                .saturating_add(
+                    (x0 as usize)
+                        .saturating_mul(self.outputs.primary().target.bytes_per_pixel as usize),
+                );
             if src_off >= backbuffer_len {
                 return Err("Backbuffer offset out of range");
             }
-            let src = &self.backbuffer[src_off..];
+            let target = &mut self.outputs.primary_mut().target;
+            let src = &target.backbuffer[src_off..];
 
-            self.display
+            target
+                .display
                 .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
                 .map_err(|_| "Failed to write backbuffer")?;
         }
@@ -5962,7 +6529,7 @@ impl Compositor {
 
     fn overview_window_drag_threshold(&self) -> u32 {
         ((u64::from(OVERVIEW_WINDOW_DRAG_THRESHOLD_LOGICAL)
-            * u64::from(self.output_scale_milli.max(1)))
+            * u64::from(self.output_scale_milli().max(1)))
             / 1000)
             .clamp(8, 40) as u32
     }
@@ -6028,7 +6595,7 @@ impl Compositor {
         let preview = window.presentation_transform?;
         let workarea = self
             .workarea
-            .unwrap_or((0, 0, self.screen_width, self.screen_height));
+            .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         Some(map_overview_drop_position(
             (preview.x, preview.y),
             target_card,
@@ -6234,7 +6801,7 @@ impl Compositor {
     ) -> bool {
         let dx = end_x.saturating_sub(navigation.start_x);
         let dy = end_y.saturating_sub(navigation.start_y);
-        let drag_threshold = (self.screen_width / 14).clamp(48, 160);
+        let drag_threshold = (self.screen_width() / 14).clamp(48, 160);
         if dx.unsigned_abs() >= drag_threshold && dx.unsigned_abs() > dy.unsigned_abs() {
             return self.move_overview_selection(if dx < 0 { 1 } else { -1 });
         }
@@ -6273,13 +6840,13 @@ impl Compositor {
         {
             return None;
         }
-        let scale = self.output_scale_milli.max(1);
-        let width = (100 * scale / 1000).min(self.screen_width / 3).max(1);
+        let scale = self.output_scale_milli().max(1);
+        let width = (100 * scale / 1000).min(self.screen_width() / 3).max(1);
         let height = (4 * scale / 1000).max(2);
         let margin = (4 * scale / 1000).max(2);
         Some((
-            (self.screen_width - width) as i32 / 2,
-            self.screen_height.saturating_sub(height + margin) as i32,
+            (self.screen_width() - width) as i32 / 2,
+            self.screen_height().saturating_sub(height + margin) as i32,
             width,
             height,
         ))
@@ -6385,19 +6952,24 @@ impl Compositor {
             .map(|contact| {
                 (
                     contact.tracking_id,
-                    normalized_touch_to_screen(contact.x, self.screen_width),
-                    normalized_touch_to_screen(contact.y, self.screen_height),
+                    normalized_touch_to_screen(contact.x, self.screen_width()),
+                    normalized_touch_to_screen(contact.y, self.screen_height()),
                 )
             })
             .collect::<Vec<_>>();
         let was_captured = self.tablet_navigation[index].1.is_captured();
+        let (screen_width, screen_height, output_scale_milli) = (
+            self.screen_width(),
+            self.screen_height(),
+            self.output_scale_milli(),
+        );
         let step = self.tablet_navigation[index].1.process(
             &contacts,
             frame.cancelled,
             frame.time_ns,
-            self.screen_width,
-            self.screen_height,
-            self.output_scale_milli,
+            screen_width,
+            screen_height,
+            output_scale_milli,
         );
         if self.tablet_navigation_source.is_none() && step.consumed && !was_captured {
             self.tablet_navigation_source = Some(frame.source);
@@ -6447,8 +7019,9 @@ impl Compositor {
                 overview_ready,
             }) => {
                 self.set_overview_pan(self.clamped_overview_pan(horizontal));
-                let horizontal_progress =
-                    (horizontal.abs() / tablet_navigation::page_stride(self.screen_width)).min(1.0);
+                let horizontal_progress = (horizontal.abs()
+                    / tablet_navigation::page_stride(self.screen_width()))
+                .min(1.0);
                 let mut direct = None;
                 let mut begin_hold = false;
                 if let Some(scene) = self.tablet_gesture_scene.as_mut() {
@@ -6561,7 +7134,7 @@ impl Compositor {
                             starts,
                             &incoming,
                             direction,
-                            self.screen_width,
+                            self.screen_width(),
                             monotonic_time_ns(),
                             self.animations_enabled(),
                         )
@@ -6623,7 +7196,7 @@ impl Compositor {
             .iter()
             .position(|w| w.id == state.active_workspace)
             .unwrap_or(0);
-        let pitch = tablet_navigation::page_stride(self.screen_width);
+        let pitch = tablet_navigation::page_stride(self.screen_width());
         let low = -((state.workspaces.len().saturating_sub(index + 1)) as f32) * pitch;
         let high = index as f32 * pitch;
         let bound = pan.clamp(low, high);
@@ -6632,7 +7205,7 @@ impl Compositor {
     }
 
     fn settle_overview_pan(&mut self, velocity: f32) {
-        let pitch = tablet_navigation::page_stride(self.screen_width);
+        let pitch = tablet_navigation::page_stride(self.screen_width());
         let projected = self.overview_pan + (velocity * 0.18).clamp(-pitch, pitch);
         let steps = (-projected / pitch).round() as i32;
         let mut moved = 0i32;
@@ -6728,13 +7301,14 @@ impl Compositor {
             sws_protocol::workspace::ShellPresentation::Home
                 | sws_protocol::workspace::ShellPresentation::Overview
         ) {
-            if dx.unsigned_abs() >= self.screen_width / 10 && dx.unsigned_abs() > dy.unsigned_abs()
+            if dx.unsigned_abs() >= self.screen_width() / 10
+                && dx.unsigned_abs() > dy.unsigned_abs()
             {
                 changed =
                     self.workspace_manager
                         .move_overview_selection(if dx < 0 { 1 } else { -1 });
-            } else if dx.unsigned_abs() <= self.screen_width / 12
-                && dy.unsigned_abs() <= self.screen_height / 12
+            } else if dx.unsigned_abs() <= self.screen_width() / 12
+                && dy.unsigned_abs() <= self.screen_height() / 12
             {
                 changed = if let Some(workspace_id) = navigation.remove_workspace_id
                     && self.overview_remove_workspace_at_point(
@@ -6785,8 +7359,8 @@ impl Compositor {
                     .iter()
                     .find(|contact| contact.tracking_id == navigation.tracking_id)
             {
-                navigation.current_x = normalized_touch_to_screen(contact.x, self.screen_width);
-                navigation.current_y = normalized_touch_to_screen(contact.y, self.screen_height);
+                navigation.current_x = normalized_touch_to_screen(contact.x, self.screen_width());
+                navigation.current_y = normalized_touch_to_screen(contact.y, self.screen_height());
                 if frame.contacts.len() != 1 {
                     navigation.contact.cancel();
                     self.cancel_overview_window_drag();
@@ -6829,14 +7403,14 @@ impl Compositor {
                     .overview_window_drag
                     .and_then(|d| self.window_manager.get_window(d.window_id))
                     .and_then(|w| w.presentation_transform)
-                    .map_or(self.screen_height / 2, |t| t.height);
+                    .map_or(self.screen_height() / 2, |t| t.height);
                 let close = navigation.contact.dismiss_committed(height);
                 if close && let Some(drag) = self.overview_window_drag {
                     let card = self
                         .overview_card_rects()
                         .into_iter()
                         .find_map(|(id, rect)| (id == drag.source_workspace_id).then_some(rect))
-                        .unwrap_or((0, 0, self.screen_width, self.screen_height));
+                        .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
                     let target_y =
                         i64::from(drag.start_y) - i64::from(card.1) - i64::from(card.3) - 32;
                     self.overview_window_drag = None;
@@ -6908,8 +7482,8 @@ impl Compositor {
             return None;
         }
         let contact = frame.contacts.first()?;
-        let screen_x = normalized_touch_to_screen(contact.x, self.screen_width);
-        let screen_y = normalized_touch_to_screen(contact.y, self.screen_height);
+        let screen_x = normalized_touch_to_screen(contact.x, self.screen_width());
+        let screen_y = normalized_touch_to_screen(contact.y, self.screen_height());
         if self
             .window_manager
             .window_at_point(screen_x, screen_y)
@@ -6966,7 +7540,7 @@ impl Compositor {
                 screen_x,
                 screen_y,
                 frame.time_ns,
-                self.output_scale_milli,
+                self.output_scale_milli(),
             ),
             pan_origin: self.overview_pan,
         });
@@ -7060,8 +7634,8 @@ impl Compositor {
             return redraw;
         }
         for contact in frame.contacts {
-            let screen_x = normalized_touch_to_screen(contact.x, self.screen_width);
-            let screen_y = normalized_touch_to_screen(contact.y, self.screen_height);
+            let screen_x = normalized_touch_to_screen(contact.x, self.screen_width());
+            let screen_y = normalized_touch_to_screen(contact.y, self.screen_height());
             if let Some(index) = self.direct_touch_grabs.iter().position(|grab| {
                 grab.source == frame.source && grab.tracking_id == contact.tracking_id
             }) {
@@ -7243,7 +7817,7 @@ impl Compositor {
         }
 
         let mut cursor =
-            load_cursor_theme(theme_path, self.output_scale_milli).map_err(|error| {
+            load_cursor_theme(theme_path, self.output_scale_milli()).map_err(|error| {
                 println!(
                     "[Compositor] Rejecting cursor theme {}: {}",
                     theme_path, error
@@ -7326,8 +7900,8 @@ impl Compositor {
             self.cursor.set_position(
                 self.cursor.x.clamp(x, max_x),
                 self.cursor.y.clamp(y, max_y),
-                self.screen_width,
-                self.screen_height,
+                self.screen_width(),
+                self.screen_height(),
             );
         }
         false
@@ -7385,8 +7959,12 @@ impl Compositor {
         let locked_x = self.cursor.x.clamp(geometry_x, max_x);
         let locked_y = self.cursor.y.clamp(geometry_y, max_y);
         self.add_pending_damage(cursor_rect);
-        self.cursor
-            .set_position(locked_x, locked_y, self.screen_width, self.screen_height);
+        self.cursor.set_position(
+            locked_x,
+            locked_y,
+            self.screen_width(),
+            self.screen_height(),
+        );
         if self.pointer_grab_window_id != interaction.implicit_grab_window_id {
             self.pointer_grab_window_id = interaction.implicit_grab_window_id;
             self.last_left_down_cursor = None;
@@ -7588,8 +8166,8 @@ impl Compositor {
                     None => self.capture_session.capture_cpu(
                         client_id,
                         buffer_id,
-                        &self.backbuffer,
-                        self.backbuffer_stride,
+                        &self.outputs.primary().target.backbuffer,
+                        self.outputs.primary().target.backbuffer_stride,
                     ),
                 };
                 if let Err(error) = result {
@@ -7633,6 +8211,7 @@ impl Compositor {
 
         if !self.gpu_frame_pending() {
             self.check_display_resize()?;
+            self.poll_secondary_outputs()?;
         }
 
         // Process IPC events from global queue (non-blocking)
@@ -7823,7 +8402,7 @@ impl Compositor {
         // Synchronous DCP presentation already waits for the next completed
         // page flip. Sleeping for another frame here would double-pace the
         // compositor and reduce interactive updates to roughly 30 Hz.
-        if !self.display.has_swapchain() {
+        if !self.outputs.primary().target.display.has_swapchain() {
             let now = monotonic_time_ns();
             let deadline = self.next_frame_deadline_ns.unwrap_or(now);
             if deadline > now {
@@ -7852,7 +8431,7 @@ impl Compositor {
         if let Some(motion) = self.drawer_motion.as_mut() {
             motion.note_presented(now);
         }
-        if self.display.has_swapchain() {
+        if self.outputs.primary().target.display.has_swapchain() {
             self.next_frame_deadline_ns = None;
             return;
         }
@@ -7904,7 +8483,7 @@ impl Compositor {
                 );
                 self.full_redraw_needed = true;
                 self.damage_profile.full(line!());
-                self.presented_damage.clear();
+                self.outputs.primary_mut().target.presented_damage.clear();
                 self.next_frame_deadline_ns = None;
                 super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
                 thread::sleep(Duration::from_millis(RUNTIME_ERROR_RETRY_DELAY_MS));
@@ -8012,7 +8591,7 @@ impl Compositor {
             super::trace::compositor_present();
             super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             self.note_frame_presented();
-            self.event_counter += 1;
+            self.outputs.primary_mut().present_counter += 1;
             presented = true;
             // Grant only after the display accepted the frame. Presentation
             // policy applied below may expose a different scene, which must
@@ -8151,8 +8730,10 @@ impl Compositor {
                     self.send_locked_relative_motion(window_id, dx, dy);
                     return Ok(true);
                 }
+                let (bounds_width, bounds_height) = self.pointer_bounds();
                 self.cursor
-                    .update_position(dx, dy, self.screen_width, self.screen_height);
+                    .update_position(dx, dy, bounds_width, bounds_height);
+                self.confine_cursor_to_outputs();
                 self.refresh_cursor_icon();
                 if self.workspace_manager.presentation()
                     == sws_protocol::workspace::ShellPresentation::Overview
@@ -8260,7 +8841,7 @@ impl Compositor {
                     return Ok(true);
                 }
                 self.cursor
-                    .set_position(x, y, self.screen_width, self.screen_height);
+                    .set_position(x, y, self.screen_width(), self.screen_height());
                 self.refresh_cursor_icon();
                 if self.workspace_manager.presentation()
                     == sws_protocol::workspace::ShellPresentation::Overview
@@ -10244,10 +10825,10 @@ impl Compositor {
             .saturating_add(cursor.height as i32)
             .saturating_add(popup.offset_y);
 
-        let max_x = (self.screen_width as i32).saturating_sub(old_rect.2 as i32);
+        let max_x = (self.screen_width() as i32).saturating_sub(old_rect.2 as i32);
         let available_bottom = self
             .input_panel_occlusion
-            .map_or(self.screen_height as i32, |area| area.y);
+            .map_or(self.screen_height() as i32, |area| area.y);
         let max_y = available_bottom.saturating_sub(old_rect.3 as i32);
         if y > max_y {
             let cursor_top = anchor_y.saturating_add(cursor.y);
@@ -10398,7 +10979,7 @@ impl Compositor {
             .get_window(window_id)
             .and_then(|window| window.last_frame_submission_counter);
         let requested_after_present = (!is_credit)
-            .then(|| frame_callback_target(self.event_counter, last_submission_counter));
+            .then(|| frame_callback_target(self.present_counter(), last_submission_counter));
         self.pending_frame_callbacks.push(PendingFrameCallback {
             client_id,
             window_id,
@@ -10453,7 +11034,7 @@ impl Compositor {
                     self.pending_workspace_scenes.contains(&callback.window_id)
                         && window.visible
                         && !window.minimized,
-                    self.event_counter,
+                    self.present_counter(),
                     requested,
                     window.prepares_while_workspace_hidden(),
                 ),
@@ -10472,7 +11053,7 @@ impl Compositor {
                         "sws-frame-done window={} callback={} counter={} requested_after={:?}",
                         window.id,
                         callback.callback_id,
-                        self.event_counter,
+                        self.present_counter(),
                         callback.requested_after_present,
                     ),
                 );
@@ -10540,7 +11121,7 @@ impl Compositor {
     /// overlay and never changes maximized, single-scene, or split geometry.
     fn app_workarea(&self) -> (i32, i32, u32, u32) {
         self.workarea
-            .unwrap_or((0, 0, self.screen_width, self.screen_height))
+            .unwrap_or((0, 0, self.screen_width(), self.screen_height()))
     }
 
     fn refresh_input_panel(&mut self) {
@@ -10557,14 +11138,14 @@ impl Compositor {
         let mut next = None;
         if let Some(id) = next_window {
             if let Some(window) = self.window_manager.get_window(id) {
-                let height = window.height.min(self.screen_height / 2).max(1);
-                let y = self.screen_height.saturating_sub(height) as i32;
-                let resized = window.width != self.screen_width || window.height != height;
+                let height = window.height.min(self.screen_height() / 2).max(1);
+                let y = self.screen_height().saturating_sub(height) as i32;
+                let resized = window.width != self.screen_width() || window.height != height;
                 self.window_manager.set_window_position(id, 0, y);
                 if resized {
                     self.window_manager.resize_window_geometry_in_place(
                         id,
-                        self.screen_width,
+                        self.screen_width(),
                         height,
                     );
                     self.send_current_window_configure(id);
@@ -10576,7 +11157,7 @@ impl Compositor {
                             window_id: panel.context.window_id,
                             x: 0,
                             y,
-                            width: self.screen_width,
+                            width: self.screen_width(),
                             height,
                         });
                     }
@@ -10596,7 +11177,7 @@ impl Compositor {
         let target = self.input_panel_occlusion.and_then(|area| {
             self.window_manager
                 .get_window(area.window_id)
-                .map(|window| (area, window.surface_geometry(), self.output_scale_milli))
+                .map(|window| (area, window.surface_geometry(), self.output_scale_milli()))
         });
         let updates = self.input_panel_notifications.update(target);
         if !updates.is_empty() {
@@ -10616,8 +11197,8 @@ impl Compositor {
         Some(maximized_geometry_for(
             window.window_type,
             Some(self.app_workarea()),
-            self.screen_width,
-            self.screen_height,
+            self.screen_width(),
+            self.screen_height(),
         ))
     }
 
@@ -10723,7 +11304,7 @@ impl Compositor {
         sgfx_frame: Option<((u32, u32), (u32, u32))>,
     ) {
         let focused = self.windowing_mode == sws_protocol::WindowingMode::Focused;
-        let presentation_counter = self.event_counter;
+        let presentation_counter = self.present_counter();
         let Some((first_frame_needs_policy, presentation_content_became_ready)) =
             self.window_manager.get_window_mut(window_id).map(|window| {
                 let first = window.note_frame_submission(presentation_counter);
@@ -10791,7 +11372,7 @@ impl Compositor {
                 height,
                 opacity: 1.0,
             },
-            self.output_scale_milli,
+            self.output_scale_milli(),
             monotonic_time_ns(),
             self.animations_enabled(),
         );
@@ -11058,7 +11639,7 @@ impl Compositor {
                     *candidate == workspace_id
                         && intersect_compositor_rects(
                             *rect,
-                            (0, 0, self.screen_width, self.screen_height),
+                            (0, 0, self.screen_width(), self.screen_height()),
                         )
                         .is_some()
                 }) && (self.windowing_mode == sws_protocol::WindowingMode::Freeform
@@ -11108,14 +11689,17 @@ impl Compositor {
                     width,
                     height,
                 );
-                if let Some(geometry) = BackdropGeometry::new(
-                    self.screen_width,
-                    self.screen_height,
-                    output,
-                    region.blur_radius,
-                    region.corner_radius,
-                ) {
-                    result.push((window.id, geometry));
+                for target in self.outputs.iter() {
+                    if let Some(geometry) = BackdropGeometry::new_on_output(
+                        (target.rect.x, target.rect.y),
+                        target.rect.width,
+                        target.rect.height,
+                        output,
+                        region.blur_radius,
+                        region.corner_radius,
+                    ) {
+                        result.push((window.id, geometry));
+                    }
                 }
             }
         }
@@ -11136,14 +11720,14 @@ impl Compositor {
     fn overview_workspace_region(&self) -> (i32, i32, u32, u32) {
         let workarea = self
             .workarea
-            .unwrap_or((0, 0, self.screen_width, self.screen_height));
+            .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         if self.console_home_active() {
             return (workarea.0, workarea.1, workarea.2, 0);
         }
         overview_workspace_region_for(
             workarea,
             self.tablet_mode,
-            self.output_scale_milli,
+            self.output_scale_milli(),
             self.workspace_manager.presentation(),
         )
     }
@@ -11155,7 +11739,7 @@ impl Compositor {
         let state = self.workspace_manager.snapshot();
         let workarea = self
             .workarea
-            .unwrap_or((0, 0, self.screen_width, self.screen_height));
+            .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         let mut workspace_ids = state
             .workspaces
             .iter()
@@ -11169,7 +11753,7 @@ impl Compositor {
         layout_overview_cards(
             workarea,
             self.tablet_mode,
-            self.output_scale_milli,
+            self.output_scale_milli(),
             state.presentation,
             &workspace_ids,
             state.active_workspace,
@@ -11389,7 +11973,7 @@ impl Compositor {
             .find(|(candidate, _)| *candidate == workspace_id)?;
         let (work_x, work_y, work_width, work_height) =
             self.workarea
-                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+                .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         let surface = if self.windowing_mode == sws_protocol::WindowingMode::Focused
             && window_id == root_id
         {
@@ -11475,13 +12059,13 @@ impl Compositor {
             .collect::<Vec<_>>();
         let workarea = self
             .workarea
-            .unwrap_or((0, 0, self.screen_width, self.screen_height));
+            .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         let stage = laptop_overview_window_stage_for(
             workarea,
             self.overview_workspace_region(),
-            self.output_scale_milli,
+            self.output_scale_milli(),
         );
-        layout_overview_window_spread(stage, self.output_scale_milli, &windows)
+        layout_overview_window_spread(stage, self.output_scale_milli(), &windows)
     }
 
     fn laptop_overview_spread_transform_for_window(
@@ -12123,7 +12707,7 @@ impl Compositor {
 
         let (bounds_x, bounds_y, bounds_width, bounds_height) =
             self.workarea
-                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+                .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         let min_x = bounds_x as i64;
         let min_y = bounds_y as i64;
         let max_x = (min_x + bounds_width as i64 - width as i64).max(min_x);
@@ -12158,7 +12742,7 @@ impl Compositor {
     fn centered_window_position(&self, width: u32, height: u32) -> (i32, i32) {
         let (work_x, work_y, work_width, work_height) =
             self.workarea
-                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+                .unwrap_or((0, 0, self.screen_width(), self.screen_height()));
         (
             work_x + (work_width as i32 - width as i32).max(0) / 2,
             work_y + (work_height as i32 - height as i32).max(0) / 2,
@@ -12167,8 +12751,8 @@ impl Compositor {
 
     fn publish_window_creation_environment(&self) {
         super::ipc::set_window_creation_environment(
-            self.screen_width,
-            self.screen_height,
+            self.screen_width(),
+            self.screen_height(),
             self.workarea,
             self.windowing_mode,
         );
@@ -12496,21 +13080,25 @@ impl Compositor {
                     | super::window::WindowType::ShellBackground
                     | super::window::WindowType::ShellChrome => {
                         let needs_resize =
-                            width != self.screen_width || height != self.screen_height;
+                            width != self.screen_width() || height != self.screen_height();
                         if needs_resize {
                             println!(
                                 "[Compositor] Auto-resizing DESKTOP window #{} from {}x{} to {}x{}",
-                                window_id, width, height, self.screen_width, self.screen_height
+                                window_id,
+                                width,
+                                height,
+                                self.screen_width(),
+                                self.screen_height()
                             );
                             self.window_manager.resize_window_in_place(
                                 window_id,
-                                self.screen_width,
-                                self.screen_height,
+                                self.screen_width(),
+                                self.screen_height(),
                             );
                             let payload = sws_protocol::payload_window_configure(
                                 window_id,
-                                self.screen_width,
-                                self.screen_height,
+                                self.screen_width(),
+                                self.screen_height(),
                             );
                             super::ipc::send_message_to_window(
                                 window_id,
@@ -12520,19 +13108,21 @@ impl Compositor {
                         }
                     }
                     super::window::WindowType::Taskbar => {
-                        if width != self.screen_width {
+                        if width != self.screen_width() {
                             println!(
                                 "[Compositor] Auto-resizing TASKBAR window #{} width from {} to {}",
-                                window_id, width, self.screen_width
+                                window_id,
+                                width,
+                                self.screen_width()
                             );
                             self.window_manager.resize_window_in_place(
                                 window_id,
-                                self.screen_width,
+                                self.screen_width(),
                                 height,
                             );
                             let payload = sws_protocol::payload_window_configure(
                                 window_id,
-                                self.screen_width,
+                                self.screen_width(),
                                 height,
                             );
                             super::ipc::send_message_to_window(
@@ -12543,12 +13133,12 @@ impl Compositor {
                         }
 
                         let workarea_y = height as i32;
-                        let workarea_height = self.screen_height.saturating_sub(height);
-                        self.workarea = Some((0, workarea_y, self.screen_width, workarea_height));
+                        let workarea_height = self.screen_height().saturating_sub(height);
+                        self.workarea = Some((0, workarea_y, self.screen_width(), workarea_height));
                         self.window_manager.set_workarea(
                             0,
                             workarea_y,
-                            self.screen_width,
+                            self.screen_width(),
                             workarea_height,
                         );
                         self.publish_window_creation_environment();
@@ -12672,33 +13262,18 @@ impl Compositor {
                     return Ok(false);
                 }
 
-                // Convert window-local damage -> screen-space rect and clamp to screen.
-                let rx0 = win_x.saturating_add(damage_x);
-                let ry0 = win_y.saturating_add(damage_y);
-                let rx1 = rx0.saturating_add(damage_width as i32);
-                let ry1 = ry0.saturating_add(damage_height as i32);
-
-                let sx0 = rx0.max(0).min(self.screen_width as i32);
-                let sy0 = ry0.max(0).min(self.screen_height as i32);
-                let sx1 = rx1.max(0).min(self.screen_width as i32);
-                let sy1 = ry1.max(0).min(self.screen_height as i32);
-                let w = (sx1 - sx0).max(0) as u32;
-                let h = (sy1 - sy0).max(0) as u32;
-                if (w == 0 || h == 0)
+                let damage = self.clamp_rect_to_outputs((
+                    win_x.saturating_add(damage_x),
+                    win_y.saturating_add(damage_y),
+                    damage_width,
+                    damage_height,
+                ));
+                if damage.is_none()
                     && presentation_transform.is_none()
                     && presentation_instances.is_empty()
                 {
-                    println!(
-                        "[Compositor] Window #{} buffer updated but damage out of bounds: ({},{}) {}x{} (ignored)",
-                        window_id, damage_x, damage_y, damage_width, damage_height
-                    );
                     return Ok(false);
                 }
-
-                // println!(
-                //     "[Compositor] Window #{} buffer updated: ({},{}) {}x{} -> screen ({},{}) {}x{}",
-                //     window_id, damage_x, damage_y, damage_width, damage_height, sx0, sy0, w, h
-                // );
 
                 if let Some(transform) = presentation_transform {
                     self.add_pending_damage((
@@ -12707,8 +13282,8 @@ impl Compositor {
                         transform.width,
                         transform.height,
                     ));
-                } else {
-                    self.add_window_content_damage(window_id, (sx0, sy0, w, h));
+                } else if let Some(rect) = damage {
+                    self.add_window_content_damage(window_id, rect);
                 }
                 for transform in presentation_instances {
                     self.add_pending_damage((
@@ -12918,7 +13493,7 @@ impl Compositor {
                                     damage.extent,
                                     geometry,
                                     clip,
-                                    (self.screen_width, self.screen_height),
+                                    self.pointer_bounds(),
                                     &damage.rects,
                                 ) {
                                     if self.damage_profile.enabled {
@@ -13414,8 +13989,8 @@ impl Compositor {
                     .map(|window| (window.x, window.y, window.width, window.height));
                 if !self.window_manager.set_fullscreen_window(
                     window_id,
-                    self.screen_width,
-                    self.screen_height,
+                    self.screen_width(),
+                    self.screen_height(),
                 ) {
                     self.send_fullscreen_configure(window_id);
                     super::ipc::send_message_to_client(
@@ -14338,7 +14913,7 @@ impl Compositor {
                     client_id
                 );
                 let payload =
-                    sws_protocol::payload_screen_size(self.screen_width, self.screen_height);
+                    sws_protocol::payload_screen_size(self.screen_width(), self.screen_height());
                 super::ipc::send_response_to_client(
                     client_id,
                     sws_protocol::server_msg::SCREEN_SIZE,
@@ -14347,7 +14922,9 @@ impl Compositor {
                 );
                 println!(
                     "[Compositor] Sent SCREEN_SIZE: {}x{} to client {}",
-                    self.screen_width, self.screen_height, client_id
+                    self.screen_width(),
+                    self.screen_height(),
+                    client_id
                 );
             }
             IpcEvent::GetOutputScale {
@@ -14358,7 +14935,7 @@ impl Compositor {
                     "[Compositor] GetOutputScale request from client {}",
                     client_id
                 );
-                let payload = sws_protocol::payload_output_scale(self.output_scale_milli);
+                let payload = sws_protocol::payload_output_scale(self.output_scale_milli());
                 super::ipc::send_response_to_client(
                     client_id,
                     sws_protocol::server_msg::OUTPUT_SCALE,
@@ -14367,7 +14944,8 @@ impl Compositor {
                 );
                 println!(
                     "[Compositor] Sent OUTPUT_SCALE: {} to client {}",
-                    self.output_scale_milli, client_id
+                    self.output_scale_milli(),
+                    client_id
                 );
             }
             IpcEvent::Clipboard {

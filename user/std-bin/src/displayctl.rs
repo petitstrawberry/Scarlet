@@ -1,8 +1,9 @@
-//! Command-line control for Scarlet display backlights.
+//! Command-line control for Scarlet displays.
 //!
-//! This utility deliberately uses [`framebuffer::DisplayControl`] rather than
-//! [`framebuffer::DisplaySurface`], so querying or setting brightness never
-//! creates a framebuffer mapping.
+//! `info` lists every display endpoint and its connector; `get`/`set` control
+//! the backlight. This utility deliberately uses [`framebuffer::DisplayControl`]
+//! rather than [`framebuffer::DisplaySurface`], so it never creates a
+//! framebuffer mapping.
 
 use std::process::ExitCode;
 
@@ -10,11 +11,18 @@ use std::process::ExitCode;
 use std::env;
 
 #[cfg(target_os = "scarlet")]
-use framebuffer::DisplayControl;
+use framebuffer::{
+    DISPLAY_CONNECTOR_KIND_EXTERNAL, DISPLAY_CONNECTOR_KIND_INTERNAL,
+    DISPLAY_CONNECTOR_KIND_VIRTUAL, DisplayControl, DisplayOutputInfo,
+};
+
+/// Highest `/dev/displayN` index `info` probes.
+#[cfg(target_os = "scarlet")]
+const DISPLAY_SCAN_LIMIT: usize = 16;
 
 #[cfg(target_os = "scarlet")]
 fn usage() {
-    eprintln!("usage: displayctl <get|set <0..100>>");
+    eprintln!("usage: displayctl <info|get|set <0..100>>");
 }
 
 #[cfg(target_os = "scarlet")]
@@ -23,6 +31,73 @@ fn open_display() -> Result<DisplayControl, ExitCode> {
         eprintln!("displayctl: no brightness-capable display: {error:?}");
         ExitCode::from(1)
     })
+}
+
+#[cfg(target_os = "scarlet")]
+fn kind_name(kind: u32) -> &'static str {
+    match kind {
+        DISPLAY_CONNECTOR_KIND_INTERNAL => "internal",
+        DISPLAY_CONNECTOR_KIND_EXTERNAL => "external",
+        DISPLAY_CONNECTOR_KIND_VIRTUAL => "virtual",
+        _ => "unknown",
+    }
+}
+
+#[cfg(target_os = "scarlet")]
+fn describe(path: &str, info: &DisplayOutputInfo) -> String {
+    let mut line = format!(
+        "{path}: connector={} ({}/{}) kind={} {} {}x{}",
+        info.name(),
+        info.connector_index,
+        info.connector_count,
+        kind_name(info.kind),
+        if info.is_connected() {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        info.width,
+        info.height,
+    );
+    if info.refresh_mhz != 0 {
+        line.push_str(&format!(
+            "@{}.{:03}Hz",
+            info.refresh_mhz / 1000,
+            info.refresh_mhz % 1000
+        ));
+    }
+    if info.physical_width_mm != 0 && info.physical_height_mm != 0 {
+        line.push_str(&format!(
+            " {}x{}mm",
+            info.physical_width_mm, info.physical_height_mm
+        ));
+    }
+    if info.is_primary() {
+        line.push_str(" primary");
+    }
+    line
+}
+
+#[cfg(target_os = "scarlet")]
+fn print_info() -> ExitCode {
+    let mut found = false;
+    for index in 0..DISPLAY_SCAN_LIMIT {
+        let path = format!("/dev/display{index}");
+        let Ok(display) = DisplayControl::open(&path) else {
+            continue;
+        };
+        found = true;
+        match display.get_output_info() {
+            Ok(info) => println!("{}", describe(&path, &info)),
+            Err(error) => println!("{path}: output info unavailable: {error:?}"),
+        }
+    }
+    if found {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("displayctl: no display endpoints found");
+        ExitCode::from(1)
+    }
 }
 
 fn parse_percent(value: &str) -> Result<u8, &'static str> {
@@ -50,6 +125,7 @@ fn main() -> ExitCode {
     };
 
     match command.as_str() {
+        "info" if args.next().is_none() => print_info(),
         "get" if args.next().is_none() => {
             let Ok(display) = open_display() else {
                 return ExitCode::from(1);

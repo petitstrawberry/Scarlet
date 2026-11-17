@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use crate::sync::IrqSpinLock;
+use crate::sync::Mutex;
 use alloc::sync::Arc;
 
 /// PHY operation errors.
@@ -63,11 +63,20 @@ pub enum PhyOrientation {
     Reverse,
 }
 
+/// DisplayPort link settings negotiated with the sink, in wire lane order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayPortConfig {
+    pub link_rate_mbps: u32,
+    pub lanes: u8,
+    pub voltage: [u8; 4],
+    pub pre_emphasis: [u8; 4],
+}
+
 /// Consumer-side PHY handle with refcounted power state.
 #[derive(Clone)]
 pub struct PhyHandle {
     phy: Arc<dyn Phy>,
-    state: Arc<IrqSpinLock<PhyState>>,
+    state: Arc<Mutex<PhyState>>,
 }
 
 struct PhyState {
@@ -89,7 +98,7 @@ impl PhyHandle {
     pub fn new(phy: Arc<dyn Phy>) -> Self {
         Self {
             phy,
-            state: Arc::new(IrqSpinLock::new(PhyState {
+            state: Arc::new(Mutex::new(PhyState {
                 power_count: 0,
                 mode: None,
                 orientation: None,
@@ -116,18 +125,12 @@ impl PhyHandle {
     /// The reference count saturates at zero. Power-off errors are intentionally
     /// ignored because this method is used for best-effort cleanup paths.
     pub fn power_off(&self) {
-        let call_power_off = {
-            let mut state = self.state.lock();
+        let mut state = self.state.lock();
+        if state.power_count > 0 {
+            state.power_count -= 1;
             if state.power_count == 0 {
-                false
-            } else {
-                state.power_count -= 1;
-                state.power_count == 0
+                let _ = self.phy.power_off();
             }
-        };
-
-        if call_power_off {
-            let _ = self.phy.power_off();
         }
     }
 
@@ -141,8 +144,9 @@ impl PhyHandle {
     ///
     /// `Ok(())` when the mode was accepted by the PHY.
     pub fn set_mode(&self, mode: PhyMode) -> Result<(), PhyError> {
+        let mut state = self.state.lock();
         self.phy.set_mode(mode)?;
-        self.state.lock().mode = Some(mode);
+        state.mode = Some(mode);
         Ok(())
     }
 
@@ -183,9 +187,16 @@ impl PhyHandle {
     ///
     /// `Ok(())` when the orientation was accepted by the PHY.
     pub fn set_orientation(&self, orientation: PhyOrientation) -> Result<(), PhyError> {
+        let mut state = self.state.lock();
         self.phy.set_orientation(orientation)?;
-        self.state.lock().orientation = Some(orientation);
+        state.orientation = Some(orientation);
         Ok(())
+    }
+
+    /// Configure the DP link or update its electrical training levels.
+    pub fn configure_displayport(&self, config: DisplayPortConfig) -> Result<(), PhyError> {
+        let _state = self.state.lock();
+        self.phy.configure_displayport(config)
     }
 
     /// Return the last orientation set through this handle.
@@ -200,6 +211,11 @@ impl PhyHandle {
 
 /// A single PHY instance.
 pub trait Phy: Send + Sync {
+    /// Configure the negotiated DisplayPort link, if supported by this PHY.
+    fn configure_displayport(&self, _config: DisplayPortConfig) -> Result<(), PhyError> {
+        Err(PhyError::NotSupported)
+    }
+
     /// Return the PHY name.
     ///
     /// # Returns

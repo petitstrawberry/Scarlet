@@ -12,10 +12,11 @@ use core::any::Any;
 
 use super::{
     FramebufferConfig, GpuPresentOptions, PixelFormat, PresentationOwners,
-    manager::FramebufferResource, output::DisplayRegion,
+    manager::FramebufferResource,
+    output::{ConnectorKind, DisplayRegion},
 };
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
-use crate::library::std::usercopy::copy_from_user;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::vm::addr::phys_to_virt;
@@ -47,6 +48,11 @@ pub mod display_commands {
     /// The scalar `control` argument is the requested percentage. Values
     /// outside the inclusive `0..=100` range are rejected.
     pub const DISPLAY_SET_BRIGHTNESS: u32 = 0x5007;
+    /// Describe the output this endpoint presents and its connector.
+    ///
+    /// The argument points to a [`super::DisplayOutputInfo`] whose `size` the
+    /// caller sets to the bytes it provides. See that type for the contract.
+    pub const DISPLAY_GET_OUTPUT_INFO: u32 = 0x5008;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -158,6 +164,64 @@ pub struct DisplayPresentImage {
     pub height: u32,
 }
 
+/// Layout version of [`DisplayOutputInfo`] written by this kernel.
+pub const DISPLAY_OUTPUT_INFO_VERSION: u32 = 1;
+/// A monitor is attached to the connector and enabled.
+pub const DISPLAY_OUTPUT_FLAG_CONNECTED: u32 = 1 << 0;
+/// This endpoint is `/dev/display0`, the primary output.
+pub const DISPLAY_OUTPUT_FLAG_PRIMARY: u32 = 1 << 1;
+/// Connector kind is unknown.
+pub const DISPLAY_CONNECTOR_KIND_UNKNOWN: u32 = 0;
+/// Built-in panel.
+pub const DISPLAY_CONNECTOR_KIND_INTERNAL: u32 = 1;
+/// External monitor port.
+pub const DISPLAY_CONNECTOR_KIND_EXTERNAL: u32 = 2;
+/// Output of a virtual display device.
+pub const DISPLAY_CONNECTOR_KIND_VIRTUAL: u32 = 3;
+/// Bytes reserved for the NUL-padded connector name.
+pub const DISPLAY_CONNECTOR_NAME_LEN: usize = 32;
+
+/// Argument for `DISPLAY_GET_OUTPUT_INFO`.
+///
+/// Contract:
+/// * The caller sets `size` to the number of bytes it provides. Requests
+///   smaller than the version 1 record are rejected.
+/// * The kernel writes `min(size, size_of::<DisplayOutputInfo>())` bytes and
+///   stores that count in `size`, and the layout version in `version`. Later
+///   versions only append fields.
+/// * All fields are fixed width so the record is identical on 32- and 64-bit
+///   targets. Unknown values are 0.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayOutputInfo {
+    /// In: bytes provided by the caller. Out: bytes written.
+    pub size: u32,
+    /// Out: [`DISPLAY_OUTPUT_INFO_VERSION`].
+    pub version: u32,
+    /// `DISPLAY_OUTPUT_FLAG_*` values.
+    pub flags: u32,
+    /// Connector this endpoint presents, within its graphics device.
+    pub connector_index: u32,
+    /// Connectors the graphics device exposes, whether connected or not.
+    pub connector_count: u32,
+    /// `DISPLAY_CONNECTOR_KIND_*` value.
+    pub kind: u32,
+    /// Current mode width in pixels.
+    pub width: u32,
+    /// Current mode height in pixels.
+    pub height: u32,
+    /// Refresh rate in millihertz.
+    pub refresh_mhz: u32,
+    /// Physical width in millimetres.
+    pub physical_width_mm: u32,
+    /// Physical height in millimetres.
+    pub physical_height_mm: u32,
+    /// Reserved; written as 0.
+    pub reserved: u32,
+    /// NUL-padded connector name.
+    pub name: [u8; DISPLAY_CONNECTOR_NAME_LEN],
+}
+
 /// Present the full GPU image and require zero region fields.
 pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
 /// The producer will not rewrite this image until another image is presented.
@@ -264,7 +328,8 @@ impl DisplayCharDevice {
             .get_device(self.fb_resource.source_device_id)
         {
             if let Some(graphics_device) = device.as_graphics_device() {
-                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let (config, physical_addr) =
+                    graphics_device.connector_framebuffer_info(self.fb_resource.connector_index)?;
                 let size = Self::page_aligned_size(config.size())?;
                 return Ok(DisplayBackingInfo {
                     config,
@@ -274,6 +339,10 @@ impl DisplayCharDevice {
             }
         }
 
+        if self.fb_resource.connector_index != 0 {
+            // Secondary connectors have no static backing to fall back to.
+            return Err("Display source device not found");
+        }
         Ok(DisplayBackingInfo {
             config: self.fb_resource.config.clone(),
             physical_addr: self.fb_resource.physical_addr,
@@ -352,7 +421,7 @@ impl DisplayCharDevice {
         let brightness = device
             .as_graphics_device()
             .ok_or("Display source device is not graphics-capable")?
-            .get_brightness_percent()?;
+            .connector_brightness_percent(self.fb_resource.connector_index)?;
         if brightness > 100 {
             return Err("Display driver returned an invalid brightness percentage");
         }
@@ -368,7 +437,123 @@ impl DisplayCharDevice {
         device
             .as_graphics_device()
             .ok_or("Display source device is not graphics-capable")?
-            .set_brightness_percent(arg as u8)?;
+            .set_connector_brightness_percent(self.fb_resource.connector_index, arg as u8)?;
+        Ok(0)
+    }
+
+    fn connector_kind_code(kind: ConnectorKind) -> u32 {
+        match kind {
+            ConnectorKind::Unknown => DISPLAY_CONNECTOR_KIND_UNKNOWN,
+            ConnectorKind::Internal => DISPLAY_CONNECTOR_KIND_INTERNAL,
+            ConnectorKind::External => DISPLAY_CONNECTOR_KIND_EXTERNAL,
+            ConnectorKind::Virtual => DISPLAY_CONNECTOR_KIND_VIRTUAL,
+        }
+    }
+
+    /// Build the output description for this endpoint.
+    fn current_output_info(&self) -> Result<DisplayOutputInfo, &'static str> {
+        let device = self.source_graphics_device()?;
+        let connectors = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?
+            .connectors();
+        let connector_index = self.fb_resource.connector_index;
+        let mut info = DisplayOutputInfo {
+            size: core::mem::size_of::<DisplayOutputInfo>() as u32,
+            version: DISPLAY_OUTPUT_INFO_VERSION,
+            flags: 0,
+            connector_index,
+            connector_count: connectors.len() as u32,
+            kind: DISPLAY_CONNECTOR_KIND_UNKNOWN,
+            width: 0,
+            height: 0,
+            refresh_mhz: 0,
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            reserved: 0,
+            name: [0; DISPLAY_CONNECTOR_NAME_LEN],
+        };
+        if self.fb_resource.logical_name == "fb0" {
+            info.flags |= DISPLAY_OUTPUT_FLAG_PRIMARY;
+        }
+        if let Some(connector) = connectors.get(connector_index as usize) {
+            if connector.connected {
+                info.flags |= DISPLAY_OUTPUT_FLAG_CONNECTED;
+            }
+            info.kind = Self::connector_kind_code(connector.kind);
+            info.width = connector.width;
+            info.height = connector.height;
+            info.refresh_mhz = connector.refresh_mhz;
+            if let Some((width_mm, height_mm)) = connector.physical_size_mm {
+                info.physical_width_mm = width_mm;
+                info.physical_height_mm = height_mm;
+            }
+            // Keep a terminating NUL so C callers can read it as a string,
+            // and cut on a character boundary so the prefix stays UTF-8.
+            let mut len = connector.name.len().min(DISPLAY_CONNECTOR_NAME_LEN - 1);
+            while !connector.name.is_char_boundary(len) {
+                len -= 1;
+            }
+            info.name[..len].copy_from_slice(&connector.name.as_bytes()[..len]);
+        }
+        Ok(info)
+    }
+
+    /// Copy bytes from the caller, or from a kernel pointer in kernel tests.
+    fn read_argument(arg: usize, dst: &mut [u8]) -> Result<(), &'static str> {
+        if arg == 0 {
+            return Err("Invalid argument pointer");
+        }
+        match crate::task::mytask() {
+            Some(task) => copy_from_user(&task, arg, dst).map_err(|_| "Invalid user pointer"),
+            None => {
+                // SAFETY: without a current task, in-kernel callers pass a
+                // kernel pointer to at least `dst.len()` readable bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(arg as *const u8, dst.as_mut_ptr(), dst.len())
+                };
+                Ok(())
+            }
+        }
+    }
+
+    /// Copy bytes to the caller, or to a kernel pointer in kernel tests.
+    fn write_argument(arg: usize, src: &[u8]) -> Result<(), &'static str> {
+        if arg == 0 {
+            return Err("Invalid argument pointer");
+        }
+        match crate::task::mytask() {
+            Some(task) => copy_to_user(&task, arg, src).map_err(|_| "Invalid user pointer"),
+            None => {
+                // SAFETY: without a current task, in-kernel callers pass a
+                // kernel pointer to at least `src.len()` writable bytes.
+                unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), arg as *mut u8, src.len()) };
+                Ok(())
+            }
+        }
+    }
+
+    fn handle_get_output_info(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut size_bytes = [0u8; 4];
+        Self::read_argument(arg, &mut size_bytes)?;
+        let requested = u32::from_ne_bytes(size_bytes) as usize;
+        let record_len = core::mem::size_of::<DisplayOutputInfo>();
+        if requested < record_len {
+            return Err("Display output info buffer is too small");
+        }
+
+        let mut info = self.current_output_info()?;
+        let written = requested.min(record_len);
+        info.size = written as u32;
+        // SAFETY: DisplayOutputInfo is repr(C) with only integer fields and no
+        // padding, so viewing it as bytes is sound.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&info as *const DisplayOutputInfo).cast::<u8>(),
+                record_len,
+            )
+        };
+        Self::write_argument(arg, &bytes[..written])?;
         Ok(0)
     }
 
@@ -574,7 +759,8 @@ impl DisplayCharDevice {
             } else {
                 options
             };
-            let completion = graphics.begin_gpu_resource_present(
+            let completion = graphics.begin_connector_gpu_resource_present(
+                self.fb_resource.connector_index,
                 resource.clone(),
                 region,
                 options,
@@ -597,7 +783,12 @@ impl DisplayCharDevice {
             device
                 .as_graphics_device()
                 .ok_or("Display source device is not graphics-capable")?
-                .present_gpu_resource_region_with_options(resource, region, options)?;
+                .present_connector_gpu_resource_region(
+                    self.fb_resource.connector_index,
+                    resource,
+                    region,
+                    options,
+                )?;
         }
         Ok(0)
     }
@@ -615,7 +806,8 @@ impl DisplayCharDevice {
             let graphics_device = device
                 .as_graphics_device()
                 .ok_or("Display source device is not graphics-capable")?;
-            let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+            let connector = self.fb_resource.connector_index;
+            let (config, physical_addr) = graphics_device.connector_framebuffer_info(connector)?;
             if physical_addr == 0 {
                 return Err("Invalid display backing address");
             }
@@ -626,7 +818,8 @@ impl DisplayCharDevice {
                 region.width.min(config.width.saturating_sub(region.x)),
                 region.height.min(config.height.saturating_sub(region.y)),
             );
-            let completion = graphics_device.begin_framebuffer_present(
+            let completion = graphics_device.begin_connector_framebuffer_present(
+                connector,
                 config,
                 physical_addr,
                 region,
@@ -646,7 +839,7 @@ impl DisplayCharDevice {
                 .expect("legacy framebuffer presentation")
                 .as_graphics_device()
                 .ok_or("Display source device is not graphics-capable")?
-                .present_current_framebuffer_region(region)
+                .present_connector_framebuffer_region(self.fb_resource.connector_index, region)
         }
     }
 }
@@ -755,10 +948,19 @@ impl ControlOps for DisplayCharDevice {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         use display_commands::*;
 
+        if self.fb_resource.connector_index != 0
+            && matches!(command, DISPLAY_GET_SWAPCHAIN | DISPLAY_PRESENT_BUFFER)
+        {
+            // Direct-scanout swapchains are a driver feature of the primary
+            // connector only. Other connectors present through the CPU
+            // framebuffer or GPU images, like the primary does without one.
+            return Err("Direct scanout buffers are not supported on this connector");
+        }
         match command {
             DISPLAY_GET_INFO => self.handle_get_info(arg),
             DISPLAY_GET_BRIGHTNESS => self.handle_get_brightness(),
             DISPLAY_SET_BRIGHTNESS => self.handle_set_brightness(arg),
+            DISPLAY_GET_OUTPUT_INFO => self.handle_get_output_info(arg),
             DISPLAY_PRESENT => self.handle_present(),
             DISPLAY_PRESENT_REGION => self.handle_present_region(arg),
             DISPLAY_GET_SWAPCHAIN => self.handle_get_swapchain(arg),
@@ -774,6 +976,10 @@ impl ControlOps for DisplayCharDevice {
             (DISPLAY_GET_INFO, "Get display surface information"),
             (DISPLAY_GET_BRIGHTNESS, "Get display brightness percentage"),
             (DISPLAY_SET_BRIGHTNESS, "Set display brightness percentage"),
+            (
+                DISPLAY_GET_OUTPUT_INFO,
+                "Get output and connector information",
+            ),
             (DISPLAY_PRESENT, "Present whole display surface"),
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
             (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
@@ -901,12 +1107,17 @@ impl Selectable for DisplayCharDevice {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayCharDevice, display_commands};
+    use super::{
+        DISPLAY_CONNECTOR_KIND_INTERNAL, DISPLAY_CONNECTOR_KIND_UNKNOWN,
+        DISPLAY_CONNECTOR_NAME_LEN, DISPLAY_OUTPUT_FLAG_CONNECTED, DISPLAY_OUTPUT_INFO_VERSION,
+        DisplayCharDevice, DisplayOutputInfo, display_commands,
+    };
     use crate::device::{
         Device, DeviceType,
         graphics::{
             FramebufferConfig, GenericGraphicsDevice, GraphicsDevice, PixelFormat,
             manager::FramebufferResource,
+            output::{ConnectorInfo, ConnectorKind},
         },
         manager::DeviceManager,
     };
@@ -1066,6 +1277,303 @@ mod tests {
                 .iter()
                 .any(|(command, _)| *command == display_commands::DISPLAY_SET_BRIGHTNESS)
         );
+    }
+
+    fn output_info_request(size: u32) -> DisplayOutputInfo {
+        DisplayOutputInfo {
+            size,
+            version: 0,
+            flags: 0,
+            connector_index: u32::MAX,
+            connector_count: 0,
+            kind: u32::MAX,
+            width: 0,
+            height: 0,
+            refresh_mhz: u32::MAX,
+            physical_width_mm: u32::MAX,
+            physical_height_mm: u32::MAX,
+            reserved: u32::MAX,
+            name: [0xff; DISPLAY_CONNECTOR_NAME_LEN],
+        }
+    }
+
+    #[test_case]
+    fn display_output_info_reports_default_single_connector() {
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TestBrightnessGraphicsDevice::new(42));
+        let display = display_for_test(&manager, graphics);
+        let mut info = output_info_request(core::mem::size_of::<DisplayOutputInfo>() as u32);
+
+        assert_eq!(
+            display
+                .control(
+                    display_commands::DISPLAY_GET_OUTPUT_INFO,
+                    &mut info as *mut DisplayOutputInfo as usize,
+                )
+                .expect("output info should succeed"),
+            0
+        );
+        assert_eq!(
+            info.size as usize,
+            core::mem::size_of::<DisplayOutputInfo>()
+        );
+        assert_eq!(info.version, DISPLAY_OUTPUT_INFO_VERSION);
+        // The test resource is not fb0, so it is connected but not primary.
+        assert_eq!(info.flags, DISPLAY_OUTPUT_FLAG_CONNECTED);
+        assert_eq!(info.connector_index, 0);
+        assert_eq!(info.connector_count, 1);
+        assert_eq!(info.kind, DISPLAY_CONNECTOR_KIND_UNKNOWN);
+        assert_eq!((info.width, info.height), (1, 1));
+        assert_eq!(info.refresh_mhz, 0);
+        assert_eq!((info.physical_width_mm, info.physical_height_mm), (0, 0));
+        assert_eq!(info.reserved, 0);
+        let name = b"test-brightness-graphics";
+        assert_eq!(&info.name[..name.len()], name);
+        assert!(info.name[name.len()..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test_case]
+    fn display_output_info_rejects_short_buffers_and_truncates_long_ones() {
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TestBrightnessGraphicsDevice::new(42));
+        let display = display_for_test(&manager, graphics);
+        let record_len = core::mem::size_of::<DisplayOutputInfo>();
+
+        let mut short = output_info_request(record_len as u32 - 1);
+        assert_eq!(
+            display
+                .control(
+                    display_commands::DISPLAY_GET_OUTPUT_INFO,
+                    &mut short as *mut DisplayOutputInfo as usize,
+                )
+                .expect_err("short request must be rejected"),
+            "Display output info buffer is too small"
+        );
+        assert_eq!(short.version, 0);
+
+        // A newer caller may pass a larger record; the kernel writes only the
+        // fields it knows and leaves the tail untouched.
+        let mut buffer = [0xa5u8; 256];
+        let buffer_len = buffer.len() as u32;
+        buffer[..4].copy_from_slice(&buffer_len.to_ne_bytes());
+        display
+            .control(
+                display_commands::DISPLAY_GET_OUTPUT_INFO,
+                buffer.as_mut_ptr() as usize,
+            )
+            .expect("larger request should succeed");
+        assert_eq!(
+            u32::from_ne_bytes(buffer[..4].try_into().unwrap()) as usize,
+            record_len
+        );
+        assert_eq!(
+            u32::from_ne_bytes(buffer[4..8].try_into().unwrap()),
+            DISPLAY_OUTPUT_INFO_VERSION
+        );
+        assert!(buffer[record_len..].iter().all(|byte| *byte == 0xa5));
+
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_GET_OUTPUT_INFO, 0)
+                .expect_err("null pointer must be rejected"),
+            "Invalid argument pointer"
+        );
+    }
+
+    /// Graphics device reporting two connectors with a long non-ASCII name.
+    struct TwoConnectorGraphicsDevice(TestBrightnessGraphicsDevice);
+
+    impl Device for TwoConnectorGraphicsDevice {
+        fn device_type(&self) -> DeviceType {
+            DeviceType::Graphics
+        }
+
+        fn name(&self) -> &'static str {
+            "test-two-connector-graphics"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
+            Some(self)
+        }
+    }
+
+    impl ControlOps for TwoConnectorGraphicsDevice {}
+
+    impl MemoryMappingOps for TwoConnectorGraphicsDevice {
+        fn get_mapping_info(
+            &self,
+            offset: usize,
+            length: usize,
+        ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
+            self.0.get_mapping_info(offset, length)
+        }
+    }
+
+    impl Selectable for TwoConnectorGraphicsDevice {
+        fn wait_until_ready(
+            &self,
+            interest: crate::object::capability::selectable::ReadyInterest,
+            trapframe: &mut crate::arch::Trapframe,
+            timeout_ticks: Option<u64>,
+            min_wait_ticks: u64,
+        ) -> SelectWaitOutcome {
+            self.0
+                .wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks)
+        }
+    }
+
+    impl GraphicsDevice for TwoConnectorGraphicsDevice {
+        fn get_display_name(&self) -> &'static str {
+            "test-two-connector-graphics"
+        }
+
+        fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
+            self.0.get_framebuffer_config()
+        }
+
+        fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
+            self.0.get_framebuffer_address()
+        }
+
+        fn present_framebuffer_region(
+            &self,
+            config: &FramebufferConfig,
+            physical_addr: u64,
+            region: crate::device::graphics::output::DisplayRegion,
+        ) -> Result<(), &'static str> {
+            self.0
+                .present_framebuffer_region(config, physical_addr, region)
+        }
+
+        fn init_graphics(&self) -> Result<(), &'static str> {
+            Ok(())
+        }
+
+        fn connectors(&self) -> alloc::vec::Vec<ConnectorInfo> {
+            alloc::vec![
+                ConnectorInfo {
+                    index: 0,
+                    // 29 ASCII bytes then a 3-byte character crossing byte 31.
+                    name: "internal-panel-with-long-name\u{3042}".to_string(),
+                    kind: ConnectorKind::Internal,
+                    connected: true,
+                    width: 2560,
+                    height: 1600,
+                    refresh_mhz: 60_000,
+                    physical_size_mm: Some((300, 190)),
+                },
+                ConnectorInfo {
+                    index: 1,
+                    name: "dp0".to_string(),
+                    kind: ConnectorKind::External,
+                    connected: false,
+                    width: 0,
+                    height: 0,
+                    refresh_mhz: 0,
+                    physical_size_mm: None,
+                },
+            ]
+        }
+    }
+
+    #[test_case]
+    fn display_output_info_reports_connector_zero_of_a_multi_connector_device() {
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TwoConnectorGraphicsDevice(
+            TestBrightnessGraphicsDevice::new(50),
+        ));
+        let display = display_for_test(&manager, graphics);
+        let mut info = output_info_request(core::mem::size_of::<DisplayOutputInfo>() as u32);
+        display
+            .control(
+                display_commands::DISPLAY_GET_OUTPUT_INFO,
+                &mut info as *mut DisplayOutputInfo as usize,
+            )
+            .expect("output info should succeed");
+
+        assert_eq!(info.connector_index, 0);
+        assert_eq!(info.connector_count, 2);
+        assert_eq!(info.kind, DISPLAY_CONNECTOR_KIND_INTERNAL);
+        assert_eq!((info.width, info.height), (2560, 1600));
+        assert_eq!(info.refresh_mhz, 60_000);
+        assert_eq!(
+            (info.physical_width_mm, info.physical_height_mm),
+            (300, 190)
+        );
+        // The 3-byte character would straddle the 31-byte limit, so it is
+        // dropped whole and the name stays valid UTF-8 with a NUL terminator.
+        let expected = b"internal-panel-with-long-name";
+        assert_eq!(&info.name[..expected.len()], expected);
+        assert!(info.name[expected.len()..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test_case]
+    fn secondary_connector_endpoint_reports_its_own_connector() {
+        let manager = DeviceManager::new_for_test();
+        let graphics: Arc<dyn Device> = Arc::new(TwoConnectorGraphicsDevice(
+            TestBrightnessGraphicsDevice::new(50),
+        ));
+        let source_device_id =
+            manager.register_device_with_name("test-two-connector".to_string(), graphics);
+        let resource = Arc::new(FramebufferResource::new_connector(
+            source_device_id,
+            "fb-test-1".to_string(),
+            1,
+        ));
+        let display = DisplayCharDevice::new_with_device_manager(resource, &manager);
+
+        let mut info = output_info_request(core::mem::size_of::<DisplayOutputInfo>() as u32);
+        display
+            .control(
+                display_commands::DISPLAY_GET_OUTPUT_INFO,
+                &mut info as *mut DisplayOutputInfo as usize,
+            )
+            .expect("output info should succeed on a disconnected connector");
+        assert_eq!((info.connector_index, info.connector_count), (1, 2));
+        assert_eq!(info.flags, 0);
+        assert_eq!(&info.name[..4], b"dp0\0");
+
+        // The default trait has no backing for connector 1, and the
+        // primary-only controls are refused rather than reaching connector 0.
+        let mut display_info = super::DisplayInfo::default();
+        assert!(
+            display
+                .control(
+                    display_commands::DISPLAY_GET_INFO,
+                    &mut display_info as *mut super::DisplayInfo as usize,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            display
+                .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
+                .expect_err("the test device has no backlight on connector 1"),
+            "Display brightness control is not supported"
+        );
+        let mut swapchain = super::DisplaySwapchainInfo::default();
+        assert_eq!(
+            display
+                .control(
+                    display_commands::DISPLAY_GET_SWAPCHAIN,
+                    &mut swapchain as *mut super::DisplaySwapchainInfo as usize,
+                )
+                .expect_err("direct scanout is primary-only"),
+            "Direct scanout buffers are not supported on this connector"
+        );
+    }
+
+    #[test_case]
+    fn display_output_info_record_has_fixed_layout() {
+        assert_eq!(core::mem::size_of::<DisplayOutputInfo>(), 80);
+        assert_eq!(core::mem::align_of::<DisplayOutputInfo>(), 4);
     }
 
     #[test_case]

@@ -48,6 +48,46 @@ impl BackdropGeometry {
         })
     }
 
+    /// Clip in an output's pixel grid, retaining global scene coordinates.
+    pub fn new_on_output(
+        origin: (i32, i32),
+        width: u32,
+        height: u32,
+        output: Rect,
+        radius: u32,
+        corner: u32,
+    ) -> Option<Self> {
+        let local = (
+            output.0.saturating_sub(origin.0),
+            output.1.saturating_sub(origin.1),
+            output.2,
+            output.3,
+        );
+        let mut geometry = Self::new(width, height, local, radius, corner)?;
+        geometry.output.0 += origin.0;
+        geometry.output.1 += origin.1;
+        geometry.source.0 += origin.0;
+        geometry.source.1 += origin.1;
+        Some(geometry)
+    }
+
+    /// Resolve one output-owned cache into the target's local pixel grid.
+    pub fn relative_to(self, origin: (i32, i32), width: u32, height: u32) -> Option<Self> {
+        let mut local = self;
+        local.source.0 = local.source.0.checked_sub(origin.0)?;
+        local.source.1 = local.source.1.checked_sub(origin.1)?;
+        local.output.0 = local.output.0.checked_sub(origin.0)?;
+        local.output.1 = local.output.1.checked_sub(origin.1)?;
+        if local.source.0 < 0
+            || local.source.1 < 0
+            || u64::from(local.source.0 as u32) + u64::from(local.source.2) > u64::from(width)
+            || u64::from(local.source.1 as u32) + u64::from(local.source.3) > u64::from(height)
+        {
+            return None;
+        }
+        Some(local)
+    }
+
     pub fn intersects_source(self, rect: Rect) -> bool {
         intersects(self.source, rect)
     }
@@ -346,6 +386,23 @@ fn box_pass(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spanning_material_has_separate_bounded_sampling_halos() {
+        let region = (90, 10, 30, 20);
+        let left = super::BackdropGeometry::new_on_output((0, 0), 100, 60, region, 4, 0).unwrap();
+        let right = super::BackdropGeometry::new_on_output((100, 0), 80, 60, region, 4, 0).unwrap();
+        assert_eq!(left.output, (90, 10, 10, 20));
+        assert_eq!(right.output, (100, 10, 20, 20));
+        assert_eq!(left.source.0 as u32 + left.source.2, 100);
+        assert_eq!(right.source.0, 100);
+        assert!(left.relative_to((100, 0), 80, 60).is_none());
+        assert!(right.relative_to((0, 0), 100, 60).is_none());
+        let local = right.relative_to((100, 0), 80, 60).unwrap();
+        assert_eq!(
+            local,
+            super::BackdropGeometry::new(80, 60, (-10, 10, 30, 20), 4, 0).unwrap()
+        );
+    }
     use super::*;
 
     #[test]
