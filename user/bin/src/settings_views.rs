@@ -194,7 +194,6 @@ pub(super) fn about_page() -> impl View + Clone {
 }
 pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
     let brightness_app = app.clone();
-    let scale_app = app.clone();
     settings_page(vstack! {
         settings_section(vstack! {
             settings_row(hstack! {
@@ -204,9 +203,16 @@ pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
             settings_note(app.display_brightness_status.get()),
         }.spacing(12.0).alignment(Alignment::Leading), "Screen brightness", 14.0),
         settings_section(vstack! {
-            settings_row(Select::new(vec![String::from("100%"),String::from("200%")],app.output_scale_index.clone()).width(240.0).placeholder("Custom saved scale").on_change(move |index| scale_app.set_output_scale(index)), "Scale"),
-            settings_note(app.output_scale_status.get()),
-        }.spacing(12.0).alignment(Alignment::Leading), "Text and interface size", 14.0),
+            settings_displays::canvas(app.display_editor.clone()),
+            settings_row(Select::new(app.display_editor.get().snapshot.as_ref().map(|snapshot| snapshot.outputs.iter().enumerate().map(|(index, output)| format!("{}. {}", index + 1, output.name)).collect()).unwrap_or_default(), app.display_output_index.clone()).width(300.0)
+                .on_change({ let editor = app.display_editor.clone(); move |index| editor.update(|state| state.selected = index) }), "Display"),
+            settings_row(Select::new(settings_displays::SCALES.iter().map(|scale| format!("{}%", scale / 10)).collect(), app.display_scale_index.clone()).width(240.0)
+                .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::scale(&editor, index) }), "Scale"),
+            settings_row(Select::new(vec![String::from("Automatic"), String::from("Desktop"), String::from("Tablet")], app.display_experience_index.clone()).width(240.0)
+                .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::experience(&editor, index) }), "Experience"),
+            settings_note(app.display_editor.get().status),
+            Button::new("Apply").enabled(app.display_editor.get().dirty).on_click({ let editor = app.display_editor.clone(); move || settings_displays::apply(&editor) }),
+        }.spacing(12.0).alignment(Alignment::Leading), "Displays", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
 fn cursor_section(app: SettingsApp) -> impl View + Clone {

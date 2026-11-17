@@ -698,10 +698,17 @@ impl Cursor {
     ///
     /// `true` when the pointer position changed.
     pub fn set_position(&mut self, x: i32, y: i32, screen_width: u32, screen_height: u32) -> bool {
+        self.set_position_in_rect(x, y, (0, 0, screen_width, screen_height))
+    }
+
+    /// A desktop may extend left or above the primary output.
+    pub(super) fn set_position_in_rect(&mut self, x: i32, y: i32, bounds: (i32, i32, u32, u32)) -> bool {
         let old_x = self.x;
         let old_y = self.y;
-        self.x = x.max(0).min(screen_width as i32 - 1);
-        self.y = y.max(0).min(screen_height as i32 - 1);
+        let right = (i64::from(bounds.0) + i64::from(bounds.2.max(1)) - 1).min(i64::from(i32::MAX)) as i32;
+        let bottom = (i64::from(bounds.1) + i64::from(bounds.3.max(1)) - 1).min(i64::from(i32::MAX)) as i32;
+        self.x = x.clamp(bounds.0, right);
+        self.y = y.clamp(bounds.1, bottom);
         let moved = old_x != self.x || old_y != self.y;
         if moved {
             self.needs_redraw = true;

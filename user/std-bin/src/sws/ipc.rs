@@ -589,6 +589,17 @@ static WINDOW_OWNERS: Mutex<BTreeMap<u32, usize>> = Mutex::new(BTreeMap::new());
 static SGFX_SHARED_IMAGES_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static COMPOSITOR_EPOCH: AtomicU32 = AtomicU32::new(1);
 
+/// One compositor-selected target retained through allocation and creation.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WindowCreationTarget {
+    pub context: protocol::outputs::OutputContext,
+    pub client_scale_milli: u32,
+    pub workarea: Option<(i32, i32, u32, u32)>,
+    pub placement: protocol::WindowPlacement,
+    pub activated: bool,
+    pub focused: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct WindowCreationEnvironment {
     screen_width: u32,
@@ -876,6 +887,22 @@ struct SystemShellClient {
     full_app_menus: bool,
 }
 
+static OUTPUT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+static OUTPUT_CONTEXTS: Mutex<BTreeMap<usize, protocol::outputs::OutputContext>> = Mutex::new(BTreeMap::new());
+pub(super) fn client_output_context(client: usize) -> Option<protocol::outputs::OutputContext> { OUTPUT_CONTEXTS.lock().expect("output contexts").get(&client).copied() }
+pub(super) fn set_client_output_context(client: usize, context: protocol::outputs::OutputContext) { OUTPUT_CONTEXTS.lock().expect("output contexts").insert(client, context); }
+pub(super) fn refresh_output_contexts(contexts: &[protocol::outputs::OutputContext]) {
+    for context in OUTPUT_CONTEXTS.lock().expect("output contexts").values_mut() {
+        if let Some(updated) = contexts.iter().find(|updated| updated.id == context.id).or_else(|| contexts.first()) {
+            *context = *updated;
+        }
+    }
+}
+pub(super) fn publish_output_event(event: protocol::outputs::OutputEvent) {
+    let clients: Vec<_> = OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").iter().copied().collect();
+    let payload = protocol::outputs::encode_event(&event);
+    for client in clients { send_message_to_client(client, protocol::server_msg::OUTPUT_CONTROL, payload.clone()); }
+}
 static SYSTEM_SHELL_CLIENT: Mutex<Option<SystemShellClient>> = Mutex::new(None);
 
 fn claim_system_shell(client_id: usize, full_app_menus: bool) -> bool {
@@ -931,6 +958,8 @@ fn subscribe_input_environment(client_id: usize) {
 }
 
 fn unsubscribe_input_environment(client_id: usize) {
+    OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").remove(&client_id);
+    OUTPUT_CONTEXTS.lock().expect("output contexts").remove(&client_id);
     INPUT_ENVIRONMENT_SUBSCRIBERS
         .lock()
         .expect("SWS input-environment subscriber mutex poisoned")
@@ -2991,10 +3020,28 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 let requested_width = width.max(1);
                 let requested_height = height.max(1);
 
+                // Decide output/policy on the compositor thread before allocating
+                // SHM. Legacy clients need the same placement policy without
+                // opting into new wire events. Retain this snapshot even if the
+                // pointer moves while the allocation is in progress.
+                let (reply, target) = std::sync::mpsc::sync_channel(1);
+                push_ipc_event(IpcEvent::PrepareWindowCreation {
+                    client_id,
+                    app_id: app_id.to_vec(),
+                    window_type,
+                    placement: initial_position,
+                    activation_token: activation_token.map(|token| token.to_vec()),
+                    reply,
+                });
+                let Ok(creation) = target.recv() else { break; };
                 let (width, height) = if let Some(configuration) = initial_configuration {
-                    let environment = *WINDOW_CREATION_ENVIRONMENT
-                        .lock()
-                        .expect("SWS window-creation environment mutex poisoned");
+                    let pixels = |scene: u32| ((u64::from(scene) * u64::from(creation.client_scale_milli)).div_ceil(2000)).max(1).min(u64::from(u32::MAX)) as u32;
+                    let environment = WindowCreationEnvironment {
+                        screen_width: pixels(creation.context.rect.width.saturating_mul(2)),
+                        screen_height: pixels(creation.context.rect.height.saturating_mul(2)),
+                        workarea: creation.workarea.map(|(_, _, width, height)| (0, 0, pixels(width), pixels(height))),
+                        windowing_mode: if creation.focused { protocol::WindowingMode::Focused } else { protocol::WindowingMode::Freeform },
+                    };
                     let Some(extent) = configured_initial_surface_extent(
                         width,
                         height,
@@ -3179,8 +3226,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             resizable,
                             focus_on_create,
                             active_on_focus,
-                            initial_position,
-                            activation_token: activation_token.map(|token| token.to_vec()),
+                            creation,
                             initial_configuration,
                             shm: Some(shm),
                             shm_mapped_addr,
@@ -4238,6 +4284,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     );
                 }
             }
+            Ok(ClientMessageRef::OutputControl { payload }) => {
+                if let Ok(command) = protocol::outputs::decode_request(payload) {
+                    OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").insert(client_id);
+                    push_ipc_event(IpcEvent::OutputControl { client_id, request_id, command });
+                }
+            }
             Ok(ClientMessageRef::GetWorkspaceState {}) => {
                 push_ipc_event(IpcEvent::GetWorkspaceState {
                     client_id,
@@ -4840,6 +4892,14 @@ pub enum IpcEvent {
         code: u16,
         modifiers: u32,
     },
+    PrepareWindowCreation {
+        client_id: usize,
+        app_id: Vec<u8>,
+        window_type: u32,
+        placement: protocol::WindowPlacement,
+        activation_token: Option<Vec<u8>>,
+        reply: std::sync::mpsc::SyncSender<WindowCreationTarget>,
+    },
     /// Client requested to create a window
     CreateWindow {
         client_id: usize,
@@ -4855,8 +4915,7 @@ pub enum IpcEvent {
         resizable: bool,
         focus_on_create: bool,
         active_on_focus: bool,
-        initial_position: protocol::WindowPlacement,
-        activation_token: Option<Vec<u8>>,
+        creation: WindowCreationTarget,
         /// Initial constraints/insets already applied to the allocated buffer.
         initial_configuration: Option<protocol::InitialWindowConfiguration>,
         /// Shared memory for the window buffer (server-allocated)
@@ -5269,6 +5328,7 @@ pub enum IpcEvent {
     },
 
     /// A client requested the authoritative workspace snapshot.
+    OutputControl { client_id: usize, request_id: u8, command: protocol::outputs::OutputRequest },
     GetWorkspaceState {
         client_id: usize,
         request_id: u8,

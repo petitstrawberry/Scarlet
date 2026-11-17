@@ -313,3 +313,59 @@ mod tests {
         assert!(updated.contains("theme = \"/share/cursors/default\""));
     }
 }
+
+
+
+/// Save one display combination atomically. Profiles are matched by monitor
+/// identity, never by a port, runtime output ID or enumeration order.
+pub(super) fn persist_outputs(snapshot: &sws_protocol::outputs::OutputSnapshot) -> Result<(), &'static str> {
+    let Some(key) = sws_protocol::outputs::topology_key(&snapshot.outputs) else { return Ok(()); };
+    let _guard = CONFIG_WRITE_LOCK.lock().expect("SWS config mutex");
+    let content = read_sws_config()?;
+    let mut document = content.parse::<toml::Value>().map_err(|_| "Invalid SWS configuration")?;
+    let table = document.as_table_mut().ok_or("Invalid SWS configuration")?;
+    let layouts = table.entry("display_layouts").or_insert_with(|| toml::Value::Array(Vec::new())).as_array_mut().ok_or("Invalid display layouts")?;
+    let key_value = toml::Value::Array(key.into_iter().map(toml::Value::String).collect());
+    let mut profile = toml::map::Map::new();
+    profile.insert("monitors".into(), key_value.clone());
+    let mut entries = Vec::new();
+    for output in &snapshot.outputs {
+        let config = snapshot.configuration.iter().find(|config| config.id == output.id).ok_or("Missing output configuration")?;
+        let mut entry = toml::map::Map::new();
+        entry.insert("monitor".into(), toml::Value::String(output.monitor_key.clone()));
+        for (name, value) in [("x", i64::from(config.x)), ("y", i64::from(config.y)), ("scale_milli", i64::from(config.scale_milli)), ("experience", config.experience as i64)] {
+            entry.insert(name.into(), toml::Value::Integer(value));
+        }
+        profile.insert("primary_monitor".into(), toml::Value::String(snapshot.outputs.iter().find(|output| output.primary).ok_or("Missing primary output")?.monitor_key.clone()));
+        entries.push(toml::Value::Table(entry));
+    }
+    profile.insert("configuration".into(), toml::Value::Array(entries));
+    if let Some(index) = layouts.iter().position(|layout| layout.get("monitors") == Some(&key_value)) { layouts.remove(index); }
+    layouts.push(toml::Value::Table(profile));
+    if layouts.len() > 64 { layouts.remove(0); }
+    let updated = toml::to_string(&document).map_err(|_| "Cannot encode display layouts")?;
+    let temporary = "/etc/sws/.config-output.tmp";
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(temporary).map_err(|_| "Cannot stage display layout")?;
+    if file.write_all(updated.as_bytes()).is_err() || file.flush().is_err() { let _ = fs::remove_file(temporary); return Err("Cannot write display layout"); }
+    drop(file);
+    fs::rename(temporary, SWS_CONFIG_PATH).map_err(|_| "Cannot publish display layout")
+}
+
+pub(super) fn saved_output_layout(outputs: &[sws_protocol::outputs::OutputDescriptor]) -> Option<Vec<sws_protocol::outputs::OutputConfiguration>> {
+    use sws_protocol::outputs::{OutputConfiguration, OutputExperience};
+    let key = sws_protocol::outputs::topology_key(outputs)?;
+    let key = toml::Value::Array(key.into_iter().map(toml::Value::String).collect());
+    let document: toml::Value = read_sws_config().ok()?.parse().ok()?;
+    let layout = document.get("display_layouts")?.as_array()?.iter().find(|layout| layout.get("monitors") == Some(&key))?;
+    let entries = layout.get("configuration")?.as_array()?;
+    let mut configuration = Vec::new();
+    for output in outputs {
+        let entry = entries.iter().find(|entry| entry.get("monitor").and_then(toml::Value::as_str) == Some(output.monitor_key.as_str()))?;
+        configuration.push(OutputConfiguration { id: output.id,
+            x: entry.get("x")?.as_integer()?.try_into().ok()?, y: entry.get("y")?.as_integer()?.try_into().ok()?,
+            scale_milli: entry.get("scale_milli")?.as_integer()?.try_into().ok()?, experience: match entry.get("experience")?.as_integer()? {
+                0 => OutputExperience::Auto, 1 => OutputExperience::Desktop, 2 => OutputExperience::Tablet, _ => return None,
+            } });
+    }
+    sws_protocol::outputs::canonical_layout(outputs, &configuration).ok()
+}

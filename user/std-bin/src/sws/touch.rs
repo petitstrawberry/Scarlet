@@ -280,6 +280,7 @@ struct SourceState {
     start_time_ns: u64,
     start_centroid: (i32, i32),
     last_centroid: (i32, i32),
+    pointer_remainder: (i64, i64),
     start_distance: i32,
     last_distance: i32,
     moved: bool,
@@ -298,6 +299,7 @@ impl SourceState {
             start_time_ns: 0,
             start_centroid: (0, 0),
             last_centroid: (0, 0),
+            pointer_remainder: (0, 0),
             start_distance: 0,
             last_distance: 0,
             moved: false,
@@ -424,6 +426,7 @@ fn indirect_frame(
         state.start_time_ns = frame.time_ns;
         state.start_centroid = centroid;
         state.last_centroid = centroid;
+        state.pointer_remainder = (0, 0);
         state.start_distance = contact_distance(&frame.contacts);
         state.last_distance = state.start_distance;
         state.moved = false;
@@ -457,14 +460,19 @@ fn indirect_frame(
     state.moved |= total > config.tap_move;
 
     if count == 1 {
-        if previous_count != 1 {
+        if previous_count != 1 || state.previous[0].tracking_id != frame.contacts[0].tracking_id {
+            // A different finger is a new anchor, never relative motion from
+            // the last finger's position, even when the count remains one.
             state.start_centroid = current;
             state.last_centroid = current;
+            state.pointer_remainder = (0, 0);
+            state.moved = true;
         } else if delta != (0, 0) {
-            events.push(pointer(CompositorInputEvent::MouseMove {
-                dx: scale_delta(delta.0, screen_width),
-                dy: scale_delta(delta.1, screen_height),
-            }));
+            let dx = scale_delta(delta.0, screen_width, &mut state.pointer_remainder.0);
+            let dy = scale_delta(delta.1, screen_height, &mut state.pointer_remainder.1);
+            if dx != 0 || dy != 0 {
+                events.push(pointer(CompositorInputEvent::MouseMove { dx, dy }));
+            }
         }
         state.last_centroid = current;
         return;
@@ -635,8 +643,10 @@ fn centroid(contacts: &[TouchContact]) -> (i32, i32) {
     (x as i32, y as i32)
 }
 
-fn scale_delta(delta: i32, dimension: u32) -> i32 {
-    (i64::from(delta) * i64::from(dimension.max(1)) / i64::from(TOUCH_COORD_MAX)) as i32
+fn scale_delta(delta: i32, dimension: u32, remainder: &mut i64) -> i32 {
+    let scaled = i64::from(delta) * i64::from(dimension.max(1)) + *remainder;
+    *remainder = scaled % i64::from(TOUCH_COORD_MAX);
+    (scaled / i64::from(TOUCH_COORD_MAX)) as i32
 }
 
 fn contact_distance(contacts: &[TouchContact]) -> i32 {
@@ -802,6 +812,37 @@ mod tests {
         recognizer.process(frame(10, std::vec![contact(2, 2000, 2000)]));
         let tap = recognizer.process(frame(100_000_000, std::vec![]));
         assert_eq!(pointers(&tap).len(), 2);
+    }
+
+    #[test]
+    fn slow_motion_preserves_distance_across_report_rates() {
+        for direction in [-1, 1] {
+            let mut recognizer = GestureRecognizer::new(2160, 1440);
+            recognizer.process(frame(1, std::vec![contact(1, 4000, 4000)]));
+            let mut movement = (0, 0);
+            for step in 1..=100 {
+                for event in pointers(&recognizer.process(frame(step as u64 + 1,
+                    std::vec![contact(1, 4000 + step * direction, 4000 + step * direction)]))) {
+                    if let CompositorInputEvent::MouseMove { dx, dy } = event {
+                        movement.0 += dx; movement.1 += dy;
+                    }
+                }
+            }
+            let mut once = GestureRecognizer::new(2160, 1440);
+            once.process(frame(1, std::vec![contact(1, 4000, 4000)]));
+            assert_eq!(pointers(&once.process(frame(2, std::vec![contact(1,
+                4000 + 100 * direction, 4000 + 100 * direction)]))),
+                std::vec![CompositorInputEvent::MouseMove { dx: movement.0, dy: movement.1 }]);
+            assert_eq!(movement, (21 * direction, 14 * direction));
+        }
+    }
+
+    #[test]
+    fn replacement_finger_does_not_jump_or_click() {
+        let mut recognizer = GestureRecognizer::new(2160, 1440);
+        recognizer.process(frame(1, std::vec![contact(1, 1000, 1000)]));
+        assert!(pointers(&recognizer.process(frame(2, std::vec![contact(2, 8000, 8000)]))).is_empty());
+        assert!(pointers(&recognizer.process(frame(3, std::vec![]))).is_empty());
     }
 
     #[test]

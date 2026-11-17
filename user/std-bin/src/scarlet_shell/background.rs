@@ -288,77 +288,81 @@ fn draw_background(conn: &mut Connection, surface_id: u32, state: &BackgroundSta
     }
 }
 
+struct OutputBackground {
+    output: u32,
+    surface: u32,
+    extent: (u32, u32),
+}
+
+fn reconcile_outputs(conn: &mut Connection, outputs: &sws_protocol::outputs::OutputSnapshot,
+    surfaces: &mut Vec<OutputBackground>, background: &BackgroundState) {
+    surfaces.retain(|entry| {
+        if outputs.outputs.iter().any(|output| output.id == entry.output) { return true; }
+        let _ = conn.destroy_surface(entry.surface);
+        false
+    });
+    for output in &outputs.outputs {
+        if conn.output_context(output.id).is_err() { continue; }
+        let extent = (output.mode.pixel_width, output.mode.pixel_height);
+        if let Some(entry) = surfaces.iter_mut().find(|entry| entry.output == output.id) {
+            if entry.extent != extent && conn.resize_window(entry.surface, extent.0, extent.1).is_ok() {
+                entry.extent = extent;
+                draw_background(conn, entry.surface, background);
+            }
+        } else {
+            let result = SurfaceBuilder::new()
+                .app_id("org.scarlet-os.desktop.background").app_name("Background").menu_titles("")
+                .size(extent.0, extent.1).window_type(window_types::DESKTOP)
+                .resizable(false).focus_on_create(false).active_on_focus(false).build(conn);
+            if let Ok(surface) = result {
+                surfaces.push(OutputBackground { output: output.id, surface, extent });
+                draw_background(conn, surface, background);
+            }
+        }
+    }
+}
+
 pub fn run() {
-    println!("[Shell::Background] starting");
-
     thread::spawn(background_signal_listener);
-
-    let mut conn = match connect_sws_with_retry() {
-        Ok(c) => c,
-        Err(()) => {
-            println!("[Shell::Background] Failed to connect to SWS after retries");
-            return;
-        }
-    };
-
-    let (screen_width, screen_height) = match conn.get_screen_size() {
-        Ok((width, height)) => (width, height),
-        Err(_) => (1024, 768),
-    };
-
-    let surface_id = match SurfaceBuilder::new()
-        .app_id("org.scarlet-os.desktop.background")
-        .app_name("Background")
-        .menu_titles("")
-        .size(screen_width, screen_height)
-        .window_type(window_types::DESKTOP)
-        .resizable(false)
-        .focus_on_create(false)
-        .active_on_focus(false)
-        .position(0, 0)
-        .build(&mut conn)
-    {
-        Ok(id) => id,
-        Err(_) => {
-            println!("[Shell::Background] Failed to create surface");
-            return;
-        }
-    };
-
-    let mut background_state = load_background_state();
-    draw_background(&mut conn, surface_id, &background_state);
-
     loop {
-        let _ = conn.dispatch();
-        while let Some(ev) = conn.poll_event() {
-            match ev {
-                Event::SurfaceConfigure {
-                    surface_id: sid,
-                    width,
-                    height,
-                } if sid == surface_id => {
-                    // Resize to requested screen dimensions.
-                    if conn.resize_window(surface_id, width, height).is_ok() {
-                        let _ = conn.move_window(surface_id, 0, 0);
-                        draw_background(&mut conn, surface_id, &background_state);
+        let Ok(mut conn) = connect_sws_with_retry() else { return; };
+        let mut background = load_background_state();
+        let mut surfaces = Vec::new();
+        let Ok(mut outputs) = conn.outputs() else { return; };
+        reconcile_outputs(&mut conn, &outputs, &mut surfaces, &background);
+        loop {
+            if conn.dispatch().is_err() { break; }
+            while let Some(event) = conn.poll_event() {
+                match event {
+                    Event::Output(sws_protocol::outputs::OutputEvent::Snapshot(next)) if next.generation != outputs.generation => {
+                        reconcile_outputs(&mut conn, &next, &mut surfaces, &background);
+                        outputs = next;
                     }
+                    Event::SurfaceConfigure { surface_id, width, height }
+                    | Event::Output(sws_protocol::outputs::OutputEvent::Window { window: surface_id, width, height, .. }) => {
+                        if let Some(entry) = surfaces.iter_mut().find(|entry| entry.surface == surface_id) {
+                            let native = outputs.outputs.iter().find(|output| output.id == entry.output)
+                                .map_or((width, height), |output| (output.mode.pixel_width, output.mode.pixel_height));
+                            // Wallpaper always fills the native output; a scale
+                            // change does not increase its backing allocation.
+                            if conn.resize_window(surface_id, native.0, native.1).is_ok() {
+                                entry.extent = native;
+                                draw_background(&mut conn, surface_id, &background);
+                            }
+                        }
+                    }
+                    Event::SurfaceDestroyed { surface_id } => surfaces.retain(|entry| entry.surface != surface_id),
+                    _ => {}
                 }
-                Event::SurfaceDestroyed { surface_id: sid } if sid == surface_id => {
-                    println!("[Shell::Background] destroyed");
-                    return;
+            }
+            if BACKGROUND_CHANGED.swap(false, Ordering::Acquire) {
+                let next = load_background_state();
+                if next != background {
+                    for entry in &surfaces { draw_background(&mut conn, entry.surface, &next); }
+                    background = next;
                 }
-                _ => {}
             }
+            let _ = conn.wait_for_window_events(Duration::from_millis(100));
         }
-
-        if BACKGROUND_CHANGED.swap(false, Ordering::Acquire) {
-            let next_state = load_background_state();
-            if next_state != background_state {
-                draw_background(&mut conn, surface_id, &next_state);
-                background_state = next_state;
-            }
-        }
-
-        thread::sleep(Duration::from_millis(16));
     }
 }

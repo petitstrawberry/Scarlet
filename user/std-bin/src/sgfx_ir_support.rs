@@ -253,7 +253,7 @@ pub(crate) struct MappedTarget {
     surfaces: Vec<TargetSurface>,
     active: usize,
     display_completion_wake: CompletionWake,
-    gpu_completion: Option<GpuCompletionQueue<sgfx::Submission>>,
+    gpu_completion: Option<Vec<GpuCompletionQueue<sgfx::Submission>>>,
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
     tracked_submission: bool,
@@ -282,7 +282,9 @@ impl MappedTarget {
     pub(crate) fn prepare_gpu_completion(&mut self, wake: fn()) -> Result<(), &'static str> {
         self.prepare_display_completion(wake);
         if self.gpu_completion.is_none() {
-            self.gpu_completion = Some(GpuCompletionQueue::new(wake)?);
+            let mut queues = Vec::with_capacity(self.surfaces.len());
+            for _ in 0..self.surfaces.len() { queues.push(GpuCompletionQueue::new(wake)?); }
+            self.gpu_completion = Some(queues);
         }
         Ok(())
     }
@@ -291,13 +293,14 @@ impl MappedTarget {
         &mut self,
         receipts: Vec<sgfx::Submission>,
     ) -> Result<(), &'static str> {
-        GpuCompletionQueue::submit_to(self.gpu_completion.as_mut(), receipts)
+        GpuCompletionQueue::submit_to(self.gpu_completion.as_mut().and_then(|queues| queues.get_mut(self.active)), receipts)
     }
 
     pub(crate) fn poll_gpu_completion(&mut self) -> Result<bool, &'static str> {
         let elapsed = self
             .gpu_completion
             .as_mut()
+            .and_then(|queues| queues.get_mut(self.active))
             .ok_or("GPU completion worker unavailable")?
             .poll()?;
         if let Some(elapsed) = elapsed {
@@ -308,6 +311,26 @@ impl MappedTarget {
         } else {
             Ok(false)
         }
+    }
+
+    pub(crate) fn queue_output_gpu_completions(&mut self, groups: Vec<(usize, Vec<sgfx::Submission>)>) -> Result<(), &'static str> {
+        let mut failure = None;
+        for (index, receipts) in groups {
+            // Every group owns accepted GPU commands. On a failed handoff,
+            // retire the remaining groups too before returning the failure.
+            let worker = if failure.is_none() {
+                self.gpu_completion.as_mut().and_then(|queues| queues.get_mut(index))
+            } else { None };
+            if let Err(error) = GpuCompletionQueue::submit_to(worker, receipts) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    pub(crate) fn poll_output_gpu_completion(&mut self, index: usize) -> Result<bool, &'static str> {
+        let elapsed = self.gpu_completion.as_mut().and_then(|queues| queues.get_mut(index)).ok_or("GPU output completion unavailable")?.poll()?;
+        if let (Some(elapsed), Some(timings)) = (elapsed, &mut self.frame_timings) { timings.gpu_wait_ns += elapsed.as_nanos(); }
+        Ok(elapsed.is_some())
     }
 
     pub(crate) fn supports_tracked_submission(&self) -> bool {
@@ -906,6 +929,22 @@ pub(crate) fn clipped_scaled_image(
 /// before outward-rounded projection, including integer-size projections.
 /// Clipping only
 /// reduces coverage, while geometry/opacity changes have separate scene damage.
+pub(crate) fn projected_image_damage_in_bounds(
+    image_extent: (u32, u32),
+    geometry: (i32, i32, u32, u32),
+    clip: Option<(i32, i32, u32, u32)>,
+    bounds: (i32, i32, u32, u32),
+    rects: &[(u32, u32, u32, u32)],
+) -> Vec<(i32, i32, u32, u32)> {
+    let local = |rect: (i32, i32, u32, u32)| (
+        rect.0.saturating_sub(bounds.0), rect.1.saturating_sub(bounds.1), rect.2, rect.3,
+    );
+    projected_image_damage(image_extent, local(geometry), clip.map(local), (bounds.2, bounds.3), rects)
+        .into_iter()
+        .map(|rect| (rect.0.saturating_add(bounds.0), rect.1.saturating_add(bounds.1), rect.2, rect.3))
+        .collect()
+}
+
 pub(crate) fn projected_image_damage(
     image_extent: (u32, u32),
     geometry: (i32, i32, u32, u32),
@@ -1376,7 +1415,7 @@ impl QuadRenderer {
                 operations,
                 backdrops,
             }],
-        )
+        ).map(|groups| groups.into_iter().flatten().collect())
     }
 
     /// All outputs share one receipt owner. Admission failure retires the
@@ -1388,7 +1427,7 @@ impl QuadRenderer {
         uploads: &[TextureUpload<'_>],
         outputs: &[QuadOutput<'_>],
     ) -> Result<
-        Vec<sgfx::Submission>,
+        Vec<Vec<sgfx::Submission>>,
         QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>,
     > {
         let encode_start = target
@@ -1396,6 +1435,7 @@ impl QuadRenderer {
             .as_ref()
             .map(|_| std::time::Instant::now());
         let mut executor = FrameExecutor::new(target.session.executor());
+        let mut checkpoints = Vec::with_capacity(outputs.len());
         let mut backend_admit_ns = 0;
         let mut timed = TimedExecutor {
             inner: &mut executor,
@@ -1415,6 +1455,7 @@ impl QuadRenderer {
                     output.operations,
                     output.backdrops,
                 )?;
+                checkpoints.push(timed.inner.accepted_count());
             }
             Ok(())
         })();
@@ -1438,9 +1479,20 @@ impl QuadRenderer {
         if let (Some(start), Some(timings)) = (encode_start, &mut target.frame_timings) {
             timings.encode_submit_ns += start.elapsed().as_nanos();
         }
-        executor
-            .into_submissions()
-            .map_err(QuadSubmitError::Execution)
+        let accepted = executor.accepted_count();
+        let receipts = executor.into_submissions().map_err(QuadSubmitError::Execution)?;
+        let mut ordinal = accepted - receipts.len() as u64;
+        let mut receipts = receipts.into_iter();
+        let mut groups = Vec::with_capacity(checkpoints.len());
+        for boundary in checkpoints {
+            let mut group = Vec::new();
+            while ordinal < boundary {
+                group.push(receipts.next().ok_or(QuadSubmitError::Recording("Missing output receipt"))?);
+                ordinal += 1;
+            }
+            groups.push(group);
+        }
+        Ok(groups)
     }
 
     #[allow(clippy::too_many_arguments)]

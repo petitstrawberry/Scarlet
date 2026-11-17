@@ -10,6 +10,7 @@ extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
 mod settings_network;
+mod settings_displays;
 mod settings_support;
 use settings_support::{Autosave, TimezoneCommitError, atomic_write, commit_timezone};
 
@@ -990,6 +991,10 @@ fn save_timezone(zone: &str) -> core::result::Result<(), TimezoneCommitError> {
 
 #[derive(View, Clone)]
 struct SettingsApp {
+    display_editor: State<settings_displays::Editor>,
+    display_output_index: State<usize>,
+    display_scale_index: State<usize>,
+    display_experience_index: State<usize>,
     wifi_networks: State<Vec<scarlet_os::wireless_service::Network>>,
     wifi_index: State<usize>,
     wifi_ssid: State<String>,
@@ -1092,6 +1097,10 @@ impl SettingsApp {
         let (status_preferences, status_preferences_status) = load_status_preferences();
         let (output_scale_index, output_scale_status) = load_output_scale();
         let app = Self {
+            display_editor: State::new(StateId::new(120), settings_displays::Editor::new()),
+            display_output_index: State::new(StateId::new(121), 0),
+            display_scale_index: State::new(StateId::new(122), 0),
+            display_experience_index: State::new(StateId::new(123), 0),
             wifi_networks: State::new(StateId::new(41), Vec::new()),
             wifi_index: State::new(StateId::new(42), 0),
             wifi_ssid: State::new(StateId::new(43), String::new()),
@@ -1189,6 +1198,7 @@ impl SettingsApp {
         start_picker_response_listener();
         start_background_autosave(&app);
         settings_network::start_monitor(&app);
+        settings_displays::watch(app.display_editor.clone());
         app
     }
 
@@ -1681,6 +1691,15 @@ fn system_description() -> (String, String, String, String) {
 impl Application for SettingsApp {
     fn on_idle(&mut self) {
         self.process_picker_ui_events();
+        let editor = self.display_editor.get();
+        if let Some(output) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)) {
+            if let Some(config) = editor.draft.iter().find(|config| config.id == output.id) {
+                if self.display_output_index.get() != editor.selected { self.display_output_index.set(editor.selected); }
+                let scale_index = settings_displays::SCALES.iter().position(|scale| *scale == config.scale_milli).unwrap_or(usize::MAX);
+                if self.display_scale_index.get() != scale_index { self.display_scale_index.set(scale_index); }
+                if self.display_experience_index.get() != config.experience as usize { self.display_experience_index.set(config.experience as usize); }
+            }
+        }
     }
 
     fn scenes(&self) -> impl Scene {

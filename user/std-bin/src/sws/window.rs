@@ -191,6 +191,12 @@ pub struct Window {
     pub id: WindowId,
     /// SWS connection that owns this window.
     pub owner_client_id: Option<usize>,
+    /// The output whose workspace owns this surface (transients inherit it).
+    pub output_id: u32,
+    /// Physical pixels per logical pixel in the attached client buffer.
+    pub buffer_scale_milli: u32,
+    pub preferred_scale_milli: u32,
+    scene_extent: (u32, u32),
     /// Application identifier (e.g., "org.scarlet-os.desktop.settings")
     pub app_id: Option<Vec<u8>>,
     pub surface_regions: Vec<sws_protocol::surface_regions::SurfaceRegion>,
@@ -486,10 +492,53 @@ impl<'a> WindowPixels<'a> {
 
 #[allow(dead_code)]
 impl Window {
+    pub(super) fn translate_output(&mut self, dx: i32, dy: i32) {
+        self.x = self.x.saturating_add(dx);
+        self.y = self.y.saturating_add(dy);
+        for geometry in [&mut self.saved_geometry, &mut self.fullscreen_restore_geometry, &mut self.workspace_restore_geometry] {
+            if let Some(rect) = geometry { rect.0 = rect.0.saturating_add(dx); rect.1 = rect.1.saturating_add(dy); }
+        }
+    }
     /// Return the extent of the buffer most recently attached by the client.
     ///
     /// # Returns
     ///
+    pub(super) fn configured_pixel_extent(&self) -> (u32, u32) { (self.width, self.height) }
+    pub(super) fn client_length(&self, scene: u32) -> u32 {
+        if self.preferred_scale_milli == 2000 { return scene; }
+        (u64::from(scene) * u64::from(self.preferred_scale_milli)).div_ceil(2000).min(u64::from(u32::MAX)) as u32
+    }
+    pub(super) fn scene_length(&self, pixels: u32) -> u32 {
+        if self.preferred_scale_milli == 2000 { return pixels; }
+        ((u64::from(pixels) * 1000 / u64::from(self.preferred_scale_milli.max(1))) * 2).min(u64::from(u32::MAX)) as u32
+    }
+    pub(super) fn scene_insets(&self) -> WindowGeometryInsets {
+        let i = self.window_geometry_insets;
+        WindowGeometryInsets { left: self.scene_length(i.left), top: self.scene_length(i.top),
+            right: self.scene_length(i.right), bottom: self.scene_length(i.bottom) }
+    }
+    pub(super) fn set_scene_extent(&mut self, width: u32, height: u32) {
+        self.scene_extent = (width.max(1), height.max(1));
+        self.width = self.client_length(self.scene_extent.0).max(1);
+        self.height = self.client_length(self.scene_extent.1).max(1);
+    }
+    pub(super) fn accept_client_scale(&mut self, scale: u32) {
+        self.preferred_scale_milli = scale.max(1);
+        self.buffer_scale_milli = self.preferred_scale_milli;
+        self.scene_extent = (self.scene_length(self.width).max(1), self.scene_length(self.height).max(1));
+    }
+    pub(super) fn prefer_scale(&mut self, scale: u32) {
+        let old = self.preferred_scale_milli;
+        if old == scale { return; }
+        let convert = |value: u32| (u64::from(value) * u64::from(scale)).div_ceil(u64::from(old.max(1))).min(u64::from(u32::MAX)) as u32;
+        let insets = &mut self.window_geometry_insets;
+        insets.left = convert(insets.left); insets.top = convert(insets.top); insets.right = convert(insets.right); insets.bottom = convert(insets.bottom);
+        self.size_limits.min_width = convert(self.size_limits.min_width); self.size_limits.min_height = convert(self.size_limits.min_height);
+        self.size_limits.max_width = convert(self.size_limits.max_width); self.size_limits.max_height = convert(self.size_limits.max_height);
+        self.preferred_scale_milli = scale;
+        self.set_scene_extent(self.scene_extent.0, self.scene_extent.1);
+    }
+
     /// Physical backing width and height. These remain stable across managed
     /// geometry changes until the corresponding buffer resize is received.
     pub(super) const fn backing_extent(&self) -> (u32, u32) {
@@ -675,6 +724,10 @@ impl Window {
         Self {
             id,
             owner_client_id: None,
+            output_id: 0,
+            buffer_scale_milli: 2000,
+            preferred_scale_milli: 2000,
+            scene_extent: (width, height),
             app_id: None,
             surface_regions: Vec::new(),
             restrict_input_to_regions: false,
@@ -751,6 +804,10 @@ impl Window {
         Self {
             id,
             owner_client_id: None,
+            output_id: 0,
+            buffer_scale_milli: 2000,
+            preferred_scale_milli: 2000,
+            scene_extent: (width, height),
             app_id: None,
             surface_regions: Vec::new(),
             restrict_input_to_regions: false,
@@ -855,6 +912,10 @@ impl Window {
         Ok(Self {
             id,
             owner_client_id: None,
+            output_id: 0,
+            buffer_scale_milli: 2000,
+            preferred_scale_milli: 2000,
+            scene_extent: (width, height),
             app_id: None,
             surface_regions: Vec::new(),
             restrict_input_to_regions: false,
@@ -1015,7 +1076,8 @@ impl Window {
 
     /// Return the complete surface rectangle used for composition and damage.
     pub const fn surface_geometry(&self) -> (i32, i32, u32, u32) {
-        (self.x, self.y, self.width, self.height)
+        if self.preferred_scale_milli == 2000 { (self.x, self.y, self.width, self.height) }
+        else { (self.x, self.y, self.scene_extent.0, self.scene_extent.1) }
     }
 
     /// Return the managed visible geometry in screen coordinates.
@@ -1028,11 +1090,12 @@ impl Window {
             return self.surface_geometry();
         }
         let insets = self.window_geometry_insets;
+        let (_, _, scene_width, scene_height) = self.surface_geometry();
         (
-            self.x.saturating_add(insets.left as i32),
-            self.y.saturating_add(insets.top as i32),
-            self.width.saturating_sub(insets.horizontal()).max(1),
-            self.height.saturating_sub(insets.vertical()).max(1),
+            self.x.saturating_add(self.scene_length(insets.left) as i32),
+            self.y.saturating_add(self.scene_length(insets.top) as i32),
+            scene_width.saturating_sub(self.scene_length(insets.horizontal())).max(1),
+            scene_height.saturating_sub(self.scene_length(insets.vertical())).max(1),
         )
     }
 
@@ -1046,10 +1109,10 @@ impl Window {
     ) -> (i32, i32, u32, u32) {
         let insets = self.window_geometry_insets;
         (
-            x.saturating_sub(insets.left as i32),
-            y.saturating_sub(insets.top as i32),
-            width.saturating_add(insets.horizontal()).max(1),
-            height.saturating_add(insets.vertical()).max(1),
+            x.saturating_sub(self.scene_length(insets.left) as i32),
+            y.saturating_sub(self.scene_length(insets.top) as i32),
+            width.saturating_add(self.scene_length(insets.horizontal())).max(1),
+            height.saturating_add(self.scene_length(insets.vertical())).max(1),
         )
     }
 
@@ -1101,8 +1164,8 @@ impl Window {
         } else {
             let (visible_x, visible_y, _, _) = self.window_geometry();
             (
-                visible_x.saturating_sub(left as i32),
-                visible_y.saturating_sub(top as i32),
+                visible_x.saturating_sub(self.scene_length(left) as i32),
+                visible_y.saturating_sub(self.scene_length(top) as i32),
             )
         };
         let changed = self.window_geometry_insets != next || self.x != next_x || self.y != next_y;
@@ -1134,11 +1197,25 @@ impl Window {
 
     /// Check if a point is inside the complete composited surface bounds.
     pub fn contains_surface_point(&self, x: i32, y: i32) -> bool {
+        let (_, _, width, height) = self.surface_geometry();
+        let (local_x, local_y) = self.surface_input_coordinates(x, y);
         x >= self.x
-            && x < self.x.saturating_add(self.width as i32)
+            && x < self.x.saturating_add(width as i32)
             && y >= self.y
-            && y < self.y.saturating_add(self.height as i32)
-            && self.input_region_contains(x - self.x, y - self.y)
+            && y < self.y.saturating_add(height as i32)
+            && self.input_region_contains(local_x, local_y)
+    }
+
+    /// Map scene coordinates into the client's configured pixel space. Keep
+    /// negative coordinates for pointer/touch grabs which leave the surface.
+    pub(super) fn surface_input_coordinates(&self, x: i32, y: i32) -> (i32, i32) {
+        let (_, _, width, height) = self.surface_geometry();
+        let project = |point: i32, origin: i32, pixels: u32, scene: u32| {
+            ((i64::from(point) - i64::from(origin)) * i64::from(pixels))
+                .div_euclid(i64::from(scene.max(1)))
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
+        (project(x, self.x, self.width, width), project(y, self.y, self.height, height))
     }
 
     fn input_region_contains(&self, x: i32, y: i32) -> bool {
@@ -1381,6 +1458,7 @@ impl Window {
     /// Resize window
     pub fn resize(&mut self, width: u32, height: u32) {
         let (w, h) = self.size_limits.clamp(width, height);
+        self.scene_extent = (self.scene_length(w).max(1), self.scene_length(h).max(1));
         self.width = w;
         self.height = h;
         self.reconcile_window_geometry_after_resize();
@@ -1642,6 +1720,10 @@ impl WindowManager {
         let window = Window {
             id,
             owner_client_id: Some(owner_client_id),
+            output_id: 0,
+            buffer_scale_milli: 2000,
+            preferred_scale_milli: 2000,
+            scene_extent: (width, height),
             app_id: None,
             surface_regions: Vec::new(),
             restrict_input_to_regions: false,
@@ -1738,6 +1820,10 @@ impl WindowManager {
         let window = Window {
             id,
             owner_client_id: None,
+            output_id: 0,
+            buffer_scale_milli: 2000,
+            preferred_scale_milli: 2000,
+            scene_extent: (width, height),
             app_id: None,
             surface_regions: Vec::new(),
             restrict_input_to_regions: false, // Will be set from IPC CREATE_WINDOW message
@@ -1911,7 +1997,7 @@ impl WindowManager {
         let system_shell_focus = self
             .get_window(id)
             .is_some_and(|window| window.window_type == WindowType::ShellBackground);
-        if let Some(fullscreen_id) = self.fullscreen_window_id()
+        if let Some(fullscreen_id) = self.fullscreen_window_for(id)
             && !self.is_in_fullscreen_group(id)
             && !system_shell_focus
         {
@@ -1991,7 +2077,7 @@ impl WindowManager {
         if !Self::window_type_accepts_focus(window.window_type) {
             return false;
         }
-        self.fullscreen_window_id().is_none() || self.is_in_fullscreen_group(id)
+        self.fullscreen_window_for(id).is_none() || self.is_in_fullscreen_group(id)
     }
 
     /// Raise a window and its transient group to the top.
@@ -2193,6 +2279,12 @@ impl WindowManager {
         }
     }
 
+    pub fn clamp_scene_size_for_window(&self, id: WindowId, width: u32, height: u32) -> (u32, u32) {
+        let Some(w) = self.get_window(id) else { return (width.max(1), height.max(1)); };
+        let (pixels_w, pixels_h) = w.size_limits.clamp(w.client_length(width), w.client_length(height));
+        (w.scene_length(pixels_w).max(1), w.scene_length(pixels_h).max(1))
+    }
+
     /// Get focused window ID
     pub fn get_focused_window_id(&self) -> Option<WindowId> {
         self.focused_window
@@ -2209,6 +2301,8 @@ impl WindowManager {
     }
 
     /// Get all windows in Z-order (bottom to top)
+    pub(super) fn get_windows_mut(&mut self) -> &mut [Window] { &mut self.windows }
+
     pub fn get_windows(&self) -> &[Window] {
         &self.windows
     }
@@ -2266,8 +2360,8 @@ impl WindowManager {
         // delta to transient descendants.
         let (surface_x, surface_y, dx, dy) = match self.get_window(id) {
             Some(w) => {
-                let surface_x = x.saturating_sub(w.window_geometry_insets.left as i32);
-                let surface_y = y.saturating_sub(w.window_geometry_insets.top as i32);
+                let surface_x = x.saturating_sub(w.scene_length(w.window_geometry_insets.left) as i32);
+                let surface_y = y.saturating_sub(w.scene_length(w.window_geometry_insets.top) as i32);
                 (surface_x, surface_y, surface_x - w.x, surface_y - w.y)
             }
             None => return,
@@ -2318,8 +2412,10 @@ impl WindowManager {
 
             // IMPORTANT: Do not clamp here. The SHM buffer was already allocated
             // for the provided width/height by the IPC thread.
+            if (width, height) != (w.width, w.height) { w.scene_extent = (w.scene_length(width).max(1), w.scene_length(height).max(1)); }
             w.width = width.max(1);
             w.height = height.max(1);
+            w.buffer_scale_milli = w.preferred_scale_milli;
             w.set_backing_extent(width, height);
             w.reconcile_window_geometry_after_resize();
             w.buffer = None;
@@ -2346,8 +2442,7 @@ impl WindowManager {
     /// message and provide a new buffer via ResizeWindow.
     pub fn resize_window_in_place(&mut self, id: WindowId, width: u32, height: u32) -> bool {
         if let Some(w) = self.get_window_mut(id) {
-            w.width = width.max(1);
-            w.height = height.max(1);
+            w.set_scene_extent(width, height);
             w.reconcile_window_geometry_after_resize();
             true
         } else {
@@ -2381,8 +2476,7 @@ impl WindowManager {
             width.max(1),
             height.max(1),
         );
-        window.width = surface_width;
-        window.height = surface_height;
+        window.set_scene_extent(surface_width, surface_height);
         true
     }
 
@@ -2436,14 +2530,13 @@ impl WindowManager {
             }
             if !w.maximized {
                 // Save current geometry for restore
-                w.saved_geometry = Some((w.x, w.y, w.width, w.height));
+                w.saved_geometry = Some(w.surface_geometry());
                 let (x, y, surface_width, surface_height) =
                     w.surface_geometry_for_window_geometry(0, 0, screen_width, screen_height);
                 let (width, height) = w.size_limits.clamp(surface_width, surface_height);
                 w.x = x;
                 w.y = y;
-                w.width = width;
-                w.height = height;
+                w.set_scene_extent(width, height);
                 w.maximized = true;
                 println!(
                     "[WindowManager] Window #{} maximized to {}x{}",
@@ -2481,11 +2574,12 @@ impl WindowManager {
         screen_width: u32,
         screen_height: u32,
     ) -> bool {
-        if self
-            .windows
-            .iter()
-            .any(|window| window.fullscreen && window.id != id)
-        {
+        self.set_fullscreen_window_on(id, (0, 0, screen_width, screen_height))
+    }
+
+    /// Fullscreen ownership and scene geometry belong to one output.
+    pub fn set_fullscreen_window_on(&mut self, id: WindowId, rect: (i32, i32, u32, u32)) -> bool {
+        if self.fullscreen_window_for(id).is_some_and(|owner| owner != id) {
             return false;
         }
 
@@ -2497,16 +2591,15 @@ impl WindowManager {
         }
 
         window.fullscreen_restore_geometry =
-            Some((window.x, window.y, window.width, window.height));
+            Some(window.surface_geometry());
         // Unlike maximize, fullscreen sizes the complete client surface to the
         // output. Expanding the surface by normal-mode shadow outsets makes an
         // undecorated fullscreen frame larger than the output and clips its
         // right and bottom edges.
         window.begin_native_transition();
-        window.x = 0;
-        window.y = 0;
-        window.width = screen_width.max(1);
-        window.height = screen_height.max(1);
+        window.x = rect.0;
+        window.y = rect.1;
+        window.set_scene_extent(rect.2, rect.3);
         window.fullscreen = true;
         println!(
             "[WindowManager] Window #{} entered fullscreen at {}x{}",
@@ -2548,8 +2641,7 @@ impl WindowManager {
         window.begin_native_transition();
         window.x = 0;
         window.y = 0;
-        window.width = screen_width.max(1);
-        window.height = screen_height.max(1);
+        window.set_scene_extent(screen_width, screen_height);
         true
     }
 
@@ -2577,8 +2669,7 @@ impl WindowManager {
         window.begin_native_transition();
         window.x = x;
         window.y = y;
-        window.width = width.max(1);
-        window.height = height.max(1);
+        window.set_scene_extent(width, height);
         window.fullscreen = false;
         println!("[WindowManager] Window #{} left fullscreen", id);
 
@@ -2611,8 +2702,13 @@ impl WindowManager {
     ///
     /// `true` for the fullscreen window and each of its transient descendants.
     pub fn is_in_fullscreen_group(&self, id: WindowId) -> bool {
-        self.fullscreen_window_id()
+        self.fullscreen_window_for(id)
             .is_some_and(|fullscreen_id| self.top_level_ancestor(id) == fullscreen_id)
+    }
+
+    fn fullscreen_window_for(&self, id: WindowId) -> Option<WindowId> {
+        let output = self.get_window(id)?.output_id;
+        self.windows.iter().find(|window| window.output_id == output && window.fullscreen).map(|window| window.id)
     }
 
     fn fullscreen_window_id(&self) -> Option<WindowId> {
@@ -2649,8 +2745,7 @@ impl WindowManager {
                 if let Some((x, y, width, height)) = w.saved_geometry {
                     w.x = x;
                     w.y = y;
-                    w.width = width;
-                    w.height = height;
+                    w.set_scene_extent(width, height);
                     w.maximized = false;
                     w.focused_mode_managed = false;
                     w.saved_geometry = None;

@@ -12,6 +12,11 @@
 //! This module is generic over the per-output display target so its geometry
 //! and bookkeeping can be tested on the host without a display device.
 
+use sws_protocol::outputs::{self as protocol, OutputConfiguration, OutputDescriptor, OutputExperience, OutputMode, OutputSnapshot, OutputTransaction};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfigurationError { Stale, Invalid }
+
 /// Compositor-assigned output identifier, stable while the output exists.
 pub(super) type OutputId = u32;
 
@@ -119,12 +124,46 @@ impl OutputRect {
     }
 }
 
+/// A projection from the shared logical/subpixel grid to one native target.
+/// The identity case retains the established composition path.
+#[derive(Clone, Copy)]
+pub(super) struct OutputProjection {
+    pub origin: (i32, i32),
+    pub scene: (u32, u32),
+    pub native: (u32, u32),
+}
+impl OutputProjection {
+    pub fn rect(self, rect: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {
+        if self.scene == self.native { return (rect.0.saturating_sub(self.origin.0), rect.1.saturating_sub(self.origin.1), rect.2, rect.3); }
+        let axis = |start: i32, length: u32, origin: i32, scene: u32, native: u32| {
+            let denominator = i64::from(scene.max(1));
+            let left = (i64::from(start) - i64::from(origin)) * i64::from(native);
+            let right = left + i64::from(length) * i64::from(native);
+            let left = left.div_euclid(denominator);
+            let right = (right + denominator - 1).div_euclid(denominator);
+            (left.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32, (right - left).clamp(0, i64::from(u32::MAX)) as u32)
+        };
+        let (x, width) = axis(rect.0, rect.2, self.origin.0, self.scene.0, self.native.0);
+        let (y, height) = axis(rect.1, rect.3, self.origin.1, self.scene.1, self.native.1);
+        (x, y, width, height)
+    }
+    pub fn radius(self, radius: u32) -> u32 { (u64::from(radius) * u64::from(self.native.0)).div_ceil(u64::from(self.scene.0.max(1))).min(u64::from(u32::MAX)) as u32 }
+    pub fn clipped(self, rect: (i32, i32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+        let (x, y, width, height) = self.rect(rect);
+        let clipped = OutputRect::new(x, y, width, height).intersect(OutputRect::new(0, 0, self.native.0, self.native.1))?;
+        Some((clipped.x as u32, clipped.y as u32, clipped.width, clipped.height))
+    }
+}
+
 /// One display output and the compositor state that belongs to it.
 pub(super) struct Output<T> {
     pub(super) id: OutputId,
     /// Firmware/bus device and connector identity. A `session:` prefix marks
     /// old drivers without a persistent hardware identity.
-    pub(super) connector_key: String,
+    pub(super) metadata: OutputDescriptor,
+    pub(super) logical_rect: protocol::LogicalRect,
+    pub(super) experience: OutputExperience,
+    pub(super) workarea: Option<(i32, i32, u32, u32)>,
     /// Placement in global compositor coordinates. `width`/`height` are the
     /// output's current pixel size.
     pub(super) rect: OutputRect,
@@ -133,6 +172,9 @@ pub(super) struct Output<T> {
     /// Number of frames this output has accepted. Frame callbacks are paced
     /// against this counter.
     pub(super) present_counter: u64,
+    pub(super) restore_focus: Option<u32>,
+    pub(super) overview_add_selected: bool,
+    pub(super) overview_scroll_step_ns: u64,
     /// Display device, backing store and present history for this output.
     pub(super) target: T,
 }
@@ -153,17 +195,40 @@ impl<T> Output<T> {
     pub(super) fn new(id: OutputId, rect: OutputRect, scale_milli: u32, target: T) -> Self {
         Self {
             id,
-            connector_key: format!("session:output{}", id),
-            rect,
+            metadata: OutputDescriptor { id, connector_key: format!("session:output{}", id), monitor_key: String::new(), identity_is_unique: false, name: format!("Display {}", id),
+                mode: OutputMode { pixel_width: rect.width, pixel_height: rect.height, refresh_millihz: 0 }, primary: id == 0, internal: id == 0,
+                physical_width_mm: 0, physical_height_mm: 0 },
+            logical_rect: protocol::LogicalRect { x: rect.x / 2, y: rect.y / 2,
+                width: (u64::from(rect.width) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32,
+                height: (u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32 },
+            experience: OutputExperience::Auto,
+            workarea: None,
+            rect: OutputRect::new(rect.x, rect.y,
+                ((u64::from(rect.width) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32).saturating_mul(2),
+                ((u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32).saturating_mul(2)),
             scale_milli,
             present_counter: 0,
+            restore_focus: None,
+            overview_add_selected: false,
+            overview_scroll_step_ns: 0,
             target,
         }
     }
 
     pub(super) fn with_connector_key(mut self, connector_key: String) -> Self {
-        self.connector_key = connector_key;
+        self.metadata.connector_key = connector_key;
         self
+    }
+
+    pub(super) fn with_metadata(mut self, metadata: OutputDescriptor) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub(super) fn projection(&self) -> OutputProjection { OutputProjection { origin: (self.rect.x, self.rect.y), scene: (self.rect.width, self.rect.height), native: (self.metadata.mode.pixel_width, self.metadata.mode.pixel_height) } }
+
+    pub(super) fn configuration(&self) -> OutputConfiguration {
+        OutputConfiguration { id: self.id, x: self.logical_rect.x, y: self.logical_rect.y, scale_milli: self.scale_milli, experience: self.experience }
     }
 
     /// Output width in pixels.
@@ -181,6 +246,7 @@ impl<T> Output<T> {
 pub(super) struct OutputSet<T> {
     outputs: Vec<Output<T>>,
     primary: OutputId,
+    generation: u32,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -199,8 +265,42 @@ impl<T> OutputSet<T> {
         Self {
             outputs: vec![primary],
             primary: id,
+            generation: 1,
         }
     }
+
+    pub(super) fn snapshot(&self) -> OutputSnapshot {
+        OutputSnapshot { generation: self.generation,
+            outputs: self.outputs.iter().map(|output| { let mut metadata = output.metadata.clone(); metadata.primary = output.id == self.primary; metadata }).collect(),
+            configuration: self.outputs.iter().map(Output::configuration).collect() }
+    }
+    pub(super) fn validated_configuration(&self, transaction: &OutputTransaction) -> Result<Vec<OutputConfiguration>, ConfigurationError> {
+        if transaction.base_generation != self.generation { return Err(ConfigurationError::Stale); }
+        protocol::canonical_layout(&self.snapshot().outputs, &transaction.configuration).map_err(|_| ConfigurationError::Invalid)
+    }
+    pub(super) fn apply_configuration(&mut self, configuration: &[OutputConfiguration]) {
+        for entry in configuration {
+            let output = self.get_mut(entry.id).expect("validated complete output configuration");
+            let (width, height) = output.metadata.mode.logical_size(entry.scale_milli).expect("validated scale");
+            let previous = output.rect;
+            if let Some(area) = output.workarea {
+                let left = area.0.saturating_sub(previous.x).max(0) as u32;
+                let top = area.1.saturating_sub(previous.y).max(0) as u32;
+                let right = previous.width.saturating_sub(left.saturating_add(area.2));
+                let bottom = previous.height.saturating_sub(top.saturating_add(area.3));
+                output.workarea = Some((entry.x.saturating_mul(2).saturating_add(left as i32),
+                    entry.y.saturating_mul(2).saturating_add(top as i32), width.saturating_mul(2).saturating_sub(left.saturating_add(right)).max(1),
+                    height.saturating_mul(2).saturating_sub(top.saturating_add(bottom)).max(1)));
+            }
+            output.logical_rect = protocol::LogicalRect { x: entry.x, y: entry.y, width, height };
+            output.rect = OutputRect::new(entry.x.saturating_mul(2), entry.y.saturating_mul(2), width.saturating_mul(2), height.saturating_mul(2));
+            output.scale_milli = entry.scale_milli;
+            output.experience = entry.experience;
+        }
+        self.bump_generation();
+    }
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Output<T>> { self.outputs.iter_mut() }
+    fn bump_generation(&mut self) { self.generation = self.generation.wrapping_add(1).max(1); }
 
     fn primary_index(&self) -> usize {
         self.outputs
@@ -271,6 +371,7 @@ impl<T> OutputSet<T> {
             return false;
         }
         self.outputs.push(output);
+        self.bump_generation();
         true
     }
 
@@ -288,6 +389,7 @@ impl<T> OutputSet<T> {
             return None;
         }
         let index = self.outputs.iter().position(|output| output.id == id)?;
+        self.bump_generation();
         Some(self.outputs.remove(index))
     }
 

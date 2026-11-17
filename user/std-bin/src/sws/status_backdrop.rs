@@ -10,6 +10,25 @@ pub(super) struct BackdropGeometry {
     pub source: Rect,
     pub radius: u32,
     pub corner_radius: u32,
+    mapping: Option<OutputMapping>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OutputMapping { origin: (i32, i32), scene: (u32, u32), native: (u32, u32) }
+
+impl OutputMapping {
+    fn global(self, rect: Rect) -> Rect {
+        let axis = |start: i32, length: u32, origin: i32, scene: u32, native: u32| {
+            let denominator = i64::from(native.max(1));
+            let left = (i64::from(start) * i64::from(scene)).div_euclid(denominator);
+            let right = ((i64::from(start) + i64::from(length)) * i64::from(scene) + denominator - 1).div_euclid(denominator);
+            ((i64::from(origin) + left).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                (right - left).clamp(0, i64::from(u32::MAX)) as u32)
+        };
+        let (x, width) = axis(rect.0, rect.2, self.origin.0, self.scene.0, self.native.0);
+        let (y, height) = axis(rect.1, rect.3, self.origin.1, self.scene.1, self.native.1);
+        (x, y, width, height)
+    }
 }
 
 impl BackdropGeometry {
@@ -29,6 +48,7 @@ impl BackdropGeometry {
         let sx = (left - halo).max(0);
         let sy = (top - halo).max(0);
         Some(Self {
+            mapping: None,
             output: (
                 left as i32,
                 top as i32,
@@ -47,6 +67,17 @@ impl BackdropGeometry {
                 .min((bottom - top) as u32 / 2),
         })
     }
+
+    /// Native cache allocation with an explicit scene-to-output association.
+    pub fn new_projected(origin: (i32, i32), scene: (u32, u32), native: (u32, u32),
+        output: Rect, radius: u32, corner: u32) -> Option<Self> {
+        let mut geometry = Self::new(native.0, native.1, output, radius, corner)?;
+        geometry.mapping = Some(OutputMapping { origin, scene, native });
+        Some(geometry)
+    }
+
+    pub fn global_source(self) -> Rect { self.mapping.map_or(self.source, |mapping| mapping.global(self.source)) }
+    pub fn global_output(self) -> Rect { self.mapping.map_or(self.output, |mapping| mapping.global(self.output)) }
 
     /// Clip in an output's pixel grid, retaining global scene coordinates.
     pub fn new_on_output(
@@ -74,6 +105,11 @@ impl BackdropGeometry {
     /// Resolve one output-owned cache into the target's local pixel grid.
     pub fn relative_to(self, origin: (i32, i32), width: u32, height: u32) -> Option<Self> {
         let mut local = self;
+        if let Some(mapping) = self.mapping {
+            if mapping.origin != origin || mapping.native != (width, height) { return None; }
+            local.mapping = None;
+            return Some(local);
+        }
         local.source.0 = local.source.0.checked_sub(origin.0)?;
         local.source.1 = local.source.1.checked_sub(origin.1)?;
         local.output.0 = local.output.0.checked_sub(origin.0)?;
@@ -89,7 +125,7 @@ impl BackdropGeometry {
     }
 
     pub fn intersects_source(self, rect: Rect) -> bool {
-        intersects(self.source, rect)
+        intersects(self.global_source(), rect)
     }
 
     /// Absolute x span for a row in the rounded output. CPU and GPU use the
@@ -156,7 +192,7 @@ pub(super) fn expand_damage(geometries: &[BackdropGeometry], rects: &mut Vec<Rec
     loop {
         let mut changed = false;
         for geometry in geometries {
-            let mut merged = geometry.source;
+            let mut merged = geometry.global_source();
             let mut matches = 0;
             let mut previous = merged;
             for &rect in rects
@@ -256,7 +292,7 @@ pub(super) fn backdrop_refreshes(
             let upstream_changed = backdrops.iter().enumerate().any(|(lower, (_, material))| {
                 refresh[lower]
                     && ranks[lower].is_none_or(|lower_rank| lower_rank < rank)
-                    && geometry.intersects_source(material.output)
+                    && geometry.intersects_source(material.global_output())
             });
             refresh[index] = upstream_changed;
         }
@@ -404,6 +440,24 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn scaled_output_cache_keeps_native_pixels_and_global_damage_separate() {
+        let geometry = BackdropGeometry::new_projected(
+            (-1280, 0), (1280, 720), (1920, 1080), (0, 0, 1920, 48), 8, 0,
+        ).unwrap();
+        assert_eq!(geometry.output, (0, 0, 1920, 48));
+        assert_eq!(geometry.global_output(), (-1280, 0, 1280, 32));
+        assert_eq!(geometry.global_source(), (-1280, 0, 1280, 48));
+        assert!(geometry.intersects_source((-20, 44, 4, 4)));
+        assert!(!geometry.intersects_source((0, 0, 10, 10)));
+        assert!(geometry.relative_to((0, 0), 1920, 1080).is_none());
+        let local = geometry.relative_to((-1280, 0), 1920, 1080).unwrap();
+        assert_eq!(local, BackdropGeometry::new(1920, 1080, (0, 0, 1920, 48), 8, 0).unwrap());
+        let mut damage = vec![(-20, 44, 4, 4)];
+        expand_damage(&[geometry], &mut damage);
+        assert_eq!(damage, [(-1280, 0, 1280, 48)]);
+    }
 
     #[test]
     fn native_content_damage_only_refreshes_materials_above_its_owner() {
