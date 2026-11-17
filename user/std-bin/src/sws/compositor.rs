@@ -13941,10 +13941,8 @@ impl Compositor {
                 }
                 if self
                     .window_manager
-                    .get_windows()
-                    .iter()
-                    .any(|window| window.fullscreen && window.id != window_id
-                        && window.output_id == self.window_output_id(window_id))
+                    .fullscreen_window_for(window_id)
+                    .is_some_and(|owner| owner != window_id)
                 {
                     self.send_fullscreen_configure(window_id);
                     super::ipc::send_message_to_client(
@@ -14141,10 +14139,7 @@ impl Compositor {
                 }
                 if let Some(fullscreen_id) = self
                     .window_manager
-                    .get_windows()
-                    .iter()
-                    .find(|window| window.fullscreen)
-                    .map(|window| window.id)
+                    .fullscreen_window_for(window_id)
                     && !self.window_manager.is_in_fullscreen_group(window_id)
                 {
                     println!(

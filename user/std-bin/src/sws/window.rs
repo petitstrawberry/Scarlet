@@ -2712,9 +2712,13 @@ impl WindowManager {
             .is_some_and(|fullscreen_id| self.top_level_ancestor(id) == fullscreen_id)
     }
 
-    fn fullscreen_window_for(&self, id: WindowId) -> Option<WindowId> {
+    /// Visible fullscreen owner on the target window's output. Hidden workspaces
+    /// retain fullscreen state without confining the active workspace's focus.
+    pub fn fullscreen_window_for(&self, id: WindowId) -> Option<WindowId> {
         let output = self.get_window(id)?.output_id;
-        self.windows.iter().find(|window| window.output_id == output && window.fullscreen).map(|window| window.id)
+        self.windows.iter().find(|window| {
+            window.output_id == output && window.fullscreen && window.is_logically_presented()
+        }).map(|window| window.id)
     }
 
     fn fullscreen_window_id(&self) -> Option<WindowId> {
@@ -2841,13 +2845,12 @@ impl WindowManager {
 
     /// Rebuild type and fullscreen layers while preserving order within each layer.
     fn rebuild_z_order(&mut self) {
-        let fullscreen_id = self
-            .windows
-            .iter()
-            .find(|window| window.fullscreen)
-            .map(|window| window.id);
+        let fullscreen_ids: Vec<_> = self.windows.iter()
+            .filter(|window| window.fullscreen)
+            .map(|window| window.id)
+            .collect();
         let mut fullscreen_group_ids = Vec::new();
-        if let Some(id) = fullscreen_id {
+        for &id in &fullscreen_ids {
             fullscreen_group_ids.push(id);
             self.collect_descendants_for_raise(id, &mut fullscreen_group_ids);
         }
@@ -2880,11 +2883,13 @@ impl WindowManager {
             }
         }
 
-        if let Some(id) = fullscreen_id
-            && let Some(position) = fullscreen.iter().position(|window| window.id == id)
-        {
-            let root = fullscreen.remove(position);
-            fullscreen.insert(0, root);
+        // Each output may have a fullscreen root. Keep every root below its
+        // dialogs, rather than lifting only the first output's fullscreen group.
+        for &id in fullscreen_ids.iter().rev() {
+            if let Some(position) = fullscreen.iter().position(|window| window.id == id) {
+                let root = fullscreen.remove(position);
+                fullscreen.insert(0, root);
+            }
         }
 
         // Reconstruct bottom-to-top layer order.
@@ -2966,12 +2971,7 @@ impl WindowManager {
             None => return,
         };
 
-        if let Some(fullscreen_id) = self
-            .windows
-            .iter()
-            .find(|window| window.fullscreen)
-            .map(|window| window.id)
-        {
+        if let Some(fullscreen_id) = self.fullscreen_window_for(id) {
             if self.top_level_ancestor(id) == fullscreen_id {
                 self.rebuild_z_order();
             } else {
@@ -3117,6 +3117,11 @@ impl WindowManager {
                 self.windows.extend(always_on_top);
                 self.windows.extend(ime_popup);
             }
+        }
+
+        // Raising on another output must preserve every fullscreen layer.
+        if self.fullscreen_window_id().is_some() {
+            self.rebuild_z_order();
         }
 
         // Print current Z-order
@@ -3870,6 +3875,54 @@ mod tests {
         assert_eq!((pixels.width(), pixels.height()), (640, 480));
         assert_eq!(pixels.stride(), 640 * 4);
         assert_eq!(pixels.bytes().len(), 640 * 480 * 4);
+    }
+
+    #[test]
+    fn fullscreen_outputs_keep_independent_focus_and_layers() {
+        let mut manager = WindowManager::new();
+        let primary = manager.create_window_no_buffer(0, 0, 640, 480);
+        let external = manager.create_window_no_buffer(-1920, 0, 640, 480);
+        let other = manager.create_window_no_buffer(-1800, 100, 320, 240);
+        let chrome = manager.create_window_no_buffer(-1920, 0, 1920, 40);
+        manager.get_window_mut(external).unwrap().output_id = 1;
+        manager.get_window_mut(other).unwrap().output_id = 1;
+        manager.get_window_mut(chrome).unwrap().output_id = 1;
+        manager.get_window_mut(chrome).unwrap().window_type = super::WindowType::ShellChrome;
+        assert!(manager.set_fullscreen_window_on(primary, (0, 0, 2160, 1440)));
+        manager.focus_window(external);
+        manager.raise_to_top(external);
+        assert_eq!(manager.get_focused_window_id(), Some(external));
+        let rank = |manager: &WindowManager, id| manager.get_windows().iter().position(|w| w.id == id).unwrap();
+        assert!(rank(&manager, external) > rank(&manager, other));
+        assert!(rank(&manager, primary) > rank(&manager, chrome));
+        assert!(manager.set_fullscreen_window_on(external, (-1920, 0, 1920, 1080)));
+        let dialog = manager.create_window_no_buffer(-1800, 100, 200, 100);
+        manager.get_window_mut(dialog).unwrap().output_id = 1;
+        assert!(manager.set_window_parent(dialog, Some(external)));
+        manager.raise_to_top(dialog);
+        assert!(rank(&manager, external) > rank(&manager, chrome));
+        assert!(rank(&manager, dialog) > rank(&manager, external));
+        manager.focus_window(primary);
+        assert_eq!(manager.get_focused_window_id(), Some(primary));
+        manager.focus_window(dialog);
+        assert_eq!(manager.get_focused_window_id(), Some(dialog));
+    }
+
+    #[test]
+    fn fullscreen_hidden_workspace_does_not_occupy_active_output() {
+        let mut manager = WindowManager::new();
+        let hidden = manager.create_window_no_buffer(0, 0, 640, 480);
+        let active = manager.create_window_no_buffer(0, 0, 640, 480);
+        assert!(manager.set_fullscreen_window(hidden, 1920, 1080));
+        manager.get_window_mut(hidden).unwrap().workspace_visible = false;
+        manager.focus_window(active);
+        assert_eq!(manager.get_focused_window_id(), Some(active));
+        assert!(manager.set_fullscreen_window(active, 1920, 1080));
+        manager.get_window_mut(active).unwrap().workspace_visible = false;
+        manager.get_window_mut(hidden).unwrap().workspace_visible = true;
+        manager.focus_window(hidden);
+        assert_eq!(manager.get_focused_window_id(), Some(hidden));
+        assert_eq!(manager.fullscreen_window_for(hidden), Some(hidden));
     }
 
     #[test]
