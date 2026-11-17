@@ -12370,15 +12370,19 @@ impl Compositor {
             let current = self.workspace_manager.output(output.id)?.presentation();
             (current != output.last_presentation).then_some((output.id, output.last_presentation, current))
         }).collect();
-        let entering = transitions.iter().any(|(_, _, current)| *current == ShellPresentation::Overview);
+        let entering = !self.overview_session_active
+            && transitions.iter().any(|(_, _, current)| *current == ShellPresentation::Overview);
+        // Home is the local drawer within the Overview session. Only an
+        // explicit return to Workspace ends the session on the other outputs;
+        // opening or lowering a drawer must leave their presentation alone.
         let leaving = self.overview_session_active && transitions.iter().any(|(_, previous, current)|
-            *previous == ShellPresentation::Overview && *current != ShellPresentation::Overview);
+            *previous != ShellPresentation::Workspace && *current == ShellPresentation::Workspace);
         if !self.console_shell_present() && (entering || leaving) {
             let ids: Vec<_> = self.outputs.iter().map(|output| output.id).collect();
             for id in ids {
                 let mut state = self.workspace_manager.output_mut(id).unwrap();
                 if leaving {
-                    if state.presentation() == ShellPresentation::Overview { state.return_to_workspace(); }
+                    if state.presentation() != ShellPresentation::Workspace { state.return_to_workspace(); }
                 } else {
                     state.set_presentation(ShellPresentation::Overview);
                 }
