@@ -7,9 +7,9 @@
 use alloc::sync::Arc;
 
 use crate::{
-    device::block::BlockDevice,
+    device::{block::BlockDevice, manager::DeviceManager},
     fs::{
-        FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType,
+        FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType,
         params::FileSystemParams,
     },
 };
@@ -62,13 +62,51 @@ impl FileSystemDriver for Fat32Driver {
 
     fn create_from_option_string(
         &self,
-        _options: &str,
+        options: &str,
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
-        // FAT32 requires a block device, cannot create from options alone
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "FAT32 filesystem requires a block device, not options",
-        ))
+        let mut path = None;
+        for option in options.split(',').map(str::trim) {
+            if let Some(value) = option.strip_prefix("device=") {
+                if path.is_some() || !value.starts_with('/') {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid FAT32 device option",
+                    ));
+                }
+                path = Some(value);
+            } else if !matches!(option, "" | "rw") {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Unsupported FAT32 mount option",
+                ));
+            }
+        }
+        let path = path.ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "FAT32 requires a device path",
+            )
+        })?;
+        let vfs = crate::task::mytask()
+            .and_then(|task| task.get_vfs())
+            .unwrap_or_else(super::super::super::manager::get_global_vfs_manager);
+        let (entry, _) = vfs.resolve_path(path)?;
+        let FileType::BlockDevice(info) = entry.node().metadata()?.file_type else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                "FAT32 source is not a block device",
+            ));
+        };
+        let block = DeviceManager::get_manager()
+            .get_device(info.device_id)
+            .and_then(|device| device.into_block_device())
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "FAT32 block device is unavailable",
+                )
+            })?;
+        Fat32FileSystem::new(block).map(|fs| fs as Arc<dyn FileSystemOperations>)
     }
 
     fn create_from_params(

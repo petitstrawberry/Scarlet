@@ -129,6 +129,24 @@ pub fn backing(cmdline: &str, require_disk: bool) -> Result<VfsView, &'static st
     global
         .mount("/tmp", "tmpfs", "size=128M")
         .map_err(|_| "cannot mount shared temporary storage")?;
+    if let Some(device) = cmdline_value(cmdline, "boot=") {
+        let fstype = cmdline_value(cmdline, "bootfstype=").unwrap_or("fat32");
+        // Optional distribution mount, composed before sealing the Environment.
+        // A missing ESP must not prevent the persistent root from booting.
+        let result = (|| {
+            if !device.starts_with("/dev/") || device.contains(',') {
+                return Err("boot must name an absolute device path");
+            }
+            view_directory(&global, "/boot")?;
+            global
+                .mount("/boot", fstype, &format!("device={},rw", device))
+                .map_err(|_| "cannot mount boot partition")
+        })();
+        match result {
+            Ok(()) => println!("init: mounted {} ({}) at /boot", device, fstype),
+            Err(error) => println!("init: /boot unavailable: {}", error),
+        }
+    }
     Ok(global)
 }
 

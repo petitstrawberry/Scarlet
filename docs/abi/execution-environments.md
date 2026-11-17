@@ -128,6 +128,11 @@ an Environment. The in-tree init selects backing storage using `root=` and
 execs `/bin/stemd` while retaining PID 1. Failure leaves init in bootstrap.
 Microvm init instead execs Firecracker in the Linux view.
 
+An optional `boot=/dev/...` mounts that block device at `/boot`, read-write,
+before the Environment is sealed. `bootfstype=` defaults to `fat32`. A failed
+boot-partition mount is reported and does not prevent root/service startup.
+These options are distribution bootstrap policy, like `root=`.
+
 The bundles use this **userspace-owned** backing layout:
 
 ```text

@@ -207,6 +207,17 @@ impl Fat32FileSystem {
             ));
         }
 
+        if !boot_sector.is_valid()
+            || boot_sector.sectors_per_fat == 0
+            || boot_sector.root_cluster < 2
+            || boot_sector.reserved_sectors == 0
+            || boot_sector.fat_count == 0
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid FAT32 filesystem geometry",
+            ));
+        }
         Ok(())
     }
 
