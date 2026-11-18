@@ -55,20 +55,24 @@ fn spawn_component(name: &str, args: &[&str], profile_ui: bool) -> i32 {
                 argv.push(argv0);
                 argv.extend_from_slice(args);
 
-                // Only the supervised shell receives requested diagnostics.
-                // This same launch path is used for its initial start and respawns.
-                let mut diagnostic_env = std::vec::Vec::new();
+                // Keep the authenticated session's environment across exec and respawn.
+                let session_env: std::vec::Vec<_> = ["USER", "LOGNAME", "HOME", "SHELL", "PATH"]
+                    .iter()
+                    .filter_map(|key| std::env::var(key).map(|value| std::format!("{key}={value}")))
+                    .collect();
+                let mut env: std::vec::Vec<&str> =
+                    session_env.iter().map(|entry| entry.as_str()).collect();
                 if name == "scarlet-shell" {
                     if std::env::var("SCARLET_HOME_TRACE").as_deref() == Some("1") {
-                        diagnostic_env.push("SCARLET_HOME_TRACE=1");
+                        env.push("SCARLET_HOME_TRACE=1");
                     }
                     if profile_ui {
-                        diagnostic_env.push("SCARLET_UI_PROFILE=1");
-                        diagnostic_env.push("SCARLET_UI_FRAME_LOG=1");
+                        env.push("SCARLET_UI_PROFILE=1");
+                        env.push("SCARLET_UI_FRAME_LOG=1");
                     }
                 }
                 // If exec succeeds, it never returns.
-                let rc = execve(argv0, &argv, &diagnostic_env);
+                let rc = execve(argv0, &argv, &env);
                 if rc == 0 {
                     break;
                 }

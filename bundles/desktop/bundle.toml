@@ -29,6 +29,13 @@ to = "/"
 kind = "cargo"
 source = "../../user/bin"
 package = "userprogram"
+bin = "scarlet-session"
+to = "/bin/scarlet-session"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "userprogram"
 bin = "scarlet-desktop"
 to = "/bin/scarlet-desktop"
 
@@ -59,6 +66,13 @@ source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "scarlet-shell"
 to = "/bin/scarlet-shell"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "scarlet-shell-greeter"
+to = "/bin/scarlet-shell-greeter"
 
 [[layers]]
 kind = "cargo"

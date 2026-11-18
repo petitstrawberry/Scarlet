@@ -7,7 +7,7 @@ mod database;
 
 use alloc::{string::String, vec::Vec};
 #[cfg(target_os = "scarlet")]
-pub use database::authenticate_local;
+pub use database::{authenticate_local, authorized_keys, lookup_local};
 
 pub struct Account {
     pub name: String,
@@ -16,12 +16,39 @@ pub struct Account {
     pub groups: Vec<u32>,
 }
 
-fn id(text: &str) -> Option<u32> {
-    let id = text.parse().ok()?;
-    (id != 0 && id != u32::MAX).then_some(id)
+impl Account {
+    pub fn home(&self) -> String {
+        if self.uid == 0 {
+            String::from("/root")
+        } else {
+            alloc::format!("/home/{}", self.name)
+        }
+    }
+
+    /// Join the supervised scope and permanently install this login's credentials.
+    ///
+    /// # Safety
+    /// Run only in an exclusive child about to exec. Apart from the scope, the
+    /// caller must relinquish owners of all handles above stderr before calling.
+    #[cfg(target_os = "scarlet")]
+    pub unsafe fn enter(
+        &self,
+        scope: scarlet_os::process_scope::ProcessScope,
+    ) -> Result<(), &'static str> {
+        scope.enter().map_err(|_| "cannot join session scope")?;
+        drop(scope);
+        // SAFETY: the caller owns an exclusive child and the scope handle was closed.
+        unsafe { scarlet_os::shield::enter_user_session(self.uid, self.gid, &self.groups) }
+            .map_err(|_| "cannot install session credentials")
+    }
 }
 
-fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Account>, ()> {
+fn id(text: &str) -> Option<u32> {
+    let id = text.parse().ok()?;
+    (id != u32::MAX).then_some(id)
+}
+
+fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), ()> {
     use alloc::collections::BTreeSet;
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
@@ -36,6 +63,8 @@ fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Accou
         let groups = fields.next().ok_or(())?;
         let hash = fields.next().ok_or(())?;
         if fields.next().is_some()
+            || (login == "root") != (uid == 0)
+            || (login == "root") != (gid == 0)
             || login.is_empty()
             || login.len() > 32
             || !login
@@ -61,7 +90,7 @@ fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Accou
         } else {
             groups
                 .split(',')
-                .map(id)
+                .map(|group| id(group).filter(|&id| id != 0))
                 .collect::<Option<Vec<_>>>()
                 .ok_or(())?
         };
@@ -75,6 +104,11 @@ fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Accou
             verifier = hash;
         }
     }
+    Ok((selected, verifier))
+}
+
+fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Account>, ()> {
+    let (selected, verifier) = lookup(data, name)?;
     if password.is_empty() || password.len() > 72 || password.contains(&0) {
         return Ok(None);
     }

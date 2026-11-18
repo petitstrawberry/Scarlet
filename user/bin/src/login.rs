@@ -52,13 +52,9 @@ fn authenticate(tty: &Terminal) -> Result<Account, &'static str> {
 }
 
 fn start_shell(account: &Account, scope: ProcessScope) -> Result<(), &'static str> {
-    scope.enter().map_err(|_| "cannot join session scope")?;
-    drop(scope);
-    // SAFETY: the child has relinquished the scope handle. The account DB and
-    // password buffers were dropped before fork; stdio are the only handles in use.
-    unsafe { scarlet_os::shield::enter_user_session(account.uid, account.gid, &account.groups) }
-        .map_err(|_| "cannot install session credentials")?;
-    let home = format!("/home/{}", account.name);
+    // SAFETY: this exclusive child has only stdio and the inherited scope in use.
+    unsafe { account.enter(scope) }?;
+    let home = account.home();
     std::fs::change_directory(&home).map_err(|_| "cannot enter home directory")?;
     let user_env = format!("USER={}", account.name);
     let logname = format!("LOGNAME={}", account.name);

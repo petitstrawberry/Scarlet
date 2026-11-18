@@ -1,23 +1,27 @@
 # SSH and SFTP
 
-Scarlet's `/bin/sshd` accepts the `sftp` SSH subsystem directly. It shares the
-existing SSH authentication and host keys; it does not allocate a PTY, start a
-shell, or need a separate `sftp-server` executable. The base bundle already
-installs sshd and starts it after netcfgd.
+The base bundle starts `/bin/sshd` after netcfgd. SSH passwords are verified
+against the same protected `/etc/scarlet-users` database as TTY logins. Root
+needs an enabled account like every other user. An omitted or locked root
+record disables both password and public-key login as root.
 
-Install an authorized public key in `/root/.ssh/authorized_keys`, as for an SSH
-shell, then connect from the other computer:
+Install public keys in `.ssh/authorized_keys` under the account's home.
+The home, key directory and key file must be owned by the account or root.
+Each path component must exclude group and other write access, symbolic links
+and named grants. A key with unsupported options is ignored.
 
 ```sh
-sftp root@SCARLET_IP
-# For the QEMU runner's configured SSH forwarding port:
-sftp -P HOST_PORT root@127.0.0.1
+sftp alice@SCARLET_IP
+sftp -P HOST_PORT alice@127.0.0.1
 ```
 
-The initial remote directory is `/root`. Absolute paths address the normal
-Scarlet filesystem. Authentication remains root-only, matching sshd. Ed25519
-and supported OpenSSH authorized-key formats follow sshd's existing behavior.
-The listener uses port 22 by default (`SCARLET_SSH_PORT` overrides it).
+Shells, commands and SFTP workers enter a per-connection Shield process scope
+with the account's UID, GID and supplementary groups. They start in
+`/home/NAME` (`/root` for root) with all management authorities cleared.
+The SFTP worker uses a binary socket pair. The listener defaults to port 22
+and accepts a port override via `SCARLET_SSH_PORT`. Host private keys under
+`/etc/ssh` must be regular, root-owned files with no group or other access.
+Provision existing keys with mode 0600.
 
 The implementation speaks [SFTP version 3](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02),
 with OpenSSH's established symlink argument order and the
@@ -38,12 +42,9 @@ permission changes are unsupported. Pathnames must be UTF-8, contain no NUL, and
 fit the native 1024-byte pathname storage including its terminator.
 
 Each connection retains at most 64 open SFTP handles, one pending response, and
-one bounded request buffer. Requests execute in order. Incoming channel data is
-still drained while a response waits for SSH send credit, so a later SSH window
-adjustment cannot become stuck behind queued SFTP requests. Resource bounds
-remain enforced instead of accumulating an entire transfer.
+one bounded request buffer. Requests execute in order.
 
-sshd advertises a 1 MiB receive window and 32 KiB maximum channel packets, with
+The SSH transport advertises a 1 MiB receive window and 32 KiB maximum channel packets, with
 64 KiB heap buffers for each SSH transport direction. Sunset's original small
 constructor defaults remain available for embedded consumers. Bulk output
 reserves space for control replies, and receive credit counts channel payload

@@ -240,8 +240,9 @@ mkdir -p .accounts
 cargo scarlet image --project .
 ```
 
-Both `ext2` and `gpt-ext2` support image users. The builder creates each
-`/home/NAME` with mode 0700, assigns existing contents to that user and writes
+Both `ext2` and `gpt-ext2` support image users. The builder creates each home
+(`/root` for root, `/home/NAME` for other accounts) with mode 0700, assigns
+existing contents to that user and writes
 the protected account database. Omit `password-hash-file` for a locked
 account. No default password is shipped. An administrator can update the
 database on a running writable filesystem. Rebuilding the image reapplies
@@ -260,5 +261,6 @@ both identity-change authorities, replaces base, active and saved identities,
 sets supplementary groups, and clears all authority ceilings. The child keeps
 its three terminal descriptors and execs `/bin/sh` in the user's home with a
 fresh environment. The supervisor terminates session descendants on logout
-before accepting the next login. These accounts are ordinary local TTY
-sessions. SSH and desktop launchers have their own session setup.
+before accepting the next login. SSH uses the same account database and credential transition for shell,
+command and SFTP sessions, including logins as root. The desktop boot
+configuration currently starts the graphical session as a system service.

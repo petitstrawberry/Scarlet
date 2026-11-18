@@ -99,6 +99,10 @@ name = "scarlet-desktop"
 path = "src/scarlet_desktop/main.rs"
 
 [[bin]]
+name = "scarlet-session"
+path = "src/scarlet_desktop/session.rs"
+
+[[bin]]
 name = "desktop-settings"
 path = "src/scarlet_desktop/settingsd.rs"
 
@@ -197,8 +201,6 @@ sunset = { path = "../lib/sunset", default-features = false, features = ["larger
 getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "rsa"] }
 rand_core = { version = "0.6.4", default-features = false, features = ["getrandom"] }
-bcrypt = { version = "0.15.1", default-features = false, features = ["alloc", "zeroize"] }
-hmac = { version = "0.12.1", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
 subtle = { version = "2.6.1", default-features = false }
 sbus = { path = "../lib/sbus" }
