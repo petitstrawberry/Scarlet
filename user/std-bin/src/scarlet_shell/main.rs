@@ -3838,26 +3838,7 @@ impl Application for ShellApp {
     }
 
     fn on_idle(&mut self) {
-        let session = self.control_center_session.get();
-        if !session.open {
-            set_state_if_changed(&self.control_center_window, None);
-        }
-        let panel_here = multi_output::session().is_none_or(|bus| bus.panel_output.get() == self.output_id.get());
-        if !panel_here && self.control_center_window.get().is_some() {
-            self.dismiss_scene(CONTROL_CENTER_SCENE_KEY);
-            self.control_center_window.set(None);
-        }
-        if session.open && panel_here
-            && session.snapshot.is_some()
-            && self
-                .control_center_window
-                .get()
-                .is_none_or(|(generation, _)| generation != session.generation())
-        {
-            // Both the declaration and initial layout now consume a completed
-            // sample. The command is handled on this same application tick.
-            self.open_scene(CONTROL_CENTER_SCENE_KEY);
-        }
+        self.sync_control_center_scene();
         if self.pending_app_menus.get().is_empty() {
             return;
         }
@@ -4126,6 +4107,29 @@ impl ShellApp {
         });
     }
 
+    fn sync_control_center_scene(&mut self) {
+        let session = self.control_center_session.get();
+        if !session.open {
+            set_state_if_changed(&self.control_center_window, None);
+        }
+        let panel_here = multi_output::session().is_none_or(|bus| bus.panel_output.get() == self.output_id.get());
+        if !panel_here && self.control_center_window.get().is_some() {
+            self.dismiss_scene(CONTROL_CENTER_SCENE_KEY);
+            self.control_center_window.set(None);
+        }
+        if session.open && panel_here
+            && session.snapshot.is_some()
+            && self
+                .control_center_window
+                .get()
+                .is_none_or(|(generation, _)| generation != session.generation())
+        {
+            // Both the declaration and initial layout now consume a completed
+            // sample. The command is handled on this same application tick.
+            self.open_scene(CONTROL_CENTER_SCENE_KEY);
+        }
+    }
+
     fn apply_focus_metadata(
         &mut self,
         window_id: u32,
@@ -4139,6 +4143,18 @@ impl ShellApp {
             app_name,
             menu_titles
         );
+        self.dismiss_control_center_for_focus(window_id, app_name);
+        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
+        self.update_menu_for_app(
+            window_id,
+            app_name,
+            title,
+            &resolved_menu_titles,
+            menu_changed,
+        );
+    }
+
+    fn dismiss_control_center_for_focus(&mut self, window_id: u32, app_name: &str) {
         if self.control_center_window.get().map(|(_, id)| id) == Some(window_id) {
             return;
         }
@@ -4152,14 +4168,6 @@ impl ShellApp {
             self.control_center_window.set(None);
             self.control_center_armed_power.set(None);
         }
-        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(
-            window_id,
-            app_name,
-            title,
-            &resolved_menu_titles,
-            menu_changed,
-        );
     }
 
     fn apply_active_metadata(
@@ -4169,20 +4177,7 @@ impl ShellApp {
         title: &str,
         menu_titles: &str,
     ) {
-        if let Some(window) = self
-            .windows
-            .get()
-            .iter()
-            .find(|window| window.window_id == window_id)
-            && self
-                .home_applications
-                .get()
-                .iter()
-                .any(|app| app.app_id == window.app_id)
-        {
-            self.recent_app_ids
-                .update(|recent| console::record_recent(recent, &window.app_id));
-        }
+        self.record_recent_window(window_id);
         status_bar_debug!(
             "[StatusBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
             window_id,
@@ -4197,6 +4192,23 @@ impl ShellApp {
             &resolved_menu_titles,
             menu_changed,
         );
+    }
+
+    fn record_recent_window(&self, window_id: u32) {
+        if let Some(window) = self
+            .windows
+            .get()
+            .iter()
+            .find(|window| window.window_id == window_id)
+            && self
+                .home_applications
+                .get()
+                .iter()
+                .any(|app| app.app_id == window.app_id)
+        {
+            self.recent_app_ids
+                .update(|recent| console::record_recent(recent, &window.app_id));
+        }
     }
 
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
@@ -4882,10 +4894,7 @@ impl ShellApp {
             return;
         }
 
-        if matches!(
-            app_name,
-            "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Overview Drawer" | "Menu"
-        ) {
+        if is_shell_menu_name(app_name) {
             status_bar_debug!("[StatusBar] Skipping menu update for {}", app_name);
             return;
         }
@@ -4932,6 +4941,13 @@ impl ShellApp {
         self.active_window_id.set(window_id);
         self.open_menu_index.set(None);
     }
+}
+
+fn is_shell_menu_name(app_name: &str) -> bool {
+    matches!(
+        app_name,
+        "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Overview Drawer" | "Menu" | "Control Center"
+    )
 }
 
 fn main() {

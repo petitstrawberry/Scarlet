@@ -74,6 +74,55 @@ impl SessionBus {
     }
 }
 
+#[derive(Clone, Default)]
+struct WorkspaceMenus {
+    // Only a focus event advances recency. Title and menu edits can arrive
+    // after focus has moved and must not select that window again.
+    history: Vec<AppMenuMetadata>,
+    known_windows: std::collections::BTreeSet<u32>,
+}
+
+impl WorkspaceMenus {
+    fn receive(&mut self, mut update: AppMenuMetadata) {
+        let position = self.history.iter().position(|entry| entry.window_id == update.window_id);
+        if let Some(position) = position {
+            if update.menus.is_empty() {
+                update.menus.clone_from(&self.history[position].menus);
+            }
+            if !update.focused {
+                self.history[position] = update;
+                return;
+            }
+            self.history.remove(position);
+        }
+        if update.focused {
+            self.history.push(update);
+        } else {
+            self.history.insert(0, update);
+        }
+    }
+
+    fn update_windows(&mut self, windows: &[ShellWindow]) {
+        let current: std::collections::BTreeSet<_> = windows.iter().map(|window| window.window_id).collect();
+        self.history.retain(|entry| {
+            !self.known_windows.contains(&entry.window_id) || current.contains(&entry.window_id)
+        });
+        self.known_windows = current;
+    }
+
+    fn selected<'a>(
+        &'a self,
+        state: &sws::WorkspaceState,
+        windows: &[ShellWindow],
+    ) -> Option<&'a AppMenuMetadata> {
+        let workspace = state.workspaces.iter().find(|workspace| workspace.id == state.active_workspace)?;
+        self.history.iter().rev().find(|entry| {
+            workspace.window_ids.contains(&entry.window_id)
+                && !windows.iter().any(|window| window.window_id == entry.window_id && window.minimized)
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ShellSession {
     primary: ShellApp,
@@ -83,6 +132,8 @@ pub(super) struct ShellSession {
     model_generation: u64,
     filter_queries: BTreeMap<u32, String>,
     scene_owners: BTreeMap<u32, u32>,
+    menus: WorkspaceMenus,
+    menus_changed: bool,
 }
 
 impl ShellSession {
@@ -97,7 +148,7 @@ impl ShellSession {
         bus.observe(&bus.outputs); bus.observe(&bus.windows); bus.observe(&primary.home_applications);
         bus.observe(&primary.workspace_state); bus.observe(&primary.input_environment_snapshot);
         let _ = SESSION.set(bus.clone());
-        Self { primary, secondary: Vec::new(), bus, topology_generation: 0, model_generation: 0, filter_queries: BTreeMap::new(), scene_owners: BTreeMap::new() }
+        Self { primary, secondary: Vec::new(), bus, topology_generation: 0, model_generation: 0, filter_queries: BTreeMap::new(), scene_owners: BTreeMap::new(), menus: WorkspaceMenus::default(), menus_changed: false }
     }
     fn app(&self, id: u32) -> Option<&ShellApp> {
         if id == 0 { Some(&self.primary) } else { self.secondary.iter().find(|app| app.output_id.get() == id) }
@@ -179,13 +230,49 @@ impl ShellSession {
         }
         self.bus.changed.fetch_add(1, Ordering::Relaxed);
     }
+    fn receive_menu(&mut self, update: AppMenuMetadata) {
+        let output = self.owner(update.window_id);
+        let is_shell_scene = self.scene_owners.contains_key(&update.window_id);
+        if let Some(app) = self.app_mut(output) {
+            if update.focused {
+                app.dismiss_control_center_for_focus(update.window_id, &update.app_name);
+            } else {
+                app.record_recent_window(update.window_id);
+            }
+        }
+        // Metadata can arrive before the corresponding workspace snapshot.
+        // Keep it by window ID and resolve its output when the model settles.
+        if !is_shell_scene && update.window_id != 0 && !update.app_name.is_empty()
+            && !is_shell_menu_name(&update.app_name)
+        {
+            self.menus.receive(update);
+            self.menus_changed = true;
+        }
+    }
+
+    fn synchronize_menus(&mut self) {
+        if !core::mem::take(&mut self.menus_changed) { return; }
+        for app in core::iter::once(&mut self.primary).chain(&mut self.secondary) {
+            let Some(state) = app.workspace_state.get() else { continue; };
+            let windows = app.windows.get();
+            if let Some(entry) = self.menus.selected(&state, &windows) {
+                let (menus, changed) = app.resolve_menu_titles(entry.window_id, &entry.menus);
+                app.update_menu_for_app(entry.window_id, &entry.app_name, &entry.title, &menus, changed);
+            } else {
+                app.update_menu_for_app(0, "", "", "", false);
+            }
+        }
+    }
+
     fn synchronize_models(&mut self) {
         let generation = self.bus.changed.load(Ordering::Relaxed);
         let changed = generation != self.model_generation;
         if !changed { return; }
         self.model_generation = generation;
         let catalog = changed.then(|| self.primary.home_applications.get());
-        let all_windows = changed.then(|| self.bus.windows.get());
+        let all_windows = self.bus.windows.get();
+        self.menus.update_windows(&all_windows);
+        self.menus_changed = true;
         let topology = self.bus.outputs.get();
         let physical_tablet = self.primary.input_environment_snapshot.get().is_some_and(|environment| environment.tablet_mode == Some(true));
         for app in core::iter::once(&self.primary).chain(&self.secondary) {
@@ -201,11 +288,9 @@ impl ShellSession {
                     }
                 }
             }
-            if let Some(windows) = &all_windows {
-                let workspace = app.workspace_state.get();
-                let filtered = windows.iter().filter(|window| workspace.as_ref().is_some_and(|state| state.workspaces.iter().any(|workspace| workspace.window_ids.contains(&window.window_id)))).cloned().collect();
-                set_state_if_changed(&app.windows, filtered);
-            }
+            let workspace = app.workspace_state.get();
+            let filtered = all_windows.iter().filter(|window| workspace.as_ref().is_some_and(|state| state.workspaces.iter().any(|workspace| workspace.window_ids.contains(&window.window_id)))).cloned().collect();
+            set_state_if_changed(&app.windows, filtered);
             if app.output_id.get() == 0 { continue; } // Primary's existing filter owns its query.
             let query = app.home_query.get();
             if changed || self.filter_queries.get(&app.output_id.get()) != Some(&query) {
@@ -247,15 +332,10 @@ impl Application for ShellSession {
         self.reconcile(); self.synchronize_models();
         let mut updates = Vec::new();
         if !self.primary.pending_app_menus.get().is_empty() { self.primary.pending_app_menus.update(|pending| updates = core::mem::take(pending)); }
-        for update in updates {
-            let id = self.owner(update.window_id);
-            if let Some(app) = self.app_mut(id) {
-                if update.focused { app.apply_focus_metadata(update.window_id, &update.app_name, &update.title, &update.menus); }
-                else { app.apply_active_metadata(update.window_id, &update.app_name, &update.title, &update.menus); }
-            }
-        }
-        self.primary.on_idle();
-        for app in &mut self.secondary { app.on_idle(); }
+        for update in updates { self.receive_menu(update); }
+        self.synchronize_menus();
+        self.primary.sync_control_center_scene();
+        for app in &mut self.secondary { app.sync_control_center_scene(); }
     }
     fn on_window_created(&mut self, context: &WindowContext, window: &mut dyn PlatformWindow) {
         if let Some((id, local)) = self.local_context(context) {
@@ -273,10 +353,71 @@ impl Application for ShellSession {
         if let Some((id, local)) = self.local_context(context) { if let Some(app) = self.app_mut(id) { app.on_frame_presented(&local); } }
     }
     fn on_focus_changed_with_title(&mut self, window: u32, app_name: &str, title: &str, menus: &str) {
-        if let Some(app) = self.app_mut(self.owner(window)) { app.on_focus_changed_with_title(window, app_name, title, menus); }
+        if !self.primary.full_app_menus.get() {
+            self.receive_menu(AppMenuMetadata {
+                focused: true,
+                window_id: window,
+                app_name: app_name.into(),
+                title: title.into(),
+                menus: menus.into(),
+            });
+        }
     }
     fn on_active_app_changed_with_title(&mut self, window: u32, app_name: &str, title: &str, menus: &str) {
-        if let Some(app) = self.app_mut(self.owner(window)) { app.on_active_app_changed_with_title(window, app_name, title, menus); }
+        if !self.primary.full_app_menus.get() {
+            self.receive_menu(AppMenuMetadata {
+                focused: false,
+                window_id: window,
+                app_name: app_name.into(),
+                title: title.into(),
+                menus: menus.into(),
+            });
+        }
     }
     fn exit_when_all_windows_closed(&self) -> bool { false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focused_window_menu_follows_workspace_membership_without_another_focus_event() {
+        fn state(id: u32, windows: Vec<u32>) -> sws::WorkspaceState {
+            sws::WorkspaceState {
+                generation: 1,
+                active_workspace: id,
+                normal_workspace: id,
+                presentation: sws::ShellPresentation::Workspace,
+                workspaces: vec![sws::WorkspaceSnapshot {
+                    id,
+                    window_ids: windows,
+                    tablet_layout: sws::TabletLayout::Empty,
+                }],
+            }
+        }
+
+        let mut menus = WorkspaceMenus::default();
+        for (window_id, app_name) in [(10, "Files"), (20, "Settings"), (30, "Vellum")] {
+            menus.receive(AppMenuMetadata {
+                focused: true,
+                window_id,
+                app_name: app_name.into(),
+                title: app_name.into(),
+                menus: format!("{app_name} File;Edit"),
+            });
+        }
+
+        let mut source = state(1, vec![10, 30]);
+        let mut destination = state(2, vec![20]);
+        assert_eq!(menus.selected(&source, &[]).unwrap().window_id, 30);
+        assert_eq!(menus.selected(&destination, &[]).unwrap().window_id, 20);
+
+        source.workspaces[0].window_ids.retain(|id| *id != 30);
+        destination.workspaces[0].window_ids.push(30);
+        assert_eq!(menus.selected(&source, &[]).unwrap().window_id, 10);
+        let moved = menus.selected(&destination, &[]).unwrap();
+        assert_eq!(moved.window_id, 30);
+        assert_eq!(moved.menus, "Vellum File;Edit");
+    }
 }

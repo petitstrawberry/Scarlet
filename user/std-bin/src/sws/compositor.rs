@@ -2430,6 +2430,10 @@ struct DisplayTarget {
     full_redraw: bool,
     /// Exact native damage deferred by this output's scanout backpressure.
     deferred_gpu_damage: Option<(u32, u32, u32, u32)>,
+    workspace_motion: Option<tablet_motion::Motion>,
+    drawer_motion: Option<tablet_motion::Motion>,
+    /// Wait for the shell to submit its new Home content before revealing it.
+    drawer_open_pending: bool,
 }
 
 /// A non-primary `/dev/displayN` endpoint SWS watches for a monitor.
@@ -2554,9 +2558,6 @@ pub struct Compositor {
     overview_pan: f32,
     overview_pan_settle: Option<tablet_motion::OverviewScroll>,
     pending_card_close: Option<ClosingCard>,
-    drawer_motion: Option<tablet_motion::Motion>,
-    /// Wait for the shell to submit its new Home content before revealing it.
-    drawer_open_pending: bool,
     direct_touch_grabs: Vec<DirectTouchGrab>,
     next_touch_contact_id: u64,
     next_seat_serial: u64,
@@ -3062,6 +3063,9 @@ impl Compositor {
                 cpu_backdrops: Vec::new(),
                 full_redraw: false,
                 deferred_gpu_damage: None,
+                workspace_motion: None,
+                drawer_motion: None,
+                drawer_open_pending: false,
             },
         )
         .with_metadata(primary_metadata);
@@ -3138,8 +3142,6 @@ impl Compositor {
             overview_pan: 0.0,
             overview_pan_settle: None,
             pending_card_close: None,
-            drawer_motion: None,
-            drawer_open_pending: false,
             direct_touch_grabs: Vec::new(),
             next_touch_contact_id: 1,
             next_seat_serial: 1,
@@ -4853,6 +4855,9 @@ impl Compositor {
                     cpu_backdrops: Vec::new(),
                     full_redraw: true,
                     deferred_gpu_damage: None,
+                workspace_motion: None,
+                drawer_motion: None,
+                drawer_open_pending: false,
                 },
             )
             .with_metadata(metadata),
@@ -5216,8 +5221,16 @@ impl Compositor {
 
     fn account_output_presents(&mut self) {
         let indices = self.gpu_compositor.as_mut().map(|gpu| gpu.take_completed_outputs()).unwrap_or_default();
-        let ids = self.outputs.iter().enumerate().filter_map(|(index, output)| indices.contains(&index).then_some(output.id)).collect::<Vec<_>>();
-        for id in ids { if let Some(output) = self.outputs.get_mut(id) { output.present_counter = output.present_counter.saturating_add(1); } }
+        if indices.is_empty() { return; }
+        let now = monotonic_time_ns();
+        for (index, output) in self.outputs.iter_mut().enumerate() {
+            if indices.contains(&index) {
+                output.present_counter = output.present_counter.saturating_add(1);
+                for motion in [&mut output.target.workspace_motion, &mut output.target.drawer_motion].into_iter().flatten() {
+                    motion.note_presented(now);
+                }
+            }
+        }
     }
 
     fn gpu_frame_pending(&self) -> bool {
@@ -6942,9 +6955,13 @@ impl Compositor {
         if settling {
             self.tablet_motion = None;
         }
-        self.drawer_open_pending = false;
-        let drawer = self.drawer_motion.take().is_some();
-        if settling || drawer {
+        let mut removed = settling;
+        for output in self.outputs.iter_mut() {
+            output.target.drawer_open_pending = false;
+            removed |= output.target.drawer_motion.take().is_some();
+            removed |= output.target.workspace_motion.take().is_some();
+        }
+        if removed {
             self.apply_workspace_presentation_policy();
             self.update_overview_transforms();
             self.full_redraw_needed = true;
@@ -6953,12 +6970,16 @@ impl Compositor {
     }
 
     fn tablet_scene_snapshot(&self) -> Vec<(u32, PresentationTransform)> {
+        self.scene_snapshot_on(self.outputs.primary_id())
+    }
+
+    fn scene_snapshot_on(&self, output: OutputId) -> Vec<(u32, PresentationTransform)> {
         self.window_manager
             .get_windows()
             .iter()
             .filter_map(|window| {
                 let root = self.top_level_window_id(window.id);
-                if !window.is_presented()
+                if window.output_id != output || !window.is_presented()
                     || self.workspace_manager.workspace_for_window(root).is_none()
                 {
                     return None;
@@ -8108,7 +8129,7 @@ impl Compositor {
                 .tablet_motion
                 .as_ref()
                 .is_some_and(|motion| motion.started_ns.is_some())
-                || self.drawer_motion.is_some())
+                || self.outputs.iter().any(|o| o.target.drawer_motion.is_some() || o.target.workspace_motion.is_some()))
         {
             timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
         }
@@ -8450,12 +8471,17 @@ impl Compositor {
             // Retire outgoing cards in the same frame as their final fade.
             self.apply_workspace_presentation_policy();
         }
-        if let Some(motion) = self.drawer_motion.as_mut() {
-            if motion.advance(monotonic_time_ns()) {
-                self.drawer_motion = None;
+        let mut output_motion_changed = false;
+        for output in self.outputs.iter_mut() {
+            for slot in [&mut output.target.workspace_motion, &mut output.target.drawer_motion] {
+                if let Some(motion) = slot {
+                    if motion.advance(now) { *slot = None; }
+                    output.target.full_redraw = true;
+                    output_motion_changed = true;
+                }
             }
-            motion_changed = true;
         }
+        if output_motion_changed && !motion_changed { self.update_overview_transforms(); }
         if motion_changed {
             self.update_overview_transforms();
             self.full_redraw_needed = true;
@@ -8499,9 +8525,6 @@ impl Compositor {
             }
         }
         if let Some(motion) = self.tablet_motion.as_mut() {
-            motion.note_presented(now);
-        }
-        if let Some(motion) = self.drawer_motion.as_mut() {
             motion.note_presented(now);
         }
         if self.outputs.primary().target.display.has_swapchain() {
@@ -11408,11 +11431,8 @@ impl Compositor {
             self.sync_shell_presentation_focus(None);
             self.route_pointer_motion_at_cursor();
         }
-        if self.drawer_open_pending
-            && self.animations_enabled()
-            && self.workspace_manager.presentation()
-                == sws_protocol::workspace::ShellPresentation::Home
-            && let Some(window) = self.window_manager.get_window(window_id)
+        if let Some(window) = self.window_manager.get_window(window_id)
+            && self.outputs.get(window.output_id).is_some_and(|o| o.target.drawer_open_pending)
             && window.window_type == WindowType::ShellBackground
             && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
         {
@@ -11428,7 +11448,8 @@ impl Compositor {
             return;
         };
         let (x, y, width, height) = window.surface_geometry();
-        self.drawer_motion = tablet_motion::Motion::drawer(
+        let output_id = window.output_id;
+        let motion = tablet_motion::Motion::drawer(
             window_id,
             PresentationTransform {
                 x,
@@ -11441,7 +11462,10 @@ impl Compositor {
             monotonic_time_ns(),
             self.animations_enabled(),
         );
-        self.drawer_open_pending = false;
+        if let Some(output) = self.outputs.get_mut(output_id) {
+            output.target.drawer_motion = motion;
+            output.target.drawer_open_pending = false;
+        }
     }
 
     fn maximize_window_from_client(&mut self, window_id: u32) -> bool {
@@ -12210,7 +12234,7 @@ impl Compositor {
             .map(|window| {
                 let shell_presentation = self.workspace_manager.output(window.output_id).is_some_and(|state|
                     state.presentation() != sws_protocol::workspace::ShellPresentation::Workspace);
-                if let Some(motion) = self.drawer_motion.as_ref()
+                if let Some(motion) = self.outputs.get(window.output_id).and_then(|o| o.target.drawer_motion.as_ref())
                     && motion.contains(window.id)
                 {
                     let (x, y, width, height) = window.surface_geometry();
@@ -12238,9 +12262,9 @@ impl Compositor {
                 } else {
                     None
                 };
-                let animating = self.tablet_motion.as_ref().filter(|_| {
-                    window.output_id == self.outputs.primary_id() && workspace_id.is_some() && self.desired_workspace_visibility(window.id)
-                });
+                let gesture = self.tablet_motion.as_ref().filter(|_| window.output_id == self.outputs.primary_id());
+                let animating = gesture.or_else(|| self.outputs.get(window.output_id)?.target.workspace_motion.as_ref())
+                    .filter(|_| workspace_id.is_some() && self.desired_workspace_visibility(window.id));
                 let transform = if let Some(motion) = animating {
                     let (x, y, width, height) = window.surface_geometry();
                     Some(motion.project(
@@ -12389,11 +12413,6 @@ impl Compositor {
             }
             self.overview_session_active = !leaving;
         }
-        for output in self.outputs.iter_mut() {
-            if let Some(state) = self.workspace_manager.output(output.id) {
-                output.last_presentation = state.presentation();
-            }
-        }
         // Console Home owns the application/workspace switcher. Normalize
         // gestures and external Overview requests before visibility, focus or
         // transforms can expose an intermediate desktop Overview frame.
@@ -12415,17 +12434,24 @@ impl Compositor {
                     self.last_shell_presentation, presentation,
                 ),
             );
-            self.drawer_motion = None;
-            self.drawer_open_pending = self.animations_enabled()
-                && !self.console_shell_present()
-                && presentation == sws_protocol::workspace::ShellPresentation::Home;
         }
-        let transition_starts = (self.animations_enabled()
-            && self.tablet_drag_origin.is_none()
-            && presentation != self.last_shell_presentation)
-            .then(|| self.tablet_scene_snapshot());
-        if transition_starts.is_some() {
-            self.tablet_motion = None;
+        let accelerated = self.animations_enabled();
+        let drawer_enabled = accelerated && !self.console_shell_present();
+        let changes: Vec<_> = self.outputs.iter().filter_map(|output| {
+            let current = self.workspace_manager.output(output.id)?.presentation();
+            (current != output.last_presentation).then_some((output.id, current))
+        }).collect();
+        for (id, current) in changes {
+            let gesture_active = id == self.outputs.primary_id() && self.tablet_drag_origin.is_some();
+            let motion = (accelerated && !gesture_active)
+                .then(|| self.scene_snapshot_on(id))
+                .and_then(|starts| tablet_motion::Motion::settle(starts, monotonic_time_ns(), true));
+            if id == self.outputs.primary_id() && motion.is_some() { self.tablet_motion = None; }
+            let output = self.outputs.get_mut(id).unwrap();
+            output.last_presentation = current;
+            output.target.workspace_motion = motion;
+            output.target.drawer_motion = None;
+            output.target.drawer_open_pending = drawer_enabled && current == ShellPresentation::Home;
         }
         let withhold_shell_background =
             shell_background_must_be_withheld(self.last_shell_presentation, presentation);
@@ -12501,24 +12527,14 @@ impl Compositor {
             }
         }
 
-        if self.drawer_open_pending {
-            let cached = self
-                .window_manager
-                .get_windows()
-                .iter()
-                .find(|window| {
-                    window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
-                        && window.has_presented_frame
-                        && window.is_presented()
-                })
-                .map(|window| window.id);
-            if let Some(id) = cached {
-                // The fixed Home image is already usable. Animate before its
-                // first visible frame, rather than flash it and restart on a
-                // later catalog commit. Cold images still use the submit hook.
-                self.begin_home_drawer_motion(id);
-                changed = true;
-            }
+        let cached_drawers: Vec<_> = self.window_manager.get_windows().iter()
+            .filter(|window| self.outputs.get(window.output_id).is_some_and(|o| o.target.drawer_open_pending)
+                && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                && window.has_presented_frame && window.is_presented())
+            .map(|window| window.id).collect();
+        for id in cached_drawers {
+            self.begin_home_drawer_motion(id);
+            changed = true;
         }
         changed |= self.update_overview_transforms();
         changed |= self.sync_shell_presentation_focus(focus_output);
@@ -12551,14 +12567,6 @@ impl Compositor {
             }
         }
 
-        if let Some(starts) = transition_starts {
-            self.tablet_motion = tablet_motion::Motion::settle(
-                starts,
-                monotonic_time_ns(),
-                self.animations_enabled(),
-            );
-            changed |= self.update_overview_transforms();
-        }
         if changed {
             self.full_redraw_needed = true;
             self.damage_profile.full(line!());
