@@ -882,6 +882,10 @@ impl DisplayCharDevice {
 }
 
 impl Device for DisplayCharDevice {
+    fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
+        &[crate::device::DeviceCapability::PhysicalSeat]
+    }
+
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
     }

@@ -471,6 +471,10 @@ impl EventDevice {
 
 // Implement Device trait for device registration
 impl Device for EventDevice {
+    fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
+        &[crate::device::DeviceCapability::PhysicalSeat]
+    }
+
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
     }

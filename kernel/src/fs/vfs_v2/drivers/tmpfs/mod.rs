@@ -255,7 +255,7 @@ impl FileSystemOperations for TmpFS {
             FileType::RegularFile => TmpFileObject::new_regular(tmp_node),
             FileType::Directory => TmpFileObject::new_directory(tmp_node),
             FileType::CharDevice(info) | FileType::BlockDevice(info) => {
-                TmpFileObject::new_device(tmp_node, info)
+                TmpFileObject::new_device(tmp_node, info)?
             }
             FileType::Socket(info) => TmpFileObject::new_socket(tmp_node, info),
             _ => {
@@ -1268,23 +1268,17 @@ impl TmpFileObject {
     }
 
     /// Create a new file object for device files
-    pub fn new_device(node: Arc<TmpNode>, info: DeviceFileInfo) -> Self {
-        // Try to borrow the device from DeviceManager
-        match DeviceManager::get_manager().get_device(info.device_id) {
-            Some(device_guard) => Self {
-                node,
-                position: IrqRwSpinLock::new(0),
-                device_guard: Some(device_guard),
-                socket_ref: None,
-                mmap_backing: IrqRwSpinLock::new(None),
-                mmap_backing_len: IrqSpinLock::new(0),
-                mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
-            },
-            None => {
-                // If borrowing fails, return an error
-                panic!("Failed to borrow device {}", info.device_id);
-            }
-        }
+    pub fn new_device(node: Arc<TmpNode>, info: DeviceFileInfo) -> Result<Self, FileSystemError> {
+        let device = crate::shield::access::device_for_open(DeviceManager::get_manager(), info)?;
+        Ok(Self {
+            node,
+            position: IrqRwSpinLock::new(0),
+            device_guard: Some(device),
+            socket_ref: None,
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
+        })
     }
 
     /// Create a new file object for socket files

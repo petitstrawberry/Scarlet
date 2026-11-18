@@ -702,6 +702,10 @@ impl TimerHandler for FbCompatFlushHandler {
 }
 
 impl Device for FramebufferCharDevice {
+    fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
+        &[crate::device::DeviceCapability::PhysicalSeat]
+    }
+
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
     }

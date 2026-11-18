@@ -289,6 +289,8 @@ pub const ACL_MAX_ENTRIES: usize = 64;
 pub const SYSTEM_MANAGEMENT_CLASS: u32 = 0x5346_5302;
 pub const ADMIN_NETWORK: u64 = 1;
 pub const ADMIN_MODULES: u64 = 2;
+/// Acquire a physical input or scanout device through a filesystem.
+pub const ADMIN_SEAT: u64 = 4;
 
 pub const ENDPOINT_ACCESS_CLASS: u32 = 0x5346_5303;
 pub const CONNECT_LOCAL: u64 = 1;

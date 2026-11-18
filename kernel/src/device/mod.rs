@@ -61,6 +61,8 @@ pub enum DeviceCapability {
     Audio,
     /// Device provides a Scarlet sensor event stream and metadata ABI.
     Sensor,
+    /// Direct access to physical seat input or display scanout.
+    PhysicalSeat,
 }
 
 /// Discovery information supplied to a device driver during matching and probing.
