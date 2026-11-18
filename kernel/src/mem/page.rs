@@ -172,6 +172,15 @@ impl ContiguousPages {
         }
     }
 
+    /// Allocate zeroed contiguous pages accessible through an inclusive DMA address mask.
+    pub fn new_below(count: usize, max_address: u64) -> Option<Self> {
+        let address = crate::mem::pmm::alloc_contiguous_pages_below(count, max_address)?;
+        let ptr = phys_to_virt(address) as *mut Page;
+        // PMM returned exclusive ownership of exactly this many writable pages.
+        unsafe { core::ptr::write_bytes(ptr, 0, count) };
+        Some(Self { ptr, count, memory_attribute: MemoryAttribute::Normal })
+    }
+
     /// Allocate contiguous pages with a minimum physical alignment.
     ///
     /// # Arguments

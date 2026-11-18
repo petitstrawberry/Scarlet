@@ -2511,6 +2511,7 @@ pub struct Compositor {
     pending_damage: Vec<(i32, i32, u32, u32)>,
     pending_backdrop_damage: Vec<BackdropDamage>,
     pending_frame_callbacks: Vec<PendingFrameCallback>,
+    pending_output_modes: Vec<(u32, sws_protocol::outputs::OutputMode)>,
     extension_shm_pools: BTreeMap<ExtensionResourceKey, ExtensionShmPool>,
     extension_buffers: BTreeMap<ExtensionResourceKey, ExtensionBuffer>,
     extension_scenes: BTreeMap<u32, (usize, sws_protocol::surface_scene::Commit)>,
@@ -3102,6 +3103,7 @@ impl Compositor {
             pending_damage: Vec::new(),
             pending_backdrop_damage: Vec::new(),
             pending_frame_callbacks: Vec::new(),
+            pending_output_modes: Vec::new(),
             extension_shm_pools: BTreeMap::new(),
             extension_buffers: BTreeMap::new(),
             extension_scenes: BTreeMap::new(),
@@ -4766,36 +4768,42 @@ impl Compositor {
         }
         self.next_output_poll_ns = now.saturating_add(SECONDARY_OUTPUT_POLL_INTERVAL_NS);
         let mut changed = false;
+        let mut topology_changed = false;
         for index in 0..self.secondary_endpoints.len() {
-            let info = self.secondary_endpoints[index].control.get_output_info().ok()
-                .filter(|info| info.is_connected() && info.width != 0 && info.height != 0);
+            let Ok(info) = self.secondary_endpoints[index].control.get_output_info() else { continue; };
+            // A failed query or incomplete timing is not an unplug notification.
+            if info.is_connected() && (info.width == 0 || info.height == 0) { continue; }
+            let info = info.is_connected().then_some(info);
             let attached = self.secondary_endpoints[index].output;
             match (info, attached) {
-                (Some(_), None) => { changed |= self.attach_secondary_output(index); }
+                (Some(_), None) => { topology_changed |= self.attach_secondary_output(index); }
                 (Some(info), Some(id)) => {
                     let same_monitor_and_mode = self.outputs.get(id).is_some_and(|output| {
                         output.metadata.mode.pixel_width == info.width && output.metadata.mode.pixel_height == info.height
                             && output.metadata.monitor_key == info.monitor_key().unwrap_or("")
                             && output.metadata.mode.refresh_millihz == info.refresh_mhz
                     });
-                    if !same_monitor_and_mode {
+                    if !same_monitor_and_mode && self.outputs.get(id).is_some_and(|output| output.metadata.monitor_key == info.monitor_key().unwrap_or("")) {
+                        changed |= self.refresh_secondary_mode(index, id);
+                    } else if !same_monitor_and_mode {
                         self.detach_secondary_output(index);
                         self.attach_secondary_output(index);
-                        changed = true;
+                        topology_changed = true;
                     }
                 }
                 (None, Some(_)) => {
                     self.detach_secondary_output(index);
-                    changed = true;
+                    topology_changed = true;
                 }
                 (None, None) => {}
             }
         }
+        changed |= topology_changed;
         if changed {
             if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
                 gpu_compositor.outputs_changed();
             }
-            self.restore_output_configuration();
+            if topology_changed { self.restore_output_configuration(); }
             let cursor_rect = self.cursor_rect();
             self.confine_cursor_to_outputs();
             self.add_pending_damage(cursor_rect);
@@ -4804,6 +4812,57 @@ impl Compositor {
             self.publish_workspace_state();
         }
         Ok(changed)
+    }
+
+    /// A modeset changes scanout resources, not workspace/output identity.
+    fn refresh_secondary_mode(&mut self, index: usize, id: u32) -> bool {
+        let Ok(display) = DisplaySurface::open(&self.secondary_endpoints[index].path) else { return false; };
+        let Ok(info) = display.get_var_screen_info() else { return false; };
+        let metadata = output_control::describe_output(id, display.get_output_info().ok(), info.xres, info.yres, false);
+        let Some(output) = self.outputs.get_mut(id) else { return false; };
+        output.metadata = metadata;
+        output.target.display = display;
+        output.target.backbuffer_stride = info.xres * 4;
+        output.target.backbuffer = vec![0; info.xres as usize * info.yres as usize * 4];
+        output.target.presented_damage.clear();
+        output.target.cpu_backdrops.clear();
+        output.target.deferred_gpu_damage = None;
+        output.target.full_redraw = true;
+        let snapshot = self.outputs.snapshot();
+        let mut configuration = snapshot.configuration;
+        if let Some(entry) = configuration.iter().find(|entry| entry.id == id).copied() {
+            if let Ok((x, y)) = sws_protocol::outputs::snapped_position(&snapshot.outputs, &configuration, id, (entry.x, entry.y)) {
+                let entry = configuration.iter_mut().find(|entry| entry.id == id).unwrap();
+                entry.x = x; entry.y = y;
+            }
+        }
+        // If a complex arrangement no longer touches after resizing, keep all
+        // workspaces and place outputs in a connected row around the primary.
+        if sws_protocol::outputs::validate_layout(&snapshot.outputs, &configuration).is_err() {
+            let mut x = 0i32;
+            for output in snapshot.outputs.iter().filter(|o| o.primary).chain(snapshot.outputs.iter().filter(|o| !o.primary)) {
+                let entry = configuration.iter_mut().find(|entry| entry.id == output.id).unwrap();
+                entry.x = x; entry.y = 0;
+                x += output.mode.logical_size(entry.scale_milli).unwrap().0 as i32;
+            }
+        }
+        if self.install_output_configuration(&configuration, false).is_err() { return false; }
+        let rect = self.outputs.get(id).unwrap().rect;
+        let windows: Vec<_> = self.window_manager.get_windows().iter().filter(|w| w.output_id == id).map(|w| w.id).collect();
+        for window in windows {
+            if self.window_manager.resize_fullscreen_window_on(window, (rect.x, rect.y, rect.width, rect.height)) {
+                self.send_fullscreen_configure(window);
+            }
+            self.notify_window_output(window);
+        }
+        let requested = self.pending_output_modes.iter().any(|(output, mode)| *output == id && *mode == self.outputs.get(id).unwrap().metadata.mode);
+        self.pending_output_modes.retain(|(output, _)| *output != id);
+        if requested {
+            if let Err(error) = super::config::persist_outputs(&self.outputs.snapshot()) {
+                println!("[Compositor] Resolution applied but not saved: {}", error);
+            }
+        }
+        true
     }
 
     /// Open a connected secondary display and place it right of the layout.
@@ -4896,6 +4955,7 @@ impl Compositor {
         if let Some(id) = self.secondary_endpoints[index].output.take()
             && let Some(output) = self.outputs.remove(id)
         {
+            self.pending_output_modes.retain(|(output, _)| *output != id);
             self.detached_output_geometry.insert(id, output.rect);
             self.workspace_manager.detach_output(id);
             let primary = self.outputs.primary();

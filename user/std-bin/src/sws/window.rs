@@ -2637,17 +2637,16 @@ impl WindowManager {
         screen_width: u32,
         screen_height: u32,
     ) -> bool {
-        let Some(window) = self.get_window_mut(id) else {
-            return false;
-        };
-        if !window.fullscreen {
-            return false;
-        }
+        self.resize_fullscreen_window_on(id, (0, 0, screen_width, screen_height))
+    }
 
+    pub fn resize_fullscreen_window_on(&mut self, id: WindowId, rect: (i32, i32, u32, u32)) -> bool {
+        let Some(window) = self.get_window_mut(id) else { return false; };
+        if !window.fullscreen { return false; }
         window.begin_native_transition();
-        window.x = 0;
-        window.y = 0;
-        window.set_scene_extent(screen_width, screen_height);
+        window.x = rect.0;
+        window.y = rect.1;
+        window.set_scene_extent(rect.2, rect.3);
         true
     }
 

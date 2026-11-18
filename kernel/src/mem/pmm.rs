@@ -335,6 +335,14 @@ impl BuddyRegion {
 
             let page_idx = self.page_to_pfn(page);
 
+            Some(self.take_block(page_idx, current_order, order))
+        }
+    }
+
+    // Split toward the lower address, leaving the unused right halves free.
+    unsafe fn take_block(&mut self, page_idx: usize, mut current_order: usize, order: usize) -> u64 {
+        let page = self.pfn_to_page(page_idx);
+        unsafe {
             self.del_from_free_list(page, current_order);
             (*page).order = 0;
 
@@ -346,8 +354,26 @@ impl BuddyRegion {
                 self.add_to_free_list(buddy_idx, current_order);
             }
 
-            Some(self.pfn_to_addr(page_idx))
+            self.pfn_to_addr(page_idx)
         }
+    }
+    fn alloc_below(&mut self, order: usize, last_base: u64) -> Option<u64> {
+        if !self.active || self.mem_start > last_base {
+            return None;
+        }
+        for current_order in order..=MAX_ORDER {
+            let head = &raw const self.free_area[current_order].free_list;
+            let mut entry = self.free_area[current_order].free_list.next;
+            while !entry.is_null() && !core::ptr::eq(entry, head) {
+                let pfn = self.page_to_pfn(entry.cast());
+                if self.pfn_to_addr(pfn) <= last_base {
+                    // The lower half of every split starts at the same address.
+                    return Some(unsafe { self.take_block(pfn, current_order, order) });
+                }
+                entry = unsafe { (*entry).next };
+            }
+        }
+        None
     }
 
     fn free(&mut self, paddr: u64, pages: usize) {
@@ -821,6 +847,18 @@ pub fn alloc_contiguous_pages(pages: usize) -> Option<u64> {
             None
         }
     }
+}
+
+/// Allocate contiguous pages whose last requested byte is at most `max_address`.
+pub fn alloc_contiguous_pages_below(pages: usize, max_address: u64) -> Option<u64> {
+    let bytes = pages.checked_mul(PAGE_SIZE)?;
+    let last_base = max_address.checked_sub(u64::try_from(bytes.checked_sub(1)?).ok()?)?;
+    let order = pages.checked_next_power_of_two()?.trailing_zeros() as usize;
+    let allocation = PMM.lock().regions.iter_mut().find_map(|region| region.alloc_below(order, last_base));
+    if allocation.is_none() {
+        note_allocation_failure(pages);
+    }
+    allocation
 }
 
 /// Allocate aligned contiguous physical pages.

@@ -3737,6 +3737,15 @@ impl Connection {
             protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
         }
     }
+    pub fn output_modes(&self, output: u32) -> Result<Vec<protocol::outputs::OutputMode>, Error> {
+        match self.output_request(protocol::outputs::OutputRequest::Modes(output))? {
+            protocol::outputs::OutputEvent::Modes { output: actual, modes } if actual == output => Ok(modes),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn set_output_mode(&self, output: u32, mode: protocol::outputs::OutputMode) -> Result<(), Error> {
+        self.output_request(protocol::outputs::OutputRequest::SetMode { output, mode }).map(|_| ())
+    }
     pub fn configure_outputs(&self, transaction: protocol::outputs::OutputTransaction) -> Result<protocol::outputs::OutputSnapshot, Error> {
         match self.output_request(protocol::outputs::OutputRequest::Apply(transaction))? {
             protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
