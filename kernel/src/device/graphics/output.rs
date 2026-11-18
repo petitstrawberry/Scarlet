@@ -96,3 +96,12 @@ pub struct ConnectorInfo {
     /// Physical size in millimetres, when the monitor reports it.
     pub physical_size_mm: Option<(u32, u32)>,
 }
+
+/// A progressive scanout mode advertised by the connected monitor and driver.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_millihz: u32,
+}

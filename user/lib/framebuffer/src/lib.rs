@@ -98,6 +98,8 @@ pub mod display_commands {
     /// The argument points to a [`super::DisplayOutputInfo`] whose `size` is
     /// set to the bytes the caller provides.
     pub const DISPLAY_GET_OUTPUT_INFO: u32 = 0x5008;
+    pub const DISPLAY_GET_MODE: u32 = 0x5009;
+    pub const DISPLAY_REQUEST_MODE: u32 = 0x500a;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -668,6 +670,17 @@ fn present_gpu_image_with_flags(
 /// not map scanout memory or initialize a swapchain. It is intended for
 /// display controls such as backlight changes from settings and hotkey
 /// handlers.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_millihz: u32,
+}
+#[repr(C)]
+#[derive(Default)]
+struct DisplayModeQuery { index: u32, count: u32, mode: DisplayMode }
+
 pub struct DisplayControl {
     file: File,
 }
@@ -706,6 +719,22 @@ fn set_brightness_percent(file: &File, percent: u8) -> HandleResult<()> {
 }
 
 impl DisplayControl {
+    pub fn modes(&self) -> HandleResult<alloc::vec::Vec<DisplayMode>> {
+        let mut modes = alloc::vec::Vec::new();
+        for index in 0..256 {
+            let mut query = DisplayModeQuery { index, ..Default::default() };
+            // SAFETY: synchronous fixed-size control borrows this initialized query.
+            unsafe { self.file.as_handle().control(display_commands::DISPLAY_GET_MODE, &mut query as *mut _ as usize) }?;
+            if index >= query.count { return Ok(modes); }
+            modes.push(query.mode);
+        }
+        Err(HandleError::InvalidParameter)
+    }
+    pub fn request_mode(&self, mode: DisplayMode) -> HandleResult<()> {
+        // SAFETY: the kernel copies this initialized fixed-size value before returning.
+        unsafe { self.file.as_handle().control(display_commands::DISPLAY_REQUEST_MODE, &mode as *const _ as usize) }?;
+        Ok(())
+    }
     const PRIMARY_DISPLAY_SCAN_LIMIT: usize = 16;
 
     /// Open a display control endpoint by path without mapping its scanout.

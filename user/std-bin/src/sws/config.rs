@@ -336,6 +336,9 @@ pub(super) fn persist_outputs(snapshot: &sws_protocol::outputs::OutputSnapshot) 
         for (name, value) in [("x", i64::from(config.x)), ("y", i64::from(config.y)), ("scale_milli", i64::from(config.scale_milli)), ("experience", config.experience as i64)] {
             entry.insert(name.into(), toml::Value::Integer(value));
         }
+        for (name, value) in [("mode_width", output.mode.pixel_width), ("mode_height", output.mode.pixel_height), ("mode_refresh_millihz", output.mode.refresh_millihz)] {
+            entry.insert(name.into(), toml::Value::Integer(i64::from(value)));
+        }
         profile.insert("primary_monitor".into(), toml::Value::String(snapshot.outputs.iter().find(|output| output.primary).ok_or("Missing primary output")?.monitor_key.clone()));
         entries.push(toml::Value::Table(entry));
     }
@@ -368,4 +371,24 @@ pub(super) fn saved_output_layout(outputs: &[sws_protocol::outputs::OutputDescri
             } });
     }
     sws_protocol::outputs::canonical_layout(outputs, &configuration).ok()
+}
+
+/// Mode preferences use the same monitor-combination identity as arrangement.
+pub(super) fn saved_output_modes(outputs: &[sws_protocol::outputs::OutputDescriptor]) -> Vec<(u32, sws_protocol::outputs::OutputMode)> {
+    fn read(outputs: &[sws_protocol::outputs::OutputDescriptor]) -> Option<Vec<(u32, sws_protocol::outputs::OutputMode)>> {
+        let key = sws_protocol::outputs::topology_key(outputs)?;
+        let key = toml::Value::Array(key.into_iter().map(toml::Value::String).collect());
+        let document: toml::Value = read_sws_config().ok()?.parse().ok()?;
+        let layout = document.get("display_layouts")?.as_array()?.iter().find(|layout| layout.get("monitors") == Some(&key))?;
+        let entries = layout.get("configuration")?.as_array()?;
+        Some(outputs.iter().filter_map(|output| {
+            let entry = entries.iter().find(|entry| entry.get("monitor").and_then(toml::Value::as_str) == Some(output.monitor_key.as_str()))?;
+            Some((output.id, sws_protocol::outputs::OutputMode {
+                pixel_width: entry.get("mode_width")?.as_integer()?.try_into().ok()?,
+                pixel_height: entry.get("mode_height")?.as_integer()?.try_into().ok()?,
+                refresh_millihz: entry.get("mode_refresh_millihz")?.as_integer()?.try_into().ok()?,
+            }))
+        }).collect())
+    }
+    read(outputs).unwrap_or_default()
 }

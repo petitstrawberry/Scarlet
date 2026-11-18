@@ -45,6 +45,9 @@ pub(super) struct Editor {
     pub selected: usize,
     pub status: String,
     pub dirty: bool,
+    pub modes: Vec<(u32, Vec<outputs::OutputMode>)>,
+    mode_draft: Vec<(u32, outputs::OutputMode)>,
+    pub applying: bool,
     // View callbacks are replaced on rebuild; contact ownership must outlive them.
     touch_contact: Option<(u32, u64)>,
     drag_snap: (Option<AxisSnap>, Option<AxisSnap>),
@@ -53,13 +56,32 @@ pub(super) struct Editor {
 }
 impl Default for Editor { fn default() -> Self { Self::new() } }
 impl Editor {
-    pub fn new() -> Self { Self { snapshot: None, draft: Vec::new(), selected: 0, status: String::from("Loading displays…"), dirty: false, drag: None, drag_before: None, drag_snap: (None, None), touch_contact: None } }
+    pub fn new() -> Self { Self { snapshot: None, draft: Vec::new(), selected: 0, status: String::from("Loading displays…"), dirty: false, modes: Vec::new(), mode_draft: Vec::new(), applying: false, drag: None, drag_before: None, drag_snap: (None, None), touch_contact: None } }
     fn adopt(&mut self, snapshot: OutputSnapshot) {
         let selected_id = self.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(self.selected)).map(|output| output.monitor_key.clone());
         self.selected = selected_id.and_then(|key| snapshot.outputs.iter().position(|output| output.monitor_key == key)).unwrap_or(0);
+        self.mode_draft.clear();
         self.draft = snapshot.configuration.clone();
         self.snapshot = Some(snapshot);
         self.dirty = false; self.drag = None; self.drag_before = None; self.drag_snap = (None, None); self.touch_contact = None;
+    }
+    pub fn selected_modes(&self) -> Vec<outputs::OutputMode> {
+        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return Vec::new(); };
+        self.modes.iter().find(|(id, _)| *id == output.id).map(|(_, modes)| modes.clone()).unwrap_or_else(|| vec![output.mode])
+    }
+    pub fn selected_mode_index(&self) -> usize {
+        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return 0; };
+        let mode = self.mode_draft.iter().find(|(id, _)| *id == output.id).map_or(output.mode, |(_, mode)| *mode);
+        self.selected_modes().iter().position(|candidate| *candidate == mode).unwrap_or(usize::MAX)
+    }
+    fn preview_mode(&self, output: &outputs::OutputDescriptor) -> outputs::OutputMode {
+        self.mode_draft.iter().find(|(id, _)| *id == output.id).map_or(output.mode, |(_, mode)| *mode)
+    }
+    pub fn logical_size_label(&self) -> String {
+        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return String::new(); };
+        self.draft.iter().find(|config| config.id == output.id)
+            .and_then(|config| self.preview_mode(output).logical_size(config.scale_milli).ok())
+            .map_or_else(String::new, |(w, h)| format!("Workspace size: {w} × {h} logical points"))
     }
     fn geometry(&self, viewport_width: f32) -> Option<(f32, f32, f32)> {
         // Keep the preview coordinate system fixed while the pointer moves.
@@ -69,7 +91,7 @@ impl Editor {
         let mut left = 0i64; let mut top = 0i64; let mut right = 1i64; let mut bottom = 1i64;
         for config in &self.draft {
             let output = snapshot.outputs.iter().find(|output| output.id == config.id)?;
-            let (width, height) = output.mode.logical_size(config.scale_milli).ok()?;
+            let (width, height) = self.preview_mode(output).logical_size(config.scale_milli).ok()?;
             left = left.min(i64::from(config.x)); top = top.min(i64::from(config.y));
             right = right.max(i64::from(config.x) + i64::from(width)); bottom = bottom.max(i64::from(config.y) + i64::from(height));
         }
@@ -80,7 +102,7 @@ impl Editor {
     fn card(&self, index: usize, viewport_width: f32) -> Option<(f32, f32, f32, f32)> {
         let snapshot = self.snapshot.as_ref()?; let output = snapshot.outputs.get(index)?;
         let config = self.draft.iter().find(|config| config.id == output.id)?;
-        let (width, height) = output.mode.logical_size(config.scale_milli).ok()?;
+        let (width, height) = self.preview_mode(output).logical_size(config.scale_milli).ok()?;
         let (x, y, zoom) = self.geometry(viewport_width)?;
         Some((x + config.x as f32 * zoom, y + config.y as f32 * zoom, width as f32 * zoom, height as f32 * zoom))
     }
@@ -88,10 +110,10 @@ impl Editor {
         let Some(snapshot) = &self.snapshot else { return; };
         let Some(moving) = self.draft.iter().find(|config| config.id == id) else { return; };
         let Some(output) = snapshot.outputs.iter().find(|output| output.id == id) else { return; };
-        let Ok((width, height)) = output.mode.logical_size(moving.scale_milli) else { return; };
+        let Ok((width, height)) = self.preview_mode(output).logical_size(moving.scale_milli) else { return; };
         let neighbours: Vec<_> = self.draft.iter().filter(|config| config.id != id).filter_map(|config| {
             let output = snapshot.outputs.iter().find(|output| output.id == config.id)?;
-            let (w, h) = output.mode.logical_size(config.scale_milli).ok()?;
+            let (w, h) = self.preview_mode(output).logical_size(config.scale_milli).ok()?;
             Some((config.x, config.y, w, h))
         }).collect();
         let nearby = |a: i32, length: u32, b: i32, other_length: u32| {
@@ -128,16 +150,39 @@ impl Editor {
     fn settle(&mut self, id: u32) {
         let Some(snapshot) = &self.snapshot else { return; };
         let Some(current) = self.draft.iter().find(|config| config.id == id).copied() else { return; };
-        match outputs::snapped_position(&snapshot.outputs, &self.draft, id, (current.x, current.y)) {
+        let mut projected = snapshot.outputs.clone();
+        for output in &mut projected { output.mode = self.preview_mode(output); }
+        match outputs::snapped_position(&projected, &self.draft, id, (current.x, current.y)) {
             Ok((x, y)) => {
                 if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) { config.x = x; config.y = y; }
-                if let Ok(canonical) = outputs::canonical_layout(&snapshot.outputs, &self.draft) { self.draft = canonical; }
-                self.dirty = self.draft != snapshot.configuration;
+                if let Ok(canonical) = outputs::canonical_layout(&projected, &self.draft) { self.draft = canonical; }
+                self.dirty = !self.mode_draft.is_empty() || self.draft != snapshot.configuration;
                 self.status = String::from("Ready to apply. Displays must touch at an edge or corner.");
             }
-            Err(_) => { self.draft = snapshot.configuration.clone(); self.dirty = false; self.status = String::from("This arrangement would overlap or disconnect displays."); }
+            Err(_) => { self.draft = snapshot.configuration.clone(); self.dirty = !self.mode_draft.is_empty(); self.status = String::from("This arrangement would overlap or disconnect displays."); }
         }
     }
+}
+
+fn mode_catalog(connection: &Connection, snapshot: &OutputSnapshot) -> Vec<(u32, Vec<outputs::OutputMode>)> {
+    snapshot.outputs.iter().map(|output| (output.id, connection.output_modes(output.id).unwrap_or_else(|_| vec![output.mode]))).collect()
+}
+pub(super) fn resolution(state: &State<Editor>, id: u32, mode: outputs::OutputMode) {
+    state.update(|editor| {
+        if editor.applying {
+            return;
+        }
+        let Some(output) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected))
+            .filter(|output| output.id == id) else { return; };
+        if !editor.selected_modes().contains(&mode) {
+            return;
+        }
+        editor.mode_draft.retain(|(output, _)| *output != id);
+        if mode != output.mode {
+            editor.mode_draft.push((id, mode));
+        }
+        editor.settle(id);
+    });
 }
 
 pub(super) fn watch(state: State<Editor>) {
@@ -146,13 +191,19 @@ pub(super) fn watch(state: State<Editor>) {
         let Ok(snapshot) = connection.outputs() else {
             state.update(|editor| editor.status = String::from("Display configuration is unavailable.")); return;
         };
-        state.update(|editor| { editor.adopt(snapshot); editor.status = String::from("Drag displays to arrange them, then apply."); });
+        let modes = mode_catalog(&connection, &snapshot);
+        state.update(|editor| { editor.adopt(snapshot); editor.modes = modes; editor.status = String::from("Drag displays to arrange them, then apply."); });
         loop {
             if connection.wait_for_window_events(Duration::from_millis(500)).is_err() || connection.dispatch().is_err() { break; }
             while let Some(event) = connection.poll_event() {
                 if let sws_client::event::Event::Output(outputs::OutputEvent::Snapshot(snapshot)) = event {
-                    if state.get().snapshot.as_ref().is_some_and(|old| old.generation == snapshot.generation) { continue; }
-                    state.update(|editor| { editor.adopt(snapshot); editor.status = String::from("Display configuration updated."); });
+                    if state.get().applying || state.get().snapshot.as_ref().is_some_and(|old| old.generation >= snapshot.generation) { continue; }
+                    let modes = mode_catalog(&connection, &snapshot);
+                    state.update(|editor| {
+                        if editor.applying { return; }
+                        editor.adopt(snapshot); editor.modes = modes;
+                        editor.status = String::from("Display configuration updated.");
+                    });
                 }
             }
         }
@@ -192,6 +243,7 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                 &format!("{}", index + 1), Color::WHITE, 18.0 * scale);
         }
     })).touch_drag_axis(TouchDragAxis::Both).on_event(move |event| {
+        if state.get().applying { return false; }
         let viewport_width = viewport.get();
         // Canvas owns a single contact; a second finger cannot move or finish
         // the first finger's display arrangement.
@@ -256,16 +308,49 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
 }
 
 pub(super) fn apply(state: &State<Editor>) {
-    let editor = state.get(); let Some(snapshot) = editor.snapshot else { return; };
-    let persistent = outputs::topology_key(&snapshot.outputs).is_some();
-    let result = Connection::connect_default().and_then(|connection| connection.configure_outputs(outputs::OutputTransaction { base_generation: snapshot.generation, configuration: editor.draft }));
-    state.update(|editor| match result {
-        Ok(snapshot) => { editor.adopt(snapshot); editor.status = String::from(if persistent { "Applied and remembered for this display combination." } else { "Applied for this session. A display has no unique identity, so this combination is not restored automatically." }); }
-        Err(error) => editor.status = format!("Not applied: {:?}. Refresh if displays changed.", error),
+    let editor = state.get();
+    if editor.applying { return; }
+    let Some(original) = editor.snapshot else { return; };
+    let state = state.clone();
+    state.update(|editor| { editor.applying = true; editor.status = String::from("Applying display settings…"); });
+    thread::spawn(move || {
+        let result = (|| -> core::result::Result<OutputSnapshot, String> {
+            let connection = Connection::connect_default().map_err(|e| format!("{e:?}"))?;
+            let read = || connection.outputs().map_err(|e| format!("{e:?}"));
+            let mut live = read()?;
+            if live.generation != original.generation { return Err("Displays changed before applying".into()); }
+            for (id, mode) in &editor.mode_draft {
+                connection.set_output_mode(*id, *mode).map_err(|e| format!("{e:?}"))?;
+            }
+            // The driver acknowledges a request before the new timing is live.
+            // Validate layout against the confirmed modes, including fractional scales.
+            let start = scarlet_os::time::monotonic_time_ns();
+            while !editor.mode_draft.iter().all(|(id, mode)| live.outputs.iter().any(|o| o.id == *id && o.mode == *mode)) {
+                if scarlet_os::time::monotonic_time_ns().saturating_sub(start) > 10_000_000_000 {
+                    return Err("Display did not confirm the selected resolution".into());
+                }
+                thread::sleep(Duration::from_millis(100));
+                live = read()?;
+                if live.outputs.len() != original.outputs.len() || !original.outputs.iter().all(|old|
+                    live.outputs.iter().any(|o| o.id == old.id && o.monitor_key == old.monitor_key)) {
+                    return Err("Connected displays changed".into());
+                }
+            }
+            connection.configure_outputs(outputs::OutputTransaction { base_generation: live.generation, configuration: editor.draft })
+                .map_err(|e| format!("{e:?}"))
+        })();
+        let status = match &result { Ok(_) => "Display settings applied.".into(), Err(e) => format!("Display settings: {e}.") };
+        let snapshot = result.ok().or_else(|| Connection::connect_default().ok()?.outputs().ok());
+        state.update(|editor| {
+            if let Some(snapshot) = snapshot { editor.adopt(snapshot); }
+            editor.applying = false;
+            editor.status = status;
+        });
     });
 }
 
 pub(super) fn scale(state: &State<Editor>, index: usize) {
+    if state.get().applying { return; }
     let Some(scale) = SCALES.get(index).copied() else { return; };
     state.update(|editor| {
         let Some(id) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)).map(|output| output.id) else { return; };
@@ -274,6 +359,7 @@ pub(super) fn scale(state: &State<Editor>, index: usize) {
     });
 }
 pub(super) fn experience(state: &State<Editor>, index: usize) {
+    if state.get().applying { return; }
     state.update(|editor| {
         let Some(id) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)).map(|output| output.id) else { return; };
         if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) { config.experience = match index { 1 => OutputExperience::Desktop, 2 => OutputExperience::Tablet, _ => OutputExperience::Auto }; editor.dirty = true; }
