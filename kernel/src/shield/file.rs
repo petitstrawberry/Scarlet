@@ -233,6 +233,9 @@ pub struct CreateContext {
     target: u32,
 }
 impl CreateContext {
+    pub(super) fn target(&self) -> u32 {
+        self.target
+    }
     pub fn prepare(
         task: &Task,
         parent: &dyn VfsNode,

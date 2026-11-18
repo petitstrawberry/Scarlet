@@ -1346,7 +1346,7 @@ impl FileObject for BinderFile {
                 device_type: crate::device::DeviceType::Char,
             }),
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,
@@ -2003,6 +2003,8 @@ mod tests {
             entry,
             mount,
             "/dev/binder".into(),
+            2,
+            crate::shield::access::FileGrant::for_backing(2).unwrap(),
         ));
         task.handle_table
             .insert(KernelObject::File(wrapped))

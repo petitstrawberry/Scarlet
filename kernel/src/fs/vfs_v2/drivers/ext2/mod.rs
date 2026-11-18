@@ -21,6 +21,8 @@
 //! - `Ext2Driver`: Filesystem driver for registration
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
+use crate::shield::access::InodeAccess;
+
 use crate::sync::counter::SaturatingCounter;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
@@ -655,6 +657,12 @@ impl Ext2FileSystem {
 
         // Parse superblock and move to heap to avoid stack overflow
         let superblock = Ext2Superblock::from_bytes_boxed(&superblock_data)?;
+        if u32::from_le(superblock.creator_os) != 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Unsupported ext2 ownership format",
+            ));
+        }
 
         let block_size = superblock.get_block_size();
         let root_inode = EXT2_ROOT_INO;
@@ -1525,11 +1533,20 @@ impl Ext2FileSystem {
         inode_number: u32,
         name: &[u8],
     ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
-        use crate::fs::vfs_v2::xattr::Error;
-        let key = Self::xattr_name_parts(name)?;
         let inode_lock = self.get_inode_lock(inode_number);
         let _inode_guard = inode_lock.lock();
         let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        self.get_locked_xattr(inode_number, &inode, name)
+    }
+
+    fn get_locked_xattr(
+        &self,
+        inode_number: u32,
+        inode: &Ext2Inode,
+        name: &[u8],
+    ) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        let key = Self::xattr_name_parts(name)?;
         let body = self.read_inode_xattr_body(inode_number)?;
         let block = self.read_xattr_block(&inode)?;
         Self::merge_inode_and_external_xattrs(&body.records, block.as_ref())?
@@ -1756,6 +1773,17 @@ impl Ext2FileSystem {
         value: &[u8],
         mode: crate::fs::vfs_v2::xattr::SetMode,
     ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
+        self.store_ext2_xattr(inode_number, name, value, mode, false)
+    }
+
+    fn store_ext2_xattr(
+        &self,
+        inode_number: u32,
+        name: &[u8],
+        value: &[u8],
+        mode: crate::fs::vfs_v2::xattr::SetMode,
+        unpublished: bool,
+    ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
         use crate::fs::vfs_v2::xattr::{self, Error, SetMode};
         if value.len() > xattr::MAX_VALUE {
             return Err(Error::TooLarge);
@@ -1765,6 +1793,14 @@ impl Ext2FileSystem {
         let _inode_guard = inode_lock.lock();
         let _allocation_guard = self.allocation_lock.lock();
         let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        if name == scarlet_abi::shield::FILE_ACCESS_ACL {
+            if !unpublished {
+                self.inode_access(&inode)
+                    .check_chmod()
+                    .map_err(|_| Error::PermissionDenied)?;
+            }
+            crate::shield::access::acl_permissions(value, None)?;
+        }
         let body = self.read_inode_xattr_body(inode_number)?;
         let old_block = self.read_xattr_block(&inode)?;
         if old_block.is_some() && inode.get_blocks() < self.block_size / 512 {
@@ -1844,6 +1880,11 @@ impl Ext2FileSystem {
         let _inode_guard = inode_lock.lock();
         let _allocation_guard = self.allocation_lock.lock();
         let inode = self.read_inode(inode_number).map_err(Self::xattr_error)?;
+        if name == scarlet_abi::shield::FILE_ACCESS_ACL {
+            self.inode_access(&inode)
+                .check_chmod()
+                .map_err(|_| Error::PermissionDenied)?;
+        }
         let body = self.read_inode_xattr_body(inode_number)?;
         let old_block = self.read_xattr_block(&inode)?;
         if old_block.is_some() && inode.get_blocks() < self.block_size / 512 {
@@ -2827,19 +2868,33 @@ impl Ext2FileSystem {
         Ok(())
     }
 
-    /// Persist selected times without losing cached writes or a later fsync.
+    fn inode_access(&self, inode: &Ext2Inode) -> InodeAccess {
+        InodeAccess {
+            owner: inode.native_owner(),
+            mode: u32::from(inode.get_mode() & 0o7777),
+        }
+    }
+
+    fn set_inode_mode(&self, number: u32, mode: u32) -> Result<(), FileSystemError> {
+        let lock = self.get_inode_lock(number);
+        let _guard = lock.lock();
+        let mut inode = self.read_inode(number)?;
+        self.inode_access(&inode).check_chmod()?;
+        inode.mode = ((inode.get_mode() & EXT2_S_IFMT) | (mode as u16 & 0o7777)).to_le();
+        if let Some(now) = current_timestamp() {
+            inode.ctime = now.to_le();
+        }
+        self.write_inode(number, &inode)?;
+        self.inode_cache.write().insert(number, inode);
+        Ok(())
+    }
+
     fn set_inode_owner(
         &self,
         inode_num: u32,
         principal: Option<crate::shield::identity::Principal>,
         group: Option<crate::shield::identity::Group>,
     ) -> Result<(), FileSystemError> {
-        if u32::from_le(self.superblock.creator_os) != 0 {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Unknown ext2 ownership format",
-            ));
-        }
         let task = crate::task::mytask().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::PermissionDenied,
@@ -6332,6 +6387,10 @@ impl Ext2FileSystem {
 }
 
 impl FileSystemOperations for Ext2FileSystem {
+    fn preserves_creation_access(&self) -> bool {
+        true
+    }
+
     fn supports_retained_node_identity(&self) -> bool {
         true
     }
@@ -6515,17 +6574,25 @@ impl FileSystemOperations for Ext2FileSystem {
         parent: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        _mode: u32,
+        mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent, name, file_type, _mode, None)
+        self.create_labeled(
+            parent,
+            name,
+            file_type,
+            InodeAccess::for_creation(mode),
+            None,
+            None,
+        )
     }
     fn create_labeled(
         &self,
         parent: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        _mode: u32,
+        access: InodeAccess,
         label: Option<&crate::shield::file::CreateContext>,
+        acl: Option<&[u8]>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let ext2_parent = parent.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
             FileSystemError::new(
@@ -6569,18 +6636,16 @@ impl FileSystemOperations for Ext2FileSystem {
                 "Parent directory was removed",
             ));
         }
-        let new_inode_number = self.allocate_inode()?;
-        let file_id = new_inode_number as u64;
 
         // Create the inode structure on disk
-        let mode = match &file_type {
-            FileType::RegularFile => EXT2_S_IFREG | 0o644,
-            FileType::Directory => EXT2_S_IFDIR | 0o755,
-            FileType::SymbolicLink(_) => EXT2_S_IFLNK | 0o777,
-            FileType::CharDevice(_) => EXT2_S_IFCHR | 0o666,
-            FileType::BlockDevice(_) => EXT2_S_IFBLK | 0o666,
-            FileType::Pipe => EXT2_S_IFIFO | 0o666,
-            FileType::Socket(_) => EXT2_S_IFSOCK | 0o666,
+        let kind = match &file_type {
+            FileType::RegularFile => EXT2_S_IFREG,
+            FileType::Directory => EXT2_S_IFDIR,
+            FileType::SymbolicLink(_) => EXT2_S_IFLNK,
+            FileType::CharDevice(_) => EXT2_S_IFCHR,
+            FileType::BlockDevice(_) => EXT2_S_IFBLK,
+            FileType::Pipe => EXT2_S_IFIFO,
+            FileType::Socket(_) => EXT2_S_IFSOCK,
             _ => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -6589,6 +6654,9 @@ impl FileSystemOperations for Ext2FileSystem {
             }
         } as u16;
 
+        let new_inode_number = self.allocate_inode()?;
+        let file_id = u64::from(new_inode_number);
+        let mode = kind | (access.mode as u16 & 0o7777);
         // Create new inode with proper initialization
         let initial_nlinks: u16 = if file_type == FileType::Directory {
             2
@@ -6680,11 +6748,7 @@ impl FileSystemOperations for Ext2FileSystem {
             }
         }
 
-        if u32::from_le(self.superblock.creator_os) == 0 {
-            if let Some(task) = crate::task::mytask() {
-                new_inode.set_native_owner(task.credentials.read().identity());
-            }
-        }
+        new_inode.set_native_owner(access.owner);
         // Handle device file information storage
         if let FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) = &file_type {
             // Store device major/minor numbers in the first direct block pointer
@@ -6791,6 +6855,22 @@ impl FileSystemOperations for Ext2FileSystem {
             new_node.set_filesystem(fs_ref);
         }
 
+        if let Some(acl) = acl {
+            if let Err(error) = self.store_ext2_xattr(
+                new_inode_number,
+                scarlet_abi::shield::FILE_ACCESS_ACL,
+                acl,
+                crate::fs::vfs_v2::xattr::SetMode::Create,
+                true,
+            ) {
+                drop(new_node);
+                self.discard_created_inode(new_inode_number)?;
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    format!("Cannot initialize inode ACL: {error:?}"),
+                ));
+            }
+        }
         if let Some(label) = label {
             if let Err(reason) = label.initialize(new_node.as_ref()) {
                 drop(new_node);

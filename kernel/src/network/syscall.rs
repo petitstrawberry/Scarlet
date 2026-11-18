@@ -193,6 +193,12 @@ pub fn sys_network_set_ipv4(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
     tf.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
+        return usize::MAX;
+    }
 
     let req_ptr = tf.get_arg(0);
     let mut req_bytes = [0u8; core::mem::size_of::<NetworkSetIpv4Request>()];
@@ -226,6 +232,12 @@ pub fn sys_network_set_gateway(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
     tf.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
+        return usize::MAX;
+    }
 
     let addr_ptr = tf.get_arg(0);
     let gateway = match read_user_ipv4(addr_ptr) {
@@ -242,6 +254,12 @@ pub fn sys_network_set_netmask(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
     tf.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
+        return usize::MAX;
+    }
 
     let addr_ptr = tf.get_arg(0);
     let mask = match read_user_ipv4(addr_ptr) {
@@ -352,6 +370,12 @@ pub fn sys_network_configure_ipv4(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
     tf.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
+        return usize::MAX;
+    }
 
     let request_ptr = tf.get_arg(0);
     let mut request_bytes = [0u8; core::mem::size_of::<NetworkConfigureIpv4Request>()];
@@ -503,6 +527,12 @@ pub fn sys_network_clear_ipv4(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
     tf.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
+        return usize::MAX;
+    }
 
     let interface = match read_user_string(tf.get_arg(0), tf.get_arg(1)) {
         Some(interface) => interface,
@@ -1469,6 +1499,12 @@ pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
         return usize::MAX;
     };
     tf.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
+        return usize::MAX;
+    }
     let mut request = scarlet_abi::network::NetworkUpdateIpv4V1::default();
     // SAFETY: every bit pattern is valid for the integer/byte-array ABI record.
     let bytes = unsafe {
@@ -1491,11 +1527,10 @@ pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
         return usize::MAX;
     };
     tf.increment_pc_next(&task);
-    if !task
-        .credentials
-        .read()
-        .permits(crate::shield::identity::MANAGE_TRAFFIC)
-    {
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Network,
+    ) {
         return usize::MAX;
     }
     let mut request = scarlet_abi::network::NetworkTrafficConfigureV1::default();

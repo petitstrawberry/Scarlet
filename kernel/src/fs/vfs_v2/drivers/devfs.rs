@@ -487,7 +487,7 @@ impl VfsNode for DevNode {
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
             size: 0, // Device files have no size
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,

@@ -636,7 +636,7 @@ fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
             FileType::RegularFile
         },
         size,
-        permissions: FilePermission {
+        permissions: FilePermission::Capabilities {
             read: true,
             write: false,
             execute: directory,

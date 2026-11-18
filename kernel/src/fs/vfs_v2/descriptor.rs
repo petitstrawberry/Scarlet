@@ -61,10 +61,8 @@ fn vfs_file(object: &KernelObject) -> Option<&VfsFileObject> {
 
 fn check_stream(table: &HandleTable, handle: usize, write: bool) -> Result<KernelObject, usize> {
     let (object, metadata) = descriptor(table, handle)?;
-    if matches!(
-        (write, metadata.access_mode),
-        (true, AccessMode::ReadOnly) | (false, AccessMode::WriteOnly)
-    ) {
+    use crate::shield::access::{FileGrant, READ, WRITE};
+    if !FileGrant::from_mode(metadata.access_mode).permits(if write { WRITE } else { READ }) {
         return Err(negative(ERRNO_EBADF));
     }
     if let Some(file) = vfs_file(&object) {

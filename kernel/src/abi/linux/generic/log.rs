@@ -54,8 +54,8 @@ fn access_mode(flags: i32) -> Result<AccessMode, usize> {
 }
 
 fn check_access(mode: AccessMode, permissions: FilePermission) -> Result<(), usize> {
-    if (mode != AccessMode::WriteOnly && !permissions.read)
-        || (mode != AccessMode::ReadOnly && !permissions.write)
+    if (mode != AccessMode::WriteOnly && !permissions.readable())
+        || (mode != AccessMode::ReadOnly && !permissions.writable())
     {
         Err(errno::EACCES)
     } else {
@@ -67,7 +67,7 @@ pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
     (path.trim_end_matches('/') == "/proc/kmsg").then_some(FileMetadata {
         file_type: FileType::RegularFile,
         size: 0,
-        permissions: FilePermission {
+        permissions: FilePermission::Capabilities {
             read: true,
             write: false,
             execute: false,
@@ -977,7 +977,7 @@ mod tests {
                     assert_eq!(
                         check_access(
                             mode,
-                            FilePermission {
+                            FilePermission::Capabilities {
                                 read,
                                 write,
                                 execute: false

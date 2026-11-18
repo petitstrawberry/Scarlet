@@ -3039,6 +3039,7 @@ impl SocketControl for TcpSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        crate::shield::authorization::connect(crate::shield::authorization::Target::Internet)?;
         match address {
             SocketAddress::Inet(inet) => {
                 self.clear_pending_error();

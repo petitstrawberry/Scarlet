@@ -951,6 +951,7 @@ pub enum Syscall {
     /// Requires bootstrap, existing policy administration, or factory authority.
     /// The returned handle grants no access to any existing policy. No arguments.
     ShieldPolicyFactory = 1347,
+    ShieldFileAcl = 1348,
     VmLayoutConfigure = 1350,
     VmLayoutQuery = 1351,
     ShieldPolicyCreate = 1310,

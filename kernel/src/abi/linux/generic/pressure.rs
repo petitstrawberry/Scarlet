@@ -363,7 +363,7 @@ impl FileObject for PressureFile {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: self.can_read(),
                 write: self.can_write(),
                 execute: false,

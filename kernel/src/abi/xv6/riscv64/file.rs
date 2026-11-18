@@ -136,7 +136,7 @@ pub fn sys_open(
     let vfs = task.vfs.read().clone().unwrap();
 
     // Try to open the file
-    let file = vfs.open(&path_str, 0);
+    let file = vfs.open(&path_str, mode as u32 & 3);
 
     match file {
         Ok(kernel_obj) => {
@@ -159,7 +159,7 @@ pub fn sys_open(
                 if res.is_err() {
                     return usize::MAX; // File creation error
                 }
-                match vfs.open(&path_str, 0) {
+                match vfs.open(&path_str, mode as u32 & 3) {
                     Ok(kernel_obj) => {
                         // Register the file with the task using HandleTable
                         let handle = task.handle_table.insert(kernel_obj);

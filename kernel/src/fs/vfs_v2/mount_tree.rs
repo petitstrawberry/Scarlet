@@ -638,6 +638,10 @@ impl MountTree {
                 ));
             }
 
+            crate::shield::access::check(
+                current_entry.node().as_ref(),
+                crate::shield::access::EXECUTE,
+            )?;
             if *component == ".." {
                 // Handle parent directory traversal (same as original implementation)
                 let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
@@ -741,6 +745,12 @@ impl MountTree {
             ));
         }
 
+        if path.ends_with('/') {
+            crate::shield::access::check(
+                current_entry.node().as_ref(),
+                crate::shield::access::EXECUTE,
+            )?;
+        }
         Ok((current_entry, current_mount))
     }
 

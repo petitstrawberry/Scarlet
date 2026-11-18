@@ -44,6 +44,12 @@ pub fn sys_lsm_load(trapframe: &mut Trapframe) -> usize {
         }
     };
     trapframe.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Modules,
+    ) {
+        return LsmErrorCode::PermissionDenied as usize;
+    }
 
     let path_str = match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH)
     {
@@ -129,6 +135,12 @@ pub fn sys_lsm_unload(trapframe: &mut Trapframe) -> usize {
         }
     };
     trapframe.increment_pc_next(&task);
+    if !crate::shield::authorization::permits_management(
+        &task,
+        crate::shield::authorization::Management::Modules,
+    ) {
+        return LsmErrorCode::PermissionDenied as usize;
+    }
 
     let module_id = trapframe.get_arg(0) as u64;
     match unload_module(module_id) {

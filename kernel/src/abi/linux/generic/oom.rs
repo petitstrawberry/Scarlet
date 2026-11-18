@@ -295,7 +295,7 @@ impl FileObject for ProcReclaimFile {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
             size: target_text(self)?.len(),
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,
@@ -374,7 +374,7 @@ pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
     Some(FileMetadata {
         file_type: FileType::RegularFile,
         size: content.len(),
-        permissions: FilePermission {
+        permissions: FilePermission::Capabilities {
             read: true,
             write: true,
             execute: false,

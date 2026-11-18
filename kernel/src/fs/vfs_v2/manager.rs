@@ -1,5 +1,6 @@
 //! Filesystem views and per-process filesystem contexts.
 
+use crate::shield::access::{self, EXECUTE, READ, WRITE};
 use crate::sync::{IrqRwSpinLock, Mutex, MutexGuard, Once};
 use alloc::{
     collections::VecDeque,
@@ -591,13 +592,29 @@ impl VfsManager {
     /// acquire this namespace lock.
     ///
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
+        let access = access::open_access(flags)?;
         if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
             return self.create_new_and_open(path, flags);
         }
+        self.open_existing(path, flags, access)
+    }
+
+    /// The returned readable description is private to the image loader.
+    pub(crate) fn open_executable(&self, path: &str) -> Result<KernelObject, FileSystemError> {
+        self.open_existing(path, 0, EXECUTE)
+    }
+
+    fn open_existing(
+        &self,
+        path: &str,
+        flags: u32,
+        access: u32,
+    ) -> Result<KernelObject, FileSystemError> {
         let mut namespace_guard = Some(lock_namespace_mutations()?);
         // Use MountTreeV2 to resolve filesystem and relative path, then open
         let (entry, mount_point) = self.resolve_path(path)?;
         let node = entry.node();
+        let grant = access::FileGrant::acquire(node.as_ref(), access)?;
         Self::check_device_open(&mount_point, &node.file_type()?)?;
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
             FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
@@ -610,8 +627,14 @@ impl VfsManager {
         let inner_file_obj = filesystem.open(&node, flags)?;
 
         // Wrap with VFS-layer information
-        let vfs_file_obj =
-            super::core::VfsFileObject::new(inner_file_obj, entry, mount_point, path.to_string());
+        let vfs_file_obj = super::core::VfsFileObject::new(
+            inner_file_obj,
+            entry,
+            mount_point,
+            path.to_string(),
+            flags,
+            grant,
+        );
 
         Ok(KernelObject::File(Arc::new(vfs_file_obj)))
     }
@@ -621,7 +644,6 @@ impl VfsManager {
     /// Relative paths retain the supplied directory (or cwd) as their anchor;
     /// absolute paths ignore it. Creation, overlay copy-up and truncation share
     /// one namespace mutation guard. Creation is not rolled back if open fails.
-    /// `mode` supplies permission metadata, not a permission enforcement policy.
     pub fn open_at(
         &self,
         base: Option<(&Arc<VfsEntry>, &Arc<MountPoint>)>,
@@ -646,6 +668,18 @@ impl VfsManager {
                 "Invalid open flags",
             ));
         }
+        self.open_at_with_driver_flags(base, path, flags, mode)
+    }
+
+    /// ABI adapters translate flag values and validate ABI-specific options.
+    pub(crate) fn open_at_with_driver_flags(
+        &self,
+        base: Option<(&Arc<VfsEntry>, &Arc<MountPoint>)>,
+        path: &str,
+        flags: u32,
+        mode: u32,
+    ) -> Result<KernelObject, FileSystemError> {
+        let access = access::open_access(flags)?;
         if path.is_empty() {
             return Err(vfs_error(FileSystemErrorKind::NotFound, "Empty pathname"));
         }
@@ -656,8 +690,12 @@ impl VfsManager {
             ));
         }
         let mut namespace_guard = Some(lock_namespace_mutations()?);
-        let (entry, mount_point) = self.resolve_open_at(base, path, flags, mode)?;
+        let (entry, mount_point, created) = self.resolve_open_at(base, path, flags, mode)?;
         let node = entry.node();
+        let grant = match created {
+            Some(grant) => grant,
+            None => access::FileGrant::acquire(node.as_ref(), access)?,
+        };
         let file_type = node.file_type()?;
         Self::check_device_open(&mount_point, &file_type)?;
         if flags & O_DIRECTORY != 0 && file_type != FileType::Directory {
@@ -700,12 +738,13 @@ impl VfsManager {
             })?;
         }
         Ok(KernelObject::File(Arc::new(
-            super::core::VfsFileObject::new_with_flags(
+            super::core::VfsFileObject::new(
                 inner,
                 entry,
                 mount_point,
                 path.to_string(),
                 flags,
+                grant,
             ),
         )))
     }
@@ -720,7 +759,7 @@ impl VfsManager {
         path: &str,
         flags: u32,
         mode: u32,
-    ) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+    ) -> Result<(Arc<VfsEntry>, Arc<MountPoint>, Option<access::FileGrant>), FileSystemError> {
         let (mut entry, mut mount) = if path.starts_with('/') {
             self.resolve_path("/")?
         } else if let Some((entry, mount)) = base {
@@ -771,16 +810,25 @@ impl VfsManager {
                         .ok_or_else(|| {
                             vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference")
                         })?;
-                    let node = filesystem.create(
+                    let (node, grant) = Self::create_child(
+                        &filesystem,
                         &parent_node,
                         &component,
                         FileType::RegularFile,
-                        mode & 0o777,
+                        mode & 0o7777,
+                        access::open_access(flags)?,
                     )?;
                     let created =
                         VfsEntry::new(Some(Arc::downgrade(&entry)), component.clone(), node);
-                    entry.add_child(component, created.clone());
-                    return Ok((created, mount));
+                    entry.add_child(component.clone(), created.clone());
+                    super::notify::emit(
+                        &parent_node,
+                        super::notify::Kind::Created,
+                        &component,
+                        false,
+                        0,
+                    );
+                    return Ok((created, mount, Some(grant)));
                 }
                 Err(error) => return Err(error),
             };
@@ -836,7 +884,10 @@ impl VfsManager {
                 "Trailing slash requires a directory",
             ));
         }
-        Ok((entry, mount))
+        if requires_directory {
+            access::check(entry.node().as_ref(), EXECUTE)?;
+        }
+        Ok((entry, mount, None))
     }
 
     fn create_new_and_open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
@@ -863,6 +914,7 @@ impl VfsManager {
                 vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference")
             })?;
 
+        access::check(parent_node.as_ref(), EXECUTE)?;
         // Ask the driver directly rather than relying on a possibly unpopulated
         // entry cache. Lookup does not follow the final symlink, and also finds
         // files that exist only in an overlay's lower layer.
@@ -876,7 +928,14 @@ impl VfsManager {
             Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let node = filesystem.create(&parent_node, &filename, FileType::RegularFile, 0o644)?;
+        let (node, grant) = Self::create_child(
+            &filesystem,
+            &parent_node,
+            &filename,
+            FileType::RegularFile,
+            0o644,
+            access::open_access(flags)?,
+        )?;
         let entry = VfsEntry::new(
             Some(Arc::downgrade(&parent_entry)),
             filename.clone(),
@@ -897,8 +956,41 @@ impl VfsManager {
             drop(namespace_guard.take());
         }
         let inner = filesystem.open(&node, flags)?;
-        let file = super::core::VfsFileObject::new(inner, entry, mount_point, path.to_string());
+        let file = super::core::VfsFileObject::new(
+            inner,
+            entry,
+            mount_point,
+            path.to_string(),
+            flags,
+            grant,
+        );
         Ok(KernelObject::File(Arc::new(file)))
+    }
+
+    fn create_child(
+        filesystem: &Arc<dyn FileSystemOperations>,
+        parent_node: &Arc<dyn super::core::VfsNode>,
+        name: &String,
+        file_type: FileType,
+        mode: u32,
+        open_rights: u32,
+    ) -> Result<(Arc<dyn super::core::VfsNode>, access::FileGrant), FileSystemError> {
+        let (label, grant) =
+            access::authorize_creation(parent_node.as_ref(), &file_type, open_rights)?;
+        let node = filesystem.create_labeled(
+            parent_node,
+            name,
+            file_type,
+            access::InodeAccess::for_creation(mode),
+            label.as_ref(),
+            None,
+        )?;
+        Ok((node, grant))
+    }
+
+    pub fn chmod(&self, path: &str, mode: u32) -> Result<(), FileSystemError> {
+        let _guard = lock_namespace_mutations()?;
+        self.resolve_path(path)?.0.node().set_mode(mode)
     }
 
     /// Create a file at the specified path
@@ -916,6 +1008,21 @@ impl VfsManager {
     /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
+        let mode = match file_type {
+            FileType::Directory => 0o755,
+            FileType::SymbolicLink(_) => 0o777,
+            FileType::RegularFile => 0o644,
+            _ => 0o666,
+        };
+        self.create_file_with_mode(path, file_type, mode)
+    }
+
+    pub fn create_file_with_mode(
+        &self,
+        path: &str,
+        file_type: FileType,
+        mode: u32,
+    ) -> Result<(), FileSystemError> {
         let _namespace_guard = lock_namespace_mutations()?;
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
@@ -936,16 +1043,9 @@ impl VfsManager {
             .ok_or_else(|| {
                 FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
             })?;
-        let label = crate::task::mytask()
-            .map(|task| {
-                crate::shield::file::CreateContext::prepare(&task, parent_node.as_ref(), &file_type)
-            })
-            .transpose()
-            .map_err(|reason| FileSystemError::new(FileSystemErrorKind::PermissionDenied, reason))?
-            .flatten();
         let is_directory = file_type == FileType::Directory;
-        let new_node =
-            filesystem.create_labeled(&parent_node, &filename, file_type, 0o644, label.as_ref())?;
+        let (new_node, _) =
+            Self::create_child(&filesystem, &parent_node, &filename, file_type, mode, 0)?;
 
         // Create VfsEntry and add to parent cache
         let new_entry = VfsEntry::new(
@@ -1002,7 +1102,8 @@ impl VfsManager {
                 "Directory watch requires a directory",
             ));
         }
-        if !metadata.permissions.read {
+        access::check(node.as_ref(), READ)?;
+        if metadata.permissions.inode().is_none() && !metadata.permissions.readable() {
             return Err(vfs_error(
                 FileSystemErrorKind::PermissionDenied,
                 "Directory watch requires read access",
@@ -1154,6 +1255,7 @@ impl VfsManager {
         let parent_entry = self.resolve_path(&parent_path)?.0;
         let parent_node = parent_entry.node();
 
+        access::check_removal(parent_node.as_ref(), entry_to_remove.node().as_ref())?;
         // Remove from filesystem
         let filesystem = parent_node
             .filesystem()
@@ -1279,6 +1381,7 @@ impl VfsManager {
             )
         })?;
 
+        access::check(node.as_ref(), READ)?;
         // Call filesystem's readdir
         filesystem.readdir(&node)
     }
@@ -1297,18 +1400,7 @@ impl VfsManager {
     pub fn set_cwd_by_path(&self, path: &str) -> Result<(), FileSystemError> {
         let (entry, mount_point) = self.resolve_path(path)?;
 
-        // Verify it's a directory
-        let node = entry.node();
-
-        if !node.is_directory()? {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotADirectory,
-                "Not a directory",
-            ));
-        }
-
-        self.set_cwd(entry, mount_point);
-        Ok(())
+        self.set_cwd(entry, mount_point)
     }
 
     /// Set current working directory
@@ -1320,8 +1412,25 @@ impl VfsManager {
     /// * `entry` - The VfsEntry representing the directory
     /// * `mount_point` - The MountPoint where the directory is mounted
     ///
-    pub fn set_cwd(&self, entry: Arc<VfsEntry>, mount_point: Arc<MountPoint>) {
+    pub fn set_cwd(
+        &self,
+        entry: Arc<VfsEntry>,
+        mount_point: Arc<MountPoint>,
+    ) -> Result<(), FileSystemError> {
+        // Verify it's a directory
+        let node = entry.node();
+
+        if !node.is_directory()? {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Not a directory",
+            ));
+        }
+
+        access::check(node.as_ref(), EXECUTE)?;
+
         *self.cwd.write() = Some((entry, mount_point));
+        Ok(())
     }
 
     /// Get current working directory
@@ -1653,6 +1762,7 @@ impl VfsManager {
         let (target_parent_entry, _target_mount) = self.resolve_path(&target_parent_path)?;
         let target_parent_node = target_parent_entry.node();
 
+        access::check(target_parent_node.as_ref(), WRITE | EXECUTE)?;
         // Check that target parent is a directory
         if !target_parent_node.is_directory()? {
             return Err(vfs_error(
@@ -1867,6 +1977,12 @@ impl VfsManager {
         let old_parent_node = old_parent_entry.node();
         let new_parent_node = new_parent_entry.node();
 
+        access::check_removal(old_parent_node.as_ref(), old_entry.node().as_ref())?;
+        if let Some(target) = &replaced_node {
+            access::check_removal(new_parent_node.as_ref(), target.as_ref())?;
+        } else {
+            access::check(new_parent_node.as_ref(), WRITE | EXECUTE)?;
+        }
         // Both parents must be on the same filesystem
         let old_fs = old_parent_node
             .filesystem()
@@ -2028,6 +2144,7 @@ impl VfsManager {
         let mut namespace_guard = Some(lock_namespace_mutations()?);
         let (entry, mount_point) = self.resolve_path_from(base_entry, base_mount, path)?;
         let node = entry.node();
+        let grant = access::FileGrant::acquire(node.as_ref(), access::open_access(flags)?)?;
         Self::check_device_open(&mount_point, &node.file_type()?)?;
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
             FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
@@ -2036,8 +2153,14 @@ impl VfsManager {
             drop(namespace_guard.take());
         }
         let inner_file_obj = filesystem.open(&node, flags)?;
-        let vfs_file_obj =
-            super::core::VfsFileObject::new(inner_file_obj, entry, mount_point, path.to_string());
+        let vfs_file_obj = super::core::VfsFileObject::new(
+            inner_file_obj,
+            entry,
+            mount_point,
+            path.to_string(),
+            flags,
+            grant,
+        );
         Ok(KernelObject::File(Arc::new(vfs_file_obj)))
     }
 

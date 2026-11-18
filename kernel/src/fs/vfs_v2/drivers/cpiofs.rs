@@ -147,7 +147,7 @@ impl VfsNode for CpioNode {
             created_time: 0,
             modified_time: u64::from(self.modified_time.load(Ordering::Relaxed)),
             accessed_time: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: false,
                 execute: true,

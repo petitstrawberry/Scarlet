@@ -1676,6 +1676,11 @@ impl SocketControl for LocalSocket {
             Some(socket) => socket,
             None => return Err(SocketError::InvalidOperation),
         };
+        crate::shield::authorization::connect(
+            crate::shield::authorization::Target::LocalEndpoint(
+                server_local.security_label().as_ref(),
+            ),
+        )?;
         let client_credentials = Self::current_credentials(true);
         let server_credentials = server_local.owner_credentials.read().clone();
 

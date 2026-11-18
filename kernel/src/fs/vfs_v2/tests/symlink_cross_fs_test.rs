@@ -53,7 +53,7 @@ fn test_symlink_cross_filesystem_file_operations() {
     // Read content from the source file through symlink using VFS open
     let source_content = {
         let file_obj = vfs
-            .open("/symlink/bar", 0x01)
+            .open("/symlink/bar", scarlet_abi::fs::VFS_O_RDONLY)
             .expect("Failed to open source file through symlink"); // Read mode
 
         if let crate::object::KernelObject::File(file_obj) = file_obj {
@@ -102,7 +102,7 @@ fn test_symlink_cross_filesystem_file_operations() {
     // Try to read back from destination file to verify it worked
     {
         let dest_file = vfs
-            .open("/tmp/bar", 0x01)
+            .open("/tmp/bar", scarlet_abi::fs::VFS_O_RDONLY)
             .expect("Failed to open destination file for reading"); // Read mode
 
         if let crate::object::KernelObject::File(dest_file_obj) = dest_file {
@@ -150,7 +150,7 @@ fn copy_file_vfs(vfs: &VfsManager, src: &str, dest: &str) -> bool {
     // This mirrors the copy_file function in init.rs with detailed debugging
 
     // Read source file
-    let src_file = match vfs.open(src, 0x01) {
+    let src_file = match vfs.open(src, scarlet_abi::fs::VFS_O_RDONLY) {
         // Read mode
         Ok(file) => file,
         Err(_) => {
@@ -211,7 +211,7 @@ fn copy_file_vfs(vfs: &VfsManager, src: &str, dest: &str) -> bool {
     }
 
     // Test: Try to open the file again for reading to verify it works
-    let _verify_file = match vfs.open(dest, 0x01) {
+    let _verify_file = match vfs.open(dest, scarlet_abi::fs::VFS_O_RDONLY) {
         // Read mode
         Ok(file) => file,
         Err(_) => {

@@ -72,11 +72,13 @@ impl Fat32Node {
             metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: false,
-                },
+                permissions: FilePermission::Inode(crate::shield::access::InodeAccess {
+                    owner: crate::shield::identity::ActiveIdentity {
+                        principal: crate::shield::identity::Principal(0),
+                        group: crate::shield::identity::Group(0),
+                    },
+                    mode: 0o644,
+                }),
                 created_time: 0, // TODO: Convert FAT32 timestamps
                 modified_time: 0,
                 accessed_time: 0,
@@ -99,11 +101,13 @@ impl Fat32Node {
             metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: true, // Directories need execute permission for traversal
-                },
+                permissions: FilePermission::Inode(crate::shield::access::InodeAccess {
+                    owner: crate::shield::identity::ActiveIdentity {
+                        principal: crate::shield::identity::Principal(0),
+                        group: crate::shield::identity::Group(0),
+                    },
+                    mode: 0o755,
+                }),
                 created_time: 0, // TODO: Convert FAT32 timestamps
                 modified_time: 0,
                 accessed_time: 0,

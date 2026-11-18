@@ -145,7 +145,7 @@ impl VfsNode for Node {
                 FileType::RegularFile
             },
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: false,
                 execute: self.field == 0,

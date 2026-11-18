@@ -273,7 +273,7 @@ impl FileObject for RouteSocket {
         Ok(FileMetadata {
             file_type: FileType::Socket(crate::fs::SocketFileInfo { socket_id: 0 }),
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: false,
                 execute: false,

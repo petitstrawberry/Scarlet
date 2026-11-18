@@ -660,7 +660,9 @@ fn test_load_elf() {
     manager
         .create_file(file_path, FileType::RegularFile)
         .expect("Failed to create test file");
-    let kernel_obj = manager.open(file_path, 0).expect("Failed to open file");
+    let kernel_obj = manager
+        .open(file_path, O_RDWR)
+        .expect("Failed to open file");
     let file = kernel_obj.as_file().expect("Failed to get file reference");
     file.write(&native_fixture(&0x73u32.to_le_bytes(), 0x1000))
         .expect("Failed to write test ELF file");
@@ -718,7 +720,7 @@ fn test_load_elf_invalid_magic() {
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
-    let kernel_obj = manager.open("/invalid.elf", 0).unwrap();
+    let kernel_obj = manager.open("/invalid.elf", O_RDWR).unwrap();
     let file = kernel_obj.as_file().expect("Failed to get file reference");
     file.write(&invalid_elf_data)
         .expect("Failed to write invalid ELF data");

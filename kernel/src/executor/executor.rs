@@ -192,18 +192,16 @@ impl TransparentExecutor {
             .as_ref()
             .and_then(|env| path_in_environment_view(&vfs, path, env, &mount_namespace));
         let file = if let Some((_, view, relative)) = &view_path {
-            VfsManager::from_view(view.clone()).open(relative, 0)
+            VfsManager::from_view(view.clone()).open_executable(relative)
         } else {
-            vfs.open(path, 0)
+            vfs.open_executable(path)
         }
         .map_err(|error| ExecutorError::OpenFailed {
             path: path.to_string(),
             error,
         })?;
         if let Some(file_obj) = file.as_file() {
-            if !file_obj.allows_execution() {
-                return Err(failure("execution disabled on mount"));
-            }
+            file_obj.check_image_execution().map_err(failure)?;
             let mut header = [0u8; 256];
             if let Ok(n) = file_obj.read_at(0, &mut header) {
                 if n >= 2 && &header[..2] == b"#!" {
@@ -234,7 +232,7 @@ impl TransparentExecutor {
                             .clone()
                             .ok_or_else(|| failure("process has no Environment"))?;
                         let interpreter_file = VfsManager::from_view(view.clone())
-                            .open(interpreter, 0)
+                            .open_executable(interpreter)
                             .map_err(|error| ExecutorError::OpenFailed {
                                 path: interpreter.to_string(),
                                 error,
@@ -397,8 +395,8 @@ impl TransparentExecutor {
         task: &Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
-        if file.as_file().is_some_and(|f| !f.allows_execution()) {
-            return Err(failure("execution disabled on mount"));
+        if let Some(file) = file.as_file() {
+            file.check_image_execution().map_err(failure)?;
         }
         // Replacing a shared address space, shared descriptor table, or a live
         // thread group needs coordinated thread retirement, not partial exec.

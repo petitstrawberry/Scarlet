@@ -40,7 +40,7 @@ fn metadata(name: &str, size: usize) -> FileMetadata {
     FileMetadata {
         file_type: FileType::RegularFile,
         size,
-        permissions: FilePermission {
+        permissions: FilePermission::Capabilities {
             read: true,
             write: true,
             execute: false,
@@ -84,11 +84,10 @@ impl StreamOps for QuotaFile {
             return Err(StreamError::PermissionDenied);
         }
         let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
-        if !caller
-            .credentials
-            .read()
-            .permits(crate::shield::identity::MANAGE_TRAFFIC)
-        {
+        if !crate::shield::authorization::permits_management(
+            &caller,
+            crate::shield::authorization::Management::Network,
+        ) {
             return Err(StreamError::PermissionDenied);
         }
         let value = core::str::from_utf8(buffer)

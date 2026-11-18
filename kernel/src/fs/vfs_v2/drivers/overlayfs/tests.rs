@@ -1,7 +1,7 @@
 //! OverlayFS v2 tests including cross-VFS support
 
 use super::super::tmpfs::TmpFS;
-use super::OverlayFS;
+use super::{InodeAccess, OverlayFS};
 use crate::fs::FileSystemErrorKind;
 use crate::fs::FileSystemOperations;
 use crate::fs::FileType;
@@ -736,11 +736,19 @@ fn test_overlayfs_copy_up() {
     // Create file in lower only
     let lower_root = lower.root_node();
     let lower_file = lower
-        .create(
+        .create_labeled(
             &lower_root.clone(),
             &"testfile".to_string(),
             FileType::RegularFile,
-            0o644,
+            InodeAccess {
+                owner: crate::shield::identity::ActiveIdentity {
+                    principal: crate::shield::identity::Principal(70003),
+                    group: crate::shield::identity::Group(80003),
+                },
+                mode: 0o640,
+            },
+            None,
+            Some(&[1, 0, 4, 0, 42, 0, 0, 0]),
         )
         .unwrap();
 
@@ -770,6 +778,17 @@ fn test_overlayfs_copy_up() {
     // Verify upper layer now has the file
     let upper_root = upper.root_node();
     let upper_file = upper.lookup(&upper_root, &"testfile".to_string()).unwrap();
+    assert_eq!(
+        upper_file
+            .get_xattr(scarlet_abi::shield::FILE_ACCESS_ACL)
+            .unwrap(),
+        [1, 0, 4, 0, 42, 0, 0, 0]
+    );
+    let access = upper_file.metadata().unwrap().permissions.inode().unwrap();
+    assert_eq!(
+        (access.mode, access.owner.principal.0, access.owner.group.0),
+        (0o640, 70003, 80003)
+    );
     let upper_file_obj = upper.open(&upper_file, 0).unwrap(); // Read mode
     let mut buffer = [0u8; 32];
     let bytes_read = upper_file_obj.read(&mut buffer).unwrap();

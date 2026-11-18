@@ -1,5 +1,7 @@
 //! cgroup2 filesystem translation over native ResourceGroup membership.
 //! No resource controller is advertised until its native enforcement exists.
+use crate::shield::access::InodeAccess;
+
 use super::errno;
 use crate::{
     fs::{
@@ -158,7 +160,7 @@ impl VfsNode for Node {
                 FileType::RegularFile
             },
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: matches!(self.kind, 0 | 1 | 3)
                     || self
@@ -293,16 +295,27 @@ impl FileSystemOperations for CgroupFs {
         kind: FileType,
         _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent, name, kind, _mode, None)
+        self.create_labeled(
+            parent,
+            name,
+            kind,
+            InodeAccess::for_creation(_mode),
+            None,
+            None,
+        )
     }
     fn create_labeled(
         &self,
         parent: &Arc<dyn VfsNode>,
         name: &String,
         kind: FileType,
-        _mode: u32,
+        _access: InodeAccess,
         label: Option<&crate::shield::file::CreateContext>,
+        acl: Option<&[u8]>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        if acl.is_some() {
+            return Err(error(K::NotSupported));
+        }
         let node = self.node(parent)?;
         let task = crate::task::mytask().ok_or_else(|| error(K::PermissionDenied))?;
         if node.kind != 0 || !node.writable(&task) {
@@ -348,14 +361,7 @@ impl FileSystemOperations for CgroupFs {
         let group = node.group.child(name).ok_or_else(|| error(K::NotFound))?;
         group.remove().map_err(|_| error(K::Busy))?;
         let mut nodes = self.nodes.write();
-        nodes.retain(|(id, _), node| {
-            if *id == group.identity() {
-                super::mode::clear(&(node.clone() as Arc<dyn VfsNode>));
-                false
-            } else {
-                true
-            }
-        });
+        nodes.retain(|(id, _), _| *id != group.identity());
         Ok(())
     }
     fn readdir(

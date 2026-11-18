@@ -90,7 +90,7 @@ fn directory_metadata(file_id: u64, entries: &[ProcDirectoryEntry]) -> FileMetad
     FileMetadata {
         file_type: FileType::Directory,
         size: 0,
-        permissions: FilePermission {
+        permissions: FilePermission::Capabilities {
             read: true,
             write: false,
             execute: true,

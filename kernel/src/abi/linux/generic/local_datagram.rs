@@ -257,6 +257,8 @@ pub(super) fn receive(
                 header.msg_flags |= 8;
                 continue;
             }
+            let (object, metadata) = crate::shield::access::receive_handle(task, object, metadata)
+                .map_err(|_| errno::EACCES)?;
             let access = metadata.access_mode;
             let handle = task
                 .handle_table

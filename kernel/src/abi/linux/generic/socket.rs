@@ -2189,6 +2189,12 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             sender_process_id = Some(sender);
                         }
                         for (obj, metadata) in handles {
+                            let Ok((obj, metadata)) =
+                                crate::shield::access::receive_handle(&task, obj, metadata)
+                            else {
+                                rollback_received_fds(abi, &task, &pending_fds);
+                                return errno::to_result(errno::EACCES);
+                            };
                             let access_mode = metadata.access_mode;
                             let new_handle =
                                 match task.handle_table.insert_with_metadata(obj, metadata) {

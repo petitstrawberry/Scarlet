@@ -3406,3 +3406,243 @@ mod inode_table_request_tests {
         assert_eq!(remounted.get_inode_block(&inode, 12).unwrap(), 612);
     }
 }
+
+#[test_case]
+fn ext2_dac_native_and_linux_open_survive_remount() {
+    use crate::{
+        abi::linux::generic::{LinuxAbi, fs as linux, test_support},
+        fs::{VfsManager, vfs_v2::descriptor},
+        library::std::usercopy::{copy_from_user, copy_to_user},
+        shield::identity::{Credentials, Group, Identities, Principal},
+        task::{Task, TaskType, clear_mock_current_task, set_mock_current_task},
+    };
+    use scarlet_abi::fs::{VFS_O_CREAT, VFS_O_EXCL, VFS_O_RDWR, VFS_O_TRUNC};
+
+    fn user(uid: u32, gid: u32, groups: &[Group]) -> Credentials {
+        let mut c = Credentials::bootstrap();
+        c.set_principals(Identities::all(Principal(uid))).unwrap();
+        c.set_groups(Identities::all(Group(gid))).unwrap();
+        c.set_supplementary(groups.to_vec()).unwrap();
+        c.set_authority(0, 0).unwrap();
+        c
+    }
+    const PATH: usize = 0x20000;
+    const DATA: usize = PATH + 128;
+    let (device, fs) = inode_group_fixture(1, false);
+    let view = Arc::new(VfsManager::new_with_root(fs));
+    let task = Arc::new(Task::new("ext2-dac".into(), 0, TaskType::User));
+    task.set_vfs(view.clone());
+    set_mock_current_task(task.clone());
+    view.create_file_with_mode("/shared", FileType::Directory, 0o777)
+        .unwrap();
+    let a = user(70001, 80001, &[]);
+    let b = user(70002, 80002, &[]);
+    let member = user(70002, 80002, &[Group(80001)]);
+    *task.credentials.write() = a.clone();
+    view.create_dir("/shared/a").unwrap();
+    let mut frame = test_support::syscall_frame(&task);
+    task.allocate_stack_pages(PATH, 1).unwrap();
+    let mut abi = LinuxAbi::default();
+    abi.umask = 0;
+    let denied = (-13isize) as usize;
+    let open = |linux_abi: bool,
+                path: &str,
+                flags: u32,
+                mode: u32,
+                abi: &mut LinuxAbi,
+                frame: &mut crate::arch::Trapframe| {
+        copy_to_user(&task, PATH, format!("{path}\0").as_bytes()).unwrap();
+        frame.set_arg(0, (-100isize) as usize);
+        frame.set_arg(1, PATH);
+        frame.set_arg(2, flags as usize);
+        frame.set_arg(3, mode as usize);
+        if linux_abi {
+            linux::sys_openat(abi, frame)
+        } else {
+            descriptor::sys_vfs_open_at(frame)
+        }
+    };
+    for (linux_abi, path, mode) in [
+        (false, "/shared/a/private", 0o600),
+        (true, "/shared/a/group", 0o640),
+    ] {
+        let fd = open(
+            linux_abi,
+            path,
+            VFS_O_CREAT | VFS_O_EXCL | VFS_O_RDWR,
+            mode,
+            &mut abi,
+            &mut frame,
+        );
+        assert!((fd as isize) >= 0, "create {path}: {fd}");
+        copy_to_user(&task, DATA, b"secret").unwrap();
+        frame.set_arg(0, fd);
+        frame.set_arg(1, DATA);
+        frame.set_arg(2, 6);
+        assert_eq!(
+            if linux_abi {
+                linux::sys_write(&mut abi, &mut frame)
+            } else {
+                descriptor::sys_stream_write_with_status(&mut frame)
+            },
+            6
+        );
+        let handle = if linux_abi {
+            abi.remove_fd(fd).unwrap()
+        } else {
+            fd as u32
+        };
+        task.handle_table
+            .get(handle)
+            .unwrap()
+            .as_file()
+            .unwrap()
+            .sync()
+            .unwrap();
+        task.handle_table.remove(handle);
+    }
+    // Use the Scarlet editing API; both ABIs consult the persisted inode grant.
+    const ACL_USER: u32 = 91001;
+    let share = open(false, "/shared/a/private", 0, 0, &mut abi, &mut frame);
+    let mut acl = [1, 0, 4, 0, 0, 0, 0, 0];
+    acl[4..].copy_from_slice(&ACL_USER.to_le_bytes());
+    copy_to_user(&task, DATA, &acl).unwrap();
+    frame.set_arg(0, share);
+    frame.set_arg(1, 1);
+    frame.set_arg(2, DATA);
+    frame.set_arg(3, acl.len());
+    assert_eq!(crate::shield::syscall::sys_shield_file_acl(&mut frame), 0);
+    task.handle_table.remove(share as u32);
+    drop(view);
+    let view = Arc::new(VfsManager::new_with_root(
+        Ext2FileSystem::new(device).unwrap(),
+    ));
+    task.set_vfs(view.clone());
+    for (path, mode) in [("/shared/a/private", 0o600), ("/shared/a/group", 0o640)] {
+        let stat = linux::LinuxStat::from_metadata(&view.metadata(path).unwrap());
+        assert_eq!(
+            (stat.st_uid, stat.st_gid, stat.st_mode & 0o7777),
+            (70001, 80001, mode)
+        );
+        for linux_abi in [false, true] {
+            for (identity, allowed) in [(&a, true), (&b, false), (&member, mode == 0o640)] {
+                *task.credentials.write() = identity.clone();
+                let fd = open(linux_abi, path, 0, 0, &mut abi, &mut frame);
+                if !allowed {
+                    assert_eq!(fd, denied);
+                    assert_eq!(
+                        open(
+                            linux_abi,
+                            path,
+                            VFS_O_CREAT | VFS_O_RDWR | VFS_O_TRUNC,
+                            0,
+                            &mut abi,
+                            &mut frame
+                        ),
+                        denied
+                    );
+                    continue;
+                }
+                assert!((fd as isize) >= 0);
+                copy_to_user(&task, DATA, &[0; 6]).unwrap();
+                frame.set_arg(0, fd);
+                frame.set_arg(1, DATA);
+                frame.set_arg(2, 6);
+                assert_eq!(
+                    if linux_abi {
+                        linux::sys_read(&mut abi, &mut frame)
+                    } else {
+                        descriptor::sys_stream_read_with_status(&mut frame)
+                    },
+                    6
+                );
+                let mut out = [0; 6];
+                copy_from_user(&task, DATA, &mut out).unwrap();
+                assert_eq!(&out, b"secret");
+                let h = if linux_abi {
+                    abi.remove_fd(fd).unwrap()
+                } else {
+                    fd as u32
+                };
+                let object = task.handle_table.get(h).unwrap();
+                let file = object.as_file().unwrap();
+                assert!(file.truncate(0).is_err());
+                assert!(file.check_image_execution().is_err());
+                task.handle_table.remove(h);
+            }
+        }
+    }
+    *task.credentials.write() = user(ACL_USER, 91002, &[]);
+    for linux_abi in [false, true] {
+        let fd = open(linux_abi, "/shared/a/private", 0, 0, &mut abi, &mut frame);
+        assert!((fd as isize) >= 0);
+        task.handle_table.remove(if linux_abi {
+            abi.remove_fd(fd).unwrap()
+        } else {
+            fd as u32
+        });
+        assert_eq!(
+            open(
+                linux_abi,
+                "/shared/a/private",
+                VFS_O_RDWR,
+                0,
+                &mut abi,
+                &mut frame
+            ),
+            denied
+        );
+    }
+    let retained = view.open("/shared/a/private", 0).unwrap();
+    let node = view.resolve_path("/shared/a/private").unwrap().0.node();
+    assert!(
+        node.remove_xattr(scarlet_abi::shield::FILE_ACCESS_ACL)
+            .is_err()
+    );
+    *task.credentials.write() = a.clone();
+    node.remove_xattr(scarlet_abi::shield::FILE_ACCESS_ACL)
+        .unwrap();
+    *task.credentials.write() = user(ACL_USER, 91002, &[]);
+    assert!(view.open("/shared/a/private", 0).is_err());
+    let mut contents = [0; 6];
+    assert_eq!(retained.as_file().unwrap().read(&mut contents).unwrap(), 6);
+    assert_eq!(&contents, b"secret");
+    *task.credentials.write() = b;
+    assert!(view.chmod("/shared/a/private", 0o666).is_err());
+    assert!(view.remove("/shared/a/private").is_err());
+    assert!(
+        view.create_file("/shared/a/new", FileType::RegularFile)
+            .is_err()
+    );
+    assert!(view.rename("/shared/a/private", "/shared/moved").is_err());
+    *task.credentials.write() = a.clone();
+    assert_eq!(view.metadata("/shared/a/private").unwrap().size, 6);
+    assert!(view.metadata("/shared/a/new").is_err());
+    assert!(view.metadata("/shared/moved").is_err());
+    view.chmod("/shared/a/private", 0o100).unwrap();
+    assert!(view.open("/shared/a/private", 0).is_err());
+    assert!(
+        view.open_executable("/shared/a/private")
+            .unwrap()
+            .as_file()
+            .unwrap()
+            .check_image_execution()
+            .is_ok()
+    );
+    view.create_file_with_mode("/shared/b", FileType::RegularFile, 0o600)
+        .unwrap();
+    *task.credentials.write() = member.clone();
+    assert!(view.open_executable("/shared/a/private").is_err());
+    assert!(view.rename("/shared/b", "/shared/a/private").is_err());
+    assert!(view.metadata("/shared/b").is_ok());
+    assert_eq!(view.metadata("/shared/a/private").unwrap().size, 6);
+    *task.credentials.write() = a;
+    view.chmod("/shared/a", 0o700).unwrap();
+    *task.credentials.write() = member;
+    for path in ["/shared/a/group", "/shared/a/../a/group"] {
+        for linux_abi in [false, true] {
+            assert_eq!(open(linux_abi, path, 0, 0, &mut abi, &mut frame), denied);
+        }
+    }
+    clear_mock_current_task();
+}

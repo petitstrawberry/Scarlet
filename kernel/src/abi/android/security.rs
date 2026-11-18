@@ -113,7 +113,7 @@ fn metadata(id: u64, size: usize, directory: bool, writable: bool) -> FileMetada
             FileType::RegularFile
         },
         size,
-        permissions: FilePermission {
+        permissions: FilePermission::Capabilities {
             read: true,
             write: writable,
             execute: directory,
@@ -1129,7 +1129,7 @@ mod tests {
         assert_eq!(&bytes[..length], b"30\n");
         assert_eq!(file.read(&mut bytes).unwrap(), 0);
         assert!(file.write(b"31").is_err());
-        assert!(!file.metadata().unwrap().permissions.write);
+        assert!(!file.metadata().unwrap().permissions.writable());
 
         let unversioned = SecurityFs::new(p).unwrap();
         assert!(!unversioned.nodes.contains_key("policyvers"));

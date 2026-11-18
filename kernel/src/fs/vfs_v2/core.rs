@@ -5,6 +5,8 @@
 //! - VfsNode: Abstract interface for file entities
 //! - FileSystemOperations: Driver API for filesystem operations
 
+use crate::shield::access::{FileGrant, InodeAccess};
+
 use crate::sync::IrqRwSpinLock;
 use crate::sync::sequence::IdSequence;
 use alloc::{
@@ -251,6 +253,26 @@ pub trait VfsNode: Send + Sync + Any {
     /// Get metadata for this node
     fn metadata(&self) -> Result<FileMetadata, FileSystemError>;
 
+    /// Filesystems with an ACL take one inode snapshot for ownership, mode and grants.
+    fn inode_security(
+        &self,
+    ) -> Result<Option<crate::shield::access::InodeSecurity>, FileSystemError> {
+        use crate::shield::access::InodeSecurity;
+        let metadata = self.metadata()?;
+        Ok(metadata.permissions.inode().map(|access| InodeSecurity {
+            access,
+            directory: metadata.file_type == FileType::Directory,
+            acl: None,
+        }))
+    }
+
+    fn set_mode(&self, _mode: u32) -> Result<(), FileSystemError> {
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Inode mode unavailable",
+        ))
+    }
+
     /// Optional native ownership metadata. Backends that expose delegation may
     /// store it and enforce changes; unsupported backends retain their current model.
     fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
@@ -344,6 +366,11 @@ impl fmt::Debug for dyn VfsNode {
 /// across different interfaces. It provides a clean contract between VFS and
 /// filesystem drivers.
 pub trait FileSystemOperations: Send + Sync {
+    /// Can a copy-up publish the supplied owner, group and mode atomically?
+    fn preserves_creation_access(&self) -> bool {
+        false
+    }
+
     /// Get the unique filesystem identifier.
     ///
     /// This ID is stable for the lifetime of the filesystem mount and is used
@@ -403,16 +430,17 @@ pub trait FileSystemOperations: Send + Sync {
         parent: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        mode: u32,
+        access: InodeAccess,
         label: Option<&crate::shield::file::CreateContext>,
+        acl: Option<&[u8]>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        if label.is_some() {
+        if label.is_some() || acl.is_some() {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Filesystem cannot atomically publish inode labels",
             ));
         }
-        self.create(parent, name, file_type, mode)
+        self.create(parent, name, file_type, access.mode)
     }
     fn create(
         &self,
@@ -531,10 +559,15 @@ impl fmt::Debug for dyn FileSystemOperations {
 ///
 /// This wrapper provides the VFS layer with access to path hierarchy information
 /// while delegating actual file operations to the underlying FileSystem implementation.
+struct OpenFileState {
+    status_flags: AtomicU32,
+    lock_owner: super::file_lock::LockOwner,
+}
+
 pub struct VfsFileObject {
     /// Advisory locks belong to the open description, so dup/fork share them.
     /// Drop this before the backing file can release/reuse its inode identity.
-    lock_owner: super::file_lock::LockOwner,
+    state: Arc<OpenFileState>,
     /// The underlying FileObject from the filesystem implementation
     inner: Arc<dyn FileObject>,
     /// The VfsEntry this FileObject was created from (for *at syscalls)
@@ -543,50 +576,65 @@ pub struct VfsFileObject {
     mount_point: Arc<MountPoint>,
     /// The original path used to open this file (for debugging/logging)
     original_path: String,
-    /// Shared open-file status; duplicated handles reference the same wrapper.
-    status_flags: AtomicU32,
+    grant: FileGrant,
 }
 
 impl VfsFileObject {
     /// Create a new VfsFileObject
-    pub fn new(
+    pub(crate) fn new(
         inner: Arc<dyn FileObject>,
         vfs_entry: Arc<VfsEntry>,
         mount_point: Arc<MountPoint>,
         original_path: String,
+        flags: u32,
+        grant: FileGrant,
     ) -> Self {
         Self {
             inner,
             vfs_entry,
             mount_point,
             original_path,
-            status_flags: AtomicU32::new(0),
-            lock_owner: super::file_lock::LockOwner::new(),
+            grant,
+            state: Arc::new(OpenFileState {
+                status_flags: AtomicU32::new(flags & scarlet_abi::fs::VFS_O_APPEND),
+                lock_owner: super::file_lock::LockOwner::new(),
+            }),
         }
     }
 
-    pub fn new_with_flags(
-        inner: Arc<dyn FileObject>,
-        vfs_entry: Arc<VfsEntry>,
-        mount_point: Arc<MountPoint>,
-        original_path: String,
-        flags: u32,
-    ) -> Self {
-        let object = Self::new(inner, vfs_entry, mount_point, original_path);
-        object.set_append(flags & scarlet_abi::fs::VFS_O_APPEND != 0);
-        object
+    pub(crate) fn grant(&self) -> FileGrant {
+        self.grant
+    }
+
+    pub(crate) fn with_grant(&self, grant: FileGrant) -> Self {
+        Self {
+            grant: self.grant.intersect(grant),
+            state: self.state.clone(),
+            inner: self.inner.clone(),
+            vfs_entry: self.vfs_entry.clone(),
+            mount_point: self.mount_point.clone(),
+            original_path: self.original_path.clone(),
+        }
+    }
+
+    pub(crate) fn readable(&self) -> bool {
+        self.grant.permits(crate::shield::access::READ)
+    }
+
+    pub(crate) fn writable(&self) -> bool {
+        self.grant.permits(crate::shield::access::WRITE)
     }
 
     pub fn status_flags(&self) -> u32 {
-        self.status_flags.load(Ordering::Acquire)
+        self.state.status_flags.load(Ordering::Acquire)
     }
 
     pub(crate) fn lock_owner(&self) -> &super::file_lock::LockOwner {
-        &self.lock_owner
+        &self.state.lock_owner
     }
 
     pub fn set_append(&self, append: bool) {
-        self.status_flags.store(
+        self.state.status_flags.store(
             if append {
                 scarlet_abi::fs::VFS_O_APPEND
             } else {
@@ -628,14 +676,23 @@ impl VfsFileObject {
 
 impl StreamOps for VfsFileObject {
     fn write_empty(&self) -> Result<usize, StreamError> {
+        if !self.writable() {
+            return Err(StreamError::PermissionDenied);
+        }
         self.inner.write_empty()
     }
 
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if !self.readable() {
+            return Err(StreamError::PermissionDenied);
+        }
         self.inner.read(buffer)
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if !self.writable() {
+            return Err(StreamError::PermissionDenied);
+        }
         if self.status_flags() & scarlet_abi::fs::VFS_O_APPEND != 0 {
             self.inner.append(buffer)
         } else {
@@ -659,7 +716,9 @@ impl MemoryMappingOps for VfsFileObject {
         self.inner.mapping_owner_for_range(offset, length)
     }
     fn new_mapping_permissions(&self, is_shared: bool) -> usize {
-        self.inner.new_mapping_permissions(is_shared) & self.maximum_mapping_permissions()
+        self.inner.new_mapping_permissions(is_shared)
+            & self.maximum_mapping_permissions()
+            & self.grant.mapping_ceiling(is_shared)
     }
 
     fn maximum_mapping_permissions(&self) -> usize {
@@ -702,7 +761,7 @@ impl MemoryMappingOps for VfsFileObject {
     }
 
     fn supports_mmap(&self) -> bool {
-        self.inner.supports_mmap()
+        self.readable() && self.inner.supports_mmap()
     }
 
     fn mmap_owner_name(&self) -> alloc::string::String {
@@ -726,6 +785,17 @@ impl FileObject for VfsFileObject {
     fn allows_execution(&self) -> bool {
         self.mount_point.restrictions.allows_execution() && self.inner.allows_execution()
     }
+    fn check_image_execution(&self) -> Result<(), &'static str> {
+        if !self.mount_point.restrictions.allows_execution() {
+            return Err("execution disabled on mount");
+        }
+        self.inner.check_image_execution()?;
+        crate::shield::access::check(
+            self.vfs_entry.node().as_ref(),
+            crate::shield::access::EXECUTE,
+        )
+        .map_err(|_| "inode execution denied")
+    }
     fn allows_execution_privilege_gain(&self) -> bool {
         self.mount_point.restrictions.allows_privilege_gain()
             && self.inner.allows_execution_privilege_gain()
@@ -736,6 +806,9 @@ impl FileObject for VfsFileObject {
     }
 
     fn append(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if !self.writable() {
+            return Err(StreamError::PermissionDenied);
+        }
         self.inner.append(buffer)
     }
 
@@ -751,10 +824,16 @@ impl FileObject for VfsFileObject {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if !self.readable() {
+            return Err(StreamError::PermissionDenied);
+        }
         self.inner.read_at(offset, buffer)
     }
 
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        if !self.writable() {
+            return Err(StreamError::PermissionDenied);
+        }
         self.inner.write_at(offset, buffer)
     }
 
@@ -771,6 +850,9 @@ impl FileObject for VfsFileObject {
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        if !self.writable() {
+            return Err(StreamError::PermissionDenied);
+        }
         self.inner.truncate(size)
     }
 
