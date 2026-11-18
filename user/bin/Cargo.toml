@@ -178,6 +178,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
+scarlet-accounts = { path = "../lib/scarlet-accounts" }
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
 scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "bc240859a554fe2eca823416e4cb00d173179607", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-abi = { path = "../lib/scarlet-abi" }

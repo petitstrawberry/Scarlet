@@ -3608,6 +3608,18 @@ name = "scarlet-abi"
 version = "1.0.0"
 
 [[package]]
+name = "scarlet-accounts"
+version = "1.0.0"
+dependencies = [
+ "bcrypt",
+ "getrandom 0.2.17",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-sys",
+ "zeroize",
+]
+
+[[package]]
 name = "scarlet-app-demo"
 version = "0.1.0"
 dependencies = [
@@ -5195,6 +5207,7 @@ dependencies = [
  "sbus 1.0.0",
  "sbus-client 1.0.0",
  "scarlet-abi",
+ "scarlet-accounts",
  "scarlet-desktop-config 1.0.0",
  "scarlet-os",
  "scarlet-std",

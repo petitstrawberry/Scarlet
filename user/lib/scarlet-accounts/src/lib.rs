@@ -1,6 +1,13 @@
-//! Local console accounts. All records must be valid and unambiguous.
-use std::{string::String, vec::Vec};
-use zeroize::Zeroizing;
+//! Local account authentication shared by trusted userland session managers.
+#![no_std]
+
+extern crate alloc;
+#[cfg(target_os = "scarlet")]
+mod database;
+
+use alloc::{string::String, vec::Vec};
+#[cfg(target_os = "scarlet")]
+pub use database::authenticate_local;
 
 pub struct Account {
     pub name: String,
@@ -14,7 +21,7 @@ fn id(text: &str) -> Option<u32> {
     (id != 0 && id != u32::MAX).then_some(id)
 }
 
-pub fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Account>, ()> {
+fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Account>, ()> {
     use alloc::collections::BTreeSet;
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
@@ -76,56 +83,4 @@ pub fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<A
     } else {
         None
     })
-}
-
-fn open_at(dir: usize, name: &core::ffi::CStr, directory: bool) -> Result<std::fs::File, ()> {
-    use scarlet_abi::fs::*;
-    let flags = VFS_O_NOFOLLOW | VFS_O_CLOEXEC | if directory { VFS_O_DIRECTORY } else { 0 };
-    // SAFETY: name lives through the call, and success transfers one handle.
-    let raw = unsafe {
-        scarlet_sys::syscall4(
-            scarlet_sys::Syscall::VfsOpenAt,
-            dir,
-            name.as_ptr() as usize,
-            flags as usize,
-            0,
-        )
-    } as isize;
-    if raw < 0 {
-        return Err(());
-    }
-    let handle = unsafe { std::handle::Handle::from_raw(raw as i32) }.map_err(|_| ())?;
-    let access = scarlet_os::shield::inode_access(&handle).map_err(|_| ())?;
-    let forbidden = if directory { 0o022 } else { 0o077 };
-    if access.owner != 0 || access.has_acl != 0 || access.mode & forbidden != 0 {
-        return Err(());
-    }
-    if !directory
-        && !handle
-            .as_file()
-            .ok()
-            .and_then(|f| f.metadata().ok())
-            .is_some_and(|m| m.is_file())
-    {
-        return Err(());
-    }
-    std::fs::File::from_handle(handle).map_err(|_| ())
-}
-
-pub fn load() -> Result<Zeroizing<Vec<u8>>, ()> {
-    let root = open_at(scarlet_abi::fs::CURRENT_DIRECTORY, c"/", true)?;
-    let etc = open_at(root.as_raw() as usize, c"etc", true)?;
-    let mut file = open_at(etc.as_raw() as usize, c"scarlet-users", false)?;
-    let mut data = Zeroizing::new(Vec::new());
-    let mut chunk = Zeroizing::new([0u8; 1024]);
-    loop {
-        let n = file.read(&mut *chunk).map_err(|_| ())?;
-        if n == 0 {
-            return Ok(data);
-        }
-        if data.len() + n > 64 * 1024 {
-            return Err(());
-        }
-        data.extend_from_slice(&chunk[..n]);
-    }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-accounts"
+version = "1.0.0"
+edition = "2024"
+description = "Userland authentication for local Scarlet sessions"
+
+[dependencies]
+bcrypt = { version = "0.15.1", default-features = false, features = ["alloc", "zeroize"] }
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-os = { path = "../scarlet-os", default-features = false }
+scarlet-abi = { path = "../scarlet-abi" }
+scarlet-sys = { path = "../scarlet-sys" }
+getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }

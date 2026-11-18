@@ -211,20 +211,41 @@ identities fail authorization instead of returning a manufactured context.
 ## Local console accounts
 
 The base bundle runs `/bin/login` on the terminal configured in stemd. To
-provision an offline ext2 root filesystem mounted at `/mnt/scarlet`, run the
-following on a Linux host with Python 3 and Apache `htpasswd`. The tool prompts
-twice for each password. Unmount the filesystem before starting Scarlet.
+provision the root filesystem while building it, add entries to the project's
+`scarlet.local.toml`. This example gives Alice a supplementary group and Bob a
+private primary group. Each primary GID defaults to the UID.
 
-```sh
-sudo python3 tools/accounts/add-user.py --root /mnt/scarlet --uid 1001 --group 42 alice
-sudo python3 tools/accounts/add-user.py --root /mnt/scarlet --uid 1002 bob
+```toml
+[[images.rootfs.users]]
+name = "alice"
+uid = 1001
+groups = [42]
+password-hash-file = ".accounts/alice.bcrypt"
+
+[[images.rootfs.users]]
+name = "bob"
+uid = 1002
+password-hash-file = ".accounts/bob.bcrypt"
 ```
 
-Each account gets a private `/home/NAME` (0700). Its primary GID defaults to
-its UID. Use `--gid` to choose another primary group and repeat `--group` for
-supplementary groups. The base image ships without a console password.
-Provision the filesystem that will actually be booted. Rebuilding a root
-image from scratch requires provisioning that image again.
+In the project directory, create the verifier files once with Apache
+`htpasswd`. It prompts for a password and its confirmation. Keep passwords
+within bcrypt's 72-byte limit. Use the updated Scarlet Nix development shell
+for the image build.
+
+```sh
+mkdir -p .accounts
+(umask 077; htpasswd -nBC 12 alice | cut -d: -f2 > .accounts/alice.bcrypt)
+(umask 077; htpasswd -nBC 12 bob   | cut -d: -f2 > .accounts/bob.bcrypt)
+cargo scarlet image --project .
+```
+
+Both `ext2` and `gpt-ext2` support image users. The builder creates each
+`/home/NAME` with mode 0700, assigns existing contents to that user and writes
+the protected account database. Omit `password-hash-file` for a locked
+account. No default password is shipped. An administrator can update the
+database on a running writable filesystem. Rebuilding the image reapplies
+the manifest.
 
 The single root-owned 0600 file `/etc/scarlet-users` stores one
 `name:uid:gid:comma-separated-supplementary-gids:bcrypt` record per line.

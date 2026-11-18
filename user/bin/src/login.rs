@@ -1,12 +1,9 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
 extern crate scarlet_std as std;
-#[path = "login/accounts.rs"]
-mod accounts;
 
-use accounts::Account;
+use scarlet_accounts::{Account, authenticate_local};
 use scarlet_os::process_scope::ProcessScope;
 use std::{format, handle::Handle, println, tty::Terminal, vec::Vec};
 use zeroize::Zeroizing;
@@ -45,10 +42,7 @@ fn authenticate(tty: &Terminal) -> Result<Account, &'static str> {
             .map_err(|_| "cannot restore terminal echo")?;
         println!();
         let password = password?;
-        let data = accounts::load().map_err(|_| "cannot read a protected /etc/scarlet-users")?;
-        let data = core::str::from_utf8(&data).map_err(|_| "invalid account database")?;
-        let account = accounts::authenticate(data, &name, &password)
-            .map_err(|_| "invalid account database")?;
+        let account = authenticate_local(&name, &password)?;
         if let Some(account) = account {
             return Ok(account);
         }
