@@ -142,6 +142,13 @@ impl Compositor {
     }
 
     pub(super) fn restore_output_configuration(&mut self) {
+        for (id, mode) in super::super::config::saved_output_modes(&self.outputs.snapshot().outputs) {
+            if self.outputs.get(id).is_some_and(|output| output.metadata.mode != mode) {
+                if let Some(endpoint) = self.secondary_endpoints.iter().find(|endpoint| endpoint.output == Some(id)) {
+                    let _ = endpoint.control.request_mode(framebuffer::DisplayMode { width: mode.pixel_width, height: mode.pixel_height, refresh_millihz: mode.refresh_millihz });
+                }
+            }
+        }
         if let Some(configuration) = super::super::config::saved_output_layout(&self.outputs.snapshot().outputs) {
             if let Err(error) = self.install_output_configuration(&configuration, false) {
                 println!("[Compositor] Saved display layout could not be restored: {}", error);
@@ -149,7 +156,7 @@ impl Compositor {
         }
     }
 
-    fn install_output_configuration(&mut self, configuration: &[OutputConfiguration], persist: bool) -> Result<(), u32> {
+    pub(super) fn install_output_configuration(&mut self, configuration: &[OutputConfiguration], persist: bool) -> Result<(), u32> {
         use sws_protocol::error_codes as errors;
         let mut workspaces = self.workspace_manager.clone();
         for entry in configuration {
@@ -194,6 +201,22 @@ impl Compositor {
         use sws_protocol::error_codes as errors;
         match command {
             OutputRequest::Get => Ok(OutputEvent::Snapshot(self.outputs.snapshot())),
+            OutputRequest::Modes(id) => {
+                let output = self.outputs.get(id).ok_or(errors::UNKNOWN_OUTPUT)?;
+                let modes = self.secondary_endpoints.iter().find(|endpoint| endpoint.output == Some(id))
+                    .and_then(|endpoint| endpoint.control.modes().ok())
+                    .map(|modes| modes.into_iter().map(|mode| sws_protocol::outputs::OutputMode { pixel_width: mode.width, pixel_height: mode.height, refresh_millihz: mode.refresh_millihz }).collect())
+                    .unwrap_or_else(|| vec![output.metadata.mode]);
+                Ok(OutputEvent::Modes { output: id, modes })
+            }
+            OutputRequest::SetMode { output, mode } => {
+                let endpoint = self.secondary_endpoints.iter().find(|endpoint| endpoint.output == Some(output)).ok_or(errors::UNKNOWN_OUTPUT)?;
+                endpoint.control.request_mode(framebuffer::DisplayMode { width: mode.pixel_width, height: mode.pixel_height, refresh_millihz: mode.refresh_millihz })
+                    .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
+                self.pending_output_modes.retain(|(id, _)| *id != output);
+                self.pending_output_modes.push((output, mode));
+                Ok(OutputEvent::Applied)
+            }
             OutputRequest::Context(requested) => {
                 let id = if requested == u32::MAX {
                     self.outputs.output_at(self.cursor.x, self.cursor.y).map_or(self.outputs.primary_id(), |output| output.id)

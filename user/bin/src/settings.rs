@@ -995,6 +995,7 @@ struct SettingsApp {
     display_output_index: State<usize>,
     display_scale_index: State<usize>,
     display_experience_index: State<usize>,
+    display_resolution_index: State<usize>,
     wifi_networks: State<Vec<scarlet_os::wireless_service::Network>>,
     wifi_index: State<usize>,
     wifi_ssid: State<String>,
@@ -1101,6 +1102,7 @@ impl SettingsApp {
             display_output_index: State::new(StateId::new(121), 0),
             display_scale_index: State::new(StateId::new(122), 0),
             display_experience_index: State::new(StateId::new(123), 0),
+            display_resolution_index: State::new(StateId::new(124), 0),
             wifi_networks: State::new(StateId::new(41), Vec::new()),
             wifi_index: State::new(StateId::new(42), 0),
             wifi_ssid: State::new(StateId::new(43), String::new()),
@@ -1692,6 +1694,8 @@ impl Application for SettingsApp {
     fn on_idle(&mut self) {
         self.process_picker_ui_events();
         let editor = self.display_editor.get();
+        let mode_index = editor.selected_mode_index();
+        if self.display_resolution_index.get() != mode_index { self.display_resolution_index.set(mode_index); }
         if let Some(output) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)) {
             if let Some(config) = editor.draft.iter().find(|config| config.id == output.id) {
                 if self.display_output_index.get() != editor.selected { self.display_output_index.set(editor.selected); }

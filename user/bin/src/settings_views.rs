@@ -192,8 +192,38 @@ pub(super) fn about_page() -> impl View + Clone {
         .alignment(Alignment::Leading),
     )
 }
-pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
+#[derive(Clone)]
+struct DisplayPage(SettingsApp);
+
+impl View for DisplayPage {
+    fn create_element(&self) -> alloc::boxed::Box<dyn Element> {
+        alloc::boxed::Box::new(scarlet_ui::element::ComponentElement::new_with_builder(
+            self.clone(),
+            |page| alloc::boxed::Box::new(display_page(page.0.clone())),
+        ))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        vec![&self.0.display_editor, &self.0.display_brightness_percent, &self.0.display_brightness_status]
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+fn display_page(app: SettingsApp) -> impl View + Clone {
     let brightness_app = app.clone();
+    let editor = app.display_editor.get();
+    let modes = editor.selected_modes();
+    let selected_output = editor.snapshot.as_ref()
+        .and_then(|snapshot| snapshot.outputs.get(editor.selected))
+        .map(|output| output.id);
+    let mode_labels = modes.iter().map(|mode| {
+        format!("{} × {} · {:.2} Hz", mode.pixel_width, mode.pixel_height, mode.refresh_millihz as f32 / 1000.0)
+    }).collect();
+    let resolution_editor = app.display_editor.clone();
+    let apply_editor = app.display_editor.clone();
     settings_page(vstack! {
         settings_section(vstack! {
             settings_row(hstack! {
@@ -204,14 +234,27 @@ pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
         }.spacing(12.0).alignment(Alignment::Leading), "Screen brightness", 14.0),
         settings_section(vstack! {
             settings_displays::canvas(app.display_editor.clone()),
-            settings_row(Select::new(app.display_editor.get().snapshot.as_ref().map(|snapshot| snapshot.outputs.iter().enumerate().map(|(index, output)| format!("{}. {}", index + 1, output.name)).collect()).unwrap_or_default(), app.display_output_index.clone()).width(300.0)
+            settings_row(Select::new(editor.snapshot.as_ref().map(|snapshot| snapshot.outputs.iter().enumerate().map(|(index, output)| format!("{}. {}", index + 1, output.name)).collect()).unwrap_or_default(), app.display_output_index.clone()).width(300.0)
                 .on_change({ let editor = app.display_editor.clone(); move |index| editor.update(|state| state.selected = index) }), "Display"),
+            settings_row(hstack! {
+                Select::new(mode_labels, app.display_resolution_index.clone())
+                    .width(300.0)
+                    .enabled(modes.len() > 1 && !editor.applying)
+                    .on_change(move |index| {
+                        if let (Some(id), Some(&mode)) = (selected_output, modes.get(index)) {
+                            settings_displays::resolution(&resolution_editor, id, mode);
+                        }
+                    }),
+                Button::new("Apply")
+                    .enabled(editor.dirty && !editor.applying)
+                    .on_click(move || settings_displays::apply(&apply_editor)),
+            }.spacing(12.0), "Output resolution"),
             settings_row(Select::new(settings_displays::SCALES.iter().map(|scale| format!("{}%", scale / 10)).collect(), app.display_scale_index.clone()).width(240.0)
-                .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::scale(&editor, index) }), "Scale"),
+                .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::scale(&editor, index) }), "Display scale"),
+            settings_note(editor.logical_size_label()),
             settings_row(Select::new(vec![String::from("Automatic"), String::from("Desktop"), String::from("Tablet")], app.display_experience_index.clone()).width(240.0)
                 .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::experience(&editor, index) }), "Experience"),
-            settings_note(app.display_editor.get().status),
-            Button::new("Apply").enabled(app.display_editor.get().dirty).on_click({ let editor = app.display_editor.clone(); move || settings_displays::apply(&editor) }),
+            settings_note(editor.status),
         }.spacing(12.0).alignment(Alignment::Leading), "Displays", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
@@ -340,7 +383,7 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
     let status_app = original.clone();
     let navigation = navigation! {
         NavigationLink::new("Appearance", move || appearance_page(app.clone())),
-        NavigationLink::new("Display", move || display_page(display_app.clone())),
+        NavigationLink::new("Display", move || DisplayPage(display_app.clone())),
         NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
         NavigationLink::new("Network", move || network_page(network_app.clone())),
         NavigationLink::new("Input", move || input_page(input_app.clone())),

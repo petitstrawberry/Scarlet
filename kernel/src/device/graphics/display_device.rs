@@ -53,6 +53,18 @@ pub mod display_commands {
     /// The argument points to a [`super::DisplayOutputInfo`] whose `size` the
     /// caller sets to the bytes it provides. See that type for the contract.
     pub const DISPLAY_GET_OUTPUT_INFO: u32 = 0x5008;
+    pub const DISPLAY_GET_MODE: u32 = 0x5009;
+    pub const DISPLAY_REQUEST_MODE: u32 = 0x500a;
+}
+
+/// Indexed mode query. The caller sets `index`; the kernel fills `count` and
+/// the mode (zero when index is past the last entry).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct DisplayModeQuery {
+    index: u32,
+    count: u32,
+    mode: super::output::DisplayMode,
 }
 
 /// 32-bit RGBA pixel layout.
@@ -269,6 +281,9 @@ struct DisplayMapping {
 pub struct DisplayCharDevice {
     /// The graphics resource this display surface presents.
     fb_resource: Arc<FramebufferResource>,
+    // Retained by the open file (and hence by its VMAs) when a connector
+    // replaces its framebuffer on modeset. Control-only opens pin no pages.
+    mapping_device: IrqRwSpinLock<Option<Arc<dyn Device>>>,
     /// Track mappings for testing and diagnostics.
     mappings: IrqRwSpinLock<BTreeMap<usize, DisplayMapping>>,
     #[cfg(test)]
@@ -288,6 +303,7 @@ impl DisplayCharDevice {
     pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
         Self {
             fb_resource,
+            mapping_device: IrqRwSpinLock::new(None),
             mappings: IrqRwSpinLock::new(BTreeMap::new()),
             #[cfg(test)]
             device_manager_addr: None,
@@ -311,6 +327,7 @@ impl DisplayCharDevice {
     ) -> Self {
         Self {
             fb_resource,
+            mapping_device: IrqRwSpinLock::new(None),
             mappings: IrqRwSpinLock::new(BTreeMap::new()),
             device_manager_addr: Some(device_manager as *const DeviceManager as usize),
         }
@@ -333,6 +350,23 @@ impl DisplayCharDevice {
         size.checked_add(crate::environment::PAGE_SIZE - 1)
             .map(|size| size & !(crate::environment::PAGE_SIZE - 1))
             .ok_or("Display backing size overflow")
+    }
+
+    fn mapped_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
+        if self.fb_resource.connector_index == 0 { return self.current_backing_info(); }
+        let backing = {
+            let mut pinned = self.mapping_device.write();
+            if pinned.is_none() {
+                let source = self.source_graphics_device()?;
+                *pinned = source.as_graphics_device().unwrap()
+                    .connector_mapping_device(self.fb_resource.connector_index)?;
+            }
+            pinned.clone()
+        };
+        let Some(device) = backing else { return self.current_backing_info(); };
+        let (config, physical_addr) = device.as_graphics_device()
+            .ok_or("Invalid display backing device")?.get_framebuffer_info()?;
+        Ok(DisplayBackingInfo { size: Self::page_aligned_size(config.size())?, config, physical_addr })
     }
 
     fn current_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
@@ -882,6 +916,15 @@ impl DisplayCharDevice {
 }
 
 impl Device for DisplayCharDevice {
+    fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
+        if self.fb_resource.connector_index == 0 { return Ok(self); }
+        #[cfg(not(test))]
+        let opened = Self::new(self.fb_resource.clone());
+        #[cfg(test)]
+        let opened = Self::new_with_device_manager(self.fb_resource.clone(), self.device_manager());
+        Ok(Arc::new(opened))
+    }
+
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
     }
@@ -931,7 +974,7 @@ impl CharDevice for DisplayCharDevice {
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        let info = self.current_backing_info()?;
+        let info = self.mapped_backing_info()?;
         if info.physical_addr == 0 {
             return Err("Invalid display backing address");
         }
@@ -954,7 +997,7 @@ impl CharDevice for DisplayCharDevice {
     }
 
     fn write_at(&self, position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
-        let info = self.current_backing_info()?;
+        let info = self.mapped_backing_info()?;
         if info.physical_addr == 0 {
             return Err("Invalid display backing address");
         }
@@ -994,6 +1037,28 @@ impl ControlOps for DisplayCharDevice {
             return Err("Direct scanout buffers are not supported on this connector");
         }
         match command {
+            DISPLAY_GET_MODE | DISPLAY_REQUEST_MODE => {
+                let device = self.device_manager().get_device(self.fb_resource.source_device_id)
+                    .ok_or("Display source device not found")?;
+                let graphics = device.as_graphics_device().ok_or("Not a graphics device")?;
+                if command == DISPLAY_GET_MODE {
+                    let mut query = DisplayModeQuery::default();
+                    // SAFETY: repr(C) structure contains only initialized u32 fields.
+                    Self::read_argument(arg, unsafe { core::slice::from_raw_parts_mut(&mut query as *mut _ as *mut u8, core::mem::size_of::<DisplayModeQuery>()) })?;
+                    let modes = graphics.connector_modes(self.fb_resource.connector_index);
+                    query.count = modes.len() as u32;
+                    query.mode = modes.get(query.index as usize).copied().unwrap_or_default();
+                    // SAFETY: all fields have been initialized; this type has no padding.
+                    Self::write_argument(arg, unsafe { core::slice::from_raw_parts(&query as *const _ as *const u8, core::mem::size_of::<DisplayModeQuery>()) })?;
+                    Ok(0)
+                } else {
+                    let mut mode = super::output::DisplayMode::default();
+                    // SAFETY: mode is a repr(C) triple of initialized u32 fields.
+                    Self::read_argument(arg, unsafe { core::slice::from_raw_parts_mut(&mut mode as *mut _ as *mut u8, core::mem::size_of::<super::output::DisplayMode>()) })?;
+                    graphics.request_connector_mode(self.fb_resource.connector_index, mode)?;
+                    Ok(0)
+                }
+            }
             DISPLAY_GET_INFO => self.handle_get_info(arg),
             DISPLAY_GET_BRIGHTNESS => self.handle_get_brightness(),
             DISPLAY_SET_BRIGHTNESS => self.handle_set_brightness(arg),
@@ -1017,6 +1082,8 @@ impl ControlOps for DisplayCharDevice {
                 DISPLAY_GET_OUTPUT_INFO,
                 "Get output and connector information",
             ),
+            (DISPLAY_GET_MODE, "Query display mode by index"),
+            (DISPLAY_REQUEST_MODE, "Request display mode"),
             (DISPLAY_PRESENT, "Present whole display surface"),
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
             (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
@@ -1032,7 +1099,7 @@ impl MemoryMappingOps for DisplayCharDevice {
         offset: usize,
         length: usize,
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
-        let info = self.current_backing_info()?;
+        let info = self.mapped_backing_info()?;
 
         let source = self
             .device_manager()
@@ -1055,6 +1122,7 @@ impl MemoryMappingOps for DisplayCharDevice {
         if info.physical_addr % crate::environment::PAGE_SIZE as u64 != 0 {
             return Err("Display backing physical address must be page-aligned");
         }
+        if self.fb_resource.connector_index != 0 && offset >= info.size { return Err("Secondary display mmap exceeds framebuffer"); }
         if offset >= info.size {
             let device = self
                 .device_manager()
