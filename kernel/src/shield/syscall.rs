@@ -1254,3 +1254,64 @@ pub fn sys_shield_file_acl(tf: &mut Trapframe) -> usize {
     })();
     result.unwrap_or_else(|e| (-(e as isize)) as usize)
 }
+
+pub fn sys_enter_user_session(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    let result = (|| -> Option<()> {
+        if !task.can_replace_exec_image() {
+            return None;
+        }
+        let uid = u32::try_from(tf.get_arg(0)).ok()?;
+        let gid = u32::try_from(tf.get_arg(1)).ok()?;
+        let count = tf.get_arg(3);
+        if count > identity::MAX_GROUPS {
+            return None;
+        }
+        let mut bytes = alloc::vec![0; count * 4];
+        if count != 0 {
+            copy_from_user(&task, tf.get_arg(2), &mut bytes).ok()?;
+        }
+        let groups = bytes
+            .chunks_exact(4)
+            .map(|word| identity::Group(u32::from_ne_bytes(word.try_into().unwrap())))
+            .collect();
+        task.credentials
+            .write()
+            .enter_user_session(identity::Principal(uid), identity::Group(gid), groups)
+            .ok()?;
+        // Only the terminal streams cross the login boundary. This includes
+        // handles that the caller explicitly inherited without close-on-exec.
+        for handle in task.handle_table.active_handles() {
+            if handle > 2 {
+                task.handle_table.remove(handle);
+            }
+        }
+        task.bootstrap_environment.store(false, Ordering::Release);
+        Some(())
+    })();
+    result.map_or(usize::MAX, |_| 0)
+}
+
+pub fn sys_inode_access(tf: &mut Trapframe) -> usize {
+    use crate::fs::vfs_v2::core::VfsFileObject;
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    let result = (|| -> Option<()> {
+        let object = task.handle_table.get(tf.get_arg(0).try_into().ok()?)?;
+        let file = object.as_file()?.as_any().downcast_ref::<VfsFileObject>()?;
+        let security = file.get_vfs_entry().node().inode_security().ok()??;
+        let fields = [
+            security.access.owner.principal.0,
+            security.access.owner.group.0,
+            security.access.mode,
+            u32::from(security.acl.is_some()),
+        ];
+        let mut bytes = [0u8; 16];
+        for (dest, field) in bytes.chunks_exact_mut(4).zip(fields) {
+            dest.copy_from_slice(&field.to_ne_bytes());
+        }
+        crate::library::std::usercopy::copy_to_user(&task, tf.get_arg(1), &bytes).ok()
+    })();
+    result.map_or(usize::MAX, |_| 0)
+}

@@ -301,3 +301,16 @@ pub const RECEIVE_CAPABILITY: u64 = 1;
 /// File policy derivation flag. Enable default-deny native resource access
 /// even for a blueprint with zero resource grants.
 pub const ENFORCE_NATIVE_ACCESS: u32 = 1;
+
+/// DAC information for a retained VFS inode. A nonzero acl flag indicates
+/// additional named grants beyond the mode bits.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct RawInodeAccess {
+    pub owner: u32,
+    pub group: u32,
+    pub mode: u32,
+    pub has_acl: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<RawInodeAccess>() == 16);

@@ -207,3 +207,37 @@ Local sockets snapshot the native subject alongside the originating credentials.
 Android translates the connected peer's captured subject through `SO_PEERSEC`;
 an exited or relabeled peer does not change the snapshot, and foreign policy
 identities fail authorization instead of returning a manufactured context.
+
+## Local console accounts
+
+The base bundle runs `/bin/login` on the terminal configured in stemd. To
+provision an offline ext2 root filesystem mounted at `/mnt/scarlet`, run the
+following on a Linux host with Python 3 and Apache `htpasswd`. The tool prompts
+twice for each password. Unmount the filesystem before starting Scarlet.
+
+```sh
+sudo python3 tools/accounts/add-user.py --root /mnt/scarlet --uid 1001 --group 42 alice
+sudo python3 tools/accounts/add-user.py --root /mnt/scarlet --uid 1002 bob
+```
+
+Each account gets a private `/home/NAME` (0700). Its primary GID defaults to
+its UID. Use `--gid` to choose another primary group and repeat `--group` for
+supplementary groups. The base image ships without a console password.
+Provision the filesystem that will actually be booted. Rebuilding a root
+image from scratch requires provisioning that image again.
+
+The single root-owned 0600 file `/etc/scarlet-users` stores one
+`name:uid:gid:comma-separated-supplementary-gids:bcrypt` record per line.
+Empty supplementary lists are valid. The verifier uses bcrypt cost 12 and
+passwords of 1–72 bytes. Replacing a verifier with `!` locks future logins.
+Publish database edits by atomic rename in `/etc`. Login checks the owner,
+mode and named grants on opened handles for the root, parent directory and
+database. Missing or invalid credentials cannot start a shell.
+
+On success, login forks an exclusive child. `ShieldEnterUserSession` requires
+both identity-change authorities, replaces base, active and saved identities,
+sets supplementary groups, and clears all authority ceilings. The child keeps
+its three terminal descriptors and execs `/bin/sh` in the user's home with a
+fresh environment. The supervisor terminates session descendants on logout
+before accepting the next login. These accounts are ordinary local TTY
+sessions. SSH and desktop launchers have their own session setup.

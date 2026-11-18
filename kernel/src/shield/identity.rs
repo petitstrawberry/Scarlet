@@ -95,6 +95,27 @@ impl Credentials {
             exec_reserved: None,
         }
     }
+    /// Replace all identity slots together and permanently relinquish authority.
+    pub(crate) fn enter_user_session(
+        &mut self,
+        principal: Principal,
+        group: Group,
+        supplementary: Vec<Group>,
+    ) -> Result<(), ()> {
+        if !self.permits(CHANGE_PRINCIPAL | CHANGE_GROUPS) {
+            return Err(());
+        }
+        self.set_supplementary(supplementary)?;
+        self.principals = Identities::all(principal);
+        self.groups = Identities::all(group);
+        self.permitted = 0;
+        self.active = 0;
+        self.inheritable = 0;
+        self.delegable = 0;
+        self.exec_reserved = Some(0);
+        Ok(())
+    }
+
     pub fn principals(&self) -> Identities<Principal> {
         self.principals
     }
@@ -222,6 +243,34 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn user_session_replaces_saved_ids_and_drops_every_authority_ceiling() {
+        let mut credentials = Credentials::bootstrap();
+        credentials
+            .set_inheritable_authority(ALL_AUTHORITY)
+            .unwrap();
+        credentials.reserve_exec_authority(ALL_AUTHORITY).unwrap();
+        credentials
+            .enter_user_session(Principal(1001), Group(1002), alloc::vec![Group(42)])
+            .unwrap();
+        assert_eq!(credentials.principals(), Identities::all(Principal(1001)));
+        assert_eq!(credentials.groups(), Identities::all(Group(1002)));
+        assert_eq!(credentials.supplementary(), &[Group(42)]);
+        assert_eq!(credentials.delegable_authority(), 0);
+        assert_eq!(credentials.inheritable_authority(), 0);
+        assert_eq!(credentials.exec_reserved_authority(), Some(0));
+        credentials.apply_exec_reservation();
+        assert_eq!(credentials.active_authority(), 0);
+        assert_eq!(credentials.permitted_authority(), 0);
+        let saved = credentials.clone();
+        assert!(
+            credentials
+                .enter_user_session(Principal(0), Group(0), Vec::new())
+                .is_err()
+        );
+        assert_eq!(credentials, saved);
+    }
+
     #[test_case]
     fn exec_reservations_cannot_exceed_the_delegated_ceiling_or_modify_a_failed_image_source() {
         let mut source = Credentials::bootstrap();
