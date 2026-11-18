@@ -389,6 +389,8 @@ to = "/bin/applications"
 
 # Kureha Code distributes prebuilt app archives with a checksum-pinned bundle.
 [[layers]]
-kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "94b6bc2909ca1e6e25074d7d326a55c8de685a28" }
-bundle = "platforms/scarlet/bundle.toml"
+kind = "archive"
+url = "https://github.com/petitstrawberry/kureha-code/releases/download/v0.1.0-51.1/kureha-code-scarlet-{arch}-v0.1.0-51.1.tar.gz"
+sha256 = { aarch64 = "sha256:37b2b1734f2d84b39a95e8e0290b166387d1896669af81b72629828d6be487c5", riscv64 = "sha256:b14be23ac4f49d4d7e54a45e0c9feab6df29e87f805c950186c8c903ae4bc334" }
+format = "tar-gz"
+to = "/"
