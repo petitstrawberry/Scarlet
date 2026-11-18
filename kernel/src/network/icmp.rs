@@ -574,6 +574,9 @@ impl SocketObject for IcmpSocket {
         address: &SocketAddress,
         _flags: u32,
     ) -> Result<usize, SocketError> {
+        if !matches!(address, SocketAddress::Unspecified) {
+            crate::shield::authorization::connect(crate::shield::authorization::Target::Internet)?;
+        }
         let target = match address {
             SocketAddress::Inet(inet) => *inet,
             SocketAddress::Unspecified => match self.remote_addr.read().clone() {
@@ -692,6 +695,7 @@ impl SocketControl for IcmpSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        crate::shield::authorization::connect(crate::shield::authorization::Target::Internet)?;
         match address {
             SocketAddress::Inet(_) => {
                 *self.remote_addr.write() = Some(address.clone());
@@ -767,12 +771,15 @@ impl crate::object::capability::StreamOps for IcmpSocket {
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
-        let addr = self.remote_addr.read().clone().ok_or_else(|| {
-            crate::object::capability::StreamError::Other("icmp not connected".into())
-        })?;
-        self.sendto(data, &addr, 0).map_err(|err| {
-            crate::object::capability::StreamError::Other(format!("icmp send error: {:?}", err))
-        })?;
+        if self.remote_addr.read().is_none() {
+            return Err(crate::object::capability::StreamError::Other(
+                "icmp not connected".into(),
+            ));
+        }
+        self.sendto(data, &SocketAddress::Unspecified, 0)
+            .map_err(|err| {
+                crate::object::capability::StreamError::Other(format!("icmp send error: {:?}", err))
+            })?;
         Ok(data.len())
     }
 }

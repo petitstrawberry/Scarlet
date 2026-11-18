@@ -41,6 +41,8 @@
 //!   Lower-backed sources, whiteouts, directory moves and backing mounts are
 //!   rejected; replacing a lower regular destination does not require copy-up.
 
+use crate::shield::access::InodeAccess;
+
 use crate::sync::{IrqRwSpinLock, Mutex, MutexGuard};
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -114,7 +116,6 @@ struct OverlayInodeIds {
 
 struct OverlayInode {
     labels: Arc<crate::shield::file::Labels>,
-    owner: IrqRwSpinLock<Option<crate::shield::identity::ActiveIdentity>>,
     id: u64,
     /// Regular files involved in rename retain their backing inode instead of
     /// resolving their old pathname. All independently looked-up nodes share
@@ -135,7 +136,6 @@ impl OverlayInode {
         Arc::new(Self {
             id,
             labels: crate::shield::file::Labels::new(),
-            owner: IrqRwSpinLock::new(None),
             backing: IrqRwSpinLock::new(None),
         })
     }
@@ -202,6 +202,36 @@ impl Clone for OverlayNode {
 }
 
 impl VfsNode for OverlayNode {
+    fn inode_security(
+        &self,
+    ) -> Result<Option<crate::shield::access::InodeSecurity>, FileSystemError> {
+        let fs = self.overlay_fs.read().clone().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "Overlay unavailable")
+        })?;
+        let _namespace = fs.lock_namespace()?;
+        let backing = self.inode.backing.read().clone();
+        let node = match backing {
+            Some(backing) => backing.node,
+            None => fs.visible_node(&self.path)?.0,
+        };
+        node.inode_security()
+    }
+
+    fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr::Error;
+        if name != scarlet_abi::shield::FILE_ACCESS_ACL {
+            return Err(Error::Unsupported);
+        }
+        let fs = self.overlay_fs.read().clone().ok_or(Error::Io)?;
+        let _namespace = fs.lock_namespace().map_err(|_| Error::Io)?;
+        let backing = self.inode.backing.read().clone();
+        let node = match backing {
+            Some(backing) => backing.node,
+            None => fs.visible_node(&self.path).map_err(|_| Error::Io)?.0,
+        };
+        node.get_xattr(name)
+    }
+
     fn supports_directory_notifications(&self) -> bool {
         // Directory inode IDs survive copy-up and are never reused after
         // removal. Directory rename is unsupported by this overlay driver.
@@ -212,47 +242,86 @@ impl VfsNode for OverlayNode {
         Some(self.inode.labels.clone())
     }
     fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
-        Some(
-            self.inode
-                .owner
-                .read()
-                .unwrap_or(crate::shield::identity::ActiveIdentity {
-                    principal: crate::shield::identity::Principal(0),
-                    group: crate::shield::identity::Group(0),
-                }),
-        )
+        self.metadata()
+            .ok()?
+            .permissions
+            .inode()
+            .map(|access| access.owner)
+    }
+    fn set_mode(&self, mode: u32) -> Result<(), FileSystemError> {
+        crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)?;
+        let fs = self.overlay_fs.read().clone().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "Overlay unavailable")
+        })?;
+        let _guard = fs.lock_namespace()?;
+        let backing = self.inode.backing.read().clone();
+        if let Some(backing) = backing {
+            if backing.writable {
+                return backing.node.set_mode(mode);
+            }
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Detached lower inode",
+            ));
+        }
+        let (node, writable) = fs.visible_node(&self.path)?;
+        if writable {
+            return node.set_mode(mode);
+        }
+        let metadata = node.metadata()?;
+        let access = metadata
+            .permissions
+            .inode()
+            .unwrap_or_else(|| OverlayFS::legacy_access(&metadata.file_type));
+        access.check_chmod()?;
+        fs.copy_up(&self.path)?;
+        fs.visible_node(&self.path)?.0.set_mode(mode)
     }
     fn set_owner_identity(
         &self,
         principal: Option<crate::shield::identity::Principal>,
         group: Option<crate::shield::identity::Group>,
     ) -> Result<(), FileSystemError> {
-        let task = crate::task::mytask().ok_or_else(|| {
-            FileSystemError::new(FileSystemErrorKind::PermissionDenied, "No owner authority")
+        crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)?;
+        let fs = self.overlay_fs.read().clone().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "Overlay unavailable")
         })?;
-        if !task
-            .credentials
-            .read()
-            .permits(crate::shield::identity::MANAGE_OWNERS)
-        {
+        let _guard = fs.lock_namespace()?;
+        let backing = self.inode.backing.read().clone();
+        if let Some(backing) = backing {
+            if backing.writable {
+                return backing.node.set_owner_identity(principal, group);
+            }
             return Err(FileSystemError::new(
-                FileSystemErrorKind::PermissionDenied,
-                "No owner authority",
+                FileSystemErrorKind::NotSupported,
+                "Detached lower inode",
             ));
         }
-        let mut slot = self.inode.owner.write();
-        let mut owner = slot.unwrap_or(crate::shield::identity::ActiveIdentity {
-            principal: crate::shield::identity::Principal(0),
-            group: crate::shield::identity::Group(0),
-        });
-        if let Some(principal) = principal {
-            owner.principal = principal;
+        let (node, writable) = fs.visible_node(&self.path)?;
+        if !writable {
+            let metadata = node.metadata()?;
+            let access = metadata
+                .permissions
+                .inode()
+                .unwrap_or_else(|| OverlayFS::legacy_access(&metadata.file_type));
+            let authorized = crate::task::mytask().is_some_and(|task| {
+                task.credentials
+                    .read()
+                    .permits_owner_change(access.owner, principal, group)
+            });
+            if !authorized {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::PermissionDenied,
+                    "Owner change denied",
+                ));
+            }
+            fs.copy_up(&self.path)?;
+            return fs
+                .visible_node(&self.path)?
+                .0
+                .set_owner_identity(principal, group);
         }
-        if let Some(group) = group {
-            owner.group = group;
-        }
-        *slot = Some(owner);
-        Ok(())
+        node.set_owner_identity(principal, group)
     }
 
     fn id(&self) -> u64 {
@@ -716,37 +785,55 @@ impl OverlayFS {
     ///
     /// Returns FileMetadata for the first matching file found, or NotFound error
     /// if the file doesn't exist in any layer or is hidden by whiteout.
-    fn get_metadata_for_path(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
-        // Check for whiteout first
-        if self.is_whiteout(path) {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotFound,
-                "File is hidden by whiteout",
-            ));
-        }
-
-        // Check upper layer first
-        if let Some((ref upper_fs, ref upper_node)) = self.upper {
-            if let Ok(node) = self.resolve_in_layer(upper_fs, upper_node, path) {
-                let mut metadata = node.metadata()?;
-                metadata.file_id = self.inode_for_path(path);
-                return Ok(metadata);
+    fn visible_node(&self, path: &str) -> Result<(Arc<dyn VfsNode>, bool), FileSystemError> {
+        if !self.is_whiteout(path) {
+            for (mount, root) in self.upper.iter().chain(self.lower_layers.iter()) {
+                match self.resolve_in_layer(mount, root, path) {
+                    Ok(node) => {
+                        return Ok((
+                            node,
+                            self.upper.as_ref().is_some_and(|upper| {
+                                Arc::ptr_eq(mount, &upper.0) && Arc::ptr_eq(root, &upper.1)
+                            }),
+                        ));
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind,
+                            FileSystemErrorKind::NotFound | FileSystemErrorKind::NotADirectory
+                        ) =>
+                    {
+                        ()
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
-
-        // Check lower layers
-        for (lower_fs, lower_node) in &self.lower_layers {
-            if let Ok(node) = self.resolve_in_layer(lower_fs, lower_node, path) {
-                let mut metadata = node.metadata()?;
-                metadata.file_id = self.inode_for_path(path);
-                return Ok(metadata);
-            }
-        }
-
         Err(FileSystemError::new(
             FileSystemErrorKind::NotFound,
-            "File not found in any layer",
+            "No visible overlay entry",
         ))
+    }
+
+    fn legacy_access(kind: &FileType) -> InodeAccess {
+        use crate::shield::identity::{ActiveIdentity, Group, Principal};
+        InodeAccess {
+            owner: ActiveIdentity {
+                principal: Principal(0),
+                group: Group(0),
+            },
+            mode: if *kind == FileType::Directory {
+                0o755
+            } else {
+                0o644
+            },
+        }
+    }
+
+    fn get_metadata_for_path(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
+        let mut metadata = self.visible_node(path)?.0.metadata()?;
+        metadata.file_id = self.inode_for_path(path);
+        Ok(metadata)
     }
 
     /// Read the target of a symbolic link at the specified path
@@ -881,6 +968,8 @@ impl OverlayFS {
             entry,
             mount,
             "overlay-backing".to_string(),
+            flags,
+            crate::shield::access::FileGrant::for_backing(flags)?,
         )))
     }
 
@@ -964,120 +1053,102 @@ impl OverlayFS {
     fn copy_up(&self, path: &str) -> Result<(), FileSystemError> {
         let upper = self.get_upper_layer()?;
         let upper_fs = Self::fs_from_mount(&upper.0)?;
-        // Check if file already exists in upper layer
-        if self.resolve_in_layer(&upper.0, &upper.1, path).is_ok() {
+        let (lower, writable) = self.visible_node(path)?;
+        if writable {
             return Ok(());
         }
-        // Find the file in lower layers
-        for (lower_mount, lower_node) in &self.lower_layers {
-            if let Ok(lower_node) = self.resolve_in_layer(lower_mount, lower_node, path) {
-                let metadata = lower_node.metadata()?;
-                // Ensure parent directories exist in upper layer
-                self.ensure_parent_dirs(path)?;
-                let parent_path = if let Some(pos) = path.rfind('/') {
-                    &path[..pos]
-                } else {
-                    "/"
-                };
-                let filename = path.split('/').last().unwrap_or(path);
-                let parent_node = self.resolve_in_layer(&upper.0, &upper.1, parent_path)?;
-                match metadata.file_type {
-                    FileType::Directory => {
-                        upper_fs.create(
-                            &parent_node,
-                            &filename.to_string(),
-                            FileType::Directory,
-                            0o755,
-                        )?;
-                    }
-                    FileType::RegularFile => {
-                        // Create file and copy content
-                        let new_node = upper_fs.create(
-                            &parent_node,
-                            &filename.to_string(),
-                            FileType::RegularFile,
-                            0o644,
-                        )?;
-                        // Copy file content
-                        let lower_fs = Self::fs_from_mount(lower_mount)?;
-                        if let Ok(source_file) = lower_fs.open(&lower_node, 0) {
-                            // Read-only
-                            if let Ok(dest_file) = upper_fs.open(&new_node, 1) {
-                                // Write-only
-                                let _ = dest_file.seek(SeekFrom::Start(0));
-                                let mut buffer = alloc::vec![0u8; crate::environment::PAGE_SIZE];
-                                loop {
-                                    match source_file.read(&mut buffer) {
-                                        Ok(bytes_read) if bytes_read > 0 => {
-                                            if dest_file.write(&buffer[..bytes_read]).is_err() {
-                                                break;
-                                            }
-                                        }
-                                        _ => break,
-                                    }
-                                }
+        use crate::fs::vfs_v2::xattr::Error;
+        let acl = match lower.get_xattr(scarlet_abi::shield::FILE_ACCESS_ACL) {
+            Ok(value) => Some(value),
+            Err(Error::Missing | Error::Unsupported) => None,
+            Err(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Lower ACL unavailable",
+                ));
+            }
+        };
+        let metadata = lower.metadata()?;
+        if metadata.permissions.inode().is_some() && !upper_fs.preserves_creation_access() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Upper filesystem cannot preserve inode permissions",
+            ));
+        }
+        let access = metadata
+            .permissions
+            .inode()
+            .unwrap_or_else(|| OverlayFS::legacy_access(&metadata.file_type));
+        let source = if metadata.file_type == FileType::RegularFile {
+            let lower_fs = lower
+                .filesystem()
+                .and_then(|weak| weak.upgrade())
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Lower filesystem unavailable",
+                    )
+                })?;
+            Some(lower_fs.open(&lower, 0)?)
+        } else {
+            None
+        };
+        self.ensure_parent_dirs(path)?;
+        let (parent_path, filename) = path.rsplit_once('/').ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::InvalidPath, "Invalid overlay path")
+        })?;
+        let parent = self.resolve_in_layer(&upper.0, &upper.1, parent_path)?;
+        let name = filename.to_string();
+        let node = upper_fs.create_labeled(
+            &parent,
+            &name,
+            metadata.file_type,
+            access,
+            None,
+            acl.as_deref(),
+        )?;
+        if let Some(source) = source {
+            let copy = (|| {
+                let dest = upper_fs.open(&node, 1)?;
+                let mut buffer = alloc::vec![0u8; crate::environment::PAGE_SIZE];
+                loop {
+                    let count = match source.read(&mut buffer) {
+                        Ok(0) | Err(StreamError::EndOfStream) => return Ok(()),
+                        Ok(count) => count,
+                        Err(_) => {
+                            return Err(FileSystemError::new(
+                                FileSystemErrorKind::IoError,
+                                "Copy-up read failed",
+                            ));
+                        }
+                    };
+                    let mut copied = 0;
+                    while copied < count {
+                        match dest.write(&buffer[copied..count]) {
+                            Ok(n) if n > 0 && n <= count - copied => copied += n,
+                            _ => {
+                                return Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    "Copy-up write failed",
+                                ));
                             }
                         }
                     }
-                    _ => {
-                        // For other file types, create a placeholder
-                        upper_fs.create(
-                            &parent_node,
-                            &filename.to_string(),
-                            metadata.file_type,
-                            0o644,
-                        )?;
-                    }
                 }
-                return Ok(());
+            })();
+            if let Err(error) = copy {
+                upper_fs.remove(&parent, &name)?;
+                return Err(error);
             }
         }
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotFound,
-            "File not found for copy-up",
-        ))
+        Ok(())
     }
 
-    /// Ensure parent directories exist in upper layer
     fn ensure_parent_dirs(&self, path: &str) -> Result<(), FileSystemError> {
-        let upper = self.get_upper_layer()?;
-        let _upper_fs = Self::fs_from_mount(&upper.0)?;
-        let parent_path = if let Some(pos) = path.rfind('/') {
-            &path[..pos]
-        } else {
-            return Ok(());
-        };
-        if parent_path.is_empty() || parent_path == "/" {
-            return Ok(());
-        }
-        // Try to resolve parent - if it fails, create it
-        if self
-            .resolve_in_layer(&upper.0, &upper.1, parent_path)
-            .is_err()
+        if let Some((parent, _)) = path.rsplit_once('/')
+            && !parent.is_empty()
         {
-            self.ensure_parent_dirs(parent_path)?;
-            let grandparent_path = if let Some(pos) = parent_path.rfind('/') {
-                &parent_path[..pos]
-            } else {
-                "/"
-            };
-            let dirname = parent_path.split('/').last().unwrap_or(parent_path);
-            let grandparent_node = self.resolve_in_layer(
-                &upper.0,
-                &upper.1,
-                if grandparent_path.is_empty() {
-                    "/"
-                } else {
-                    grandparent_path
-                },
-            )?;
-            let upper_fs = Self::fs_from_mount(&upper.0)?;
-            upper_fs.create(
-                &grandparent_node,
-                &dirname.to_string(),
-                FileType::Directory,
-                0o755,
-            )?;
+            self.copy_up(parent)?;
         }
         Ok(())
     }
@@ -1116,6 +1187,13 @@ impl OverlayFS {
 }
 
 impl FileSystemOperations for OverlayFS {
+    fn preserves_creation_access(&self) -> bool {
+        self.upper
+            .as_ref()
+            .and_then(|(mount, _)| Self::fs_from_mount(mount).ok())
+            .is_some_and(|fs| fs.preserves_creation_access())
+    }
+
     fn fs_id(&self) -> FileSystemId {
         self.fs_id
     }
@@ -1300,15 +1378,23 @@ impl FileSystemOperations for OverlayFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent_node, name, file_type, mode, None)
+        self.create_labeled(
+            parent_node,
+            name,
+            file_type,
+            InodeAccess::for_creation(mode),
+            None,
+            None,
+        )
     }
     fn create_labeled(
         &self,
         parent_node: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        mode: u32,
+        access: InodeAccess,
         label: Option<&crate::shield::file::CreateContext>,
+        acl: Option<&[u8]>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let _namespace = self.lock_namespace()?;
         let upper = self.get_upper_layer()?;
@@ -1378,7 +1464,7 @@ impl FileSystemOperations for OverlayFS {
         let upper_parent = self.resolve_in_layer(&upper.0, &upper.1, &overlay_parent.path)?;
         let fs = Self::fs_from_mount(&upper.0)?;
         // let new_node = fs.create(&upper_parent, name, file_type, mode)?;
-        let new_node = match fs.create_labeled(&upper_parent, name, file_type, mode, label) {
+        let new_node = match fs.create_labeled(&upper_parent, name, file_type, access, label, acl) {
             Ok(node) => node,
             Err(e) => {
                 // crate::println!(

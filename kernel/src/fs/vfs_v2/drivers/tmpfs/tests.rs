@@ -28,7 +28,9 @@ mod tests {
         let root = fs.root_node();
         let metadata = root.metadata().unwrap();
         assert!(
-            metadata.permissions.read && metadata.permissions.write && metadata.permissions.execute
+            metadata.permissions.readable()
+                && metadata.permissions.writable()
+                && metadata.permissions.executable()
         );
         let owner = root.owner_identity().unwrap();
         assert_eq!(owner.principal.0, 0);
@@ -409,8 +411,12 @@ mod tests {
             .unwrap();
 
         // Verify both files exist and have the same content
-        let original = vfs.open("/testfile.txt", 0x01).unwrap(); // Read mode
-        let hardlink = vfs.open("/hardlink.txt", 0x01).unwrap(); // Read mode
+        let original = vfs
+            .open("/testfile.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap(); // Read mode
+        let hardlink = vfs
+            .open("/hardlink.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap(); // Read mode
 
         if let (
             crate::object::KernelObject::File(orig_obj),
@@ -446,7 +452,9 @@ mod tests {
         }
 
         // Read through the original
-        let orig_file = vfs.open("/original.txt", 0x01).unwrap(); // Read mode
+        let orig_file = vfs
+            .open("/original.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = orig_file {
             let mut buf = [0u8; 64];
             let len = file_obj.read(&mut buf).unwrap();
@@ -471,7 +479,9 @@ mod tests {
         vfs.create_hardlink("/original.txt", "/link.txt").unwrap();
         vfs.remove("/original.txt").unwrap();
 
-        let link = vfs.open("/link.txt", 0x01).unwrap();
+        let link = vfs
+            .open("/link.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap();
         if let crate::object::KernelObject::File(file_obj) = link {
             let mut buf = [0u8; 64];
             let len = file_obj.read(&mut buf).unwrap();
@@ -706,8 +716,12 @@ mod tests {
             .unwrap();
 
         // Verify content is accessible from both paths
-        let orig = vfs.open("/subdir/file.txt", 0x01).unwrap();
-        let link = vfs.open("/another/hardlink.txt", 0x01).unwrap();
+        let orig = vfs
+            .open("/subdir/file.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap();
+        let link = vfs
+            .open("/another/hardlink.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap();
 
         if let (
             crate::object::KernelObject::File(orig_obj),
@@ -865,9 +879,8 @@ mod tests {
         assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
         assert_eq!(metadata.size, target_path.len()); // Size should be target path length
         assert_eq!(metadata.link_count, 1);
-        assert!(metadata.permissions.read);
-        assert!(metadata.permissions.write);
-        assert!(!metadata.permissions.execute);
+        assert!(metadata.permissions.readable());
+        assert_eq!(metadata.permissions.inode().unwrap().mode, 0o777);
     }
 
     /// Test symlink error conditions
@@ -1197,7 +1210,9 @@ mod tests {
         }
 
         // Read data through real path
-        let read_file = vfs.open("/real_dir/data.txt", 0x01).unwrap(); // Read mode
+        let read_file = vfs
+            .open("/real_dir/data.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = read_file {
             let mut buffer = [0u8; 64];
             let bytes_read = file_obj.read(&mut buffer).unwrap();
@@ -1205,7 +1220,9 @@ mod tests {
         }
 
         // Read data through symlink path as well
-        let read_symlink = vfs.open("/symlink_dir/data.txt", 0x01).unwrap();
+        let read_symlink = vfs
+            .open("/symlink_dir/data.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap();
         if let crate::object::KernelObject::File(file_obj) = read_symlink {
             let mut buffer = [0u8; 64];
             let bytes_read = file_obj.read(&mut buffer).unwrap();
@@ -1269,7 +1286,9 @@ mod tests {
         }
 
         // Read data through target file
-        let read_target = vfs.open("/target.txt", 0x01).unwrap(); // Read mode
+        let read_target = vfs
+            .open("/target.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = read_target {
             let mut buffer = [0u8; 64];
             let bytes_read = file_obj.read(&mut buffer).unwrap();
@@ -1284,7 +1303,9 @@ mod tests {
         }
 
         // Read updated data through symlink
-        let read_symlink = vfs.open("/file_symlink.txt", 0x01).unwrap(); // Read mode
+        let read_symlink = vfs
+            .open("/file_symlink.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap(); // Read mode
         if let crate::object::KernelObject::File(file_obj) = read_symlink {
             let mut buffer = [0u8; 64];
             let bytes_read = file_obj.read(&mut buffer).unwrap();
@@ -1323,7 +1344,12 @@ mod tests {
         }
 
         // Read data through real path
-        let read_file = vfs.open("/level1/level2/deep_file.txt", 0x01).unwrap();
+        let read_file = vfs
+            .open(
+                "/level1/level2/deep_file.txt",
+                scarlet_abi::fs::VFS_O_RDONLY,
+            )
+            .unwrap();
         if let crate::object::KernelObject::File(file_obj) = read_file {
             let mut buffer = [0u8; 64];
             let bytes_read = file_obj.read(&mut buffer).unwrap();
@@ -1532,7 +1558,9 @@ mod tests {
         vfs.rename("/original.txt", "/renamed.txt").unwrap();
 
         // Read back via the new path
-        let file = vfs.open("/renamed.txt", 0x01).unwrap();
+        let file = vfs
+            .open("/renamed.txt", scarlet_abi::fs::VFS_O_RDONLY)
+            .unwrap();
         if let crate::object::KernelObject::File(f) = file {
             let mut buf = [0u8; 64];
             let len = f.read(&mut buf).unwrap();

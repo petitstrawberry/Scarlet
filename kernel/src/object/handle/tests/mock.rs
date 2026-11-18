@@ -127,7 +127,7 @@ impl crate::fs::FileObject for MockFileObject {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
             size: self.data.len(),
-            permissions: crate::fs::FilePermission {
+            permissions: crate::fs::FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,
@@ -245,7 +245,7 @@ impl crate::fs::FileObject for MockTaskFileObject {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
             size: self.data.len(),
-            permissions: crate::fs::FilePermission {
+            permissions: crate::fs::FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,

@@ -54,13 +54,16 @@ impl Export {
         if matches!(
             metadata.file_type,
             FileType::Directory | FileType::SymbolicLink(_)
-        ) || access & 1 != 0 && !metadata.permissions.read
-            || access & 2 != 0 && !metadata.permissions.write
+        ) || access & 1 != 0 && !metadata.permissions.readable()
+            || access & 2 != 0 && !metadata.permissions.writable()
         {
             return Err(error(FileSystemErrorKind::PermissionDenied));
         }
         let mut backing = Vec::new();
         while let Some(vfs) = file.as_any().downcast_ref::<VfsFileObject>() {
+            if (access & 1 != 0 && !vfs.readable()) || (access & 2 != 0 && !vfs.writable()) {
+                return Err(error(FileSystemErrorKind::PermissionDenied));
+            }
             let fs = vfs
                 .get_vfs_entry()
                 .node()
@@ -129,7 +132,7 @@ impl CapabilityFiles {
             return Ok(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
-                permissions: FilePermission {
+                permissions: FilePermission::Capabilities {
                     read: true,
                     write: false,
                     execute: true,
@@ -148,7 +151,7 @@ impl CapabilityFiles {
             .map_err(|_| error(FileSystemErrorKind::IoError))?;
         meta.file_id = id;
         meta.link_count = 1;
-        meta.permissions = FilePermission {
+        meta.permissions = FilePermission::Capabilities {
             read: export.access & 1 != 0,
             write: export.access & 2 != 0,
             execute: false,

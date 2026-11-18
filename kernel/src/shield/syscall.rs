@@ -798,7 +798,8 @@ pub fn sys_shield_file_policy(tf: &mut Trapframe) -> usize {
             return Err("file policy specification size");
         }
         let raw = read::<40>(&task, tf.get_arg(1))?;
-        if u32_at(&raw, 4) != 0 {
+        let flags = u32_at(&raw, 4);
+        if flags & !scarlet_abi::shield::ENFORCE_NATIVE_ACCESS != 0 {
             return Err("file policy flags");
         }
         let create_count = address(u64_at(&raw, 16))?;
@@ -843,10 +844,11 @@ pub fn sys_shield_file_policy(tf: &mut Trapframe) -> usize {
         insert(
             &task,
             PolicyHandle {
-                policy: policy.with_file_rules(
+                policy: policy.derive_file_policy(
                     (default != 0).then_some(default),
                     create,
                     relabel,
+                    flags != 0,
                 )?,
                 administer: true,
             },
@@ -1176,4 +1178,79 @@ mod update_tests {
             2
         );
     }
+}
+
+/// Operates on the retained inode so a concurrent rename cannot retarget an edit.
+pub fn sys_shield_file_acl(tf: &mut Trapframe) -> usize {
+    use crate::fs::vfs_v2::{
+        core::VfsFileObject,
+        xattr::{Error, SetMode},
+    };
+    use scarlet_abi::shield::{ACL_MAX_ENTRIES, FILE_ACCESS_ACL};
+    let Some(task) = crate::task::mytask() else {
+        return usize::MAX;
+    };
+    tf.increment_pc_next(&task);
+    let result = (|| -> Result<usize, i32> {
+        let handle = u32::try_from(tf.get_arg(0)).map_err(|_| 9)?;
+        let object = task.handle_table.get(handle).ok_or(9)?;
+        let file = object
+            .as_file()
+            .and_then(|f| f.as_any().downcast_ref::<VfsFileObject>())
+            .ok_or(95)?;
+        let node = file.get_vfs_entry().node();
+        let address = tf.get_arg(2);
+        let size = tf.get_arg(3);
+        let errno = |e| match e {
+            Error::Unsupported => 95,
+            Error::Missing => 61,
+            Error::PermissionDenied => 13,
+            Error::InvalidName => 22,
+            Error::TooLarge => 7,
+            Error::NoSpace => 28,
+            Error::Exists => 17,
+            Error::Io => 5,
+        };
+        if tf.get_arg(1) != 0
+            && node
+                .filesystem()
+                .and_then(|f| f.upgrade())
+                .is_some_and(|f| f.is_read_only())
+        {
+            return Err(30);
+        }
+        match tf.get_arg(1) {
+            0 => {
+                let bytes = match node.get_xattr(FILE_ACCESS_ACL) {
+                    Ok(value) => value,
+                    Err(Error::Missing) => return Ok(0),
+                    Err(e) => return Err(errno(e)),
+                };
+                if size != 0 {
+                    if size < bytes.len() {
+                        return Err(34);
+                    }
+                    crate::library::std::usercopy::copy_to_user(&task, address, &bytes)
+                        .map_err(|_| 14)?;
+                }
+                Ok(bytes.len())
+            }
+            1 => {
+                if size > ACL_MAX_ENTRIES * 8 {
+                    return Err(7);
+                }
+                let mut value = alloc::vec![0; size];
+                copy_from_user(&task, address, &mut value).map_err(|_| 14)?;
+                node.set_xattr(FILE_ACCESS_ACL, &value, SetMode::Upsert)
+                    .map_err(errno)?;
+                Ok(0)
+            }
+            2 if size == 0 => {
+                node.remove_xattr(FILE_ACCESS_ACL).map_err(errno)?;
+                Ok(0)
+            }
+            _ => Err(22),
+        }
+    })();
+    result.unwrap_or_else(|e| (-(e as isize)) as usize)
 }

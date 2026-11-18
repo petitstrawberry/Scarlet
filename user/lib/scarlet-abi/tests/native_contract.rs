@@ -414,6 +414,7 @@ fn native_syscall_numbers() {
         ShieldPolicyExtend = 1344, ShieldPolicyGeneration = 1345,
         ShieldFilePersistence = 1346,
         ShieldPolicyFactory = 1347,
+        ShieldFileAcl = 1348,
 
     }
 }

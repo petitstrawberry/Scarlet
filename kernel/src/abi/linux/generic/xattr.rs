@@ -1,6 +1,5 @@
 //! Linux extended-attribute ABI over native inode storage.
-//! The current Linux identity model is root-only. Security labels are opaque;
-//! ACLs and capability semantics are deliberately not advertised.
+//! Native named access ACLs are evaluated by Shield on either ABI.
 use super::{LinuxAbi, errno};
 use crate::{
     arch::Trapframe,
@@ -83,13 +82,6 @@ fn node(
     Ok(entry.node())
 }
 
-fn posix_acl_name(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"system.posix_acl_access" | b"system.posix_acl_default"
-    )
-}
-
 fn supported_name(node: &dyn VfsNode, name: &[u8], write: bool) -> Result<(), usize> {
     if scarlet_abi::shield::is_file_label_metadata_name(name) {
         return Err(errno::EPERM);
@@ -104,7 +96,7 @@ fn supported_name(node: &dyn VfsNode, name: &[u8], write: bool) -> Result<(), us
         Ok(())
     } else if (name.starts_with(b"trusted.") && name.len() > 8)
         || name == b"security.selinux"
-        || posix_acl_name(name)
+        || name == scarlet_abi::shield::FILE_ACCESS_ACL
     {
         Ok(())
     } else {
@@ -114,14 +106,6 @@ fn supported_name(node: &dyn VfsNode, name: &[u8], write: bool) -> Result<(), us
 
 #[cfg(test)]
 mod tests {
-    #[test_case]
-    fn recognizes_only_the_native_posix_acl_attributes() {
-        assert!(super::posix_acl_name(b"system.posix_acl_access"));
-        assert!(super::posix_acl_name(b"system.posix_acl_default"));
-        assert!(!super::posix_acl_name(b"system.posix_acl_other"));
-        assert!(!super::posix_acl_name(b"system.admin"));
-    }
-
     #[test_case]
     fn native_metadata_errors_keep_linux_permission_and_io_semantics() {
         assert_eq!(
@@ -219,11 +203,12 @@ fn dispatch(
                 matches!(op, Operation::Set | Operation::Remove),
             )?;
         }
-        if matches!(op, Operation::Get) {
+        let native_acl = attribute == scarlet_abi::shield::FILE_ACCESS_ACL;
+        if !native_acl && matches!(op, Operation::Get) {
             if let Some(value) = abi.extensions.get_xattr(&task, node.as_ref(), &attribute) {
                 return output(&task, a[2], a[3], &value?);
             }
-        } else if matches!(op, Operation::Set | Operation::Remove) {
+        } else if !native_acl && matches!(op, Operation::Set | Operation::Remove) {
             writable(node.as_ref())?;
             if let Some(result) = abi.extensions.change_xattr(
                 &task,

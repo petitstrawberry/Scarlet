@@ -290,9 +290,9 @@ mod tests {
         assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
         assert_eq!(metadata.size, 8); // Length of "file.txt"
         assert_eq!(metadata.link_count, 1);
-        assert!(metadata.permissions.read);
-        assert!(!metadata.permissions.write); // CpioFS is read-only
-        assert!(metadata.permissions.execute);
+        assert!(metadata.permissions.readable());
+        assert!(!metadata.permissions.writable()); // CpioFS is read-only
+        assert!(metadata.permissions.executable());
     }
 
     /// Test reading link from non-symlink in CpioFS returns error
@@ -380,9 +380,9 @@ mod tests {
         assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
         assert_eq!(metadata.size, 7); // Length of "testdir"
         assert_eq!(metadata.link_count, 1);
-        assert!(metadata.permissions.read);
-        assert!(!metadata.permissions.write); // CpioFS is read-only
-        assert!(metadata.permissions.execute);
+        assert!(metadata.permissions.readable());
+        assert!(!metadata.permissions.writable()); // CpioFS is read-only
+        assert!(metadata.permissions.executable());
     }
 
     /// Test reading link from non-symlink in CpioFS returns error (directory symlink)

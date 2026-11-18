@@ -46,6 +46,26 @@ identity. An administrator can select a subject, spawn a child, then select
 another subject before launching the next child. Management handles need not
 be transferred to the children.
 
+## Acquiring, using and transferring rights
+
+Shield combines the authority for an operation with the calling subject's policy ceiling in `shield::authorization::Target::grant`. A subsystem resolves an actual target before asking Shield. For example, VFS resolves each directory during traversal and both parent directories during rename. Storage drivers return an inode security snapshot under their inode lock. Shield evaluates its owner, primary and supplementary groups, mode and additional named grants.
+
+| Operation | Independent authority | Domain ceiling | Result |
+| --- | --- | --- | --- |
+| Open by name | Credential rights on the resolved inode | Read, write or execute on its policy label | A bounded file description |
+| Create and open | Write and search on the parent | Requested access on the child's prospective label | Initialize the inode and publish the entry after approval |
+| Read, write, truncate or map | The description's retained file grant | Applied when acquired | Shared writable mappings require a writable grant |
+| Receive an open file | Sender's description and descriptor access mode | Receive-read and receive-write on the inode label | A description with their intersection, sharing cursor, append state and locks |
+| Connect to a named local endpoint | A reachable endpoint | Connect-local on its label in the caller's policy | A connection to that endpoint |
+| Select an Internet peer | A socket of the appropriate protocol | Connect-internet on the caller's label | A connection or addressed datagram |
+| Configure IPv4 or load a module | Network or module management authority | Explicit self-target administration grant for labeled callers | One management operation |
+
+A broker can receive permission to open an image and give a viewer a read grant for it. The viewer needs receive-read on the image label and can have zero pathname rights. Removing an ACL changes subsequent opens. The existing description and any duplicates retain their grant. An entire capability with no VFS file grant requires the separate receive-capability permission in native resource policies.
+
+Use `Policy::with_native_access` in scarlet-os to create a default-deny blueprint, including one with no initial grants. Adding the first native resource rule also enables enforcement for all native resource classes in that policy. Older policies containing only ABI-specific rules retain their earlier resource behavior. Unlabeled tasks still undergo credential and inode checks.
+
+Scarlet's named access ACL adds grants to mode bits. The inode owner or a task with owner-management authority can replace or remove it, subject to the domain's change-attributes rule. `set_file_acl` and `read_file_acl` operate on native handles. The Linux xattr interface exposes the same bytes as `system.scarlet_acl_access`. The wire format is defined in scarlet-abi. ext2 stores it on disk, tmpfs stores it with the inode, and overlay copy-up carries it to the upper inode. FAT32 exposes fixed root ownership with 0755 directories and 0644 files and rejects individual ACL edits.
+
 ## Bounded policy updates
 
 [Policy updates](../../kernel/src/shield/update.rs) require management authority

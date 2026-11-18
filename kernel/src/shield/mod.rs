@@ -2,6 +2,8 @@
 //! Numeric classes and permission bits are interpreted by enforcement points,
 //! never by this policy engine.
 //! Possession of a policy identity is distinct from authority to assign labels.
+pub mod access;
+pub mod authorization;
 pub mod exec_transition;
 pub mod execution;
 pub mod file;
@@ -65,6 +67,7 @@ pub(crate) struct PolicyData {
     generation: u64,
     pub(crate) files: file::FilePolicy,
     pub(crate) file_persistence: Option<[u8; 16]>,
+    native_access: bool,
     sets: sets::SetPolicy,
     labels: BTreeMap<u32, Arc<str>>,
     names: BTreeMap<String, u32>,
@@ -123,6 +126,7 @@ impl Policy {
             generation: 1,
             files: file::FilePolicy::default(),
             file_persistence: None,
+            native_access: false,
             sets: sets::SetPolicy::default(),
             labels: BTreeMap::new(),
             names: BTreeMap::new(),
@@ -148,7 +152,18 @@ impl Policy {
         create: Vec<file::CreateRule>,
         relabel: Vec<file::RelabelRule>,
     ) -> Result<Arc<Self>, &'static str> {
+        self.derive_file_policy(default, create, relabel, false)
+    }
+
+    pub(crate) fn derive_file_policy(
+        &self,
+        default: Option<u32>,
+        create: Vec<file::CreateRule>,
+        relabel: Vec<file::RelabelRule>,
+        enforce_native: bool,
+    ) -> Result<Arc<Self>, &'static str> {
         let mut data = (*self.snapshot()).clone();
+        data.native_access |= enforce_native;
         data.files = file::FilePolicy::build(&data.labels, default, create, relabel)?;
         data.sets.clear_file_rules();
         data.generation = 1;

@@ -35,7 +35,7 @@ fn test_basic_bind_mount() {
         .create_file("/fs1/dir_a/file1", FileType::RegularFile)
         .expect("Failed to create file1");
     let file_obj = vfs_manager
-        .open("/fs1/dir_a/file1", 0)
+        .open("/fs1/dir_a/file1", scarlet_abi::fs::VFS_O_WRONLY)
         .expect("Failed to open file1");
     let file = file_obj.as_file().unwrap();
     let write_buf = b"hello from fs1";
@@ -65,7 +65,7 @@ fn test_basic_bind_mount() {
         .create_file("/fs2/mount_point/file2", FileType::RegularFile)
         .expect("Failed to create file2 via bind mount");
     let new_file_obj = vfs_manager
-        .open("/fs2/mount_point/file2", 0)
+        .open("/fs2/mount_point/file2", scarlet_abi::fs::VFS_O_WRONLY)
         .expect("Failed to open file2 via bind mount");
     let new_file = new_file_obj.as_file().unwrap();
     let new_write_buf = b"written via bind";

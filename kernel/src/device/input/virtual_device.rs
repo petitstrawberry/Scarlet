@@ -291,7 +291,7 @@ impl FileObject for InputEndpoint {
         Ok(FileMetadata {
             file_type: FileType::Pipe,
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: !self.producer,
                 write: self.producer,
                 execute: false,

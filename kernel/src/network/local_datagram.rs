@@ -127,6 +127,11 @@ impl LocalSocket {
         let target = self.datagram_target(address)?;
         let peer = LocalSocket::from_socket_object(target.as_ref())
             .ok_or(SocketError::ProtocolMismatch)?;
+        if !matches!(address, SocketAddress::Unspecified) {
+            crate::shield::authorization::connect(
+                crate::shield::authorization::Target::LocalEndpoint(peer.security_label().as_ref()),
+            )?;
+        }
         if !peer.is_datagram() {
             return Err(SocketError::ProtocolMismatch);
         }
@@ -162,6 +167,11 @@ impl LocalSocket {
         let target = self.datagram_target(address)?;
         let peer = LocalSocket::from_socket_object(target.as_ref())
             .ok_or(SocketError::ProtocolMismatch)?;
+        if !matches!(address, SocketAddress::Unspecified) {
+            crate::shield::authorization::connect(
+                crate::shield::authorization::Target::LocalEndpoint(peer.security_label().as_ref()),
+            )?;
+        }
         if !peer.is_datagram() {
             return Err(SocketError::ProtocolMismatch);
         }

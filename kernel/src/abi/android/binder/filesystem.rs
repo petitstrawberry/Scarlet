@@ -55,7 +55,7 @@ impl VfsNode for Node {
         Ok(FileMetadata {
             file_type: kind,
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: self.device.is_some() && !fs.aliases,
                 execute: self.device.is_none(),

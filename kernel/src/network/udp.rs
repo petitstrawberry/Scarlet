@@ -374,6 +374,9 @@ impl SocketObject for UdpSocket {
         address: &SocketAddress,
         _flags: u32,
     ) -> Result<usize, SocketError> {
+        if !matches!(address, SocketAddress::Unspecified) {
+            crate::shield::authorization::connect(crate::shield::authorization::Target::Internet)?;
+        }
         // send() on a connected UDP socket omits the destination. Resolve
         // that omission to the peer selected by connect(), as TCP does.
         let destination = match address {
@@ -501,6 +504,7 @@ impl SocketControl for UdpSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        crate::shield::authorization::connect(crate::shield::authorization::Target::Internet)?;
         match address {
             SocketAddress::Inet(inet) => {
                 // POSIX UDP connect implicitly binds an unbound socket and
@@ -581,12 +585,7 @@ impl crate::object::capability::StreamOps for UdpSocket {
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
-        let remote_addr = self
-            .remote_addr
-            .read()
-            .clone()
-            .unwrap_or(SocketAddress::Unspecified);
-        self.sendto(data, &remote_addr, 0)
+        self.sendto(data, &SocketAddress::Unspecified, 0)
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
                 SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,

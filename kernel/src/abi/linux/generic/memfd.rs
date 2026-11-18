@@ -529,7 +529,7 @@ impl FileObject for MemfdFile {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
             size: self.backing.size(),
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,

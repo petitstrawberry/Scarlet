@@ -44,6 +44,8 @@ pub const RESERVE_WAKE: u32 = 512;
 pub const INHIBIT_SUSPEND: u32 = 1024;
 pub const MANAGE_TRAFFIC: u32 = 2048;
 pub const MANAGE_RECLAIM: u32 = 4096;
+pub const OVERRIDE_DAC: u32 = 8192;
+pub const MANAGE_MODULES: u32 = 16384;
 pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL
     | CHANGE_GROUPS
     | MANAGE_MOUNTS
@@ -56,7 +58,9 @@ pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL
     | RESERVE_WAKE
     | INHIBIT_SUSPEND
     | MANAGE_TRAFFIC
-    | MANAGE_RECLAIM;
+    | MANAGE_RECLAIM
+    | OVERRIDE_DAC
+    | MANAGE_MODULES;
 pub const MAX_GROUPS: usize = 65536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -141,7 +141,7 @@ impl FileObject for InotifyFile {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: false,
                 execute: false,

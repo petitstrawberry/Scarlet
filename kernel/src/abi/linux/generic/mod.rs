@@ -17,7 +17,6 @@ mod bpf;
 mod config;
 mod inotify;
 pub mod mm;
-mod mode;
 mod mount_namespace;
 mod native_handle;
 mod oom;

@@ -340,8 +340,34 @@ impl Policy {
         create: &[FileCreate],
         relabel: &[FileRelabel],
     ) -> HandleResult<Self> {
+        self.derive_file_policy(default, create, relabel, 0)
+    }
+
+    /// Enable Shield resource authorization before adding any grants. Empty
+    /// rules yield a confined subject with no ambient acquisition rights.
+    pub fn with_native_access(
+        &self,
+        default: u32,
+        create: &[FileCreate],
+        relabel: &[FileRelabel],
+    ) -> HandleResult<Self> {
+        self.derive_file_policy(
+            default,
+            create,
+            relabel,
+            scarlet_abi::shield::ENFORCE_NATIVE_ACCESS,
+        )
+    }
+
+    fn derive_file_policy(
+        &self,
+        default: u32,
+        create: &[FileCreate],
+        relabel: &[FileRelabel],
+        flags: u32,
+    ) -> HandleResult<Self> {
         let spec = [
-            default as u64,
+            u64::from(default) | (u64::from(flags) << 32),
             create.as_ptr() as u64,
             create.len() as u64,
             relabel.as_ptr() as u64,
@@ -529,4 +555,58 @@ pub fn set_socket_creation_label(target: Option<u32>) -> HandleResult<()> {
     } else {
         Err(HandleError::SystemError(-1))
     }
+}
+
+/// A named grant stored on an inode. Use ACL_PRINCIPAL or ACL_GROUP as kind.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileAclEntry {
+    pub kind: u16,
+    pub rights: u16,
+    pub id: u32,
+}
+pub use scarlet_abi::shield::{ACL_GROUP, ACL_PRINCIPAL, VFS_EXECUTE, VFS_READ, VFS_WRITE};
+
+fn file_acl(file: &Handle, operation: usize, address: usize, size: usize) -> HandleResult<usize> {
+    // SAFETY: the kernel copies the bounded buffer before returning.
+    let result = unsafe {
+        syscall4(
+            Syscall::ShieldFileAcl,
+            file.as_raw() as usize,
+            operation,
+            address,
+            size,
+        )
+    };
+    match result as isize {
+        n if n >= 0 => Ok(result),
+        -9 => Err(HandleError::InvalidHandle),
+        -13 => Err(HandleError::PermissionDenied),
+        -95 => Err(HandleError::Unsupported),
+        n => Err(HandleError::SystemError(n as i32)),
+    }
+}
+
+/// Query the entry count with an empty slice or copy the complete ACL.
+pub fn read_file_acl(file: &Handle, entries: &mut [FileAclEntry]) -> HandleResult<usize> {
+    file_acl(
+        file,
+        0,
+        entries.as_mut_ptr() as usize,
+        core::mem::size_of_val(entries),
+    )
+    .map(|bytes| bytes / 8)
+}
+
+/// Replace all additional grants. Entries are sorted by (kind, id). An empty
+/// list removes the ACL, leaving the inode mode as its discretionary grant.
+pub fn set_file_acl(file: &Handle, entries: &[FileAclEntry]) -> HandleResult<()> {
+    let op = if entries.is_empty() { 2 } else { 1 };
+    file_acl(
+        file,
+        op,
+        entries.as_ptr() as usize,
+        core::mem::size_of_val(entries),
+    )
+    .map(|_| ())
 }

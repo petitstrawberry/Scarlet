@@ -62,9 +62,11 @@ impl LinuxAbi {
         &self,
         task: &Task,
         object: KernelObject,
-        mut metadata: HandleMetadata,
+        metadata: HandleMetadata,
         status: u32,
     ) -> Result<DescriptorReceipt, usize> {
+        let (object, mut metadata) = crate::shield::access::receive_handle(task, object, metadata)
+            .map_err(|_| errno::EACCES)?;
         let access = match metadata.access_mode {
             crate::object::handle::AccessMode::ReadOnly => 0,
             crate::object::handle::AccessMode::WriteOnly => 1,

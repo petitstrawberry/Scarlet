@@ -38,6 +38,13 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
         true
     }
 
+    /// Image loading also requires execute permission on a DAC-backed inode.
+    fn check_image_execution(&self) -> Result<(), &'static str> {
+        self.allows_execution()
+            .then_some(())
+            .ok_or("execution disabled on mount")
+    }
+
     /// Whether execution may derive privileges from this file. Current loaders
     /// preserve credentials; future file-derived grants must honor this gate.
     fn allows_execution_privilege_gain(&self) -> bool {

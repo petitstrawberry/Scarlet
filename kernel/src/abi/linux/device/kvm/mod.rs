@@ -322,7 +322,7 @@ impl FileObject for KvmCreatedDevice {
         Ok(FileMetadata {
             file_type: FileType::Unknown,
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: false,
                 write: true,
                 execute: false,

@@ -167,6 +167,41 @@ impl Ext2Node {
 }
 
 impl VfsNode for Ext2Node {
+    fn inode_security(
+        &self,
+    ) -> Result<Option<crate::shield::access::InodeSecurity>, FileSystemError> {
+        use crate::shield::access::InodeSecurity;
+        let filesystem = self.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "Lost ext2 filesystem")
+        })?;
+        let fs = filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::IoError, "Invalid ext2 filesystem")
+            })?;
+        let lock = fs.get_inode_lock(self.inode_number);
+        let _guard = lock.lock();
+        let inode = fs.read_inode(self.inode_number)?;
+        let acl = if inode.get_file_acl() == 0 && fs.superblock.get_inode_size() == 128 {
+            None
+        } else {
+            match fs.get_locked_xattr(
+                self.inode_number,
+                &inode,
+                scarlet_abi::shield::FILE_ACCESS_ACL,
+            ) {
+                Ok(bytes) => Some(bytes),
+                Err(crate::fs::vfs_v2::xattr::Error::Missing) => None,
+                Err(e) => return Err(Self::label_metadata_error(e, "read access ACL")),
+            }
+        };
+        Ok(Some(InodeSecurity {
+            access: fs.inode_access(&inode),
+            directory: inode.get_mode() & EXT2_S_IFMT == EXT2_S_IFDIR,
+            acl,
+        }))
+    }
     fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
         use crate::fs::vfs_v2::xattr;
         xattr::validate_name(name)?;
@@ -180,6 +215,10 @@ impl VfsNode for Ext2Node {
         mode: crate::fs::vfs_v2::xattr::SetMode,
     ) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
         use crate::fs::vfs_v2::xattr;
+        if name == scarlet_abi::shield::FILE_ACCESS_ACL {
+            crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)
+                .map_err(|_| xattr::Error::PermissionDenied)?;
+        }
         xattr::validate_name(name)?;
         if value.len() > xattr::MAX_VALUE {
             return Err(xattr::Error::TooLarge);
@@ -204,6 +243,10 @@ impl VfsNode for Ext2Node {
 
     fn remove_xattr(&self, name: &[u8]) -> Result<(), crate::fs::vfs_v2::xattr::Error> {
         use crate::fs::vfs_v2::xattr;
+        if name == scarlet_abi::shield::FILE_ACCESS_ACL {
+            crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)
+                .map_err(|_| xattr::Error::PermissionDenied)?;
+        }
         xattr::validate_name(name)?;
         self.raw_remove_xattr(name)
     }
@@ -238,19 +281,33 @@ impl VfsNode for Ext2Node {
     fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
         let filesystem = self.filesystem()?.upgrade()?;
         let fs = filesystem.as_any().downcast_ref::<Ext2FileSystem>()?;
-        (u32::from_le(fs.superblock.creator_os) == 0)
-            .then(|| {
-                fs.read_inode(self.inode_number)
-                    .ok()
-                    .map(|inode| inode.native_owner())
-            })
-            .flatten()
+        Some(
+            fs.inode_access(&fs.read_inode(self.inode_number).ok()?)
+                .owner,
+        )
+    }
+    fn set_mode(&self, mode: u32) -> Result<(), FileSystemError> {
+        crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)?;
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::IoError, "Resource filesystem gone")
+            })?;
+        filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotSupported, "Invalid filesystem")
+            })?
+            .set_inode_mode(self.inode_number, mode)
     }
     fn set_owner_identity(
         &self,
         principal: Option<crate::shield::identity::Principal>,
         group: Option<crate::shield::identity::Group>,
     ) -> Result<(), FileSystemError> {
+        crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)?;
         let filesystem = self
             .filesystem()
             .and_then(|weak| weak.upgrade())
@@ -327,13 +384,7 @@ impl VfsNode for Ext2Node {
 
         let inode = ext2_fs.read_inode(self.inode_number)?;
 
-        // Convert inode mode to permissions
-        let mode = inode.get_mode();
-        let permissions = FilePermission {
-            read: (mode & 0o444) != 0,
-            write: (mode & 0o222) != 0,
-            execute: (mode & 0o111) != 0,
-        };
+        let permissions = FilePermission::Inode(ext2_fs.inode_access(&inode));
 
         let cache_id =
             crate::fs::vfs_v2::cache::CacheId::new((ext2_fs.fs_id().get() << 32) | self.file_id);
@@ -1129,12 +1180,7 @@ impl FileObject for Ext2FileObject {
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?;
 
-        // Convert inode permissions to FilePermission
-        let permissions = FilePermission {
-            read: (inode.mode & 0o444) != 0,
-            write: (inode.mode & 0o222) != 0,
-            execute: (inode.mode & 0o111) != 0,
-        };
+        let permissions = FilePermission::Inode(ext2_fs.inode_access(&inode));
 
         // Determine file type from inode mode
         let file_type = if (inode.mode & EXT2_S_IFMT) == EXT2_S_IFREG {
@@ -1758,12 +1804,7 @@ impl FileObject for Ext2DirectoryObject {
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?;
 
-        // Convert inode permissions to FilePermission
-        let permissions = FilePermission {
-            read: (inode.mode & 0o444) != 0,
-            write: (inode.mode & 0o222) != 0,
-            execute: (inode.mode & 0o111) != 0,
-        };
+        let permissions = FilePermission::Inode(ext2_fs.inode_access(&inode));
 
         Ok(FileMetadata {
             file_type: FileType::Directory,
@@ -1976,10 +2017,33 @@ impl MemoryMappingOps for Ext2CharDeviceFileObject {
 
 impl FileObject for Ext2CharDeviceFileObject {
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        if let Some(guard) = &self.open_guard {
+            let filesystem = self
+                .filesystem
+                .read()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .ok_or(StreamError::Closed)?;
+            let fs = filesystem
+                .as_any()
+                .downcast_ref::<Ext2FileSystem>()
+                .ok_or(StreamError::NotSupported)?;
+            let inode = fs.read_inode(guard.inode).map_err(StreamError::from)?;
+            return Ok(FileMetadata {
+                file_type: FileType::CharDevice(self.device_info),
+                size: 0,
+                permissions: FilePermission::Inode(fs.inode_access(&inode)),
+                created_time: u64::from(inode.get_ctime()),
+                modified_time: u64::from(inode.get_mtime()),
+                accessed_time: u64::from(inode.get_atime()),
+                file_id: self.file_id,
+                link_count: u32::from(inode.get_links_count()),
+            });
+        }
         Ok(FileMetadata {
             file_type: FileType::CharDevice(self.device_info),
             size: 0, // Character devices don't have a meaningful size
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: true,
                 execute: false,

@@ -722,6 +722,10 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
         Err(error) => return socket_ipc_error_result(error),
     };
 
+    let Ok((object, metadata)) = crate::shield::access::receive_handle(&task, object, metadata)
+    else {
+        return usize::MAX;
+    };
     // Insert the received object into this task's handle table
     match task.handle_table.insert_with_metadata(object, metadata) {
         Ok(handle) => handle as usize,
@@ -869,6 +873,10 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
+    let Ok((object, metadata)) = crate::shield::access::receive_handle(&task, object, metadata)
+    else {
+        return usize::MAX;
+    };
     // Insert the received object into this task's handle table
     let new_handle = match task.handle_table.insert_with_metadata(object, metadata) {
         Ok(h) => h,

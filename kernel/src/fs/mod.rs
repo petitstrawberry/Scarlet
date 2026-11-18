@@ -334,10 +334,42 @@ pub enum FileType {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct FilePermission {
-    pub read: bool,
-    pub write: bool,
-    pub execute: bool,
+pub enum FilePermission {
+    /// Capability projection used by devices and filesystems without DAC metadata.
+    Capabilities {
+        read: bool,
+        write: bool,
+        execute: bool,
+    },
+    Inode(crate::shield::access::InodeAccess),
+}
+
+impl FilePermission {
+    pub fn inode(self) -> Option<crate::shield::access::InodeAccess> {
+        match self {
+            Self::Inode(access) => Some(access),
+            Self::Capabilities { .. } => None,
+        }
+    }
+    /// Aggregate projections for the legacy native metadata format.
+    pub fn readable(self) -> bool {
+        match self {
+            Self::Capabilities { read, .. } => read,
+            Self::Inode(access) => access.mode & 0o444 != 0,
+        }
+    }
+    pub fn writable(self) -> bool {
+        match self {
+            Self::Capabilities { write, .. } => write,
+            Self::Inode(access) => access.mode & 0o222 != 0,
+        }
+    }
+    pub fn executable(self) -> bool {
+        match self {
+            Self::Capabilities { execute, .. } => execute,
+            Self::Inode(access) => access.mode & 0o111 != 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -424,13 +456,13 @@ impl AbiFileMetadata {
         };
 
         let mut permissions = 0;
-        if metadata.permissions.read {
+        if metadata.permissions.readable() {
             permissions |= ABI_FILE_PERMISSION_READ;
         }
-        if metadata.permissions.write {
+        if metadata.permissions.writable() {
             permissions |= ABI_FILE_PERMISSION_WRITE;
         }
-        if metadata.permissions.execute {
+        if metadata.permissions.executable() {
             permissions |= ABI_FILE_PERMISSION_EXECUTE;
         }
 

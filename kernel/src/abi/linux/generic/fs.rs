@@ -809,27 +809,39 @@ impl LinuxStat {
             FileType::Pipe => S_IFIFO,
             FileType::Socket(_) => S_IFSOCK,
             FileType::Unknown => S_IFREG, // Default to regular file
-        } | if metadata.permissions.read {
-            S_IRUSR | S_IRGRP | S_IXGRP | S_IROTH
-        } else {
-            0
-        } | if metadata.permissions.write {
-            S_IWUSR
-        } else {
-            0
-        } | if metadata.permissions.execute {
-            S_IXUSR | S_IXGRP | S_IXOTH
-        } else {
-            0
         };
+        let permissions = if let Some(access) = metadata.permissions.inode() {
+            access.mode
+        } else {
+            (if metadata.permissions.readable() {
+                S_IRUSR | S_IRGRP | S_IXGRP | S_IROTH
+            } else {
+                0
+            } | if metadata.permissions.writable() {
+                S_IWUSR
+            } else {
+                0
+            } | if metadata.permissions.executable() {
+                S_IXUSR | S_IXGRP | S_IXOTH
+            } else {
+                0
+            })
+        };
+        let st_mode = st_mode | permissions;
 
         Self {
             st_dev: 0, // Virtual device ID
             st_ino: metadata.file_id,
             st_mode,
             st_nlink: metadata.link_count as u32,
-            st_uid: 0, // Root user
-            st_gid: 0, // Root group
+            st_uid: metadata
+                .permissions
+                .inode()
+                .map_or(0, |access| access.owner.principal.0),
+            st_gid: metadata
+                .permissions
+                .inode()
+                .map_or(0, |access| access.owner.group.0),
             // Preserve Scarlet's device identity across pathname and fd stat.
             // Reporting zero for every device makes Wine mistake a terminal
             // for /dev/null and disable all debug channels.
@@ -887,6 +899,7 @@ fn filesystem_device(identity: u64) -> Result<u64, usize> {
 
 fn apply_node_attributes(
     stat: &mut LinuxStat,
+    metadata: &crate::fs::FileMetadata,
     node: &dyn crate::fs::vfs_v2::core::VfsNode,
 ) -> Result<(), usize> {
     if let Some(filesystem) = node
@@ -895,7 +908,9 @@ fn apply_node_attributes(
     {
         stat.st_dev = filesystem_device(filesystem.fs_id().get())?;
     }
-    if let Some(owner) = node.owner_identity() {
+    if metadata.permissions.inode().is_none()
+        && let Some(owner) = node.owner_identity()
+    {
         stat.st_uid = owner.principal.0;
         stat.st_gid = owner.group.0;
     }
@@ -936,10 +951,7 @@ fn stat_from_object(
                 .metadata()
                 .map_err(|error| errno::from_fs_error(&error))?;
             let mut stat = LinuxStat::from_metadata(&metadata);
-            apply_node_attributes(&mut stat, node.as_ref())?;
-            if let Some(mode) = super::mode::get(&node) {
-                stat.st_mode = (stat.st_mode & !0o7777) | mode;
-            }
+            apply_node_attributes(&mut stat, &metadata, node.as_ref())?;
             return Ok((stat, metadata.created_time));
         }
         if file.as_any().is::<super::memfd::MemfdFile>() {
@@ -1404,6 +1416,10 @@ pub(crate) fn mount_tmpfs(
     if crate::executor::syscall::is_root_path(&fs, path) {
         return Err(errno::EBUSY);
     }
+    if !driver_options.is_empty() {
+        driver_options.push(',');
+    }
+    driver_options.push_str(&alloc::format!("mode={mode:o}"));
     let filesystem = crate::fs::get_fs_driver_manager()
         .create_from_option_string("tmpfs", &driver_options)
         .map_err(|e| match e.kind {
@@ -1411,7 +1427,7 @@ pub(crate) fn mount_tmpfs(
             crate::fs::FileSystemErrorKind::NotSupported => errno::EOPNOTSUPP,
             _ => errno::from_fs_error(&e),
         })?;
-    super::mode::set(&filesystem.root_node(), mode);
+
     fs.mount(filesystem, path, restrictions)
         .map_err(|e| errno::from_fs_error(&e))
 }
@@ -1615,81 +1631,20 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // }
 
     let native_flags = native_open_flags(flags);
-    let file =
-        open_from_evdev_compatible(&vfs, &base_entry, &base_mount, &mapped_path, native_flags);
-
-    let kernel_obj = match file {
-        Ok(obj) => {
-            // crate::println!("sys_openat: successfully opened '{}'", mapped_path);
-            obj
-        }
-        Err(e) => {
-            // crate::println!("sys_openat: failed to open '{}' -> {:?}", mapped_path, e);
-            // If open failed and O_CREAT flag is set, try to create the file
-            if flags & O_CREAT != 0 {
-                // crate::println!("sys_openat: O_CREAT flag set, attempting to create file '{}'", path_str);
-                // Build absolute path for file creation before getting mutable VFS reference
-                let absolute_path = match path_at_to_absolute(abi, &task, &vfs, dirfd, &mapped_path)
-                {
-                    Ok(path) => path,
-                    Err(error) => return errno::to_result(error),
-                };
-
-                // Get mutable VFS reference for file creation
-                let vfs_mut = match task.vfs.read().clone() {
-                    Some(v) => v,
-                    None => return errno::to_result(errno::EIO), // VFS not available
-                };
-
-                // Create the file (regular file type)
-                match vfs_mut.create_file(&absolute_path, FileType::RegularFile) {
-                    Ok(_) => {
-                        if let Ok((entry, _)) = vfs_mut.resolve_path(&absolute_path) {
-                            let mode = (trapframe.get_arg(3) as u32 & !abi.umask) & 0o7777;
-                            super::mode::set(&entry.node(), mode);
-                        }
-                        // File created successfully, now try to open it
-                        // Get immutable VFS reference again for opening
-                        let vfs = match task.get_vfs() {
-                            Some(vfs) => vfs,
-                            None => return errno::to_result(errno::EIO),
-                        };
-                        match vfs.open_from(&base_entry, &base_mount, &mapped_path, native_flags) {
-                            Ok(obj) => obj,
-                            Err(err) => return errno::to_result(errno::from_fs_error(&err)),
-                        }
-                    }
-                    Err(create_err) => {
-                        // Only a concurrent successful creation permits reopening.
-                        // Preserve authorization and I/O errors from the create path.
-                        if !matches!(
-                            create_err.kind,
-                            crate::fs::FileSystemErrorKind::AlreadyExists
-                                | crate::fs::FileSystemErrorKind::FileExists
-                        ) {
-                            return errno::to_result(errno::from_fs_error(&create_err));
-                        }
-                        if flags & O_EXCL != 0 {
-                            return errno::to_result(errno::EEXIST); // File exists and O_EXCL is set
-                        }
-                        // Try to open the existing file
-                        let vfs = match task.get_vfs() {
-                            Some(vfs) => vfs,
-                            None => return errno::to_result(errno::EIO),
-                        };
-                        let reopen_flags = native_flags & !((O_CREAT | O_EXCL) as u32);
-                        match vfs.open_from(&base_entry, &base_mount, &mapped_path, reopen_flags) {
-                            Ok(obj) => obj,
-                            Err(open_err) => {
-                                return errno::to_result(errno::from_fs_error(&open_err));
-                            }
-                        }
-                    }
-                }
-            } else {
-                return errno::to_result(errno::from_fs_error(&e)); // Return appropriate error based on VFS error
-            }
-        }
+    let result = if flags & O_CREAT != 0 {
+        let mode = trapframe.get_arg(3) as u32 & !abi.umask & 0o7777;
+        vfs.open_at_with_driver_flags(
+            Some((&base_entry, &base_mount)),
+            &mapped_path,
+            native_flags,
+            mode,
+        )
+    } else {
+        open_from_evdev_compatible(&vfs, &base_entry, &base_mount, &mapped_path, native_flags)
+    };
+    let kernel_obj = match result {
+        Ok(object) => object,
+        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
 
     if path_str == "/dev/tty"
@@ -1713,8 +1668,15 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
             }
         }
-        if (flags & O_TRUNC) != 0 {
-            let _ = file_obj.truncate(0);
+        if flags & O_TRUNC != 0
+            && flags & O_CREAT == 0
+            && file_obj
+                .metadata()
+                .is_ok_and(|m| m.file_type == FileType::RegularFile)
+        {
+            if let Err(error) = file_obj.truncate(0) {
+                return errno::to_result(stream_error_to_errno(error));
+            }
         }
         if (flags & O_APPEND) != 0 {
             let _ = file_obj.seek(SeekFrom::End(0));
@@ -2926,11 +2888,8 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
     let mut statistics = LinuxStat::from_metadata(&metadata);
-    if let Err(error) = apply_node_attributes(&mut statistics, node.as_ref()) {
+    if let Err(error) = apply_node_attributes(&mut statistics, &metadata, node.as_ref()) {
         return errno::to_result(error);
-    }
-    if let Some(mode) = super::mode::get(&node) {
-        statistics.st_mode = (statistics.st_mode & !0o7777) | mode;
     }
     match write_linux_stat(&task, stat_ptr, &statistics) {
         Ok(()) => 0,
@@ -3117,11 +3076,8 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let mut stat = LinuxStat::from_metadata(&metadata);
-    if let Err(error) = apply_node_attributes(&mut stat, node.as_ref()) {
+    if let Err(error) = apply_node_attributes(&mut stat, &metadata, node.as_ref()) {
         return errno::to_result(error);
-    }
-    if let Some(mode) = super::mode::get(&node) {
-        stat.st_mode = (stat.st_mode & !0o7777) | mode;
     }
     let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
     fill_statx_from_stat(&mut statx, &stat, metadata.created_time, mask);
@@ -3659,7 +3615,8 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(crate::executor::executor::ExecutorError::ExecutionFailed(reason)) => {
             errno::to_result(match reason.as_str() {
                 "argument list too large" => errno::E2BIG,
-                "execution disabled on mount"
+                "inode execution denied"
+                | "execution disabled on mount"
                 | "file-derived privilege changes disabled on mount" => errno::EACCES,
                 "runtime delegation loop" => errno::ELOOP,
                 "exec requires an exclusive single-threaded process" => errno::EBUSY,
@@ -4727,13 +4684,14 @@ fn linux_access_metadata(
     read_only: bool,
     mode: i32,
 ) -> Result<(), usize> {
-    // The current Linux ABI exposes both real and effective UID as zero.
-    // Root bypasses DAC read/write bits, but cannot execute a regular file
-    // without an execute bit or write a read-only filesystem.
+    crate::shield::access::check_metadata(metadata, mode as u32)
+        .map_err(|error| errno::from_fs_error(&error))?;
     if mode & 2 != 0 && read_only {
         return Err(errno::EROFS);
     }
-    if mode & 1 != 0 && metadata.file_type == FileType::RegularFile && !metadata.permissions.execute
+    if mode & 1 != 0
+        && metadata.file_type == FileType::RegularFile
+        && !metadata.permissions.executable()
     {
         return Err(errno::EACCES);
     }
@@ -4768,16 +4726,24 @@ fn linux_access_path(
         .resolve_path_with_options(path, &options)
         .map_err(|error| errno::from_fs_error(&error))?;
     let node = entry.node();
-    let metadata = node
-        .metadata()
-        .map_err(|error| errno::from_fs_error(&error))?;
-    linux_access_metadata(
-        &metadata,
-        node.filesystem()
+    linux_access_node(node.as_ref(), mode)
+}
+
+fn linux_access_node(node: &dyn crate::fs::vfs_v2::core::VfsNode, mode: i32) -> Result<(), usize> {
+    crate::shield::access::check(node, mode as u32).map_err(|e| errno::from_fs_error(&e))?;
+    if mode & 2 != 0
+        && node
+            .filesystem()
             .and_then(|fs| fs.upgrade())
-            .is_some_and(|fs| fs.is_read_only()),
-        mode,
-    )
+            .is_some_and(|fs| fs.is_read_only())
+    {
+        return Err(errno::EROFS);
+    }
+    let metadata = node.metadata().map_err(|e| errno::from_fs_error(&e))?;
+    if metadata.permissions.inode().is_none() {
+        return linux_access_metadata(&metadata, false, mode);
+    }
+    Ok(())
 }
 
 fn faccessat(abi: &LinuxAbi, trapframe: &mut Trapframe, flags: i32) -> usize {
@@ -4816,17 +4782,15 @@ fn faccessat(abi: &LinuxAbi, trapframe: &mut Trapframe, flags: i32) -> usize {
             Ok(metadata) => metadata,
             Err(_) => return errno::to_result(errno::EIO),
         };
-        let read_only = file
+        if let Some(file) = file
             .as_any()
             .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
-            .is_some_and(|file| {
-                file.get_vfs_entry()
-                    .node()
-                    .filesystem()
-                    .and_then(|fs| fs.upgrade())
-                    .is_some_and(|fs| fs.is_read_only())
-            });
-        return linux_access_metadata(&metadata, read_only, mode)
+        {
+            return linux_access_node(file.get_vfs_entry().node().as_ref(), mode)
+                .err()
+                .map_or(0, errno::to_result);
+        }
+        return linux_access_metadata(&metadata, false, mode)
             .err()
             .map_or(0, errno::to_result);
     }
@@ -4911,20 +4875,17 @@ pub fn sys_mknodat(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
                     && super::socket::uevent::visible(&view, endpoint)
             })
             .ok_or(errno::ENODEV)?;
-        view.create_device_file(
-            &path,
-            crate::fs::DeviceFileInfo {
-                device_id: endpoint.id,
-                device_type: endpoint.kind,
-            },
-        )
-        .map_err(|error| errno::from_fs_error(&error))?;
-        let node = view
-            .resolve_path(&path)
-            .map_err(|error| errno::from_fs_error(&error))?
-            .0
-            .node();
-        super::mode::set(&node, mode & 0o7777);
+        let device_info = crate::fs::DeviceFileInfo {
+            device_id: endpoint.id,
+            device_type: endpoint.kind,
+        };
+        let file_type = if kind == crate::device::DeviceType::Char {
+            FileType::CharDevice(device_info)
+        } else {
+            FileType::BlockDevice(device_info)
+        };
+        view.create_file_with_mode(&path, file_type, mode & !abi.umask & 0o7777)
+            .map_err(|error| errno::from_fs_error(&error))?;
         Ok(0)
     })()
     .unwrap_or_else(errno::to_result)
@@ -4959,17 +4920,8 @@ pub fn sys_mkdirat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(v) => v,
         None => return errno::to_result(errno::EIO),
     };
-    if vfs.resolve_path(&abs_path).is_ok() {
-        return errno::to_result(errno::EEXIST);
-    }
-    match vfs.create_dir(&abs_path) {
-        Ok(_) => match vfs.resolve_path(&abs_path) {
-            Ok((entry, _)) => {
-                super::mode::set(&entry.node(), mode);
-                0
-            }
-            Err(error) => errno::to_result(errno::from_fs_error(&error)),
-        },
+    match vfs.create_file_with_mode(&abs_path, FileType::Directory, mode) {
+        Ok(()) => 0,
         Err(error) => errno::to_result(errno::from_fs_error(&error)),
     }
 }
@@ -5246,10 +5198,7 @@ pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         if metadata.file_type == FileType::Directory {
                             // Try to remove the directory using VFS remove operation
                             match vfs_mut.remove(&absolute_path) {
-                                Ok(_) => {
-                                    super::mode::clear(&node);
-                                    0
-                                }
+                                Ok(_) => 0,
                                 Err(error) => errno::to_result(errno::from_fs_error(&error)),
                             }
                         } else {
@@ -5261,10 +5210,7 @@ pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             } else {
                 // Remove file or directory (standard removal)
                 match vfs_mut.remove(&absolute_path) {
-                    Ok(_) => {
-                        super::mode::clear(&entry.node());
-                        0
-                    }
+                    Ok(_) => 0,
                     Err(error) => errno::to_result(errno::from_fs_error(&error)),
                 }
             }
@@ -6417,21 +6363,7 @@ fn ppoll_for_task(
     count
 }
 
-/// Linux sys_fchmod implementation (stub)
-///
-/// Changes the permissions of a file using its file descriptor.
-/// This is a stub implementation that simply validates the file descriptor
-/// and returns success without actually changing permissions.
-///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///   - arg0: fd (file descriptor)
-///   - arg1: mode (new file permissions)
-///
-/// Returns:
-/// - 0 on success (if fd is valid)
-/// - usize::MAX (Linux -1) on error (if fd is invalid)
+/// Change the retained inode mode through the VFS.
 pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
@@ -6462,11 +6394,15 @@ pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     else {
         return errno::to_result(errno::EINVAL);
     };
-    super::mode::set(&vfs_file.get_vfs_entry().node(), mode);
-    0
+    vfs_file
+        .get_vfs_entry()
+        .node()
+        .set_mode(mode)
+        .err()
+        .map_or(0, |error| errno::to_result(errno::from_fs_error(&error)))
 }
 
-/// Linux fchmodat records exact Unix mode bits in the Linux view.
+/// Change the mode of the resolved inode.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -6500,12 +6436,9 @@ pub fn sys_fchmodat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Ok(path) => path,
         Err(error) => return errno::to_result(error),
     };
-    let (entry, _) = match vfs.resolve_path(&absolute) {
-        Ok(entry) => entry,
-        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
-    };
-    super::mode::set(&entry.node(), mode);
-    0
+    vfs.chmod(&absolute, mode)
+        .err()
+        .map_or(0, |error| errno::to_result(errno::from_fs_error(&error)))
 }
 
 /// Linux umask for subsequent file and directory creation.
@@ -6748,10 +6681,7 @@ fn proc_exe_stat(
         .metadata()
         .map_err(|error| errno::from_fs_error(&error))?;
     let mut stat = LinuxStat::from_metadata(&metadata);
-    apply_node_attributes(&mut stat, node.as_ref())?;
-    if let Some(mode) = super::mode::get(&node) {
-        stat.st_mode = (stat.st_mode & !0o7777) | mode;
-    }
+    apply_node_attributes(&mut stat, &metadata, node.as_ref())?;
     Ok((stat, metadata.created_time))
 }
 
@@ -6974,18 +6904,11 @@ fn linux_fchdir(abi: &LinuxAbi, task: &crate::task::Task, fd: i32) -> Result<(),
         .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
         .ok_or(errno::ENOTDIR)?;
     let entry = file.get_vfs_entry();
-    if !entry
-        .node()
-        .is_directory()
-        .map_err(|error| errno::from_fs_error(&error))?
-    {
-        return Err(errno::ENOTDIR);
-    }
     let vfs = task.get_vfs().ok_or(errno::EIO)?;
     // Keep the open directory's identity, including its mount. Resolving the
     // original pathname again would select the wrong object after a rename.
-    vfs.set_cwd(entry.clone(), file.get_mount_point().clone());
-    Ok(())
+    vfs.set_cwd(entry.clone(), file.get_mount_point().clone())
+        .map_err(|error| errno::from_fs_error(&error))
 }
 
 fn linux_chdir_path(vfs: &crate::fs::VfsManager, path: &str) -> Result<(), usize> {
@@ -7787,8 +7710,9 @@ mod tests {
                     0o644,
                 )
                 .unwrap();
-            let mut path_stat = super::LinuxStat::from_metadata(&node.metadata().unwrap());
-            super::apply_node_attributes(&mut path_stat, node.as_ref()).unwrap();
+            let metadata = node.metadata().unwrap();
+            let mut path_stat = super::LinuxStat::from_metadata(&metadata);
+            super::apply_node_attributes(&mut path_stat, &metadata, node.as_ref()).unwrap();
             assert!(path_stat.st_dev > 2 && path_stat.st_ino != 0);
             let identity = (path_stat.st_dev, path_stat.st_ino);
             for _ in 0..2 {

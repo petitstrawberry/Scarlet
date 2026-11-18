@@ -48,6 +48,15 @@ impl PolicyData {
             self.names.insert(name.clone(), id);
             self.labels.insert(id, Arc::from(name));
         }
+        self.native_access |= update
+            .rules
+            .iter()
+            .any(|r| authorization::is_native_class(r.class))
+            || update
+                .sets
+                .grants
+                .iter()
+                .any(|r| authorization::is_native_class(r.class));
         for rule in update.rules {
             if rule.class == 0
                 || rule.permissions == 0

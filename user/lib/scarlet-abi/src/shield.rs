@@ -262,3 +262,42 @@ const _: [(); 8] = [(); core::mem::size_of::<RawLabelSet>()];
 const _: [(); 8] = [(); core::mem::size_of::<RawSetMember>()];
 const _: [(); 32] = [(); core::mem::size_of::<RawSetGrant>()];
 const _: [(); 40] = [(); core::mem::size_of::<RawSetFileRule>()];
+
+/// Installing a rule in this class enables default-deny VFS authorization
+/// for every subject in the policy. Targets are policy-scoped inode labels.
+pub const VFS_ACCESS_CLASS: u32 = 0x5346_5301;
+pub const VFS_EXECUTE: u32 = 1;
+pub const VFS_WRITE: u32 = 2;
+pub const VFS_READ: u32 = 4;
+pub const VFS_CHANGE_ATTRIBUTES: u32 = 8;
+/// Separate from pathname rights, allowing a broker to delegate one file.
+/// Bits 4 and 5 correspond to receiving write and read respectively.
+pub const VFS_RECEIVE_WRITE: u32 = VFS_WRITE << 3;
+pub const VFS_RECEIVE_READ: u32 = VFS_READ << 3;
+
+/// Additional discretionary grants. Each 8-byte little-endian record contains
+/// kind (u16), rwx bits (u16), and identity (u32). Sort by (kind, identity).
+/// Mode bits still give the ordinary owner/group/other grant. An ACL grants
+/// additional rights independently of chmod, until the owner edits/removes it.
+pub const FILE_ACCESS_ACL: &[u8] = b"system.scarlet_acl_access";
+pub const ACL_PRINCIPAL: u16 = 1;
+pub const ACL_GROUP: u16 = 2;
+pub const ACL_MAX_ENTRIES: usize = 64;
+
+/// System-wide administration. A labeled manager needs a self-target grant
+/// as well as its credential authority.
+pub const SYSTEM_MANAGEMENT_CLASS: u32 = 0x5346_5302;
+pub const ADMIN_NETWORK: u64 = 1;
+pub const ADMIN_MODULES: u64 = 2;
+
+pub const ENDPOINT_ACCESS_CLASS: u32 = 0x5346_5303;
+pub const CONNECT_LOCAL: u64 = 1;
+pub const CONNECT_INTERNET: u64 = 2;
+/// Explicit permission to receive an entire object whose operations cannot
+/// be narrowed with file read/write rights.
+pub const CAPABILITY_RECEIVE_CLASS: u32 = 0x5346_5304;
+pub const RECEIVE_CAPABILITY: u64 = 1;
+
+/// File policy derivation flag. Enable default-deny native resource access
+/// even for a blueprint with zero resource grants.
+pub const ENFORCE_NATIVE_ACCESS: u32 = 1;

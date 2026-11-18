@@ -410,7 +410,7 @@ impl VfsNode for DevPtsNode {
         Ok(FileMetadata {
             file_type: Self::file_type_for(self.kind),
             size: 0,
-            permissions: FilePermission {
+            permissions: FilePermission::Capabilities {
                 read: true,
                 write: !matches!(self.kind, DevPtsNodeKind::Root),
                 execute: false,

@@ -4,6 +4,8 @@
 //! It implements FileSystemOperations directly and uses VfsNode for internal
 //! structure representation.
 
+use crate::shield::access::InodeAccess;
+
 use crate::fs::vfs_v2::xattr::{self, Error as XattrError, SetMode};
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
@@ -95,20 +97,17 @@ impl TmpFS {
         }
         let root = self.root.read().clone();
         if let Some(mode) = mode {
-            root.metadata.write().permissions = FilePermission {
-                read: mode & 0o444 != 0,
-                write: mode & 0o222 != 0,
-                execute: mode & 0o111 != 0,
-            };
+            root.update_access(|access| access.mode = mode);
         }
         if uid.is_some() || gid.is_some() {
-            let mut owner = root.owner.write();
-            if let Some(uid) = uid {
-                owner.principal = crate::shield::identity::Principal(uid);
-            }
-            if let Some(gid) = gid {
-                owner.group = crate::shield::identity::Group(gid);
-            }
+            root.update_access(|access| {
+                if let Some(uid) = uid {
+                    access.owner.principal = crate::shield::identity::Principal(uid);
+                }
+                if let Some(gid) = gid {
+                    access.owner.group = crate::shield::identity::Group(gid);
+                }
+            });
         }
         Ok(())
     }
@@ -171,6 +170,10 @@ impl TmpFS {
 }
 
 impl FileSystemOperations for TmpFS {
+    fn preserves_creation_access(&self) -> bool {
+        true
+    }
+
     fn fs_id(&self) -> FileSystemId {
         self.fs_id
     }
@@ -273,15 +276,23 @@ impl FileSystemOperations for TmpFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        self.create_labeled(parent_node, name, file_type, mode, None)
+        self.create_labeled(
+            parent_node,
+            name,
+            file_type,
+            InodeAccess::for_creation(mode),
+            None,
+            None,
+        )
     }
     fn create_labeled(
         &self,
         parent_node: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        mode: u32,
+        access: InodeAccess,
         label: Option<&crate::shield::file::CreateContext>,
+        acl: Option<&[u8]>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone()).map_err(|_| {
             FileSystemError::new(
@@ -324,15 +335,7 @@ impl FileSystemOperations for TmpFS {
         }
 
         let new_node = match file_type {
-            FileType::RegularFile => {
-                let node = Arc::new(TmpNode::new_file(name.clone().to_string(), file_id));
-                node.metadata.write().permissions = FilePermission {
-                    read: mode & 0o444 != 0,
-                    write: mode & 0o222 != 0,
-                    execute: mode & 0o111 != 0,
-                };
-                node
-            }
+            FileType::RegularFile => Arc::new(TmpNode::new_file(name.clone().to_string(), file_id)),
             FileType::Directory => {
                 Arc::new(TmpNode::new_directory(name.clone().to_string(), file_id))
             }
@@ -355,9 +358,23 @@ impl FileSystemOperations for TmpFS {
                 ));
             }
         };
+        new_node.metadata.write().permissions = FilePermission::Inode(access);
         // After creation, set the filesystem reference.
         if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
             tmp_node.set_filesystem(fs_ref);
+        }
+        if let Some(acl) = acl {
+            crate::shield::access::acl_permissions(acl, None).map_err(|_| {
+                FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid creation ACL")
+            })?;
+            new_node
+                .store_xattr(scarlet_abi::shield::FILE_ACCESS_ACL, acl, SetMode::Create)
+                .map_err(|_| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NoSpace,
+                        "Cannot initialize inode ACL",
+                    )
+                })?;
         }
         if let Some(label) = label {
             label.initialize(new_node.as_ref()).map_err(|reason| {
@@ -744,7 +761,6 @@ pub struct TmpNode {
     content: IrqRwSpinLock<Vec<u8>>,
     /// Attributes follow the inode, including open-but-unlinked files.
     xattrs: IrqRwSpinLock<BTreeMap<Vec<u8>, Vec<u8>>>,
-    owner: IrqRwSpinLock<crate::shield::identity::ActiveIdentity>,
     /// Child nodes (for directories)
     children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
@@ -803,6 +819,50 @@ impl Debug for TmpNode {
 }
 
 impl TmpNode {
+    fn store_xattr(&self, name: &[u8], value: &[u8], mode: SetMode) -> Result<(), XattrError> {
+        xattr::validate_name(name)?;
+        if value.len() > xattr::MAX_VALUE {
+            return Err(XattrError::TooLarge);
+        }
+        let mut attrs = self.xattrs.write();
+        let old = attrs.get(name);
+        match (mode, old.is_some()) {
+            (SetMode::Create, true) => return Err(XattrError::Exists),
+            (SetMode::Replace, false) => return Err(XattrError::Missing),
+            _ => (),
+        }
+        let old_size = old.map_or(0, |v| name.len() + v.len());
+        let new_size = name.len() + value.len();
+        let used: usize = attrs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if used - old_size + new_size > xattr::MAX_NODE_BYTES
+            || (old.is_none() && attrs.len() == xattr::MAX_NODE_ATTRIBUTES)
+        {
+            return Err(XattrError::NoSpace);
+        }
+        let fs = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(XattrError::Unsupported)?;
+        let tmpfs = fs
+            .as_any()
+            .downcast_ref::<TmpFS>()
+            .ok_or(XattrError::Unsupported)?;
+        tmpfs
+            .reserve_memory_usage(new_size.saturating_sub(old_size))
+            .map_err(|_| XattrError::NoSpace)?;
+        attrs.insert(name.to_vec(), value.to_vec());
+        tmpfs.subtract_memory_usage(old_size.saturating_sub(new_size));
+        Ok(())
+    }
+
+    fn update_access<R>(&self, change: impl FnOnce(&mut InodeAccess) -> R) -> R {
+        let mut metadata = self.metadata.write();
+        let FilePermission::Inode(access) = &mut metadata.permissions else {
+            unreachable!("tmpfs inode without ownership")
+        };
+        change(access)
+    }
+
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64) -> Self {
         let now = crate::time::system_time_s().unwrap_or(0);
@@ -812,11 +872,7 @@ impl TmpNode {
             metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: false,
-                },
+                permissions: FilePermission::Inode(InodeAccess::for_creation(0o644)),
                 created_time: now,
                 modified_time: now,
                 accessed_time: now,
@@ -827,7 +883,6 @@ impl TmpNode {
             content: IrqRwSpinLock::new(Vec::new()),
             labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
-            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -844,11 +899,7 @@ impl TmpNode {
             metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: true,
-                },
+                permissions: FilePermission::Inode(InodeAccess::for_creation(0o755)),
                 created_time: now,
                 modified_time: now,
                 accessed_time: now,
@@ -859,7 +910,6 @@ impl TmpNode {
             content: IrqRwSpinLock::new(Vec::new()),
             labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
-            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -876,11 +926,7 @@ impl TmpNode {
             metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type,
                 size: 0,
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: false,
-                },
+                permissions: FilePermission::Inode(InodeAccess::for_creation(0o666)),
                 created_time: now,
                 modified_time: now,
                 accessed_time: now,
@@ -891,7 +937,6 @@ impl TmpNode {
             content: IrqRwSpinLock::new(Vec::new()),
             labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
-            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -908,11 +953,7 @@ impl TmpNode {
             metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::SymbolicLink(target.clone()),
                 size: target.len(),
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: false,
-                },
+                permissions: FilePermission::Inode(InodeAccess::for_creation(0o777)),
                 created_time: now,
                 modified_time: now,
                 accessed_time: now,
@@ -924,7 +965,6 @@ impl TmpNode {
             content: IrqRwSpinLock::new(target.into_bytes()),
             labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
-            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -992,58 +1032,74 @@ impl TmpNode {
     }
 }
 
-fn initial_owner() -> crate::shield::identity::ActiveIdentity {
-    crate::task::mytask()
-        .map(|task| task.credentials.read().identity())
-        .unwrap_or(crate::shield::identity::ActiveIdentity {
-            principal: crate::shield::identity::Principal(0),
-            group: crate::shield::identity::Group(0),
-        })
-}
-
 impl VfsNode for TmpNode {
+    fn inode_security(
+        &self,
+    ) -> Result<Option<crate::shield::access::InodeSecurity>, FileSystemError> {
+        use crate::shield::access::InodeSecurity;
+        let metadata = self.metadata.read();
+        Ok(Some(InodeSecurity {
+            access: metadata.permissions.inode().unwrap(),
+            directory: metadata.file_type == FileType::Directory,
+            acl: self
+                .xattrs
+                .read()
+                .get(scarlet_abi::shield::FILE_ACCESS_ACL)
+                .cloned(),
+        }))
+    }
+
     fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
         Some(self.labels.clone())
     }
 
     fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> {
-        Some(*self.owner.read())
+        self.metadata
+            .read()
+            .permissions
+            .inode()
+            .map(|access| access.owner)
+    }
+    fn set_mode(&self, mode: u32) -> Result<(), FileSystemError> {
+        crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)?;
+        self.update_access(|access| {
+            access.check_chmod()?;
+            access.mode = mode & 0o7777;
+            Ok(())
+        })
     }
     fn set_owner_identity(
         &self,
         principal: Option<crate::shield::identity::Principal>,
         group: Option<crate::shield::identity::Group>,
     ) -> Result<(), FileSystemError> {
-        use crate::shield::identity::MANAGE_OWNERS;
+        crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)?;
         let task = crate::task::mytask().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::PermissionDenied,
                 "Owner authority required",
             )
         })?;
-        let credentials = task.credentials.read();
-        let mut current = self.owner.write();
-        if !credentials.permits(MANAGE_OWNERS) {
-            let ids = credentials.groups();
-            if credentials.identity().principal != current.principal
-                || principal.is_some_and(|next| next != current.principal)
-                || group.is_some_and(|next| {
-                    !ids.contains(next) && !credentials.supplementary().contains(&next)
-                })
+        self.update_access(|access| {
+            let current = &mut access.owner;
+            if !task
+                .credentials
+                .read()
+                .permits_owner_change(*current, principal, group)
             {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::PermissionDenied,
-                    "Owner authority required",
+                    "Owner change denied",
                 ));
             }
-        }
-        if let Some(principal) = principal {
-            current.principal = principal;
-        }
-        if let Some(group) = group {
-            current.group = group;
-        }
-        Ok(())
+            if let Some(principal) = principal {
+                current.principal = principal;
+            }
+            if let Some(group) = group {
+                current.group = group;
+            }
+            Ok(())
+        })
     }
 
     fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, XattrError> {
@@ -1060,42 +1116,39 @@ impl VfsNode for TmpNode {
     }
 
     fn set_xattr(&self, name: &[u8], value: &[u8], mode: SetMode) -> Result<(), XattrError> {
-        xattr::validate_name(name)?;
-        if value.len() > xattr::MAX_VALUE {
-            return Err(XattrError::TooLarge);
-        }
-        let mut attrs = self.xattrs.write();
-        let old = attrs.get(name);
-        match (mode, old.is_some()) {
-            (SetMode::Create, true) => return Err(XattrError::Exists),
-            (SetMode::Replace, false) => return Err(XattrError::Missing),
-            _ => (),
-        }
-        let old_size = old.map_or(0, |v| name.len() + v.len());
-        let new_size = name.len() + value.len();
-        let used: usize = attrs.iter().map(|(k, v)| k.len() + v.len()).sum();
-        if used - old_size + new_size > xattr::MAX_NODE_BYTES
-            || (old.is_none() && attrs.len() == xattr::MAX_NODE_ATTRIBUTES)
-        {
-            return Err(XattrError::NoSpace);
-        }
-        let fs = self
-            .filesystem()
-            .and_then(|weak| weak.upgrade())
-            .ok_or(XattrError::Unsupported)?;
-        let tmpfs = fs
-            .as_any()
-            .downcast_ref::<TmpFS>()
-            .ok_or(XattrError::Unsupported)?;
-        tmpfs
-            .reserve_memory_usage(new_size.saturating_sub(old_size))
-            .map_err(|_| XattrError::NoSpace)?;
-        attrs.insert(name.to_vec(), value.to_vec());
-        tmpfs.subtract_memory_usage(old_size.saturating_sub(new_size));
-        Ok(())
+        let _owner_guard = if name == scarlet_abi::shield::FILE_ACCESS_ACL {
+            crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)
+                .map_err(|_| XattrError::PermissionDenied)?;
+            let metadata = self.metadata.read();
+            metadata
+                .permissions
+                .inode()
+                .unwrap()
+                .check_chmod()
+                .map_err(|_| XattrError::PermissionDenied)?;
+            crate::shield::access::acl_permissions(value, None)?;
+            Some(metadata)
+        } else {
+            None
+        };
+        self.store_xattr(name, value, mode)
     }
 
     fn remove_xattr(&self, name: &[u8]) -> Result<(), XattrError> {
+        let _owner_guard = if name == scarlet_abi::shield::FILE_ACCESS_ACL {
+            crate::shield::access::check_domain(self, scarlet_abi::shield::VFS_CHANGE_ATTRIBUTES)
+                .map_err(|_| XattrError::PermissionDenied)?;
+            let metadata = self.metadata.read();
+            metadata
+                .permissions
+                .inode()
+                .unwrap()
+                .check_chmod()
+                .map_err(|_| XattrError::PermissionDenied)?;
+            Some(metadata)
+        } else {
+            None
+        };
         xattr::validate_name(name)?;
         let fs = self
             .filesystem()
