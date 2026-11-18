@@ -2348,6 +2348,14 @@ impl XhciController {
         Ok(pages)
     }
 
+    fn clear_slot_context(&self, slot_id: u8) {
+        if let Some(dcbaa) = self.dcbaa.lock().as_ref() {
+            // Disable Slot has completed and the DCBAA contains max_slots + 1 entries.
+            unsafe { write_volatile((dcbaa.as_vaddr() as *mut u64).add(slot_id as usize), 0) };
+            sync_pages_for_device(dcbaa);
+        }
+    }
+
     fn allocate_ep0_ring(&self) -> Result<DmaTrbRing, &'static str> {
         let ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
             .ok_or("Failed to allocate EP0 transfer ring")?;
@@ -2359,7 +2367,6 @@ impl XhciController {
 
     fn address_device(
         &self,
-        slot_id: u8,
         root_port_id: u8,
         speed: UsbSpeed,
         route_string: u32,
@@ -2367,7 +2374,6 @@ impl XhciController {
         tt_hub_slot_id: Option<u8>,
         tt_port: u8,
     ) -> Result<SlotRuntime, &'static str> {
-        let device_context = self.assign_device_context(slot_id)?;
         let input_pages = self
             .dma_alloc_pages(
                 address_input_context_bytes(self.context_size)
@@ -2378,39 +2384,62 @@ impl XhciController {
         ep0_ring.clear();
         let input_dma_mapping =
             self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
-        unsafe {
-            core::ptr::write_bytes(
-                input_pages.as_vaddr() as *mut u8,
-                0,
-                input_pages.len() * crate::environment::PAGE_SIZE,
-            );
-            let input = InputContextBuffer::new(input_pages.as_vaddr(), self.context_size);
-            let mut address_context = InputContext::new();
-            address_context.configure_for_address(
-                slot_id,
-                root_port_id,
-                Self::context_speed(speed),
-                route_string,
-                tt_hub_slot_id,
-                tt_port,
-            );
-            address_context
-                .endpoint0
-                .set_dequeue_pointer(ep0_ring.dma_address() as u64);
-            address_context.endpoint0.set_dequeue_cycle(true);
-            core::ptr::write(input.control_mut(), address_context.control);
-            core::ptr::write(input.slot_mut(), address_context.slot);
-            core::ptr::write(input.endpoint_mut(EP0_DCI)?, address_context.endpoint0);
+        let slot_id = self.send_command(Trb::enable_slot_command())?.slot_id();
+        if slot_id == 0 {
+            return Err("Enable Slot returned slot 0");
         }
-        sync_pages_for_device(&input_pages);
-        ep0_ring.sync_for_device();
-        let event = self.send_command(Trb::address_device_command(
-            input_dma_mapping.dma_addr().as_u64(),
-            slot_id,
-            false,
-        ))?;
-        if event.slot_id() != slot_id {
-            return Err("Address Device completion slot mismatch");
+        let device_context = match self.assign_device_context(slot_id) {
+            Ok(context) => context,
+            Err(error) => {
+                self.send_command(Trb::disable_slot_command(slot_id))?;
+                return Err(error);
+            }
+        };
+        let address = (|| -> Result<(), &'static str> {
+            unsafe {
+                core::ptr::write_bytes(
+                    input_pages.as_vaddr() as *mut u8,
+                    0,
+                    input_pages.len() * crate::environment::PAGE_SIZE,
+                );
+                let input = InputContextBuffer::new(input_pages.as_vaddr(), self.context_size);
+                let mut address_context = InputContext::new();
+                address_context.configure_for_address(
+                    slot_id,
+                    root_port_id,
+                    Self::context_speed(speed),
+                    route_string,
+                    tt_hub_slot_id,
+                    tt_port,
+                );
+                address_context
+                    .endpoint0
+                    .set_dequeue_pointer(ep0_ring.dma_address() as u64);
+                address_context.endpoint0.set_dequeue_cycle(true);
+                core::ptr::write(input.control_mut(), address_context.control);
+                core::ptr::write(input.slot_mut(), address_context.slot);
+                core::ptr::write(input.endpoint_mut(EP0_DCI)?, address_context.endpoint0);
+            }
+            sync_pages_for_device(&input_pages);
+            ep0_ring.sync_for_device();
+            let event = self.send_command(Trb::address_device_command(
+                input_dma_mapping.dma_addr().as_u64(),
+                slot_id,
+                false,
+            ))?;
+            if event.slot_id() != slot_id {
+                return Err("Address Device completion slot mismatch");
+            }
+            Ok(())
+        })();
+        if let Err(error) = address {
+            if let Err(disable_error) = self.send_command(Trb::disable_slot_command(slot_id)) {
+                // A controller that failed to stop might still DMA to these pages.
+                core::mem::forget((device_context, input_dma_mapping, input_pages, ep0_ring));
+                return Err(disable_error);
+            }
+            self.clear_slot_context(slot_id);
+            return Err(error);
         }
         // Address Device performs SET_ADDRESS. Like Linux, leave its 10 ms
         // recovery interval before the first descriptor control request.
@@ -4449,7 +4478,7 @@ impl XhciController {
 
         self.submit_interrupt_in_transfer(slot_id)?;
         self.power_hub_ports(slot_id)?;
-        let discovered = self.enumerate_hub_ports(slot_id)?;
+        let discovered = self.enumerate_hub_ports(slot_id, true)?;
         if discovered != 0 {
             println!(
                 "[xHCI] Slot {} hub enumerated {} downstream device(s)",
@@ -4639,7 +4668,7 @@ impl XhciController {
         Ok(())
     }
 
-    fn enumerate_hub_ports(&self, slot_id: u8) -> Result<usize, &'static str> {
+    fn enumerate_hub_ports(&self, slot_id: u8, initial: bool) -> Result<usize, &'static str> {
         let (hub, root_port_id, parent_speed) = {
             let slots = self.slot_runtime.lock();
             let slot = slots
@@ -4655,78 +4684,85 @@ impl XhciController {
         let mut discovered = 0usize;
 
         for port in 1..=hub.num_ports {
-            let status = self.hub_get_port_status(slot_id, port)?;
-            self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
-            self.clear_hub_port_changes(slot_id, port, status, hub.is_superspeed)?;
-            if !status.connected() {
-                self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
-                continue;
-            }
-            if hub.depth >= USB_HUB_ROUTE_DEPTH_MAX || port > 15 {
+            let result = (|| -> Result<bool, &'static str> {
+                let status = self.hub_get_port_status(slot_id, port)?;
+                self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
+                self.clear_hub_port_changes(slot_id, port, status, hub.is_superspeed)?;
+                if !status.connected() {
+                    self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
+                    return Ok(false);
+                }
+                if hub.depth >= USB_HUB_ROUTE_DEPTH_MAX || port > 15 {
+                    println!(
+                        "[xHCI] Slot {} hub port {} route depth unsupported",
+                        slot_id, port
+                    );
+                    return Ok(false);
+                }
+
+                // xHCI Route String contains only downstream hub-port nibbles; the root
+                // hub port is carried separately in the Slot Context Root Hub Port Number.
+                let child_route = hub.route_string | ((port as u32) << (hub.depth as u32 * 4));
+                let child_depth = hub.depth + 1;
+                let child_exists = self.slot_runtime.lock().iter().any(|slot| {
+                    slot.usb_device.port_id() == root_port_id
+                        && slot.route_string == child_route
+                        && slot.route_depth == child_depth
+                });
+                if child_exists && status.enabled() && !status.connection_changed() {
+                    return Ok(false);
+                }
+                if child_exists {
+                    self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
+                }
+
+                // Our own port reset also wakes the hub worker. Only a physical
+                // transition (or the initial scan) starts a new enumeration.
+                if !initial && !child_exists && !status.connection_changed() {
+                    return Ok(false);
+                }
+                let status = self.reset_hub_port(slot_id, port)?;
+                self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
+                if !status.enabled() {
+                    println!(
+                        "[xHCI] Slot {} hub port {} reset did not enable port",
+                        slot_id, port
+                    );
+                    return Ok(false);
+                }
+
+                let speed = status.speed(hub.is_superspeed);
+                let tt_hub_slot_id = if matches!(parent_speed, UsbSpeed::High)
+                    && matches!(speed, UsbSpeed::Low | UsbSpeed::Full)
+                {
+                    Some(slot_id)
+                } else {
+                    None
+                };
+
                 println!(
-                    "[xHCI] Slot {} hub port {} route depth unsupported",
-                    slot_id, port
+                    "[xHCI] Slot {} hub port {} connected, speed {:?}, route={:#x}",
+                    slot_id, port, speed, child_route
                 );
-                continue;
+                let slot_runtime = self.address_device(
+                    root_port_id,
+                    speed,
+                    child_route,
+                    child_depth,
+                    tt_hub_slot_id,
+                    port,
+                )?;
+                let child_slot_id = slot_runtime.usb_device.slot_id();
+                self.devices.lock().push(slot_runtime.usb_device);
+                self.slot_runtime.lock().push(slot_runtime);
+                self.configure_known_classes(child_slot_id);
+                Ok(true)
+            })();
+            match result {
+                Ok(true) => discovered += 1,
+                Ok(false) => {}
+                Err(error) => println!("[xHCI] Hub {} port {} enumeration failed: {}", slot_id, port, error),
             }
-
-            // xHCI Route String contains only downstream hub-port nibbles; the root
-            // hub port is carried separately in the Slot Context Root Hub Port Number.
-            let child_route = hub.route_string | ((port as u32) << (hub.depth as u32 * 4));
-            let child_depth = hub.depth + 1;
-            let child_exists = self.slot_runtime.lock().iter().any(|slot| {
-                slot.usb_device.port_id() == root_port_id
-                    && slot.route_string == child_route
-                    && slot.route_depth == child_depth
-            });
-            if child_exists && status.enabled() && !status.connection_changed() {
-                continue;
-            }
-            if child_exists {
-                self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
-            }
-
-            let status = self.reset_hub_port(slot_id, port)?;
-            self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
-            if !status.enabled() {
-                println!(
-                    "[xHCI] Slot {} hub port {} reset did not enable port",
-                    slot_id, port
-                );
-                continue;
-            }
-
-            let speed = status.speed(hub.is_superspeed);
-            let tt_hub_slot_id = if matches!(parent_speed, UsbSpeed::High)
-                && matches!(speed, UsbSpeed::Low | UsbSpeed::Full)
-            {
-                Some(slot_id)
-            } else {
-                None
-            };
-
-            println!(
-                "[xHCI] Slot {} hub port {} connected, speed {:?}, route={:#x}",
-                slot_id, port, speed, child_route
-            );
-            let completion = self.send_command(Trb::enable_slot_command())?;
-            let child_slot_id = completion.slot_id();
-            if child_slot_id == 0 {
-                return Err("Enable Slot returned slot 0");
-            }
-            let slot_runtime = self.address_device(
-                child_slot_id,
-                root_port_id,
-                speed,
-                child_route,
-                child_depth,
-                tt_hub_slot_id,
-                port,
-            )?;
-            self.devices.lock().push(slot_runtime.usb_device);
-            self.slot_runtime.lock().push(slot_runtime);
-            self.configure_known_classes(child_slot_id);
-            discovered += 1;
         }
 
         Ok(discovered)
@@ -5561,12 +5597,14 @@ impl XhciController {
             let status = self.reset_port(port_id)?;
             let speed = status.speed();
             println!("[xHCI] Port {} reset complete, speed {:?}", port_id, speed);
-            let completion = self.send_command(Trb::enable_slot_command())?;
-            let slot_id = completion.slot_id();
-            if slot_id == 0 {
-                return Err("Enable Slot returned slot 0");
-            }
-            let slot_runtime = self.address_device(slot_id, port_id, speed, 0, 0, None, 0)?;
+            let slot_runtime = match self.address_device(port_id, speed, 0, 0, None, 0) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    println!("[xHCI] Root port {} enumeration failed: {}", port_id, error);
+                    continue;
+                }
+            };
+            let slot_id = slot_runtime.usb_device.slot_id();
             self.devices.lock().push(slot_runtime.usb_device);
             self.slot_runtime.lock().push(slot_runtime);
             self.configure_known_classes(slot_id);
@@ -5642,6 +5680,7 @@ impl XhciController {
                 continue;
             }
 
+            self.clear_slot_context(slot_id);
             self.pending_events
                 .lock()
                 .retain(|event| event.slot_id() != slot_id);
@@ -6864,7 +6903,7 @@ impl XhciController {
             {
                 continue;
             }
-            match self.enumerate_hub_ports(slot_id) {
+            match self.enumerate_hub_ports(slot_id, false) {
                 Ok(count) if count != 0 => println!(
                     "[xHCI] Hub slot {} change enumerated {} device(s)",
                     slot_id, count
