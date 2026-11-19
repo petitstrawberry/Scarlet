@@ -261,8 +261,8 @@ pub enum ControlCenterAction {
     SelectOutput(String),
     /// Open a settings destination.
     OpenSettings,
-    /// Execute a desktop session or power action.
-    Session(SessionAction),
+    /// Ask the provider worker to request a system power transition.
+    Power(super::power_request::PowerAction),
 }
 
 /// Suppress repeated integer writes only while their acknowledged provider
@@ -1192,7 +1192,7 @@ fn confirmation_page(
         boxed(Spacer::new()),
         boxed(Button::new("Cancel").on_click(move || session.update(|s| s.page = previous))),
         boxed(Button::new(confirmed.label()).on_click(move || {
-            action.set(Some(ControlCenterAction::Session(confirmed)));
+            confirmed.confirm(&action);
         })),
     ], width, height, gap);
     vec![

@@ -1204,14 +1204,16 @@ impl SessionAction {
         }
     }
 
-    fn execute(self) {
+    fn confirm(self, actions: &State<Option<ControlCenterAction>>) {
         match self {
             Self::LogOut if session_logout_available() => {
+                // Exit on the UI thread. A worker exiting the group can close
+                // the SWS handles while this thread is still polling them.
                 std::process::exit(DESKTOP_SESSION_LOGOUT_STATUS);
             }
             Self::LogOut => {}
-            Self::Restart => request_system_power(power_request::PowerAction::Reboot),
-            Self::PowerOff => request_system_power(power_request::PowerAction::PowerOff),
+            Self::Restart => actions.set(Some(ControlCenterAction::Power(power_request::PowerAction::Reboot))),
+            Self::PowerOff => actions.set(Some(ControlCenterAction::Power(power_request::PowerAction::PowerOff))),
         }
     }
 }
@@ -1663,11 +1665,11 @@ fn apply_control_center_action(
             dismiss_window(multi_output::key(output, CONTROL_CENTER_SCENE_KEY));
             control_center_session.update(ControlCenterSession::close);
         }
-        ControlCenterAction::Session(action) => {
+        ControlCenterAction::Power(action) => {
             let output = multi_output::session().map_or(0, |bus| bus.panel_output.get());
             control_center_session.update(ControlCenterSession::close);
             dismiss_window(multi_output::key(output, CONTROL_CENTER_SCENE_KEY));
-            action.execute();
+            request_system_power(action);
         }
     }
 }
@@ -2836,10 +2838,10 @@ impl ShellApp {
                 .set(Some(ControlCenterAction::ToggleMute)),
             ConsoleAction::Power(PowerAction::Reboot) => self
                 .control_center_action
-                .set(Some(ControlCenterAction::Session(SessionAction::Restart))),
+                .set(Some(ControlCenterAction::Power(power_request::PowerAction::Reboot))),
             ConsoleAction::Power(PowerAction::PowerOff) => self
                 .control_center_action
-                .set(Some(ControlCenterAction::Session(SessionAction::PowerOff))),
+                .set(Some(ControlCenterAction::Power(power_request::PowerAction::PowerOff))),
         }
     }
 

@@ -20,7 +20,7 @@ framebuffer = { path = "../../user/lib/framebuffer", default-features = false, f
 gpu-raw = { path = "../../user/lib/gpu-raw", default-features = false, features = ["std"], optional = true }
 scarlet-os = { path = "../../user/lib/scarlet-os", default-features = false, features = ["std"], optional = true }
 scarlet-sys = { path = "../../user/lib/scarlet-sys", optional = true }
-scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "73005007792d31b8e242144f23412fb667652ccd", optional = true }
+scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4802af3f0191dbd6a13d0293fc63670fcb346f61", optional = true }
 sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "61e5ddd0f0e31309d2468ace3c4afe67d949fa72", default-features = false, features = ["std", "backend-dynamic", "backend-wgpu"], optional = true }
 png = { version = "0.18.1", optional = true }
 sbus-client = { path = "../../user/lib/sbus-client", default-features = false, features = ["std"], optional = true }
