@@ -5,7 +5,10 @@ mod clock;
 #[path = "scarlet_shell/fonts.rs"]
 mod fonts;
 mod greeter_ui;
-use scarlet_os::Socket;
+use scarlet_os::{
+    Socket,
+    ipc::{EventPriority, ProcessControl, send_process_control_with_priority},
+};
 use scarlet_ui::{BitmapImage, RenderingPipeline, prelude::*};
 use std::{
     fs::File,
@@ -97,31 +100,78 @@ fn private_pair() -> io::Result<(Socket, Socket)> {
     Ok((a, b))
 }
 
-struct LoginChild(Child);
-impl Drop for LoginChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
+struct SeatChild {
+    child: Child,
+    reaped: bool,
 }
-impl LoginChild {
-    fn start(command: &mut Command, input: Socket) -> io::Result<Self> {
-        let file = child_stdio(input.into_handle())?;
-        command
-            .env_clear()
-            .env("SCARLET_UI_BACKEND", "cpu")
-            .env("SWS_BACKEND", "cpu")
-            .stdin(Stdio::from(file))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(Self)
+
+impl SeatChild {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        Ok(Self {
+            child: command.spawn()?,
+            reaped: false,
+        })
     }
+
+    fn with_login_socket(command: &mut Command, input: Socket) -> io::Result<Self> {
+        let file = child_stdio(input.into_handle())?;
+        Self::spawn(
+            command
+                .env_clear()
+                .env("SCARLET_UI_BACKEND", "cpu")
+                .env("SWS_BACKEND", "cpu")
+                .stdin(Stdio::from(file))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+    }
+
+    fn exited(&mut self) -> io::Result<bool> {
+        if !self.reaped {
+            self.reaped = self.child.try_wait()?.is_some();
+        }
+        Ok(self.reaped)
+    }
+
     fn running(&mut self) -> io::Result<()> {
-        if self.0.try_wait()?.is_some() {
+        if self.exited()? {
             return Err(io::Error::other("login display service exited"));
         }
         Ok(())
+    }
+
+    fn stop(&mut self) -> io::Result<()> {
+        if self.exited()? {
+            return Ok(());
+        }
+        // Scarlet std's Child::kill currently returns Unsupported. Stop the
+        // display owner through native process control before waiting for it.
+        if let Err(error) = send_process_control_with_priority(
+            self.child.id(),
+            ProcessControl::Kill,
+            EventPriority::Critical,
+            true,
+        ) {
+            return if self.exited()? {
+                Ok(())
+            } else {
+                Err(os_err(error))
+            };
+        }
+        self.child.wait()?;
+        self.reaped = true;
+        Ok(())
+    }
+}
+
+impl Drop for SeatChild {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop() {
+            eprintln!(
+                "[scarlet-seat] could not stop child {}: {error}",
+                self.child.id()
+            );
+        }
     }
 }
 
@@ -136,22 +186,26 @@ fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
         .send_handle(provider_server.as_handle())
         .map_err(os_err)?;
     drop((editor_server, provider_server));
-    let mut compositor = LoginChild::start(
+    let mut compositor = SeatChild::with_login_socket(
         Command::new(&config.compositor[0])
             .arg("--login-seat")
             .args(&config.compositor[1..]),
         child_socket,
     )?;
     let mut keyboard =
-        LoginChild::start(Command::new(&config.broker).arg("--login-panel"), provider)?;
+        SeatChild::with_login_socket(Command::new(&config.broker).arg("--login-panel"), provider)?;
     let mut painter = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
-    sws_client::Connection::with_inherited_socket(editor, || {
+    let result = sws_client::Connection::with_inherited_socket(editor, || {
         login_window(broker, &mut painter, || {
             compositor.running()?;
             keyboard.running()
         })
     })
-    .map_err(os_err)?
+    .map_err(os_err)
+    .and_then(|result| result);
+    let stop_keyboard = keyboard.stop();
+    let stop_compositor = compositor.stop();
+    result.and(stop_keyboard).and(stop_compositor)
 }
 
 fn background(painter: &mut Worker, width: u32, height: u32) -> io::Result<BitmapImage> {
@@ -354,31 +408,30 @@ fn run_session(config: &Config) -> io::Result<()> {
     args.extend(config.session.iter().map(String::as_str));
     let mut broker = Worker::start(&config.broker, &args)?;
     authenticate(&mut broker, config)?;
-    let mut compositor = Command::new(&config.compositor[0])
-        .args(&config.compositor[1..])
-        .stdin(Stdio::null())
-        .spawn()?;
+    let mut compositor = SeatChild::spawn(
+        Command::new(&config.compositor[0])
+            .args(&config.compositor[1..])
+            .stdin(Stdio::null()),
+    )?;
     let result = (|| {
         let mut state = [0; 37];
         let start = Instant::now();
         while !sws_client::Connection::connect(&config.display_socket)
             .is_ok_and(|conn| conn.get_screen_size().is_ok())
         {
-            if compositor.try_wait()?.is_some() || start.elapsed() >= Duration::from_secs(30) {
+            if compositor.exited()? || start.elapsed() >= Duration::from_secs(30) {
                 return Err(io::Error::other("compositor did not become ready"));
             }
             thread::sleep(Duration::from_millis(50));
         }
         broker.exchange(&[16], &mut state)?;
-        while state[0] == 1 && compositor.try_wait()?.is_none() {
+        while state[0] == 1 && !compositor.exited()? {
             thread::sleep(Duration::from_millis(200));
             broker.exchange(&[0], &mut state)?;
         }
         Ok(())
     })();
-    let _ = compositor.kill();
-    let _ = compositor.wait();
-    result
+    result.and(compositor.stop())
 }
 
 fn main() -> io::Result<()> {
