@@ -16,7 +16,15 @@ fn main() {
     state[2] = 8;
     state[3] = 5;
     state[4..9].copy_from_slice(b"alice");
-    if args.get(5).is_some() {
+    if let Ok(font) = std::fs::read(
+        std::path::Path::new(&args[1]).with_file_name("JetBrainsMonoNerdFontMono-Regular.ttf"),
+    ) {
+        let _ = scarlet_ui::graphics::add_default_font_fallback(font.leak());
+    }
+    if args.get(5).is_some_and(|arg| arg == "picker") {
+        state[0] = 4;
+        state[2] = 0;
+    } else if args.get(5).is_some_and(|arg| arg == "failed") {
         state[1] = 1;
         state[2] = 0;
     }

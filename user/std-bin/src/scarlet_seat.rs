@@ -220,22 +220,21 @@ fn paint(
         .map_err(|e| io::Error::other(format!("cannot present login screen: {e:?}")))
 }
 
+#[path = "scarlet_shell/fonts.rs"]
+mod fonts;
+
 fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
     let mut renderer = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
     let mut display = DisplaySurface::open_primary()
         .map_err(|_| io::Error::other("login display unavailable"))?;
     // The trusted copy must use the same font metrics for View hit testing.
-    static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    if FONT.get().is_none() {
-        let _ = FONT.set(std::fs::read("/share/fonts/Mplus1-Regular.ttf")?);
-    }
-    scarlet_ui::graphics::set_default_font(FONT.get().unwrap())
-        .map_err(|_| io::Error::other("invalid system font"))?;
+    fonts::initialize()?;
+    let mut panel_input = seat_keys::PanelInput::new();
     let mut keys: [Keyboard; 8] = std::array::from_fn(|_| Keyboard::default());
     let mut pointers: [Option<PointerDevice>; 24] = std::array::from_fn(|_| None);
     let mut scan = None;
     let mut state = [0; 37];
-    broker.exchange(&[0], &mut state)?;
+    broker.exchange(&[19], &mut state)?;
     let info = display
         .get_info()
         .map_err(|_| io::Error::other("login display info"))?;
@@ -311,7 +310,7 @@ fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
             }
             let redraw = action.is_some();
             if let Some(action) = action {
-                pressed = seat_keys::activate(&mut screen, action);
+                pressed = panel_input.activate(&mut screen, action);
             }
             if let Some(byte) = pressed {
                 broker.exchange(&[byte], &mut state)?;

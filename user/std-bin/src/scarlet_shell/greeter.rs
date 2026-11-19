@@ -7,10 +7,10 @@ mod greeter_ui;
 mod keyboard_layout;
 use std::io::{self, Read, Write};
 
+mod fonts;
+
 fn main() -> io::Result<()> {
-    let font = std::fs::read("/share/fonts/Mplus1-Regular.ttf")?;
-    scarlet_ui::graphics::set_default_font(font.leak())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid system font"))?;
+    fonts::initialize()?;
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     let mut request = [0; greeter_ui::REQUEST_BYTES];

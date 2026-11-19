@@ -9,9 +9,9 @@ cargo run --locked --manifest-path tests/greeter/Cargo.toml --bin greeter-fixtur
   bundles/desktop/fs/share/fonts/Mplus1-Regular.ttf 800 480 /tmp/greeter.ppm
 ```
 
-Append `failed` to the fixture arguments to display the authentication error.
+Append `picker` to render the account chooser or `failed` to display the authentication error.
 For guest acceptance, boot the desktop image with a configured local test
-account and a direct touchscreen or VirtIO tablet. Use only taps to enter
-the name, select Password, submit an incorrect password, then enter the
+account and a direct touchscreen or VirtIO tablet. Use only taps to select
+an account, submit an incorrect password, then enter the
 correct password and verify that the configured desktop starts. Repeat with
 physical keys (including Shift, Backspace and Enter), in portrait and landscape.

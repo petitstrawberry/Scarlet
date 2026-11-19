@@ -269,12 +269,16 @@ before accepting the next login. SSH uses the same account database and credenti
 command and SFTP sessions, including logins as root. The desktop bundle starts `scarlet-seat` with
 `/etc/scarlet-seat.toml`. This file selects the authentication broker, greeter,
 compositor and session command. The seat reads local keyboard, touchscreen and tablet events and sends input to
-the broker over a private pipe. Tapping a field selects it and opens the on-screen
-US keyboard. Shift and the two symbol pages provide printable ASCII. Enter or
-the form button advances from the login name or submits the password. The seat
-hit-tests the same ScarletUI layout as the anonymous greeter. The greeter
-receives the login name, masked length, field, status, viewport and keyboard
-display state. Its only reply is a BGRA frame. With no enabled account the seat displays a setup message.
+the broker over a private pipe. The broker offers the names of accounts enabled
+for graphical login. Tap an account to enter its password, choose Other user
+to enter a name, or type a login name directly with a physical keyboard.
+The seat hit-tests the same ScarletUI views as the anonymous greeter. Both the
+login screen and the desktop use the system input panel's keyboard view. The
+seat routes pre-login key actions directly to the broker. Desktop IME and
+clipboard services receive no login input. The greeter receives the selected
+name, masked length, field, status, viewport and keyboard display state. Its
+only reply is a BGRA frame. It paints the shell's system background, including
+configured artwork under `/share`. With no enabled account it offers a retry.
 
 After authentication the seat starts the configured compositor. Once it is
 ready, the broker starts the session command with the user's credentials, home

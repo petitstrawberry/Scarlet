@@ -17,22 +17,17 @@ use scarlet_ui::{Color, Icon, IconSize, KeyCode, KeyEvent, State};
 
 // Match the existing Home's translucent wallpaper tint and ScarletUI's dark
 // semantic palette. Application accents come from the shared launcher icons.
+#[path = "appearance.rs"]
+mod appearance;
+pub use appearance::FROST;
+use appearance::{ACCENT, ACTION_HEIGHT, CARD, FLOATING_ACTIVE, LINE, MUTED, RADIUS, TEXT};
 const BACKGROUND: Color = Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
-const CARD: Color = Color::rgba_f32(0.22, 0.22, 0.22, 0.72);
-pub const FROST: Color = Color::rgba_f32(28.0 / 255.0, 28.0 / 255.0, 32.0 / 255.0, 0.48);
 const FLOATING: Color = FROST;
-const FLOATING_ACTIVE: Color = Color::rgba_f32(56.0 / 255.0, 56.0 / 255.0, 59.0 / 255.0, 0.58);
 pub const MATERIAL_BLUR_RADIUS: f32 = 8.0;
-const TEXT: Color = Color::WHITE;
-const MUTED: Color = Color::rgba_f32(235.0 / 255.0, 235.0 / 255.0, 245.0 / 255.0, 0.6);
-const ACCENT: Color = Color::rgba_f32(0.88, 0.25, 0.25, 1.0);
-const LINE: Color = Color::rgba_f32(1.0, 1.0, 1.0, 0.10);
-const RADIUS: f32 = 20.0;
 const SECTION_INSET: f32 = 12.0;
 const SECTION_HEADER_HEIGHT: f32 = 27.0;
 const SECTION_GAP: f32 = 10.0;
 const SHELF_CHROME_HEIGHT: f32 = SECTION_INSET * 2.0 + SECTION_HEADER_HEIGHT + SECTION_GAP;
-const ACTION_HEIGHT: f32 = 44.0;
 const ACTION_GAP: f32 = 8.0;
 const WORKSPACE_BUTTON_WIDTH: f32 = 84.0;
 
@@ -732,15 +727,7 @@ impl ConsoleView {
                     TEXT
                 });
         }
-        // Button keeps its intrinsic size. Center that actual control inside
-        // the shared 44px target instead of pinning it to the frame's origin.
-        Surface::floating(
-            ZStack::new((button,))
-                .alignment(Alignment::Center)
-                .frame(width, ACTION_HEIGHT),
-        )
-        .elevation(ElevationRole::Flat)
-        .fill(if region == Region::Workspaces {
+        let fill = if region == Region::Workspaces {
             if active {
                 ACCENT.with_opacity(0.16)
             } else {
@@ -750,21 +737,16 @@ impl ConsoleView {
             FLOATING_ACTIVE
         } else {
             FLOATING
-        })
-        .bordered(false)
-        .corner_radius(10.0)
-        .border_rounded(
-            if selected && region == Region::Workspaces {
-                TEXT
-            } else if selected || active {
-                ACCENT
-            } else {
-                LINE
-            },
-            if selected { 2.0 } else { 1.0 },
-            10.0,
-        )
-        .on_click(move || frame_click.select(region, index, true))
+        };
+        let outline = if selected && region == Region::Workspaces {
+            TEXT
+        } else if selected || active {
+            ACCENT
+        } else {
+            LINE
+        };
+        appearance::action_surface(button, Size::new(width, ACTION_HEIGHT), fill, outline, selected)
+            .on_click(move || frame_click.select(region, index, true))
     }
 
     fn floating_controls(&self, layout: ConsoleLayout) -> FloatingLayer {

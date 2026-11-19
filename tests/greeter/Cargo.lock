@@ -1479,12 +1479,17 @@ source = "git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b
 [[package]]
 name = "scarlet-desktop-config"
 version = "1.0.0"
+
+[[package]]
+name = "scarlet-desktop-config"
+version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00#9531dfe3ad00856095b132b694b442528317ae00"
 
 [[package]]
 name = "scarlet-greeter-checks"
 version = "0.1.0"
 dependencies = [
+ "scarlet-desktop-config 1.0.0",
  "scarlet-ui",
  "sws-protocol 1.0.0",
 ]
@@ -1573,7 +1578,7 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=73005007792d31b8e242144f23412fb667652ccd#73005007792d31b8e242144f23412fb667652ccd"
 dependencies = [
  "sbus-client",
- "scarlet-desktop-config",
+ "scarlet-desktop-config 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00)",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
  "sgfx",

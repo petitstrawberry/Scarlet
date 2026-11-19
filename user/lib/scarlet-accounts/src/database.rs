@@ -78,6 +78,14 @@ pub fn login_available() -> bool {
             .any(|line| !line.ends_with(":!") && !line.ends_with(':'))
 }
 
+/// Names available for the graphical account chooser, in image configuration order.
+pub fn login_names() -> Vec<alloc::string::String> {
+    load()
+        .ok()
+        .and_then(|data| super::selectable_names(core::str::from_utf8(&data).ok()?).ok())
+        .unwrap_or_default()
+}
+
 /// Read a fresh protected database for every login or unlock attempt.
 pub fn authenticate_local(
     name: &[u8],
