@@ -78,10 +78,10 @@ impl Editor {
         self.mode_draft.iter().find(|(id, _)| *id == output.id).map_or(output.mode, |(_, mode)| *mode)
     }
     pub fn logical_size_label(&self) -> String {
-        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return String::new(); };
+        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return "—".into(); };
         self.draft.iter().find(|config| config.id == output.id)
             .and_then(|config| self.preview_mode(output).logical_size(config.scale_milli).ok())
-            .map_or_else(String::new, |(w, h)| format!("Workspace size: {w} × {h} logical points"))
+            .map_or_else(|| "—".into(), |(w, h)| format!("{w} × {h}"))
     }
     fn geometry(&self, viewport_width: f32) -> Option<(f32, f32, f32)> {
         // Keep the preview coordinate system fixed while the pointer moves.
@@ -157,9 +157,9 @@ impl Editor {
                 if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) { config.x = x; config.y = y; }
                 if let Ok(canonical) = outputs::canonical_layout(&projected, &self.draft) { self.draft = canonical; }
                 self.dirty = !self.mode_draft.is_empty() || self.draft != snapshot.configuration;
-                self.status = String::from("Ready to apply. Displays must touch at an edge or corner.");
+                self.status.clear();
             }
-            Err(_) => { self.draft = snapshot.configuration.clone(); self.dirty = !self.mode_draft.is_empty(); self.status = String::from("This arrangement would overlap or disconnect displays."); }
+            Err(_) => { self.draft = snapshot.configuration.clone(); self.dirty = !self.mode_draft.is_empty(); self.status = String::from("Displays must touch at an edge or corner without overlapping."); }
         }
     }
 }
@@ -192,7 +192,7 @@ pub(super) fn watch(state: State<Editor>) {
             state.update(|editor| editor.status = String::from("Display configuration is unavailable.")); return;
         };
         let modes = mode_catalog(&connection, &snapshot);
-        state.update(|editor| { editor.adopt(snapshot); editor.modes = modes; editor.status = String::from("Drag displays to arrange them, then apply."); });
+        state.update(|editor| { editor.adopt(snapshot); editor.modes = modes; editor.status.clear(); });
         loop {
             if connection.wait_for_window_events(Duration::from_millis(500)).is_err() || connection.dispatch().is_err() { break; }
             while let Some(event) = connection.poll_event() {
@@ -202,7 +202,7 @@ pub(super) fn watch(state: State<Editor>) {
                     state.update(|editor| {
                         if editor.applying { return; }
                         editor.adopt(snapshot); editor.modes = modes;
-                        editor.status = String::from("Display configuration updated.");
+                        editor.status.clear();
                     });
                 }
             }
@@ -312,7 +312,7 @@ pub(super) fn apply(state: &State<Editor>) {
     if editor.applying { return; }
     let Some(original) = editor.snapshot else { return; };
     let state = state.clone();
-    state.update(|editor| { editor.applying = true; editor.status = String::from("Applying display settings…"); });
+    state.update(|editor| { editor.applying = true; editor.status.clear(); });
     thread::spawn(move || {
         let result = (|| -> core::result::Result<OutputSnapshot, String> {
             let connection = Connection::connect_default().map_err(|e| format!("{e:?}"))?;
@@ -339,7 +339,7 @@ pub(super) fn apply(state: &State<Editor>) {
             connection.configure_outputs(outputs::OutputTransaction { base_generation: live.generation, configuration: editor.draft })
                 .map_err(|e| format!("{e:?}"))
         })();
-        let status = match &result { Ok(_) => "Display settings applied.".into(), Err(e) => format!("Display settings: {e}.") };
+        let status = match &result { Ok(_) => String::new(), Err(e) => format!("Display settings: {e}.") };
         let snapshot = result.ok().or_else(|| Connection::connect_default().ok()?.outputs().ok());
         state.update(|editor| {
             if let Some(snapshot) = snapshot { editor.adopt(snapshot); }

@@ -152,10 +152,7 @@ fn f32_to_percent(value: f32) -> u32 {
 
 fn load_display_brightness() -> (f32, String) {
     match Connection::connect_backlight().and_then(|display| display.backlight_percent()) {
-        Ok(percent) => {
-            let percent = percent.min(100);
-            (percent as f32, format!("Current brightness: {}%", percent))
-        }
+        Ok(percent) => (percent as f32, String::new()),
         Err(error) => {
             println!("[settings] failed to read display brightness: {:?}", error);
             (
@@ -197,26 +194,6 @@ fn output_label_from_info(output: &OutputInfo) -> String {
         fixed_sas_str(&output.description),
         fixed_sas_str(&output.path),
     )
-}
-
-fn output_label_from_state(state: ControlState) -> String {
-    output_label_from_parts(
-        state.output_kind,
-        fixed_sas_str(&state.output_name),
-        fixed_sas_str(&state.output_description),
-        fixed_sas_str(&state.output_path),
-    )
-}
-
-fn audio_status_text(state: ControlState) -> String {
-    let muted = state.flags & CONTROL_FLAG_MUTED != 0;
-    let volume = q16_to_percent(state.master_volume_q16).min(100);
-    let label = output_label_from_state(state);
-    if muted {
-        format!("Muted - {} - {}%", label, volume)
-    } else {
-        format!("{} - {}%", label, volume)
-    }
 }
 
 fn save_background_via_service(
@@ -297,10 +274,7 @@ fn get_status_preferences_via_service() -> core::result::Result<StatusPreference
 
 fn load_status_preferences() -> (StatusPreferences, String) {
     match get_status_preferences_via_service() {
-        Ok(preferences) => (
-            preferences,
-            String::from("Loaded authoritative preferences from settingsd"),
-        ),
+        Ok(preferences) => (preferences, String::new()),
         Err(error) => {
             println!(
                 "[settings] failed to load status preferences through settingsd: {}",
@@ -308,7 +282,7 @@ fn load_status_preferences() -> (StatusPreferences, String) {
             );
             (
                 scarlet_desktop_config::load_desktop_config().status,
-                format!("settingsd unavailable; showing saved configuration ({error})"),
+                format!("Live status preferences are unavailable ({error})"),
             )
         }
     }
@@ -559,11 +533,9 @@ fn start_background_autosave(app: &SettingsApp) {
             if let Some((style, color, image)) =
                 autosave.poll(app.background_snapshot(), app.background_retry.get())
             {
-                app.background_status
-                    .set(String::from("Saving background…"));
                 let result = save_background_via_service(color, style, image.as_deref());
                 app.background_status.set(match result {
-                    Ok(()) => String::from("Background saved"),
+                    Ok(()) => String::new(),
                     Err(error) => format!(
                         "Background not saved: {:?}. Choose Save Again to retry.",
                         error
@@ -628,7 +600,7 @@ fn load_audio_controls() -> (Vec<OutputInfo>, usize, f32, bool, String) {
             selected,
             q16_to_percent(state.master_volume_q16).min(100) as f32,
             state.flags & CONTROL_FLAG_MUTED != 0,
-            audio_status_text(state),
+            String::new(),
         ))
     });
 
@@ -1061,9 +1033,7 @@ impl SettingsApp {
         let style = config.theme.background_style.unwrap_or(DEFAULT_STYLE);
         let color = config.theme.background.unwrap_or(DEFAULT_BG_PREVIEW);
         let background_image = config.theme.background_image.clone();
-        let background_image_label = background_image
-            .clone()
-            .unwrap_or_else(|| String::from("No image selected (using generated background)"));
+        let background_image_label = background_image.clone().unwrap_or_default();
         let input_methods = load_input_methods();
         let selected_ime_index = input_methods
             .iter()
@@ -1090,10 +1060,6 @@ impl SettingsApp {
             load_audio_controls();
         let (display_brightness, display_brightness_status) = load_display_brightness();
         let (cursor_themes, cursor_theme_index) = load_cursor_theme_choices();
-        let cursor_theme_status = cursor_themes
-            .get(cursor_theme_index)
-            .map(|theme| format!("Active: {}", theme.name))
-            .unwrap_or_else(|| String::from("No cursor themes installed"));
         let (status_preferences, status_preferences_status) = load_status_preferences();
         let (output_scale_index, output_scale_status) = load_output_scale();
         let app = Self {
@@ -1134,19 +1100,13 @@ impl SettingsApp {
                     .position(|preset| preset.color == color)
                     .unwrap_or(PRESET_COLORS.len()),
             ),
-            background_status: State::new(
-                StateId::new(29),
-                String::from("Changes are saved automatically"),
-            ),
+            background_status: State::new(StateId::new(29), String::new()),
             background_retry: State::new(StateId::new(30), 0),
             output_scale_index: State::new(StateId::new(31), output_scale_index),
             output_scale_last_good: State::new(StateId::new(32), output_scale_index),
             output_scale_status: State::new(StateId::new(33), output_scale_status),
             timezone_active: State::new(StateId::new(34), current_tz),
-            timezone_status: State::new(
-                StateId::new(35),
-                String::from("Choose a region and city, then apply the time zone"),
-            ),
+            timezone_status: State::new(StateId::new(35), String::new()),
             clock_format_index: State::new(
                 StateId::new(36),
                 if status_preferences.clock_format == ClockFormat::TwelveHour {
@@ -1192,7 +1152,7 @@ impl SettingsApp {
             display_brightness_status: State::new(StateId::new(20), display_brightness_status),
             cursor_themes: State::new(StateId::new(22), cursor_themes),
             cursor_theme_index: State::new(StateId::new(23), cursor_theme_index),
-            cursor_theme_status: State::new(StateId::new(24), cursor_theme_status),
+            cursor_theme_status: State::new(StateId::new(24), String::new()),
             status_preferences: State::new(StateId::new(25), status_preferences),
             status_preferences_status: State::new(StateId::new(26), status_preferences_status),
         };
@@ -1212,8 +1172,7 @@ impl SettingsApp {
     }
 
     fn save_config(&self) {
-        self.background_status
-            .set(String::from("Waiting to save background…"));
+        self.background_status.set(String::new());
         self.background_retry
             .update(|retry| *retry = retry.wrapping_add(1));
     }
@@ -1277,8 +1236,8 @@ impl SettingsApp {
         let zone = format!("{region}/{city}");
         match save_timezone(&zone) {
             Ok(()) => {
-                self.timezone_active.set(zone.clone());
-                self.timezone_status.set(format!("Time zone set to {zone}"));
+                self.timezone_active.set(zone);
+                self.timezone_status.set(String::new());
             }
             Err(TimezoneCommitError::Unchanged) => self.timezone_status.set(String::from(
                 "Time zone was not changed. Check access and choose Apply Time Zone to retry.",
@@ -1294,9 +1253,7 @@ impl SettingsApp {
         match get_status_preferences_via_service() {
             Ok(preferences) => {
                 self.status_preferences.set(preferences);
-                self.status_preferences_status.set(String::from(
-                    "Loaded authoritative preferences from settingsd",
-                ));
+                self.status_preferences_status.set(String::new());
             }
             Err(error) => {
                 self.status_preferences_status
@@ -1314,8 +1271,7 @@ impl SettingsApp {
         match save_status_preferences_via_service(&requested) {
             Ok(saved) => {
                 self.status_preferences.set(saved);
-                self.status_preferences_status
-                    .set(format!("{action} saved through settingsd"));
+                self.status_preferences_status.set(String::new());
             }
             Err(error) => {
                 self.status_preferences_status
@@ -1360,8 +1316,7 @@ impl SettingsApp {
         match reset_status_preferences_via_service() {
             Ok(preferences) => {
                 self.status_preferences.set(preferences);
-                self.status_preferences_status
-                    .set(String::from("Status preferences reset through settingsd"));
+                self.status_preferences_status.set(String::new());
             }
             Err(error) => {
                 self.status_preferences_status
@@ -1394,9 +1349,7 @@ impl SettingsApp {
 
     fn clear_background_image(&self) {
         self.background_image.set(None);
-        self.background_image_label.set(String::from(
-            "No image selected (using generated background)",
-        ));
+        self.background_image_label.set(String::new());
         self.save_config();
     }
 
@@ -1485,7 +1438,7 @@ impl SettingsApp {
                         item.active = item.ime_id == method.ime_id;
                     }
                 });
-                self.input_status.set(format!("Active: {}", method.name));
+                self.input_status.set(String::new());
             }
             Err(error) => {
                 self.selected_ime_index.set(previous);
@@ -1499,7 +1452,7 @@ impl SettingsApp {
         self.audio_volume_percent
             .set(q16_to_percent(state.master_volume_q16).min(100) as f32);
         self.audio_muted.set(state.flags & CONTROL_FLAG_MUTED != 0);
-        self.audio_status.set(audio_status_text(state));
+        self.audio_status.set(String::new());
         self.audio_last_good.set((
             self.audio_volume_percent.get(),
             self.audio_muted.get(),
@@ -1560,8 +1513,7 @@ impl SettingsApp {
                 let applied = percent as f32;
                 self.display_brightness_percent.set(applied);
                 self.display_brightness_last_good.set(applied);
-                self.display_brightness_status
-                    .set(format!("Current brightness: {}%", percent));
+                self.display_brightness_status.set(String::new());
                 println!("[settings] display brightness set to {}%", percent);
             }
             Err(error) => {
@@ -1609,13 +1561,9 @@ impl SettingsApp {
 
     fn refresh_cursor_themes(&self) {
         let (themes, selected) = load_cursor_theme_choices();
-        let status = themes
-            .get(selected)
-            .map(|theme| format!("Active: {}", theme.name))
-            .unwrap_or_else(|| String::from("No cursor themes installed"));
         self.cursor_themes.set(themes);
         self.cursor_theme_index.set(selected);
-        self.cursor_theme_status.set(status);
+        self.cursor_theme_status.set(String::new());
     }
 
     fn select_cursor_theme(&self, index: usize) {
@@ -1633,7 +1581,7 @@ impl SettingsApp {
         {
             Ok(()) => {
                 self.cursor_theme_index.set(index);
-                self.cursor_theme_status.set(format!("Active: {}", name));
+                self.cursor_theme_status.set(String::new());
                 println!("[settings] Cursor theme set to {} ({})", name, path);
             }
             Err(error) => {

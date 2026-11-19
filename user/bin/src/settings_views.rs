@@ -1,5 +1,8 @@
 //! Shared production Settings pages; platform services stay in the parent.
 use super::*;
+use alloc::boxed::Box;
+use scarlet_ui::view::ViewClone;
+use scarlet_ui::views::containers::ViewTuple;
 
 const SETTINGS_NOTE_FONT_SIZE: f32 = 12.0;
 static NETWORK_ENTRY_SELECTED: AtomicBool = AtomicBool::new(false);
@@ -45,11 +48,40 @@ fn wrap_settings_note(value: impl Into<String>) -> String {
     }
     wrapped
 }
-fn settings_note(value: impl Into<String>) -> impl View + Clone {
+fn settings_note(value: impl Into<String>) -> Text {
     Text::new(wrap_settings_note(value))
         .font_size(SETTINGS_NOTE_FONT_SIZE)
         .color(Color::rgb(88, 94, 104))
 }
+
+#[derive(Clone)]
+struct SettingsFeedback<V>(V, Option<Text>);
+
+impl<V: View> ViewTuple for SettingsFeedback<V> {
+    fn create_elements(&self) -> Vec<Box<dyn Element>> {
+        core::iter::once(self.0.create_element())
+            .chain(self.1.iter().map(|note| note.create_element()))
+            .collect()
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        core::iter::once(self.0.clone_view())
+            .chain(self.1.iter().map(|note| note.clone_view()))
+            .collect()
+    }
+
+    fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
+        collector.extend(self.0.listenables());
+    }
+}
+
+fn with_feedback(content: impl View + Clone, message: String) -> impl View + Clone {
+    let note = (!message.is_empty()).then(|| settings_note(message));
+    VStack::new(SettingsFeedback(content, note))
+        .spacing(8.0)
+        .alignment(Alignment::Leading)
+}
+
 fn settings_row(content: impl View + Clone, label: &str) -> impl View + Clone {
     hstack! { Text::new(label).font_size(13.0).frame_width(112.0).content_alignment(Alignment::Leading), content, Spacer::new() }
         .spacing(12.0)
@@ -163,17 +195,17 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
             settings_row(hstack! { Slider::new(app.green_value.clone()).min(0.0).max(255.0).on_change(move |_| green_app.sync_background_preset()).frame_width(270.0), Text::new(format!("{}", color[1])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Green"),
             settings_row(hstack! { Slider::new(app.blue_value.clone()).min(0.0).max(255.0).on_change(move |_| blue_app.sync_background_preset()).frame_width(270.0), Text::new(format!("{}", color[2])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Blue"),
         }.spacing(12.0).alignment(Alignment::Leading), "Desktop background", 16.0),
-        settings_section(vstack! {
-            settings_note(app.background_image_label.get()),
+        settings_section(with_feedback(vstack! {
             hstack! {
                 Button::new("Choose image…").on_click({ let app = app.clone(); move || app.open_background_picker() }),
                 Button::new("Clear image").enabled(app.background_image.get().is_some()).on_click({ let app = app.clone(); move || app.clear_background_image() }),
             }.spacing(8.0),
-            settings_note("An image replaces the generated background. Clear it to use your color and pattern."),
-        }.spacing(10.0).alignment(Alignment::Leading), "Wallpaper", 14.0),
-        settings_note(app.background_status.get()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
+        }.alignment(Alignment::Leading), app.background_image_label.get()), "Wallpaper", 14.0),
         cursor_section(app.clone()),
-        Button::new("Save again").on_click(move || app.save_config()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
+        with_feedback(
+            Button::new("Save again").on_click({ let app = app.clone(); move || app.save_config() }),
+            app.background_status.get(),
+        ).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
 pub(super) fn about_page() -> impl View + Clone {
@@ -181,7 +213,6 @@ pub(super) fn about_page() -> impl View + Clone {
     settings_page(
         vstack! {
             Text::new(distribution).font_size(16.0).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
-            settings_note("System information reported by the operating system").padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
             settings_section(vstack! {
                 settings_row(settings_note(version), "OS version"),
                 settings_row(settings_note(kernel), "Kernel"),
@@ -225,51 +256,47 @@ fn display_page(app: SettingsApp) -> impl View + Clone {
     let resolution_editor = app.display_editor.clone();
     let apply_editor = app.display_editor.clone();
     settings_page(vstack! {
-        settings_section(vstack! {
-            settings_row(hstack! {
+        settings_section(with_feedback(
+            hstack! {
                 Slider::new(app.display_brightness_percent.clone()).min(0.0).max(100.0).on_changed(move |value| brightness_app.set_display_brightness_percent(f32_to_percent(value))).frame_width(270.0),
                 Text::new(format!("{}%", f32_to_percent(app.display_brightness_percent.get()))).font_size(12.0).frame_width(48.0),
-            }.spacing(12.0), "Brightness"),
-            settings_note(app.display_brightness_status.get()),
-        }.spacing(12.0).alignment(Alignment::Leading), "Screen brightness", 14.0),
-        settings_section(vstack! {
+            }.spacing(12.0),
+            app.display_brightness_status.get(),
+        ), "Brightness", 14.0),
+        settings_section(with_feedback(vstack! {
             settings_displays::canvas(app.display_editor.clone()),
             settings_row(Select::new(editor.snapshot.as_ref().map(|snapshot| snapshot.outputs.iter().enumerate().map(|(index, output)| format!("{}. {}", index + 1, output.name)).collect()).unwrap_or_default(), app.display_output_index.clone()).width(300.0)
                 .on_change({ let editor = app.display_editor.clone(); move |index| editor.update(|state| state.selected = index) }), "Display"),
-            settings_row(hstack! {
-                Select::new(mode_labels, app.display_resolution_index.clone())
-                    .width(300.0)
-                    .enabled(modes.len() > 1 && !editor.applying)
-                    .on_change(move |index| {
-                        if let (Some(id), Some(&mode)) = (selected_output, modes.get(index)) {
-                            settings_displays::resolution(&resolution_editor, id, mode);
-                        }
-                    }),
-                Button::new("Apply")
-                    .enabled(editor.dirty && !editor.applying)
-                    .on_click(move || settings_displays::apply(&apply_editor)),
-            }.spacing(12.0), "Output resolution"),
+            settings_row(Select::new(mode_labels, app.display_resolution_index.clone())
+                .width(300.0)
+                .enabled(modes.len() > 1 && !editor.applying)
+                .on_change(move |index| {
+                    if let (Some(id), Some(&mode)) = (selected_output, modes.get(index)) {
+                        settings_displays::resolution(&resolution_editor, id, mode);
+                    }
+                }), "Resolution"),
             settings_row(Select::new(settings_displays::SCALES.iter().map(|scale| format!("{}%", scale / 10)).collect(), app.display_scale_index.clone()).width(240.0)
                 .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::scale(&editor, index) }), "Display scale"),
-            settings_note(editor.logical_size_label()),
+            settings_row(settings_note(editor.logical_size_label()), "Logical size"),
             settings_row(Select::new(vec![String::from("Automatic"), String::from("Desktop"), String::from("Tablet")], app.display_experience_index.clone()).width(240.0)
                 .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::experience(&editor, index) }), "Experience"),
-            settings_note(editor.status),
-        }.spacing(12.0).alignment(Alignment::Leading), "Displays", 14.0),
+            Button::new(if editor.applying { "Applying…" } else { "Apply" })
+                .enabled(editor.dirty && !editor.applying)
+                .on_click(move || settings_displays::apply(&apply_editor)),
+        }.spacing(12.0).alignment(Alignment::Leading), editor.status), "Displays", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
 fn cursor_section(app: SettingsApp) -> impl View + Clone {
     let themes = app.cursor_themes.get();
     let select_app = app.clone();
     let refresh_app = app.clone();
-    settings_section(vstack! {
+    settings_section(with_feedback(
         settings_row(hstack! {
             Select::new(themes.iter().map(|theme|theme.name.clone()).collect(),app.cursor_theme_index.clone()).width(310.0).placeholder("No cursor themes installed").on_change(move |index|select_app.select_cursor_theme(index)),
             Button::new("Refresh").on_click(move ||refresh_app.refresh_cursor_themes()),
         }.spacing(8.0), "Theme"),
-        settings_note(app.cursor_theme_status.get()),
-        settings_note("Cursor themes apply immediately. Installed themes are read from /share/cursors."),
-    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer", 14.0)
+        app.cursor_theme_status.get(),
+    ), "Mouse pointer", 14.0)
 }
 pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
     let outputs = app.audio_outputs.get();
@@ -279,13 +306,13 @@ pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
     let volume_app = app.clone();
     let mute_app = app.clone();
     settings_page(vstack! {
-        settings_section(vstack! {
+        settings_section(with_feedback(
             settings_row(hstack! {
                 Select::new(audio_output_labels(&outputs),app.audio_output_index.clone()).width(310.0).placeholder("No audio output available").on_change(move |index|select_app.select_audio_output(index)),
                 Button::new("Refresh").on_click(move ||refresh_app.refresh_audio()),
             }.spacing(8.0), "Device"),
-            settings_note(app.audio_status.get()),
-        }.spacing(12.0).alignment(Alignment::Leading), "Sound output", 14.0),
+            app.audio_status.get(),
+        ), "Sound output", 14.0),
         settings_section(vstack! {
             settings_row(hstack! {
                 Slider::new(app.audio_volume_percent.clone()).enabled(available).min(0.0).max(100.0).on_changed(move |value|volume_app.set_audio_volume_percent(f32_to_percent(value))).frame_width(270.0),
@@ -298,15 +325,10 @@ pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
 pub(super) fn input_page(app: SettingsApp) -> impl View + Clone {
     let methods = app.input_methods.get();
     let select_app = app.clone();
-    let selected = methods
-        .get(app.selected_ime_index.get())
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| String::from("None"));
-    settings_page(settings_section(vstack! {
+    settings_page(settings_section(with_feedback(
         settings_row(Select::new(input_method_labels(&methods),app.selected_ime_index.clone()).width(330.0).placeholder("No input methods registered").on_change(move |index|select_app.select_input_method(index)), "Input method"),
-        settings_note(format!("Active: {} · {} registered methods",selected,methods.len())),
-        settings_note(app.input_status.get()),
-    }.spacing(12.0).alignment(Alignment::Leading), "Typing", 14.0))
+        app.input_status.get(),
+    ), "Typing", 14.0))
 }
 fn status_item_label(item: StatusItemId) -> &'static str {
     match item {
@@ -353,24 +375,23 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
     let timezone = app.clone();
     settings_page(vstack! {
         settings_section(vstack! {
-            settings_note("Show items in the status bar and choose their order."),
             status_item_row(app.clone(),first,0,count),status_item_row(app.clone(),second,1,count),
         }.spacing(12.0).alignment(Alignment::Leading),"Status bar", 14.0),
-        settings_section(vstack! {
+        settings_section(with_feedback(vstack! {
             settings_row(Select::new(app.timezone_regions.get(),app.timezone_region_index.clone()).width(300.0).placeholder("No time zones installed").on_change(move |index|{
                 if let Some(name)=region.timezone_regions.get().get(index){region.timezone_cities.set(enumerate_cities(name));region.timezone_city_index.set(usize::MAX);}
             }),"Region"),
             settings_row(Select::new(app.timezone_cities.get(),app.timezone_city_index.clone()).width(300.0).placeholder("Choose a city"),"City"),
-            settings_note(format!("Active time zone: {}",app.timezone_active.get())),
-            settings_note(app.timezone_status.get()),
+            settings_row(settings_note(app.timezone_active.get()), "Active time zone"),
             Button::new("Apply time zone").enabled(app.timezone_cities.get().get(app.timezone_city_index.get()).is_some()).on_click(move ||timezone.apply_timezone()),
-        }.spacing(12.0).alignment(Alignment::Leading),"Time zone", 14.0),
-        settings_section(vstack! {
+        }.spacing(12.0).alignment(Alignment::Leading), app.timezone_status.get()),"Time zone", 14.0),
+        settings_section(
             settings_row(Select::new(vec![String::from("24-hour"),String::from("12-hour")],app.clock_format_index.clone()).width(300.0).on_change(move |index|clock.set_status_clock_format(if index==1 {ClockFormat::TwelveHour}else{ClockFormat::TwentyFourHour})),"Clock format"),
-            settings_note("The clock stays visible at the far right of the status bar."),
-        }.spacing(12.0).alignment(Alignment::Leading),"Clock", 14.0),
-        settings_note(app.status_preferences_status.get()).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
-        hstack! { Button::new("Refresh").on_click(move||refresh.refresh_status_preferences()), Button::new("Reset to defaults").on_click(move||reset.reset_status_preferences()), }.spacing(8.0).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
+            "Clock", 14.0),
+        with_feedback(
+            hstack! { Button::new("Refresh").on_click(move||refresh.refresh_status_preferences()), Button::new("Reset to defaults").on_click(move||reset.reset_status_preferences()), }.spacing(8.0),
+            app.status_preferences_status.get(),
+        ).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
 
@@ -416,7 +437,8 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
     let detail = interfaces
         .get(app.network_index.get())
         .map(|i| i.detail.clone())
-        .unwrap_or_else(|| String::from("No network interfaces detected"));
+        .unwrap_or_default();
+    let manual_ipv4 = app.network_method.get() == 1;
     let networks = app.wifi_networks.get();
     let labels = networks
         .iter()
@@ -436,25 +458,19 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
         "•".repeat(app.wifi_password.get().chars().count().min(40))
     };
     let content=vstack! {
-        settings_section(vstack! {
-            vstack! {
-                settings_note(app.network_routes.get()),
-                settings_note("Matching local networks use their own interface. Other IPv4 destinations use the lowest route metric. Bound applications and existing connections keep their selected interface."),
-            }.spacing(10.0).alignment(Alignment::Leading),
-            settings_row(Select::new(interface_labels,app.network_index.clone()).width(360.0).placeholder("No interfaces").on_change(move|i|interface_select.select_network(i)),"Interface"),
-            settings_note(detail),
+        settings_section(with_feedback(vstack! {
+            settings_note(app.network_routes.get()),
+            with_feedback(settings_row(Select::new(interface_labels,app.network_index.clone()).width(360.0).placeholder("No interfaces").on_change(move|i|interface_select.select_network(i)),"Interface"), detail),
             vstack! {
                 settings_row(Select::new(vec![String::from("Automatic (DHCP)"),String::from("Manual IPv4"),String::from("Disabled")],app.network_method.clone()).width(280.0),"IPv4 mode"),
-                settings_row(TextField::new(app.network_address.clone()).placeholder("192.168.1.20/24").frame(340.0,34.0),"IPv4 / prefix"),
-                settings_row(TextField::new(app.network_gateway.clone()).placeholder("Optional; Manual IPv4 only").frame(340.0,34.0),"Manual gateway"),
+                settings_row(TextField::new(app.network_address.clone()).enabled(manual_ipv4).placeholder("192.168.1.20/24").frame(340.0,34.0),"IPv4 / prefix"),
+                settings_row(TextField::new(app.network_gateway.clone()).enabled(manual_ipv4).placeholder("Optional").frame(340.0,34.0),"Gateway"),
                 settings_row(TextField::new(app.network_dns.clone()).placeholder("Automatic if blank").frame(340.0,34.0),"DNS servers"),
                 settings_row(TextField::new(app.network_metric.clone()).placeholder("100").frame(340.0,34.0),"Route metric"),
             }.spacing(14.0).alignment(Alignment::Leading),
-            settings_note("Lower metric is preferred when routes have the same prefix. For example, Ethernet 20 and Wi-Fi 50 prefer Ethernet for external IPv4 traffic."),
             Button::new("Apply network settings").enabled(!interfaces.is_empty()).on_click(move||apply.apply_network()),
-            settings_note(app.network_status.get()),
-            settings_note("Settings apply to the selected Ethernet, USB Ethernet or Wi-Fi interface and are saved for the next boot. Applying changes can interrupt its connections."),
-        }.spacing(14.0).alignment(Alignment::Leading),"Network interfaces",16.0),
+            settings_note("Applying changes may interrupt this connection."),
+        }.spacing(14.0).alignment(Alignment::Leading), app.network_status.get()),"Network interfaces",16.0),
         settings_section(vstack! {
             settings_note(app.wifi_status.get()),
             Button::new("Scan for networks").enabled(app.wifi_can_scan.get()).on_click(move||scan.wifi_action(scarlet_os::wireless_service::SCAN)),
@@ -473,7 +489,6 @@ pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
                 Button::new("Disconnect").on_click(move||disconnect.wifi_action(scarlet_os::wireless_service::DISCONNECT)),
                 Button::new("Forget network").on_click(move||forget.wifi_action(scarlet_os::wireless_service::FORGET)),
             }.spacing(10.0),
-            settings_note("WPA2-Personal networks are supported. Disconnect before scanning. A successfully connected network is saved for automatic reconnection."),
         }.spacing(14.0).alignment(Alignment::Leading),"Wi-Fi",16.0),
     }.spacing(18.0).alignment(Alignment::Leading);
     settings_scroll(content)
