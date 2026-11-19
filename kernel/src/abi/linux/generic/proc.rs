@@ -1405,8 +1405,17 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             // Register first, complete clone metadata/TID writes, then enqueue.
             // A remote CPU may run the child immediately after enqueue via IPI.
-            let child_id = match crate::sched::scheduler::try_register_task(child_task) {
-                Ok(child_id) => child_id,
+            // A concurrent group exit may retire a thread after publication
+            // and before we read its namespace-local TID.
+            let registered = crate::sched::scheduler::try_register_task(child_task)
+                .and_then(|child_id| {
+                    get_task_by_id(child_id)
+                        .and_then(|child| child.try_get_namespace_id())
+                        .map(|tid| (child_id, tid))
+                        .ok_or("Clone child is no longer registered")
+                });
+            let (child_id, child_linux_tid) = match registered {
+                Ok(child) => child,
                 Err(error) => {
                     crate::println!(
                         "[linux clone] registration failed: parent={} flags={:#x} reason={}",
@@ -1420,14 +1429,6 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return errno::to_result(errno::EAGAIN);
                 }
             };
-            // Linux-facing process/thread IDs are namespace-local.  The child
-            // has just been registered, so its namespace ID is now stable and
-            // must be used consistently for clone's return value and TID
-            // stores.  Kernel task IDs remain internal scheduler identities.
-            let child_linux_tid = get_task_by_id(child_id)
-                .and_then(|child| child.try_get_namespace_id())
-                .expect("registered clone child must have a namespace ID");
-
             // Establish parent-child ownership before enqueueing. The adoption
             // protocol rejects an exiting parent and retries init atomically.
             if let Some(child) = get_task_by_id(child_id) {

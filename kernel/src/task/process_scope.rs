@@ -66,12 +66,12 @@ impl ProcessScope {
     pub(crate) fn publish(
         &self,
         task: &Arc<Task>,
-        publish: impl FnOnce(),
+        publish: impl FnOnce() -> Result<(), &'static str>,
     ) -> Result<(), &'static str> {
         let mut state = self.state.lock();
         Self::validate_member(&state, task)?;
+        publish()?;
         state.members.insert(task.get_id(), Arc::downgrade(task));
-        publish();
         Ok(())
     }
     pub(crate) fn retire(&self, id: usize) {

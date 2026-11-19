@@ -47,8 +47,8 @@ use crate::{
     },
     sched::scheduler::{
         cleanup_zombie, complete_non_current_task_exit, current_task, finalize_zombie,
-        get_all_task_ids, get_task_by_id, release_task_deadline, remove_from_ready_queues,
-        schedule, setup_task_execution, unmark_blocked,
+        get_all_task_ids, get_task_by_id, get_task_pool, release_task_deadline,
+        remove_from_ready_queues, schedule, setup_task_execution, unmark_blocked,
     },
     timer::{TimerHandle, TimerHandler, add_timer, get_time_ns, ms_to_ns},
     vm::{
@@ -771,6 +771,8 @@ pub struct Task {
     parent_thread_group_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
+    /// A single caller owns thread-group teardown and the process exit status.
+    thread_group_exit_started: Arc<AtomicBool>,
     /// Legacy task group ID mirror.
     ///
     /// New job-control code should use `process_group_id`; this field is kept
@@ -1119,6 +1121,7 @@ impl Task {
             parent_id: AtomicUsize::new(0),
             parent_thread_group_id: AtomicUsize::new(0),
             thread_group_id: 0,
+            thread_group_exit_started: Arc::new(AtomicBool::new(false)),
             task_group_id: AtomicUsize::new(0),
             session_id: AtomicUsize::new(0),
             process_group_id: AtomicUsize::new(0),
@@ -1957,6 +1960,10 @@ impl Task {
     /// # Returns
     pub fn get_thread_group_id(&self) -> usize {
         self.thread_group_id
+    }
+
+    pub(crate) fn thread_group_exit_started(&self) -> bool {
+        self.thread_group_exit_started.load(Ordering::Acquire)
     }
 
     pub fn set_thread_group_id(&mut self, thread_group_id: usize) {
@@ -3249,6 +3256,7 @@ impl Task {
         if flags.is_set(CloneFlagsDef::Thread) {
             // Thread: share parent's thread group ID
             child.thread_group_id = self.thread_group_id;
+            child.thread_group_exit_started = self.thread_group_exit_started.clone();
         } else {
             child.thread_group_id = 0;
         }
@@ -3444,6 +3452,23 @@ impl Task {
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
     pub fn exit_group(&self, status: i32) {
+        if self.thread_group_exit_started.swap(true, Ordering::AcqRel) {
+            // A sibling can fault while the winning caller closes shared
+            // handles. Wait for that caller to retire this thread without
+            // publishing a second process exit.
+            if let Some(current) = mytask().filter(|task| task.get_id() == self.id) {
+                loop {
+                    let _ = self.state.compare_exchange(
+                        TaskState::Running,
+                        TaskState::Blocked(BlockedType::Uninterruptible),
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                    schedule(current.get_trapframe());
+                }
+            }
+            return;
+        }
         self.begin_exit();
         let thread_group_id = self.thread_group_id;
         let my_id = self.id;
@@ -3458,7 +3483,7 @@ impl Task {
         // while sibling Task objects still hold HandleTable Arc references.
         self.handle_table.close_all();
 
-        let all_task_ids = get_all_task_ids();
+        let all_task_ids = get_task_pool().task_ids_snapshot();
         let mut leader_finalized = false;
 
         // Terminate all tasks with the same thread group ID (except self).
@@ -3742,6 +3767,7 @@ impl Task {
             .namespace_id
             .store(self.try_get_namespace_id().unwrap_or(0), Ordering::Relaxed);
         image.thread_group_id = self.thread_group_id;
+        image.thread_group_exit_started = self.thread_group_exit_started.clone();
         image.resource_membership.retire();
         *image.process_scope.write() = self.process_scope.read().clone();
         *image.security_subject.write() = self.security_subject.read().clone();
@@ -5452,6 +5478,7 @@ mod tests {
         let mut flags = CloneFlags::default();
         flags.set(CloneFlagsDef::Thread);
         let worker = leader.clone_task(flags).unwrap();
+        let late_worker = leader.clone_task(flags).unwrap();
         let worker_id = add_task(worker, 0);
 
         let worker = get_task_by_id(worker_id).unwrap();
@@ -5459,6 +5486,8 @@ mod tests {
         worker.exit_group(130);
 
         let leader = get_task_by_id(leader_id).unwrap();
+        assert!(crate::sched::scheduler::try_register_task(late_worker).is_err());
+        leader.exit_group(132);
         assert_eq!(leader.termination_signal(), Some(2));
         assert_eq!(leader.get_state(), TaskState::Zombie);
         assert_eq!(worker.get_state(), TaskState::Terminated);

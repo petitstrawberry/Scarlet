@@ -117,9 +117,6 @@ impl SeatChild {
         let file = child_stdio(input.into_handle())?;
         Self::spawn(
             command
-                .env_clear()
-                .env("SCARLET_UI_BACKEND", "cpu")
-                .env("SWS_BACKEND", "cpu")
                 .stdin(Stdio::from(file))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
@@ -175,7 +172,7 @@ impl Drop for SeatChild {
     }
 }
 
-fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
+fn authenticate(broker: &mut Worker, config: &Config, force_cpu: bool) -> io::Result<()> {
     let (editor, editor_server) = private_pair()?;
     let (provider, provider_server) = private_pair()?;
     let (bootstrap, child_socket) = private_pair()?;
@@ -188,15 +185,21 @@ fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
     drop((editor_server, provider_server));
     let mut compositor = SeatChild::with_login_socket(
         Command::new(&config.compositor[0])
+            .env_clear()
+            .env("SWS_BACKEND", if force_cpu { "cpu" } else { "auto" })
             .arg("--login-seat")
             .args(&config.compositor[1..]),
         child_socket,
     )?;
-    let mut keyboard =
-        SeatChild::with_login_socket(Command::new(&config.broker).arg("--login-panel"), provider)?;
+    let mut keyboard = SeatChild::with_login_socket(
+        Command::new(&config.broker)
+            .env_clear()
+            .arg("--login-panel"),
+        provider,
+    )?;
     let mut painter = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
     let result = sws_client::Connection::with_inherited_socket(editor, || {
-        login_window(broker, &mut painter, || {
+        login_window(broker, &mut painter, force_cpu, || {
             compositor.running()?;
             keyboard.running()
         })
@@ -231,6 +234,7 @@ fn background(painter: &mut Worker, width: u32, height: u32) -> io::Result<Bitma
 fn login_window(
     broker: &mut Worker,
     painter: &mut Worker,
+    force_cpu: bool,
     alive: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     use scarlet_ui::{PlatformWindow, SWSPlatformWindow};
@@ -246,17 +250,13 @@ fn login_window(
     .map_err(os_err)?;
     window.set_fullscreen(true).map_err(os_err)?;
     fonts::initialize()?;
-    let wait = conn.clone();
-    run_editor(broker, painter, &mut window, alive, move || {
-        wait.wait_for_subscribed_window_events(Duration::from_millis(80))
-            .map(|_| ())
-            .map_err(os_err)
-    })
+    run_editor(broker, painter, &mut window, force_cpu, alive)
 }
 #[cfg(not(target_os = "scarlet"))]
 fn login_window(
     _: &mut Worker,
     _: &mut Worker,
+    _: bool,
     _: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     Err(io::Error::other("login requires the Scarlet window server"))
@@ -266,11 +266,12 @@ fn run_editor(
     broker: &mut Worker,
     painter: &mut Worker,
     window: &mut dyn scarlet_ui::PlatformWindow,
+    force_cpu: bool,
     mut alive: impl FnMut() -> io::Result<()>,
-    mut wait: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     use greeter_ui::{Actions, Screen};
     use scarlet_ui::event::Event;
+    use scarlet_ui::renderer::PresentedFrame;
     let mut reply = [0; 37];
     broker.exchange(&[19], &mut reply)?;
     let mut size = window.size();
@@ -283,6 +284,15 @@ fn run_editor(
     let actions = Actions::default();
     let value = State::new(scarlet_ui::generate_state_id(), screen.value());
     let mut pipeline = RenderingPipeline::new();
+    pipeline.resize(size);
+    pipeline.set_scale_milli(window.output_scale_milli());
+    if !force_cpu && let Some(backend) = window.take_paint_backend().map_err(os_err)? {
+        pipeline.set_paint_backend(backend);
+    }
+    eprintln!(
+        "[scarlet-seat] login renderer: {:?}",
+        window.renderer_backend()
+    );
     let clock_format = scarlet_desktop_config::load_desktop_config()
         .status
         .clock_format;
@@ -291,6 +301,7 @@ fn run_editor(
     let mut wallpaper = background(painter, screen.width, screen.height)?;
     let mut rebuild = true;
     let mut focus = true;
+    let mut retry_render = false;
     loop {
         alive()?;
         if screen.display[0] >= 3 && Instant::now() >= next_clock_check {
@@ -303,7 +314,6 @@ fn run_editor(
                 );
                 if time_label.get() != label {
                     time_label.set(label);
-                    pipeline.request_redraw();
                 }
             }
         }
@@ -326,12 +336,23 @@ fn run_editor(
         }
         // Same focused TextField contract as the ScarletUI ApplicationRunner.
         window.sync_text_input(pipeline.focused_text_input_state().as_ref());
-        if pipeline.has_dirty()
-            && let Some(frame) = pipeline.render()
-        {
-            window.present(frame);
+        if retry_render || pipeline.has_dirty() {
+            retry_render = false;
+            match pipeline.render_for_present() {
+                Ok(PresentedFrame::Cpu { buffer, damage }) => {
+                    window.present_with_damage(buffer, damage);
+                }
+                Ok(PresentedFrame::External | PresentedFrame::Idle) => {}
+                Err(scarlet_ui::Error::RenderDeferred) => retry_render = true,
+                Err(scarlet_ui::Error::RenderFailure(failure))
+                    if failure.kind == scarlet_ui::RenderFailureKind::Busy =>
+                {
+                    retry_render = true;
+                }
+                Err(error) => return Err(os_err(error)),
+            }
         }
-        wait()?;
+        window.wait_for_event(Duration::from_millis(if retry_render { 16 } else { 80 }));
         while let Some(event) = window.poll_event() {
             let key = match &event {
                 Event::Quit | Event::Window(scarlet_ui::event::WindowEvent::CloseRequested) => {
@@ -383,7 +404,6 @@ fn run_editor(
                     next[..2] != screen.display[..2] || (next[0] >= 3 && next != screen.display);
                 screen.display = next;
                 value.set(screen.value());
-                pipeline.request_redraw();
                 if rebuild {
                     focus = true;
                     break;
@@ -406,8 +426,14 @@ struct Config {
 fn run_session(config: &Config) -> io::Result<()> {
     let mut args = vec!["--session"];
     args.extend(config.session.iter().map(String::as_str));
-    let mut broker = Worker::start(&config.broker, &args)?;
-    authenticate(&mut broker, config)?;
+    let start_broker = || Worker::start(&config.broker, &args);
+    let mut broker = start_broker()?;
+    if let Err(error) = authenticate(&mut broker, config, false) {
+        eprintln!("[scarlet-seat] login display failed: {error}. Retrying with CPU rendering");
+        drop(broker);
+        broker = start_broker()?;
+        authenticate(&mut broker, config, true)?;
+    }
     let mut compositor = SeatChild::spawn(
         Command::new(&config.compositor[0])
             .args(&config.compositor[1..])

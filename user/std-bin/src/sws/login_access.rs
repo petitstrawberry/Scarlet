@@ -30,6 +30,11 @@ pub fn login_request_allowed(peer: LoginPeer, msg: &ClientMessageRef<'_>, window
         | RequestFrame { window_id, .. }
         | RequestFrameCredit { window_id, .. }
         | UpdateBuffer { window_id, .. } => windows.contains(window_id),
+        RegisterSgfxBuffer { window_id, .. }
+        | CommitSgfxFrame { window_id, .. }
+        | DestroySgfxBuffer { window_id, .. } => {
+            peer == LoginPeer::Editor && windows.contains(window_id)
+        }
         SetFullscreen { window_id } | TextInputCreate { window_id, .. } => {
             peer == LoginPeer::Editor && windows.contains(window_id)
         }

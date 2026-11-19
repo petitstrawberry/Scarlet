@@ -655,6 +655,12 @@ impl TaskPool {
         let scope = task.process_scope.read().clone();
         let publish = || {
             let mut tasks = self.tasks.lock();
+            // ExitGroup takes its snapshot under this same lock after
+            // claiming the group. A new thread must be visible to that
+            // snapshot or fail registration.
+            if task.thread_group_exit_started() {
+                return Err("Thread group is exiting");
+            }
             match task_type {
                 crate::task::TaskType::User => {
                     tasks.pending_user_tasks -= 1;
@@ -672,22 +678,23 @@ impl TaskPool {
                     task: task.clone(),
                 },
             );
+            Ok(())
         };
-        if let Some(scope) = scope {
-            if let Err(error) = scope.publish(&task, publish) {
-                // No task was published. Undo reservation accounting and PID mappings.
-                {
-                    let mut tasks = self.tasks.lock();
-                    match task_type {
-                        crate::task::TaskType::User => tasks.pending_user_tasks -= 1,
-                        crate::task::TaskType::Kernel => tasks.pending_kernel_tasks -= 1,
-                    }
-                }
-                task.get_namespace().unregister_mapping_for_global(task_id);
-                return Err(error);
-            }
+        let published = if let Some(scope) = scope {
+            scope.publish(&task, publish)
         } else {
-            publish();
+            publish()
+        };
+        if let Err(error) = published {
+            // No task was published. Undo reservation accounting and PID mappings.
+            let mut tasks = self.tasks.lock();
+            match task_type {
+                crate::task::TaskType::User => tasks.pending_user_tasks -= 1,
+                crate::task::TaskType::Kernel => tasks.pending_kernel_tasks -= 1,
+            }
+            drop(tasks);
+            task.get_namespace().unregister_mapping_for_global(task_id);
+            return Err(error);
         }
         Ok(task_id)
     }
