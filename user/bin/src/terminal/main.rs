@@ -595,8 +595,10 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
 fn shell_environment() -> Vec<String> {
     let mut env = Vec::new();
     let mut has_term = false;
+    let mut has_prompt = false;
 
     for (key, value) in std::env::vars() {
+        has_prompt |= key == "PS1";
         if key == "TERM" {
             has_term = true;
             env.push(String::from(TERM_ENV));
@@ -607,6 +609,11 @@ fn shell_environment() -> Vec<String> {
 
     if !has_term {
         env.push(String::from(TERM_ENV));
+    }
+
+    if !has_prompt && let Some(user) = std::env::var("USER") {
+        let mark = if user == "root" { '#' } else { '$' };
+        env.push(format!("PS1={user}{mark} "));
     }
 
     env

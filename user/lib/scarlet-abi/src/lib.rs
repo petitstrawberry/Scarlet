@@ -952,6 +952,8 @@ pub enum Syscall {
     /// The returned handle grants no access to any existing policy. No arguments.
     ShieldPolicyFactory = 1347,
     ShieldFileAcl = 1348,
+    ShieldEnterUserSession = 1349,
+    ShieldInodeAccess = 1352,
     VmLayoutConfigure = 1350,
     VmLayoutQuery = 1351,
     ShieldPolicyCreate = 1310,

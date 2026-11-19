@@ -916,6 +916,10 @@ impl DisplayCharDevice {
 }
 
 impl Device for DisplayCharDevice {
+    fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
+        &[crate::device::DeviceCapability::PhysicalSeat]
+    }
+
     fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
         if self.fb_resource.connector_index == 0 { return Ok(self); }
         #[cfg(not(test))]

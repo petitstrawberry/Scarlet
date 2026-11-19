@@ -2,7 +2,7 @@
 
 [service.mozc-server]
 exec = "/bin/mozc-server"
-depends = ["sws"]
+depends = []
 order = 02
 
 [service.scarlet-mozc]

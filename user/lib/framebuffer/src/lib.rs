@@ -895,7 +895,12 @@ impl DisplaySurface {
     ///
     /// Display surface instance or HandleError on failure.
     pub fn open(path: &str) -> HandleResult<Self> {
-        let file = File::open(path).map_err(|_| HandleError::NotFound)?;
+        // A drawing surface requests a writable mapping and may write rows
+        // through the stream on devices without mmap.
+        #[cfg(feature = "std")]
+        let file = File { handle: Handle::open(path, 2)? };
+        #[cfg(not(feature = "std"))]
+        let file = File::open_with_flags(path, 2).map_err(|_| HandleError::NotFound)?;
         let mut display = Self {
             file,
             mapped_buffer: None,

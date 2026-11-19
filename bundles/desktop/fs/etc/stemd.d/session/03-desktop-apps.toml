@@ -4,4 +4,4 @@
 [service.desktop-files]
 exec = "/bin/files --service"
 order = 03
-depends = ["sws"]
+depends = []

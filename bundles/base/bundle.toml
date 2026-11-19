@@ -41,6 +41,13 @@ to = "/bin/sh"
 kind = "cargo"
 source = "../../user/bin"
 package = "userprogram"
+bin = "run-as"
+to = "/bin/run-as"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "userprogram"
 bin = "login"
 to = "/bin/login"
 

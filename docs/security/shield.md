@@ -207,3 +207,80 @@ Local sockets snapshot the native subject alongside the originating credentials.
 Android translates the connected peer's captured subject through `SO_PEERSEC`;
 an exited or relabeled peer does not change the snapshot, and foreign policy
 identities fail authorization instead of returning a manufactured context.
+
+## Local console accounts
+
+The base bundle runs `/bin/login` on the terminal configured in stemd. To
+provision the root filesystem while building it, add entries to the project's
+`scarlet.local.toml`. This example gives Alice a supplementary group and Bob a
+private primary group. Each primary GID defaults to the UID.
+
+```toml
+[[images.rootfs.users]]
+name = "alice"
+uid = 1001
+groups = [42]
+password-hash-file = ".accounts/alice.bcrypt"
+
+[[images.rootfs.users]]
+name = "bob"
+uid = 1002
+password-hash-file = ".accounts/bob.bcrypt"
+```
+
+In the project directory, create the verifier files once with Apache
+`htpasswd`. It prompts for a password and its confirmation. Keep passwords
+within bcrypt's 72-byte limit. Use the updated Scarlet Nix development shell
+for the image build.
+
+```sh
+mkdir -p .accounts
+(umask 077; htpasswd -nBC 12 alice | cut -d: -f2 > .accounts/alice.bcrypt)
+(umask 077; htpasswd -nBC 12 bob   | cut -d: -f2 > .accounts/bob.bcrypt)
+cargo scarlet image --project .
+```
+
+Both `ext2` and `gpt-ext2` support image users. The builder creates each home
+(`/root` for root, `/home/NAME` for other accounts) with mode 0700, assigns
+existing contents to that user and writes
+the protected account database. With `console-root = true`, an image with
+no explicit root entry gets a root account with an empty verifier. At the
+local TTY, enter `root` and press Enter at the password prompt. An explicit
+root account overrides this default. GUI login requires a configured password,
+and SSH root login requires an authorized public key. Omit `password-hash-file` for a locked
+account. No default password is shipped. An administrator can update the
+database on a running writable filesystem. Rebuilding the image reapplies
+the manifest.
+
+The single root-owned 0600 file `/etc/scarlet-users` stores one
+`name:uid:gid:comma-separated-supplementary-gids:bcrypt` record per line.
+Empty supplementary lists are valid. The verifier uses bcrypt cost 12 and
+passwords of 1–72 bytes. Replacing a verifier with `!` locks future logins.
+Publish database edits by atomic rename in `/etc`. Login checks the owner,
+mode and named grants on opened handles for the root, parent directory and
+database. Missing or invalid credentials cannot start a shell.
+
+On success, login forks an exclusive child. `ShieldEnterUserSession` requires
+both identity-change authorities, replaces base, active and saved identities,
+sets supplementary groups, and clears all authority ceilings. The child keeps
+its three terminal descriptors and execs `/bin/sh` in the user's home with a
+fresh environment. The supervisor terminates session descendants on logout
+before accepting the next login. SSH uses the same account database and credential transition for shell,
+command and SFTP sessions, including logins as root. The desktop bundle starts `scarlet-seat` with
+`/etc/scarlet-seat.toml`. This file selects the authentication broker, greeter,
+compositor and session command. The seat sends physical keyboard input to
+the broker over a private pipe. The separate greeter receives the login name
+and masked length. With no enabled account the seat displays a setup message.
+
+After authentication the seat starts the configured compositor. Once it is
+ready, the broker starts the session command with the user's credentials, home
+and process scope. The bundled session runs `stemd --user /etc/stemd.d/session`.
+Configure desktop components, their dependencies and restart behavior in those
+unit files. System services stay in `/etc/stemd.d/services`.
+
+
+A system service can set `user = "NAME"` to run its command with the
+account's UID, GID and supplementary groups and all management authorities
+cleared. A locked password permits running a service under that identity.
+Omitting `user` preserves the system manager's credentials. User-session
+units inherit their session identity and reject an explicit `user` setting.

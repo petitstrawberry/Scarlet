@@ -289,6 +289,8 @@ pub const ACL_MAX_ENTRIES: usize = 64;
 pub const SYSTEM_MANAGEMENT_CLASS: u32 = 0x5346_5302;
 pub const ADMIN_NETWORK: u64 = 1;
 pub const ADMIN_MODULES: u64 = 2;
+/// Acquire a physical input or scanout device through a filesystem.
+pub const ADMIN_SEAT: u64 = 4;
 
 pub const ENDPOINT_ACCESS_CLASS: u32 = 0x5346_5303;
 pub const CONNECT_LOCAL: u64 = 1;
@@ -301,3 +303,16 @@ pub const RECEIVE_CAPABILITY: u64 = 1;
 /// File policy derivation flag. Enable default-deny native resource access
 /// even for a blueprint with zero resource grants.
 pub const ENFORCE_NATIVE_ACCESS: u32 = 1;
+
+/// DAC information for a retained VFS inode. A nonzero acl flag indicates
+/// additional named grants beyond the mode bits.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct RawInodeAccess {
+    pub owner: u32,
+    pub group: u32,
+    pub mode: u32,
+    pub has_acl: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<RawInodeAccess>() == 16);

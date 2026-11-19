@@ -39,6 +39,7 @@ bin = "microvm-init"
 to = "/init"
 
 [images.rootfs]
+console-root = true
 format = "ext2"
 output = ".scarlet/images/rootfs-aarch64-microvm.ext2"
 

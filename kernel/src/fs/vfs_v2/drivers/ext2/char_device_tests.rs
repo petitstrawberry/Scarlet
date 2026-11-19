@@ -146,15 +146,20 @@ mod tests {
     fn test_ext2_char_device_file_object_creation() {
         crate::println!("[test] Testing ext2 character device file object creation");
 
+        let manager = crate::device::manager::DeviceManager::get_manager();
+        let id =
+            manager.register_device(alloc::sync::Arc::new(MockCharDevice::new("ext2-char-test")));
         // Test creation of DeviceFileInfo
         let device_info = DeviceFileInfo {
-            device_id: 123,
+            device_id: id,
             device_type: DeviceType::Char,
         };
 
         // Test creation of Ext2CharDeviceFileObject
         let char_device_obj =
-            crate::fs::vfs_v2::drivers::ext2::Ext2CharDeviceFileObject::new(device_info, 1);
+            crate::fs::vfs_v2::drivers::ext2::Ext2CharDeviceFileObject::new(device_info, 1)
+                .unwrap();
+        manager.unregister_device(id);
 
         // Test metadata retrieval
         let metadata = char_device_obj.metadata();
@@ -163,7 +168,7 @@ mod tests {
         let metadata = metadata.unwrap();
         match metadata.file_type {
             FileType::CharDevice(info) => {
-                assert_eq!(info.device_id, 123);
+                assert_eq!(info.device_id, id);
                 assert_eq!(info.device_type, DeviceType::Char);
             }
             _ => panic!("Expected CharDevice file type"),

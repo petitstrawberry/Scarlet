@@ -70,13 +70,15 @@ pub(crate) fn is_native_class(class: u32) -> bool {
 pub enum Management {
     Network,
     Modules,
+    PhysicalSeat,
 }
 
 pub fn permits_management(task: &Task, action: Management) -> bool {
-    use super::identity::{MANAGE_MODULES, MANAGE_TRAFFIC};
+    use super::identity::{MANAGE_DEVICES, MANAGE_MODULES, MANAGE_TRAFFIC};
     let (authority, permission) = match action {
         Management::Network => (MANAGE_TRAFFIC, abi::ADMIN_NETWORK),
         Management::Modules => (MANAGE_MODULES, abi::ADMIN_MODULES),
+        Management::PhysicalSeat => (MANAGE_DEVICES, abi::ADMIN_SEAT),
     };
     let available = if task.credentials.read().permits(authority) {
         permission

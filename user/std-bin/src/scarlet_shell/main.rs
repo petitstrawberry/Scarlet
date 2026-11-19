@@ -45,7 +45,8 @@ use scarlet_desktop_config::{
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
     DESKTOP_STATUS_PREFERENCES_CHANGED_SIGNAL, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
     DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
-    DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD, DESKTOP_STEMD_OBJECT_PATH, StatusItemId,
+    DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD, DESKTOP_STEMD_OBJECT_PATH,
+    DESKTOP_STEMD_SOCKET_PATH, StatusItemId,
     StatusPreferences,
 };
 use scarlet_os::socket::Socket;
@@ -1735,7 +1736,7 @@ fn request_file_manager_window() -> bool {
 
 fn send_launch_command(command: u8, app_id: &[u8]) {
     if let Ok(mut stream) = Socket::new()
-        && stream.connect("/tmp/stemd.sock").is_ok()
+        && stream.connect(DESKTOP_STEMD_SOCKET_PATH).is_ok()
     {
         let exec_path = b"";
         let mut msg = alloc::vec::Vec::new();

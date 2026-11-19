@@ -22,6 +22,10 @@ name = "microvm-init"
 path = "src/microvm_init.rs"
 
 [[bin]]
+name = "run-as"
+path = "src/run_as.rs"
+
+[[bin]]
 name = "login"
 path = "src/login.rs"
 
@@ -97,6 +101,10 @@ path = "src/sbusd/main.rs"
 [[bin]]
 name = "scarlet-desktop"
 path = "src/scarlet_desktop/main.rs"
+
+[[bin]]
+name = "scarlet-session"
+path = "src/scarlet_desktop/session.rs"
 
 [[bin]]
 name = "desktop-settings"
@@ -178,6 +186,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
+scarlet-accounts = { path = "../lib/scarlet-accounts" }
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
 scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "73005007792d31b8e242144f23412fb667652ccd", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-abi = { path = "../lib/scarlet-abi" }
@@ -196,8 +205,6 @@ sunset = { path = "../lib/sunset", default-features = false, features = ["larger
 getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
 ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "rsa"] }
 rand_core = { version = "0.6.4", default-features = false, features = ["getrandom"] }
-bcrypt = { version = "0.15.1", default-features = false }
-hmac = { version = "0.12.1", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
 subtle = { version = "2.6.1", default-features = false }
 sbus = { path = "../lib/sbus" }

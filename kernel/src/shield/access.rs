@@ -66,6 +66,32 @@ fn denied() -> FileSystemError {
     )
 }
 
+/// Resolve and retain the registered device whose authority is being acquired.
+pub(crate) fn device_for_open(
+    manager: &crate::device::manager::DeviceManager,
+    info: crate::fs::DeviceFileInfo,
+) -> Result<crate::device::manager::SharedDevice, FileSystemError> {
+    use super::authorization::{Management, permits_management};
+    use crate::device::DeviceCapability;
+    let device = manager
+        .get_device(info.device_id)
+        .filter(|d| d.device_type() == info.device_type)
+        .ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::DeviceError, "Device unavailable")
+        })?;
+    if device
+        .capabilities()
+        .contains(&DeviceCapability::PhysicalSeat)
+        && mytask().is_some_and(|task| !permits_management(&task, Management::PhysicalSeat))
+    {
+        return Err(FileSystemError::new(
+            FileSystemErrorKind::PermissionDenied,
+            "Physical seat access denied",
+        ));
+    }
+    Ok(device)
+}
+
 pub fn check_metadata(metadata: &FileMetadata, requested: u32) -> Result<(), FileSystemError> {
     if let Some(access) = metadata.permissions.inode()
         && let Some(task) = mytask()
@@ -313,6 +339,114 @@ mod tests {
         task::{Task, TaskType, clear_mock_current_task, set_mock_current_task},
     };
     use alloc::{sync::Arc, vec};
+    #[test_case]
+    fn physical_seat_open_requires_authority_across_filesystems() {
+        use crate::device::{
+            Device, DeviceType,
+            graphics::{
+                FramebufferConfig, PixelFormat, display_device::DisplayCharDevice,
+                framebuffer_device::FramebufferCharDevice, manager::FramebufferResource,
+            },
+            input::event_device::EventDevice,
+            manager::DeviceManager,
+        };
+        use crate::fs::{
+            DeviceFileInfo,
+            vfs_v2::drivers::{devfs::DevFS, ext2::Ext2CharDeviceFileObject},
+        };
+        use crate::shield::identity::{Group, Principal};
+
+        let mut task = Task::new("seat-open".into(), 0, TaskType::User);
+        task.set_id(91004);
+        let task = Arc::new(task);
+        set_mock_current_task(task.clone());
+        let vfs = Arc::new(VfsManager::new());
+        task.set_vfs(vfs.clone());
+        vfs.create_dir("/dev").unwrap();
+        vfs.mount(DevFS::new(), "/dev", 0).unwrap();
+        let manager = DeviceManager::get_manager();
+        let fb = Arc::new(FramebufferResource::new(
+            0,
+            "seat-test".into(),
+            FramebufferConfig::new(1, 1, PixelFormat::RGBA8888),
+            0,
+            4096,
+        ));
+        let input = Arc::new(EventDevice::new("seat-test"));
+        let devices: [Arc<dyn Device>; 3] = [
+            input.clone(),
+            Arc::new(FramebufferCharDevice::new(fb.clone())),
+            Arc::new(DisplayCharDevice::new(fb)),
+        ];
+        let mut nodes = alloc::vec::Vec::new();
+        for (index, device) in devices.into_iter().enumerate() {
+            let name = alloc::format!("shield-seat-{index}");
+            let id = manager.register_device_with_name(name.clone(), device);
+            let info = DeviceFileInfo {
+                device_id: id,
+                device_type: DeviceType::Char,
+            };
+            let alias = alloc::format!("/alias-{index}");
+            let path = alloc::format!("/dev/{name}");
+            vfs.create_file_with_mode(&alias, FileType::CharDevice(info), 0o666)
+                .unwrap();
+            let opened = vfs.open(&path, 0).unwrap();
+            vfs.open_at(None, &alias, 0, 0).unwrap();
+            Ext2CharDeviceFileObject::new(info, 1).unwrap();
+            nodes.push((path, alias, info, opened));
+        }
+
+        task.credentials
+            .write()
+            .enter_user_session(Principal(1001), Group(1001), vec![])
+            .unwrap();
+        let mut frame = crate::abi::linux::generic::test_support::syscall_frame(&task);
+        let mut linux = crate::abi::linux::generic::LinuxAbi::default();
+        let address = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(address, 1).unwrap();
+        for (path, alias, info, _) in &nodes {
+            for name in [path, alias] {
+                let path = alloc::ffi::CString::new(name.as_bytes()).unwrap();
+                crate::library::std::usercopy::copy_to_user(
+                    &task,
+                    address,
+                    path.as_bytes_with_nul(),
+                )
+                .unwrap();
+                frame.set_arg(0, scarlet_abi::fs::CURRENT_DIRECTORY);
+                frame.set_arg(1, address);
+                frame.set_arg(2, 0);
+                frame.set_arg(3, 0);
+                assert_eq!(
+                    crate::fs::vfs_v2::descriptor::sys_vfs_open_at(&mut frame) as isize,
+                    -(scarlet_abi::fs::ERRNO_EACCES as isize)
+                );
+                // Linux evdev may retry an O_RDWR request as O_RDONLY.
+                frame.set_arg(0, (-100isize) as usize);
+                frame.set_arg(2, 2);
+                assert_eq!(
+                    crate::abi::linux::generic::fs::sys_openat(&mut linux, &mut frame) as isize,
+                    -(scarlet_abi::fs::ERRNO_EACCES as isize)
+                );
+            }
+            assert!(matches!(Ext2CharDeviceFileObject::new(*info, 1),
+                Err(e) if e.kind == FileSystemErrorKind::PermissionDenied));
+        }
+        // An explicit read-only transfer still carries the original file grant.
+        let (received, _) =
+            receive_handle(&task, nodes[0].3.clone(), HandleMetadata::default()).unwrap();
+        input.push_event(1, 30, 1);
+        let mut record = [0; core::mem::size_of::<crate::device::input::InputEvent>()];
+        assert_eq!(
+            received.as_file().unwrap().read(&mut record).unwrap(),
+            record.len()
+        );
+        for (_, _, info, _) in nodes {
+            manager.unregister_device(info.device_id);
+        }
+        clear_mock_current_task();
+    }
+
     #[cfg(feature = "network")]
     #[test_case]
     fn file_domain_limits_open_creation_and_received_descriptions() {

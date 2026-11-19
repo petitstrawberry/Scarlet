@@ -1871,8 +1871,8 @@ impl crate::object::capability::selectable::Selectable for Ext2DirectoryObject {
 /// ext2 Character Device File Object
 ///
 /// Handles character device operations through ext2 device files.
-#[derive(Debug)]
 pub struct Ext2CharDeviceFileObject {
+    device: crate::device::manager::SharedDevice,
     open_guard: Option<super::Ext2OpenGuard>,
     /// Device file info
     device_info: DeviceFileInfo,
@@ -1889,21 +1889,24 @@ impl Ext2CharDeviceFileObject {
         device_info: DeviceFileInfo,
         file_id: u64,
         guard: super::Ext2OpenGuard,
-    ) -> Self {
-        let mut object = Self::new(device_info, file_id);
+    ) -> Result<Self, FileSystemError> {
+        let mut object = Self::new(device_info, file_id)?;
         object.open_guard = Some(guard);
-        object
+        Ok(object)
     }
 
     /// Create a new ext2 character device file object
-    pub fn new(device_info: DeviceFileInfo, file_id: u64) -> Self {
-        Self {
+    pub fn new(device_info: DeviceFileInfo, file_id: u64) -> Result<Self, FileSystemError> {
+        let device =
+            crate::shield::access::device_for_open(DeviceManager::get_manager(), device_info)?;
+        Ok(Self {
+            device,
             open_guard: None,
             device_info,
             file_id,
             position: IrqSpinLock::new(0),
             filesystem: IrqRwSpinLock::new(None),
-        }
+        })
     }
 
     /// Set the filesystem reference
@@ -1914,84 +1917,18 @@ impl Ext2CharDeviceFileObject {
 
 impl StreamOps for Ext2CharDeviceFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        #[cfg(test)]
-        crate::println!(
-            "[ext2] CharDevice read: device_id={}",
-            self.device_info.device_id
-        );
-
-        // Get the device from device manager
-        let device = DeviceManager::get_manager()
-            .get_device(self.device_info.device_id)
-            .ok_or_else(|| {
-                #[cfg(test)]
-                crate::println!(
-                    "[ext2] CharDevice: Device with ID {} not found in DeviceManager",
-                    self.device_info.device_id
-                );
-                StreamError::NotSupported
-            })?;
-
-        #[cfg(test)]
-        crate::println!(
-            "[ext2] CharDevice: Found device with ID {}",
-            self.device_info.device_id
-        );
-
-        // Try to cast to CharDevice
-        if let Some(char_device) = device.as_char_device() {
-            #[cfg(test)]
-            crate::println!("[ext2] CharDevice: Successfully cast to CharDevice");
-            // Use the fallible CharDevice read path so interrupted waits reach the ABI.
-            char_device.try_read(buffer)
-        } else {
-            #[cfg(test)]
-            crate::println!("[ext2] CharDevice: Device is not a CharDevice");
-            Err(StreamError::NotSupported)
-        }
+        self.device
+            .as_char_device()
+            .ok_or(StreamError::NotSupported)?
+            .try_read(buffer)
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        #[cfg(test)]
-        crate::println!(
-            "[ext2] CharDevice write: device_id={}, buffer_len={}",
-            self.device_info.device_id,
-            buffer.len()
-        );
-
-        // Get the device from device manager
-        let device = DeviceManager::get_manager()
-            .get_device(self.device_info.device_id)
-            .ok_or_else(|| {
-                #[cfg(test)]
-                crate::println!(
-                    "[ext2] CharDevice: Device with ID {} not found in DeviceManager",
-                    self.device_info.device_id
-                );
-                StreamError::NotSupported
-            })?;
-
-        #[cfg(test)]
-        crate::println!(
-            "[ext2] CharDevice: Found device with ID {}",
-            self.device_info.device_id
-        );
-
-        // Try to cast to CharDevice
-        if let Some(char_device) = device.as_char_device() {
-            #[cfg(test)]
-            crate::println!("[ext2] CharDevice: Successfully cast to CharDevice");
-            // Use the CharDevice write method
-            char_device.write(buffer).map_err(|_err| {
-                #[cfg(test)]
-                crate::println!("[ext2] CharDevice write error");
-                StreamError::IoError
-            })
-        } else {
-            #[cfg(test)]
-            crate::println!("[ext2] CharDevice: Device is not a CharDevice");
-            Err(StreamError::NotSupported)
-        }
+        self.device
+            .as_char_device()
+            .ok_or(StreamError::NotSupported)?
+            .write(buffer)
+            .map_err(|_| StreamError::IoError)
     }
 }
 
@@ -2057,12 +1994,7 @@ impl FileObject for Ext2CharDeviceFileObject {
     }
 
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
-        // Get the device to check if it supports seeking
-        let device = DeviceManager::get_manager()
-            .get_device(self.device_info.device_id)
-            .ok_or(StreamError::NotSupported)?;
-
-        if let Some(char_device) = device.as_char_device() {
+        if let Some(char_device) = self.device.as_char_device() {
             if char_device.can_seek() {
                 let mut pos = self.position.lock();
                 match whence {
@@ -2098,16 +2030,7 @@ impl FileObject for Ext2CharDeviceFileObject {
 
 impl Selectable for Ext2CharDeviceFileObject {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
-        // Delegate to underlying Device's Selectable implementation when available
-        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
-            return device.current_ready(interest);
-        }
-        // Fallback: conservative defaults (always ready, non-blocking)
-        ReadySet {
-            read: interest.read,
-            write: interest.write,
-            except: interest.except && false,
-        }
+        self.device.current_ready(interest)
     }
 
     fn wait_until_ready(
@@ -2117,10 +2040,7 @@ impl Selectable for Ext2CharDeviceFileObject {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
-            return device.wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks);
-        }
-        // No device found: do not block
-        SelectWaitOutcome::Ready
+        self.device
+            .wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks)
     }
 }

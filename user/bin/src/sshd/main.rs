@@ -2,24 +2,25 @@
 //!
 //! The transport and cryptography are provided by Sunset. Scarlet's native
 //! `GetRandom` syscall backs the Rust `getrandom` ecosystem, and authenticated
-//! shell sessions use a Scarlet PTY; the SFTP subsystem accesses files directly.
+//! shell and SFTP workers run with the credentials of the authenticated account.
 
 #![no_std]
 #![no_main]
 
 extern crate scarlet_std as std;
 
+mod host_keys;
 mod sftp;
 
 use core::{num::NonZeroU32, time::Duration};
 
-use hmac::{Hmac, Mac};
-use rand_core::OsRng;
-use sha2::Sha256;
-use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey};
+use host_keys::load_host_keys;
+use scarlet_accounts::{Account, authenticate_local, authorized_keys, lookup_local};
+use scarlet_os::process_scope::ProcessScope;
+use ssh_key::{HashAlg, PublicKey};
 use std::{
     env, format,
-    fs::{File, create_directory},
+    fs::File,
     handle::Handle,
     io::{ErrorKind, Read, Write},
     println,
@@ -35,10 +36,6 @@ use subtle::ConstantTimeEq;
 use sunset::{ChanData, ChanFail, ChanHandle, Event, Runner, ServEvent, Server, SignKey};
 
 const DEFAULT_PORT: u16 = 22;
-const ROOT_USER: &str = "root";
-const AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
-const ED25519_HOST_KEY_PATH: &str = "/etc/ssh/ssh_host_ed25519_key";
-const RSA_HOST_KEY_PATH: &str = "/etc/ssh/ssh_host_rsa_key";
 const SSH_BUFFER_SIZE: usize = 64 * 1024;
 const SSH_RECEIVE_WINDOW: u32 = 1024 * 1024;
 const SSH_MAX_CHANNEL_PACKET: u32 = 32 * 1024;
@@ -46,7 +43,6 @@ const SFTP_READ_CHUNK: usize = 32 * 1024;
 const IO_BUFFER_SIZE: usize = 4096;
 const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
-const PASSWORD_COST: u8 = 10;
 const POST_EXIT_IDLE_LIMIT: u16 = 100;
 const CUSTOM_RANDOM_ERROR: u32 = getrandom::Error::CUSTOM_START + 1;
 
@@ -74,78 +70,8 @@ fn scarlet_getrandom(destination: &mut [u8]) -> Result<(), getrandom::Error> {
     Ok(())
 }
 
-#[derive(Clone)]
-struct PasswordHash {
-    salt: [u8; 16],
-    hash: [u8; 24],
-    cost: u8,
-}
-
-impl PasswordHash {
-    fn new(password: &str) -> Result<Self, &'static str> {
-        if password.is_empty() {
-            return Err("the SSH password must not be empty");
-        }
-
-        let mut salt = [0u8; 16];
-        getrandom::getrandom(&mut salt).map_err(|_| "failed to obtain password salt")?;
-        let prehash = Self::prehash(password, &salt);
-        let hash = bcrypt::bcrypt(PASSWORD_COST as u32, salt, &prehash);
-        Ok(Self {
-            salt,
-            hash,
-            cost: PASSWORD_COST,
-        })
-    }
-
-    fn check(&self, password: &str) -> bool {
-        if password.is_empty() {
-            return false;
-        }
-        let prehash = Self::prehash(password, &self.salt);
-        let candidate = bcrypt::bcrypt(self.cost as u32, self.salt, &prehash);
-        candidate.ct_eq(&self.hash).into()
-    }
-
-    fn prehash(password: &str, salt: &[u8]) -> [u8; 32] {
-        let mut prehash = Hmac::<Sha256>::new_from_slice(salt)
-            .expect("HMAC-SHA256 accepts salts of every length");
-        prehash.update(password.as_bytes());
-        prehash.finalize().into_bytes().into()
-    }
-}
-
 struct ServerConfig {
     host_keys: Vec<SignKey>,
-    password: Option<PasswordHash>,
-}
-
-impl ServerConfig {
-    fn load() -> Result<Self, String> {
-        let password = match env::var("SCARLET_SSH_PASSWORD") {
-            Some(password) if !password.is_empty() => {
-                let hashed = PasswordHash::new(&password).map_err(String::from)?;
-                env::remove_var("SCARLET_SSH_PASSWORD");
-                Some(hashed)
-            }
-            Some(_) => {
-                env::remove_var("SCARLET_SSH_PASSWORD");
-                None
-            }
-            None => None,
-        };
-
-        let host_keys = load_host_keys()?;
-
-        Ok(Self {
-            host_keys,
-            password,
-        })
-    }
-
-    fn password_enabled(&self) -> bool {
-        self.password.is_some()
-    }
 }
 
 #[derive(Default)]
@@ -179,13 +105,14 @@ impl PendingBuffer {
 }
 
 struct ChildSession {
-    master: PtyMaster,
+    io: SessionIo,
+    scope: ProcessScope,
     pid: i32,
-    to_pty: PendingBuffer,
-    from_pty: PendingBuffer,
+    to_child: PendingBuffer,
+    from_child: PendingBuffer,
     child_exited: bool,
-    pty_eof: bool,
-    sent_veof: bool,
+    output_eof: bool,
+    input_closed: bool,
     post_exit_idle: u16,
     exit_status: u32,
     ssh_finished: bool,
@@ -193,20 +120,27 @@ struct ChildSession {
 
 impl Drop for ChildSession {
     fn drop(&mut self) {
+        let _ = self.scope.terminate();
         if !self.child_exited {
-            // SAFETY: The PID and signal are scalar inputs validated by the kernel; no userspace pointer is passed.
-            let _ =
-                unsafe { scarlet_sys::syscall2(scarlet_sys::Syscall::Kill, self.pid as usize, 15) };
-            let _ = waitpid(self.pid, WAIT_NOHANG);
+            let _ = waitpid(self.pid, 0);
         }
     }
 }
 
-struct SftpSession {
-    server: sftp::Server,
-    output: PendingBuffer,
-    finished: bool,
-    ssh_finished: bool,
+enum SessionIo {
+    Terminal(PtyMaster),
+    Binary(Socket),
+}
+
+enum ChildIo {
+    Terminal(PtySlave),
+    Binary(Socket),
+}
+
+enum SessionKind<'a> {
+    Shell,
+    Command(&'a str),
+    Sftp,
 }
 
 struct TerminalSettings {
@@ -228,10 +162,9 @@ impl TerminalSettings {
 struct ConnectionState {
     channel: Option<ChanHandle>,
     child: Option<ChildSession>,
-    sftp: Option<SftpSession>,
+    account: Option<Account>,
     terminal: TerminalSettings,
     environment: Vec<(String, String)>,
-    authorized_keys: Vec<[u8; 32]>,
 }
 
 impl ConnectionState {
@@ -239,48 +172,39 @@ impl ConnectionState {
         Self {
             channel: None,
             child: None,
-            sftp: None,
+            account: None,
             terminal: TerminalSettings::new(),
             environment: Vec::new(),
-            authorized_keys: load_authorized_keys(AUTHORIZED_KEYS_PATH),
         }
     }
-
-    fn public_key_enabled(&self) -> bool {
-        !self.authorized_keys.is_empty()
-    }
-
-    fn accepts_public_key(&self, key: &sunset::PubKey<'_>) -> bool {
-        let Ok(fingerprint) = key.fingerprint(HashAlg::Sha256) else {
-            return false;
-        };
-        let Some(candidate) = fingerprint.sha256() else {
-            return false;
-        };
-
-        self.authorized_keys
+}
+fn accepts_public_key(account: &Account, key: &sunset::PubKey<'_>) -> bool {
+    let Some(candidate) = key
+        .fingerprint(HashAlg::Sha256)
+        .ok()
+        .and_then(|key| key.sha256())
+    else {
+        return false;
+    };
+    authorized_keys(account).is_some_and(|bytes| {
+        parse_authorized_keys(&bytes)
             .iter()
-            .any(|known| candidate.ct_eq(known).into())
-    }
+            .any(|known| bool::from(candidate.ct_eq(known)))
+    })
 }
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    let config = match ServerConfig::load() {
-        Ok(config) => Arc::new(config),
+    if env::args_vec().get(1).map(String::as_str) == Some("--sftp-worker") {
+        return if run_sftp_worker().is_ok() { 0 } else { 1 };
+    }
+    let config = match load_host_keys() {
+        Ok(host_keys) => Arc::new(ServerConfig { host_keys }),
         Err(error) => {
             println!("[sshd] configuration failed: {}", error);
             return 1;
         }
     };
-
-    let authorized_key_count = load_authorized_keys(AUTHORIZED_KEYS_PATH).len();
-    if !config.password_enabled() && authorized_key_count == 0 {
-        println!(
-            "[sshd] warning: no authentication is configured; set SCARLET_SSH_PASSWORD or install {}",
-            AUTHORIZED_KEYS_PATH
-        );
-    }
 
     let port = env::var("SCARLET_SSH_PORT")
         .and_then(|value| value.parse::<u16>().ok())
@@ -304,12 +228,7 @@ fn main() -> i32 {
         return 1;
     }
 
-    println!(
-        "[sshd] listening on 0.0.0.0:{} (password={}, authorized_keys={})",
-        port,
-        config.password_enabled(),
-        authorized_key_count
-    );
+    println!("[sshd] listening on 0.0.0.0:{}", port);
 
     loop {
         match listener.accept() {
@@ -337,7 +256,6 @@ fn serve_connection(mut socket: Socket, config: &ServerConfig) -> Result<(), Str
         .set_nonblocking(true)
         .map_err(|error| format!("failed to set socket nonblocking: {:?}", error))?;
 
-    let socket_handle = socket.as_raw();
     let mut ssh_input = vec![0u8; SSH_BUFFER_SIZE];
     let mut ssh_output = vec![0u8; SSH_BUFFER_SIZE];
     let mut runner = Runner::new_server_with_channel_limits(
@@ -401,7 +319,7 @@ fn serve_connection(mut socket: Socket, config: &ServerConfig) -> Result<(), Str
                     break;
                 }
                 Event::Serv(event) => {
-                    handle_server_event(event, config, &mut state, socket_handle)?;
+                    handle_server_event(event, config, &mut state)?;
                     progressed = true;
                 }
             }
@@ -413,7 +331,7 @@ fn serve_connection(mut socket: Socket, config: &ServerConfig) -> Result<(), Str
         if session_finished(&state) && finish_ssh_session(&mut runner, &mut state)? {
             progressed = true;
         }
-        if (state.child.as_ref().is_some_and(|child| child.ssh_finished) || state.sftp.is_some())
+        if state.child.as_ref().is_some_and(|child| child.ssh_finished)
             && state
                 .channel
                 .as_ref()
@@ -457,7 +375,6 @@ fn handle_server_event(
     event: ServEvent<'_, '_>,
     config: &ServerConfig,
     state: &mut ConnectionState,
-    socket_handle: i32,
 ) -> Result<(), String> {
     match event {
         ServEvent::Hostkeys(request) => {
@@ -467,22 +384,24 @@ fn handle_server_event(
                 .map_err(|error| format!("failed to provide host keys: {:?}", error))
         }
         ServEvent::FirstAuth(mut request) => {
+            let allow_password = request.username().is_ok_and(|name| name != "root");
             request
-                .set_auth_methods(config.password_enabled(), state.public_key_enabled())
+                .set_auth_methods(allow_password, true)
                 .map_err(|error| format!("failed to configure authentication: {:?}", error))?;
             request
                 .reject()
                 .map_err(|error| format!("failed to continue authentication: {:?}", error))
         }
         ServEvent::PasswordAuth(request) => {
-            let accepted = request.matches_username(ROOT_USER)
-                && request
-                    .password()
-                    .ok()
-                    .zip(config.password.as_ref())
-                    .is_some_and(|(password, expected)| expected.check(password));
-            if accepted {
-                println!("[sshd] password authentication accepted for root");
+            state.account = match (request.username(), request.password()) {
+                (Ok(name), Ok(password)) if name != "root" => {
+                    authenticate_local(name.as_bytes(), password.as_bytes())
+                        .ok()
+                        .flatten()
+                }
+                _ => None,
+            };
+            if state.account.is_some() {
                 request
                     .allow()
                     .map_err(|error| format!("failed to accept password: {:?}", error))
@@ -493,14 +412,18 @@ fn handle_server_event(
             }
         }
         ServEvent::PubkeyAuth(request) => {
-            let accepted = request.username().ok().is_some_and(|username| {
-                bool::from(username.as_bytes().ct_eq(ROOT_USER.as_bytes()))
-            }) && request
-                .pubkey()
-                .is_ok_and(|key| state.accepts_public_key(&key));
-            if accepted {
+            let account = request
+                .username()
+                .ok()
+                .and_then(|name| lookup_local(name.as_bytes()).ok().flatten())
+                .filter(|account| {
+                    request
+                        .pubkey()
+                        .is_ok_and(|key| accepts_public_key(account, &key))
+                });
+            if account.is_some() {
                 if request.real() {
-                    println!("[sshd] public-key authentication accepted for root");
+                    state.account = account;
                 }
                 request
                     .allow()
@@ -512,7 +435,7 @@ fn handle_server_event(
             }
         }
         ServEvent::OpenSession(request) => {
-            if state.channel.is_some() {
+            if state.account.is_none() || state.channel.is_some() {
                 request
                     .reject(ChanFail::SSH_OPEN_ADMINISTRATIVELY_PROHIBITED)
                     .map_err(|error| format!("failed to reject extra channel: {:?}", error))
@@ -528,7 +451,6 @@ fn handle_server_event(
             let pty = request.pty();
             if channel_matches(state, request.channel())
                 && state.child.is_none()
-                && state.sftp.is_none()
                 && let Ok(pty) = pty
             {
                 state.terminal.term = Some(String::from(pty.term.as_str()));
@@ -552,9 +474,12 @@ fn handle_server_event(
                 .map_err(|error| format!("invalid window-change request: {:?}", error))?;
             state.terminal.columns = terminal_dimension(columns, state.terminal.columns);
             state.terminal.rows = terminal_dimension(rows, state.terminal.rows);
-            if let Some(child) = state.child.as_mut() {
-                child
-                    .master
+            if let Some(ChildSession {
+                io: SessionIo::Terminal(master),
+                ..
+            }) = state.child.as_mut()
+            {
+                master
                     .set_winsize(state.terminal.columns, state.terminal.rows)
                     .map_err(|error| format!("failed to resize PTY: {}", error))?;
             }
@@ -567,7 +492,6 @@ fn handle_server_event(
                 (Ok(name), Ok(value))
                     if channel_matches(state, request.channel())
                         && state.child.is_none()
-                        && state.sftp.is_none()
                         && environment_allowed(&name, &value) =>
                 {
                     state.environment.retain(|(existing, _)| existing != &name);
@@ -587,15 +511,12 @@ fn handle_server_event(
             }
         }
         ServEvent::SessionShell(request) => {
-            if !channel_matches(state, request.channel())
-                || state.child.is_some()
-                || state.sftp.is_some()
-            {
+            if !channel_matches(state, request.channel()) || state.child.is_some() {
                 return request
                     .fail()
                     .map_err(|error| format!("failed to reject shell request: {:?}", error));
             }
-            match spawn_session(None, &state.environment, &state.terminal, socket_handle) {
+            match spawn_session(SessionKind::Shell, state) {
                 Ok(child) => {
                     state.child = Some(child);
                     request
@@ -612,10 +533,7 @@ fn handle_server_event(
         }
         ServEvent::SessionExec(request) => {
             let command = request.command().map(String::from);
-            if !channel_matches(state, request.channel())
-                || state.child.is_some()
-                || state.sftp.is_some()
-            {
+            if !channel_matches(state, request.channel()) || state.child.is_some() {
                 return request
                     .fail()
                     .map_err(|error| format!("failed to reject exec request: {:?}", error));
@@ -628,12 +546,7 @@ fn handle_server_event(
                         .map_err(|error| format!("failed to reject exec request: {:?}", error));
                 }
             };
-            match spawn_session(
-                Some(command.as_str()),
-                &state.environment,
-                &state.terminal,
-                socket_handle,
-            ) {
+            match spawn_session(SessionKind::Command(&command), state) {
                 Ok(child) => {
                     state.child = Some(child);
                     request
@@ -651,22 +564,23 @@ fn handle_server_event(
         ServEvent::SessionSubsystem(request) => {
             if !channel_matches(state, request.channel())
                 || state.child.is_some()
-                || state.sftp.is_some()
                 || request.command().ok() != Some("sftp")
             {
                 return request
                     .fail()
                     .map_err(|error| format!("failed to reject subsystem: {:?}", error));
             }
-            state.sftp = Some(SftpSession {
-                server: sftp::Server::new("/root"),
-                output: PendingBuffer::default(),
-                finished: false,
-                ssh_finished: false,
-            });
-            request
-                .succeed()
-                .map_err(|error| format!("failed to accept SFTP: {:?}", error))
+            match spawn_session(SessionKind::Sftp, state) {
+                Ok(child) => {
+                    state.child = Some(child);
+                    request
+                        .succeed()
+                        .map_err(|error| format!("failed to accept SFTP: {:?}", error))
+                }
+                Err(_) => request
+                    .fail()
+                    .map_err(|e| format!("failed to reject SFTP: {:?}", e)),
+            }
         }
         ServEvent::Defunct | ServEvent::PollAgain => Ok(()),
     }
@@ -704,74 +618,99 @@ fn environment_allowed(name: &str, value: &str) -> bool {
 }
 
 fn spawn_session(
-    command: Option<&str>,
-    requested_environment: &[(String, String)],
-    terminal: &TerminalSettings,
-    socket_handle: i32,
+    kind: SessionKind<'_>,
+    state: &ConnectionState,
 ) -> Result<ChildSession, &'static str> {
-    let PtyPair {
-        master,
-        slave,
-        slave_path: _,
-    } = PtyPair::open().map_err(|_| "failed to allocate PTY")?;
-    master
-        .set_winsize(terminal.columns, terminal.rows)
-        .map_err(|_| "failed to set PTY size")?;
-    master
-        .as_file()
-        .set_nonblocking(true)
-        .map_err(|_| "failed to set PTY nonblocking")?;
-
-    let master_handle = master.as_file().as_raw();
-    let environment = shell_environment(requested_environment, terminal.term.as_deref());
+    let account = state.account.as_ref().ok_or("unauthenticated session")?;
+    let scope = ProcessScope::create().map_err(|_| "cannot supervise SSH session")?;
+    let (io, child_io) = match kind {
+        SessionKind::Sftp => {
+            let (parent, child) = Socket::pair().map_err(|_| "cannot create SFTP channel")?;
+            parent
+                .set_nonblocking(true)
+                .map_err(|_| "cannot configure SFTP channel")?;
+            (SessionIo::Binary(parent), ChildIo::Binary(child))
+        }
+        _ => {
+            let PtyPair { master, slave, .. } =
+                PtyPair::open().map_err(|_| "cannot allocate PTY")?;
+            master
+                .set_winsize(state.terminal.columns, state.terminal.rows)
+                .map_err(|_| "cannot size PTY")?;
+            master
+                .as_file()
+                .set_nonblocking(true)
+                .map_err(|_| "cannot configure PTY")?;
+            (SessionIo::Terminal(master), ChildIo::Terminal(slave))
+        }
+    };
+    let environment =
+        shell_environment(account, &state.environment, state.terminal.term.as_deref());
+    let environment_refs: Vec<&str> = environment.iter().map(String::as_str).collect();
+    let home = account.home();
     let pid = fork();
     if pid == 0 {
-        close_inherited_handle(master_handle);
-        close_inherited_handle(socket_handle);
-        let _ = create_session();
-        setup_child_stdio(slave);
-
-        let environment_refs: Vec<&str> = environment.iter().map(String::as_str).collect();
-        let shell_candidates = ["/bin/sh"];
-        for shell in shell_candidates {
-            let result = if let Some(command) = command {
-                let arguments = [shell, "-c", command];
-                execve(shell, &arguments, &environment_refs)
-            } else {
-                let arguments = ["-sh"];
-                execve(shell, &arguments, &environment_refs)
-            };
-            if result == 0 {
-                break;
+        drop(io);
+        match child_io {
+            ChildIo::Terminal(slave) => {
+                if create_session().is_err() {
+                    exit(126);
+                }
+                setup_child_stdio(slave);
+            }
+            ChildIo::Binary(socket) => {
+                let stream = socket.into_handle();
+                let Ok(null) = File::open_with_flags("/dev/null", 1) else {
+                    exit(126)
+                };
+                duplicate_to_stdio(&stream, 0);
+                duplicate_to_stdio(&stream, 1);
+                duplicate_to_stdio(&null.into_handle(), 2);
             }
         }
-        println!("[sshd] failed to execute the system shell");
+        // SAFETY: this exclusive fork child proceeds directly to exec or exit.
+        // No inherited owners of revoked descriptors are subsequently dropped.
+        if unsafe { account.enter(scope) }.is_err() || std::fs::change_directory(&home).is_err() {
+            exit(126);
+        }
+        match kind {
+            SessionKind::Shell => execve("/bin/sh", &["-sh"], &environment_refs),
+            SessionKind::Command(command) => {
+                execve("/bin/sh", &["sh", "-c", command], &environment_refs)
+            }
+            SessionKind::Sftp => execve("/bin/sshd", &["sshd", "--sftp-worker"], &environment_refs),
+        };
         exit(127);
     }
     if pid < 0 {
         return Err("fork failed");
     }
 
-    drop(slave);
+    drop(child_io);
     Ok(ChildSession {
-        master,
+        io,
+        scope,
         pid,
-        to_pty: PendingBuffer::default(),
-        from_pty: PendingBuffer::default(),
+        to_child: PendingBuffer::default(),
+        from_child: PendingBuffer::default(),
         child_exited: false,
-        pty_eof: false,
-        sent_veof: false,
+        output_eof: false,
+        input_closed: false,
         post_exit_idle: 0,
         exit_status: 255,
         ssh_finished: false,
     })
 }
 
-fn shell_environment(requested: &[(String, String)], pty_term: Option<&str>) -> Vec<String> {
+fn shell_environment(
+    account: &Account,
+    requested: &[(String, String)],
+    pty_term: Option<&str>,
+) -> Vec<String> {
     let mut environment = vec![
-        String::from("USER=root"),
-        String::from("LOGNAME=root"),
-        String::from("HOME=/root"),
+        format!("USER={}", account.name),
+        format!("LOGNAME={}", account.name),
+        format!("HOME={}", account.home()),
         String::from("SHELL=/bin/sh"),
         String::from("PATH=/bin:/usr/bin"),
     ];
@@ -808,23 +747,7 @@ fn duplicate_to_stdio(source: &Handle, target: i32) {
     }
     match source.duplicate() {
         Ok(handle) if handle.as_raw() == target => core::mem::forget(handle),
-        Ok(handle) => {
-            println!(
-                "[sshd] duplicated stdio handle {}, expected {}",
-                handle.as_raw(),
-                target
-            );
-            core::mem::forget(handle);
-        }
-        Err(error) => println!("[sshd] failed to duplicate fd {}: {:?}", target, error),
-    }
-}
-
-fn close_inherited_handle(raw_handle: i32) {
-    if raw_handle >= 0
-        && let Ok(handle) = unsafe { Handle::from_raw(raw_handle) }
-    {
-        drop(handle);
+        _ => exit(126),
     }
 }
 
@@ -835,27 +758,28 @@ fn bridge_session(
     let Some(channel) = state.channel.as_ref() else {
         return Ok(false);
     };
-    if let Some(session) = state.sftp.as_mut() {
-        return bridge_sftp(runner, channel, session);
-    }
     let Some(child) = state.child.as_mut() else {
         return Ok(false);
     };
     let mut progressed = false;
 
-    if !child.to_pty.is_empty() {
-        match child.master.write(child.to_pty.remaining()) {
+    if !child.to_child.is_empty() {
+        let written = match &mut child.io {
+            SessionIo::Terminal(master) => master.write(child.to_child.remaining()),
+            SessionIo::Binary(stream) => stream.write(child.to_child.remaining()),
+        };
+        match written {
             Ok(0) => {}
             Ok(count) => {
-                child.to_pty.consume(count);
+                child.to_child.consume(count);
                 progressed = true;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-            Err(error) => return Err(format!("PTY write failed: {}", error)),
+            Err(error) => return Err(format!("child input write failed: {}", error)),
         }
     }
 
-    if child.to_pty.is_empty()
+    if child.to_child.is_empty()
         && let Some((number, ChanData::Normal, ready)) = runner.read_channel_ready()
         && number == channel.num()
     {
@@ -865,33 +789,38 @@ fn bridge_session(
             .read_channel(channel, ChanData::Normal, &mut buffer[..limit])
             .map_err(|error| format!("SSH channel read failed: {:?}", error))?;
         if count > 0 {
-            child.to_pty.replace(&buffer[..count]);
+            child.to_child.replace(&buffer[..count]);
             progressed = true;
         }
     }
 
-    if runner.is_channel_eof(channel) && !child.sent_veof {
-        if child.to_pty.is_empty() {
-            child.to_pty.replace(&[0x04]);
-        } else {
-            child.to_pty.bytes.push(0x04);
+    if runner.is_channel_eof(channel)
+        && !child.input_closed
+        && child.to_child.is_empty()
+        && runner.read_channel_ready().is_none()
+    {
+        match &child.io {
+            SessionIo::Terminal(_) => child.to_child.replace(&[0x04]),
+            SessionIo::Binary(stream) => stream
+                .shutdown(std::socket::ShutdownHow::Write)
+                .map_err(|_| "SFTP shutdown failed")?,
         }
-        child.sent_veof = true;
+        child.input_closed = true;
         progressed = true;
     }
 
-    if !child.from_pty.is_empty() {
+    if !child.from_child.is_empty() {
         let count = runner
-            .write_channel(channel, ChanData::Normal, child.from_pty.remaining())
+            .write_channel(channel, ChanData::Normal, child.from_child.remaining())
             .map_err(|error| format!("SSH channel write failed: {:?}", error))?;
         if count > 0 {
-            child.from_pty.consume(count);
+            child.from_child.consume(count);
             child.post_exit_idle = 0;
             progressed = true;
         }
     }
 
-    if child.from_pty.is_empty() && !child.pty_eof {
+    if child.from_child.is_empty() && !child.output_eof {
         let ready = runner
             .write_channel_ready(channel, ChanData::Normal)
             .map_err(|error| format!("SSH channel readiness failed: {:?}", error))?
@@ -899,23 +828,26 @@ fn bridge_session(
         if ready > 0 {
             let mut buffer = [0u8; IO_BUFFER_SIZE];
             let limit = ready.min(buffer.len());
-            match child.master.read(&mut buffer[..limit]) {
+            let read = match &mut child.io {
+                SessionIo::Terminal(master) => master.read(&mut buffer[..limit]),
+                SessionIo::Binary(stream) => stream.read(&mut buffer[..limit]),
+            };
+            match read {
                 Ok(0) => {
-                    child.pty_eof = true;
+                    child.output_eof = true;
                     progressed = true;
                 }
                 Ok(count) => {
-                    child.from_pty.replace(&buffer[..count]);
+                    child.from_child.replace(&buffer[..count]);
                     child.post_exit_idle = 0;
                     progressed = true;
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-                Err(error) if child.child_exited => {
-                    child.pty_eof = true;
-                    println!("[sshd] PTY closed after child exit: {}", error);
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof || child.child_exited => {
+                    child.output_eof = true;
                     progressed = true;
                 }
-                Err(error) => return Err(format!("PTY read failed: {}", error)),
+                Err(error) => return Err(format!("child output read failed: {}", error)),
             }
         }
     }
@@ -933,67 +865,45 @@ fn bridge_session(
             child.post_exit_idle = 0;
             progressed = true;
         }
-    } else if child.from_pty.is_empty() {
+    } else if child.from_child.is_empty() {
         child.post_exit_idle = child.post_exit_idle.saturating_add(1);
     }
 
     Ok(progressed)
 }
 
-/// Keep one bounded response pending, applying SSH flow control to pipelined
-/// requests rather than buffering an entire upload or running it through a PTY.
-fn bridge_sftp(
-    runner: &mut Runner<'_, Server>,
-    channel: &ChanHandle,
-    session: &mut SftpSession,
-) -> Result<bool, String> {
-    if session.ssh_finished {
-        return Ok(false);
-    }
-    let mut progressed = false;
-    if !session.output.is_empty() {
-        let n = runner
-            .write_channel(channel, ChanData::Normal, session.output.remaining())
-            .map_err(|e| format!("SFTP write: {:?}", e))?;
-        session.output.consume(n);
-        progressed |= n != 0;
-    }
-    if session.output.is_empty() {
-        if let Some(response) = session.server.next_response().map_err(String::from)? {
-            session.output.replace(&response);
-            progressed = true;
+/// Invoked after credentials and stdio are installed and the SSH transport image has been replaced.
+fn run_sftp_worker() -> Result<(), &'static str> {
+    let home = env::var("HOME").ok_or("missing session home")?;
+    let mut server = sftp::Server::new(&home);
+    let mut chunk = vec![0; SFTP_READ_CHUNK];
+    loop {
+        while let Some(reply) = server.next_response()? {
+            std::io::stdout()
+                .write_all(&reply)
+                .map_err(|_| "SFTP output failed")?;
         }
-    }
-    // CHANNEL_DATA may precede the peer's WINDOW_ADJUST in the SSH stream.
-    // Drain requests into the bounded SFTP buffer even while a response waits
-    // for send credit, so the transport can reach that control message.
-    if let Some((number, ChanData::Normal, ready)) = runner.read_channel_ready()
-        && number == channel.num()
-    {
-        let mut bytes = [0u8; SFTP_READ_CHUNK];
-        let limit = ready.min(bytes.len());
-        let n = runner
-            .read_channel(channel, ChanData::Normal, &mut bytes[..limit])
-            .map_err(|e| format!("SFTP read: {:?}", e))?;
-        session.server.feed(&bytes[..n]).map_err(String::from)?;
-        progressed |= n != 0;
-    } else if session.output.is_empty() && runner.is_channel_eof(channel) {
-        if session.server.has_partial_request() {
-            return Err(String::from("Truncated SFTP request"));
+        let n = std::io::stdin()
+            .read(&mut chunk)
+            .map_err(|_| "SFTP input failed")?;
+        if n == 0 {
+            return if server.has_partial_request() {
+                Err("truncated SFTP request")
+            } else {
+                Ok(())
+            };
         }
-        session.finished = true;
+        server.feed(&chunk[..n])?;
     }
-    Ok(progressed)
 }
 
 fn session_finished(state: &ConnectionState) -> bool {
-    if let Some(session) = state.sftp.as_ref() {
-        return session.finished;
-    }
     state.child.as_ref().is_some_and(|child| {
         child.child_exited
-            && child.from_pty.is_empty()
-            && (child.pty_eof || child.post_exit_idle >= POST_EXIT_IDLE_LIMIT)
+            && child.from_child.is_empty()
+            && (child.output_eof
+                || (matches!(child.io, SessionIo::Terminal(_))
+                    && child.post_exit_idle >= POST_EXIT_IDLE_LIMIT))
     })
 }
 
@@ -1004,22 +914,6 @@ fn finish_ssh_session(
     let Some(channel) = state.channel.as_ref() else {
         return Ok(false);
     };
-    if let Some(session) = state.sftp.as_mut() {
-        if session.ssh_finished {
-            return Ok(false);
-        }
-        runner
-            .send_channel_exit_status(channel, 0)
-            .map_err(|e| format!("SFTP exit status: {:?}", e))?;
-        runner
-            .send_channel_eof(channel)
-            .map_err(|e| format!("SFTP EOF: {:?}", e))?;
-        runner
-            .send_channel_close(channel)
-            .map_err(|e| format!("SFTP close: {:?}", e))?;
-        session.ssh_finished = true;
-        return Ok(true);
-    }
     let Some(child) = state.child.as_mut() else {
         return Ok(false);
     };
@@ -1040,85 +934,10 @@ fn finish_ssh_session(
     Ok(true)
 }
 
-fn load_host_keys() -> Result<Vec<SignKey>, String> {
-    let mut keys = Vec::new();
-    if let Some(key) = load_host_key(ED25519_HOST_KEY_PATH) {
-        println!("[sshd] loaded {}", ED25519_HOST_KEY_PATH);
-        keys.push(key);
-    } else {
-        println!("[sshd] generating a new Ed25519 host key");
-        keys.push(generate_host_key(
-            ED25519_HOST_KEY_PATH,
-            Algorithm::Ed25519,
-        )?);
-    }
-
-    if let Some(key) = load_host_key(RSA_HOST_KEY_PATH) {
-        println!("[sshd] loaded {}", RSA_HOST_KEY_PATH);
-        keys.push(key);
-    } else {
-        // RSA key generation is deliberately provisioned rather than done at
-        // daemon startup: generating it can delay the first accept by many
-        // seconds. The Ed25519 key generated above remains available; install
-        // this file when RSA host-key compatibility is required.
-        println!(
-            "[sshd] {} is not present; serving with Ed25519 only",
-            RSA_HOST_KEY_PATH
-        );
-    }
-
-    for key in &keys {
-        if let Ok(fingerprint) = key.pubkey().fingerprint(HashAlg::Sha256) {
-            println!("[sshd] host key {}", fingerprint);
-        }
-    }
-    Ok(keys)
-}
-
-fn generate_host_key(path: &str, algorithm: Algorithm) -> Result<SignKey, String> {
-    let mut private_key = PrivateKey::random(&mut OsRng, algorithm)
-        .map_err(|error| format!("host-key generation failed: {:?}", error))?;
-    private_key.set_comment("scarlet-sshd");
-    let encoded = private_key
-        .to_openssh(LineEnding::LF)
-        .map_err(|error| format!("host-key encoding failed: {:?}", error))?;
-    let signing_key = SignKey::from_openssh(encoded.as_bytes())
-        .map_err(|error| format!("generated host key is unsupported: {:?}", error))?;
-
-    let _ = create_directory("/etc/ssh");
-    let persisted = File::create(path).and_then(|mut file| file.write_all(encoded.as_bytes()));
-    match persisted {
-        Ok(()) => println!("[sshd] saved {}", path),
-        Err(error) => println!(
-            "[sshd] warning: could not persist {}: {}; this key is ephemeral",
-            path, error
-        ),
-    }
-
-    Ok(signing_key)
-}
-
-fn load_host_key(path: &str) -> Option<SignKey> {
-    let bytes = read_file(path)?;
-    match SignKey::from_openssh(&bytes) {
-        Ok(key) => Some(key),
-        Err(error) => {
-            println!("[sshd] ignored invalid host key {}: {:?}", path, error);
-            None
-        }
-    }
-}
-
-fn load_authorized_keys(path: &str) -> Vec<[u8; 32]> {
-    let Some(bytes) = read_file(path) else {
-        println!("[sshd] {} is not present", path);
+fn parse_authorized_keys(bytes: &[u8]) -> Vec<[u8; 32]> {
+    let Ok(contents) = core::str::from_utf8(bytes) else {
         return Vec::new();
     };
-    let Ok(contents) = core::str::from_utf8(&bytes) else {
-        println!("[sshd] {} is not UTF-8", path);
-        return Vec::new();
-    };
-
     let mut fingerprints = Vec::new();
     for (line_number, line) in contents.lines().enumerate() {
         let Some(key_text) = authorized_key_text(line) else {
@@ -1133,14 +952,12 @@ fn load_authorized_keys(path: &str) -> Vec<[u8; 32]> {
                 }
             }
             Err(error) => println!(
-                "[sshd] ignored {} line {}: {:?}",
-                path,
+                "[sshd] ignored authorized_keys line {}: {:?}",
                 line_number + 1,
                 error
             ),
         }
     }
-    println!("[sshd] loaded {} authorized key(s)", fingerprints.len());
     fingerprints
 }
 
@@ -1159,26 +976,4 @@ fn authorized_key_text(line: &str) -> Option<String> {
         return Some(format!("{} {}", algorithm, encoded));
     }
     None
-}
-
-fn read_file(path: &str) -> Option<Vec<u8>> {
-    let mut file = File::open(path).ok()?;
-    let mut contents = Vec::new();
-    let mut buffer = [0u8; 2048];
-    loop {
-        match file.read(&mut buffer) {
-            Ok(0) => return Some(contents),
-            Ok(count) => {
-                if contents.len().saturating_add(count) > 256 * 1024 {
-                    println!("[sshd] refused oversized file {}", path);
-                    return None;
-                }
-                contents.extend_from_slice(&buffer[..count]);
-            }
-            Err(error) => {
-                println!("[sshd] failed to read {}: {}", path, error);
-                return None;
-            }
-        }
-    }
 }

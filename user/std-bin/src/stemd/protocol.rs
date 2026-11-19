@@ -1,7 +1,8 @@
 //! stemd IPC protocol definitions
 //!
 //! This module defines the wire protocol for communicating with stemd over
-//! its Unix domain socket at /tmp/stemd.sock.
+//! Unix domain sockets. System commands use /tmp/stemd.sock. Application
+//! commands use /tmp/stemd-session.sock.
 //!
 //! # Wire Format
 //!

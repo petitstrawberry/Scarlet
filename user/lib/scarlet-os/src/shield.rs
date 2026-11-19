@@ -610,3 +610,44 @@ pub fn set_file_acl(file: &Handle, entries: &[FileAclEntry]) -> HandleResult<()>
     )
     .map(|_| ())
 }
+
+/// Start an unprivileged session, replacing every identity slot and closing
+/// handles above stderr. Call in the exclusive child immediately before exec.
+///
+/// # Safety
+/// The caller must relinquish all Rust owners of handles above 2 before use.
+/// Such owners could otherwise close a newly reused descriptor on drop.
+pub unsafe fn enter_user_session(uid: u32, gid: u32, groups: &[u32]) -> HandleResult<()> {
+    // SAFETY: the group slice is borrowed through the synchronous kernel copy.
+    let result = unsafe {
+        syscall4(
+            Syscall::ShieldEnterUserSession,
+            uid as usize,
+            gid as usize,
+            groups.as_ptr() as usize,
+            groups.len(),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(HandleError::PermissionDenied)
+    }
+}
+
+pub fn inode_access(handle: &Handle) -> HandleResult<scarlet_abi::shield::RawInodeAccess> {
+    let mut access = scarlet_abi::shield::RawInodeAccess::default();
+    // SAFETY: access remains exclusively borrowed during the synchronous call.
+    let result = unsafe {
+        syscall2(
+            Syscall::ShieldInodeAccess,
+            handle.as_raw() as usize,
+            &mut access as *mut _ as usize,
+        )
+    };
+    if result == 0 {
+        Ok(access)
+    } else {
+        Err(HandleError::Unsupported)
+    }
+}

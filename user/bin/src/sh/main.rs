@@ -892,7 +892,8 @@ fn interactive_shell() -> i32 {
     }
 
     // Initialize line editor with raw mode enabled
-    let mut editor = line_editor::LineEditor::new("# ");
+    let prompt = std::env::var("PS1");
+    let mut editor = line_editor::LineEditor::new(prompt.as_deref().unwrap_or("# "));
     if editor.set_raw_mode(true).is_err() {
         println!("Warning: Failed to enable raw mode, falling back to canonical mode");
     }

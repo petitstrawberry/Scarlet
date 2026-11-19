@@ -558,29 +558,27 @@ impl DevFileObject {
         device_type: DeviceType,
         device_manager: &DeviceManager,
     ) -> Result<Self, FileSystemError> {
-        // Try to get the device from DeviceManager by ID
-        match device_manager.get_device(device_id) {
-            Some(device_guard) => {
-                let device_open = device_guard.open().map_err(|e| {
-                    FileSystemError::new(
-                        FileSystemErrorKind::DeviceError,
-                        format!("Device open failed: {}", e),
-                    )
-                })?;
-                Ok(Self {
-                    node,
-                    position: IrqRwSpinLock::new(0),
-                    device_id,
-                    device_type,
-                    device_open: Some(device_open),
-                    tty_nonblocking: AtomicBool::new(false),
-                })
-            }
-            None => Err(FileSystemError::new(
+        let device_guard = crate::shield::access::device_for_open(
+            device_manager,
+            DeviceFileInfo {
+                device_id,
+                device_type,
+            },
+        )?;
+        let device_open = device_guard.open().map_err(|e| {
+            FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
-                format!("Device with ID {} not found in DeviceManager", device_id),
-            )),
-        }
+                format!("Device open failed: {}", e),
+            )
+        })?;
+        Ok(Self {
+            node,
+            position: IrqRwSpinLock::new(0),
+            device_id,
+            device_type,
+            device_open: Some(device_open),
+            tty_nonblocking: AtomicBool::new(false),
+        })
     }
 
     fn tty_device(&self) -> Option<&crate::device::char::tty::TtyDevice> {

@@ -6545,7 +6545,7 @@ impl FileSystemOperations for Ext2FileSystem {
                     device_info,
                     ext2_node.id(),
                     self.pin_open_inode(ext2_node.inode_number()),
-                ));
+                )?);
 
                 // Set filesystem reference
                 if let Some(fs_weak) = ext2_node.filesystem() {
