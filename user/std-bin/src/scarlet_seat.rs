@@ -1,6 +1,17 @@
-//! Own the physical seat until the session supervisor admits a desktop.
+//! Own the local seat until the session supervisor admits a desktop.
 //! The public compositor sockets and input workers are created after this gate.
+mod greeter_ui;
+#[allow(dead_code)]
+#[path = "soft_keyboard/layout.rs"]
+mod keyboard_layout;
+mod seat_keys;
+mod seat_pointer;
+use greeter_ui::Screen;
+use keyboard_layout::Layer;
+use seat_keys::key_byte;
+
 use framebuffer::DisplaySurface;
+use scarlet_os::input::{INPUT_CAP_MT, InputDeviceKind};
 use scarlet_os::{handle::capability::StreamError, input::InputDevice};
 use std::{
     io::{self, Read, Write},
@@ -8,9 +19,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-const WIDTH: u32 = 480;
-const HEIGHT: u32 = 240;
 
 struct Worker {
     child: Child,
@@ -102,52 +110,111 @@ impl Keyboard {
     }
 }
 
-// US evdev layout for the trusted login prompt. IMEs belong to the desktop.
-fn key_byte(code: u16, shift: bool, caps: bool) -> Option<u8> {
-    let (normal, shifted, start): (&[u8], &[u8], u16) = match code {
-        1 => return Some(27),
-        14 => return Some(8),
-        28 | 96 => return Some(b'\n'),
-        57 => return Some(b' '),
-        2..=13 => (b"1234567890-=", b"!@#$%^&*()_+", 2),
-        16..=27 => (b"qwertyuiop[]", b"QWERTYUIOP{}", 16),
-        30..=41 => (b"asdfghjkl;'\x60", b"ASDFGHJKL:\"~", 30),
-        43 => return Some(if shift { b'|' } else { b'\\' }),
-        44..=53 => (b"zxcvbnm,./", b"ZXCVBNM<>?", 44),
-        _ => return None,
-    };
-    let index = usize::from(code - start);
-    Some(if shift ^ (caps && normal[index].is_ascii_alphabetic()) {
-        shifted[index]
-    } else {
-        normal[index]
-    })
+struct PointerDevice {
+    device: InputDevice,
+    pointer: seat_pointer::Pointer,
+}
+impl PointerDevice {
+    fn open(path: &str) -> Option<Self> {
+        let device = InputDevice::open(path).ok()?;
+        device.set_nonblocking(true).ok()?;
+        let kind = device.kind().ok()?;
+        let mt = device.capabilities().ok()? & INPUT_CAP_MT != 0;
+        let axes = if matches!(kind, InputDeviceKind::Touchscreen | InputDeviceKind::Tablet)
+            || mt
+            || device.absolute_axis(0).is_ok()
+        {
+            let x = device.absolute_axis(if mt { 53 } else { 0 }).ok()?;
+            let y = device.absolute_axis(if mt { 54 } else { 1 }).ok()?;
+            Some((
+                seat_pointer::Axis {
+                    min: x.minimum,
+                    max: x.maximum,
+                },
+                seat_pointer::Axis {
+                    min: y.minimum,
+                    max: y.maximum,
+                },
+            ))
+        } else if kind == InputDeviceKind::Mouse {
+            None
+        } else {
+            return None;
+        };
+        Some(Self {
+            device,
+            pointer: seat_pointer::Pointer::new(axes, mt),
+        })
+    }
+    fn read_tap(&mut self, w: u32, h: u32) -> Result<Option<(i32, i32)>, ()> {
+        let mut record = [0; 16];
+        // Keep discovery, keyboard input and display changes responsive.
+        for _ in 0..128 {
+            match self.device.read(&mut record) {
+                Ok(16) => {}
+                Ok(_) | Err(StreamError::WouldBlock | StreamError::Interrupted) => return Ok(None),
+                _ => return Err(()),
+            }
+            let kind = u16::from_ne_bytes(record[8..10].try_into().unwrap());
+            let code = u16::from_ne_bytes(record[10..12].try_into().unwrap());
+            let value = i32::from_ne_bytes(record[12..16].try_into().unwrap());
+
+            if let Some(tap) = self.pointer.event(kind, code, value, w, h) {
+                return Ok(Some(tap));
+            }
+        }
+        Ok(None)
+    }
 }
 
-fn paint(display: &mut DisplaySurface, panel: &[u8]) -> io::Result<()> {
-    let info = display
-        .get_info()
-        .map_err(|_| io::Error::other("login display info"))?;
-    let (w, h) = (info.width, info.height);
-    let stride = (w as usize)
-        .checked_mul(4)
-        .ok_or_else(|| io::Error::other("invalid display width"))?;
-    let size = stride
-        .checked_mul(h as usize)
-        .ok_or_else(|| io::Error::other("invalid display height"))?;
-    let mut frame = vec![0; size];
-    let pw = w.min(WIDTH) as usize;
-    let ph = h.min(HEIGHT) as usize;
-    let x = (w as usize - pw) / 2;
-    let y = (h as usize - ph) / 2;
-    for row in 0..ph {
-        let dest = (row + y) * stride + x * 4;
-        let source = row * WIDTH as usize * 4;
-        frame[dest..dest + pw * 4].copy_from_slice(&panel[source..source + pw * 4]);
+// Use a bounded logical viewport on high density panels and small display
+// modes. The pointer decoder normalizes to these same logical dimensions.
+fn viewport(width: u32, height: u32) -> io::Result<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return Err(io::Error::other("empty login display"));
     }
-    display
-        .write_bgra_strided(0, 0, w, h, &frame, stride)
-        .map_err(|e| io::Error::other(format!("cannot write login display: {e:?}")))?;
+    let scale = (1440.0 / width.max(height) as f64)
+        .min(1.0)
+        .max(320.0 / width as f64)
+        .max(360.0 / height as f64);
+    Ok((
+        ((width as f64 * scale).round() as u32).clamp(320, 1440),
+        ((height as f64 * scale).round() as u32).clamp(360, 1440),
+    ))
+}
+fn paint(
+    display: &mut DisplaySurface,
+    screen: &Screen,
+    pixels: &[u8],
+    output: (u32, u32),
+) -> io::Result<()> {
+    let (w, h) = output;
+    let err = |e| io::Error::other(format!("cannot write login display: {e:?}"));
+    if output == (screen.width, screen.height) {
+        display
+            .write_bgra_strided(0, 0, w, h, pixels, w as usize * 4)
+            .map_err(err)?;
+    } else {
+        // Expand one scanline at a time, without another full-size framebuffer.
+        let columns: Vec<usize> = (0..w)
+            .map(|x| (u64::from(x) * u64::from(screen.width) / u64::from(w)) as usize * 4)
+            .collect();
+        let mut line = vec![0; w as usize * 4];
+        let mut last = None;
+        for y in 0..h {
+            let row = (u64::from(y) * u64::from(screen.height) / u64::from(h)) as usize;
+            if last != Some(row) {
+                let src = &pixels[row * screen.width as usize * 4..];
+                for (dst, &x) in line.chunks_exact_mut(4).zip(&columns) {
+                    dst.copy_from_slice(&src[x..x + 4]);
+                }
+                last = Some(row);
+            }
+            display
+                .write_bgra_strided(0, y, w, 1, &line, line.len())
+                .map_err(err)?;
+        }
+    }
     display
         .present()
         .map_err(|e| io::Error::other(format!("cannot present login screen: {e:?}")))
@@ -157,15 +224,53 @@ fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
     let mut renderer = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
     let mut display = DisplaySurface::open_primary()
         .map_err(|_| io::Error::other("login display unavailable"))?;
+    // The trusted copy must use the same font metrics for View hit testing.
+    static FONT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    if FONT.get().is_none() {
+        let _ = FONT.set(std::fs::read("/share/fonts/Mplus1-Regular.ttf")?);
+    }
+    scarlet_ui::graphics::set_default_font(FONT.get().unwrap())
+        .map_err(|_| io::Error::other("invalid system font"))?;
     let mut keys: [Keyboard; 8] = std::array::from_fn(|_| Keyboard::default());
+    let mut pointers: [Option<PointerDevice>; 24] = std::array::from_fn(|_| None);
     let mut scan = None;
-    let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize * 4];
     let mut state = [0; 37];
     broker.exchange(&[0], &mut state)?;
+    let info = display
+        .get_info()
+        .map_err(|_| io::Error::other("login display info"))?;
+    let mut output = (info.width, info.height);
+    let (width, height) = viewport(output.0, output.1)?;
+    let mut screen = Screen {
+        width,
+        height,
+        state: state[1..].try_into().unwrap(),
+        keyboard: true,
+        shift: false,
+        layer: Layer::Letters,
+    };
+    let mut pixels = Vec::new();
     loop {
-        renderer.exchange(&state[1..], &mut pixels)?;
-        paint(&mut display, &pixels)?;
+        // Validate dimensions before either peer allocates a framebuffer.
+        Screen::decode(&screen.encode())?;
+        let hit_test = screen.targets();
+        pixels.resize(screen.pixel_bytes(), 0);
+        renderer.exchange(&screen.encode(), &mut pixels)?;
+        paint(&mut display, &screen, &pixels, output)?;
         loop {
+            let info = display
+                .get_info()
+                .map_err(|_| io::Error::other("login display info"))?;
+            if (info.width, info.height) != output {
+                display = DisplaySurface::open_primary()
+                    .map_err(|_| io::Error::other("reopen login display"))?;
+                output = (info.width, info.height);
+                (screen.width, screen.height) = viewport(output.0, output.1)?;
+                for pointer in pointers.iter_mut().flatten() {
+                    pointer.pointer.cancel();
+                }
+                break;
+            }
             let now = Instant::now();
             if scan.is_none_or(|last: Instant| now.duration_since(last) >= Duration::from_secs(1)) {
                 scan = Some(now);
@@ -176,6 +281,12 @@ fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
                             .filter(|d| d.set_nonblocking(true).is_ok());
                     }
                 }
+                for (index, pointer) in pointers.iter_mut().enumerate() {
+                    if pointer.is_none() {
+                        let prefix = ["touchscreen", "mouse", "tablet"][index / 8];
+                        *pointer = PointerDevice::open(&format!("/dev/{prefix}{}", index % 8));
+                    }
+                }
             }
             let mut pressed = None;
             for keyboard in &mut keys {
@@ -184,11 +295,37 @@ fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
                     break;
                 }
             }
+            let mut action = None;
+            if pressed.is_none() {
+                for pointer in &mut pointers {
+                    let Some(device) = pointer else { continue };
+                    match device.read_tap(screen.width, screen.height) {
+                        Ok(Some((x, y))) => {
+                            action = hit_test.at(x, y);
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(()) => *pointer = None,
+                    }
+                }
+            }
+            let redraw = action.is_some();
+            if let Some(action) = action {
+                pressed = seat_keys::activate(&mut screen, action);
+            }
             if let Some(byte) = pressed {
                 broker.exchange(&[byte], &mut state)?;
                 if state[0] == 2 {
                     return Ok(());
                 }
+                screen.state.copy_from_slice(&state[1..]);
+                // Do not carry a contact into a changed field or auth result.
+                for pointer in pointers.iter_mut().flatten() {
+                    pointer.pointer.cancel();
+                }
+                break;
+            }
+            if redraw {
                 break;
             }
             thread::sleep(Duration::from_millis(10));

@@ -1,0 +1,23 @@
+[package]
+name = "scarlet-greeter-checks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "73005007792d31b8e242144f23412fb667652ccd", default-features = false, features = ["std"] }
+sws-protocol = { path = "../../user/lib/sws-protocol", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "greeter-fixture"
+path = "fixture.rs"
+
+[[test]]
+name = "interaction"
+path = "interaction.rs"
+
+[[bin]]
+name = "scarlet-shell-greeter"
+path = "../../user/std-bin/src/scarlet_shell/greeter.rs"

@@ -268,9 +268,13 @@ fresh environment. The supervisor terminates session descendants on logout
 before accepting the next login. SSH uses the same account database and credential transition for shell,
 command and SFTP sessions, including logins as root. The desktop bundle starts `scarlet-seat` with
 `/etc/scarlet-seat.toml`. This file selects the authentication broker, greeter,
-compositor and session command. The seat sends physical keyboard input to
-the broker over a private pipe. The separate greeter receives the login name
-and masked length. With no enabled account the seat displays a setup message.
+compositor and session command. The seat reads local keyboard, touchscreen and tablet events and sends input to
+the broker over a private pipe. Tapping a field selects it and opens the on-screen
+US keyboard. Shift and the two symbol pages provide printable ASCII. Enter or
+the form button advances from the login name or submits the password. The seat
+hit-tests the same ScarletUI layout as the anonymous greeter. The greeter
+receives the login name, masked length, field, status, viewport and keyboard
+display state. Its only reply is a BGRA frame. With no enabled account the seat displays a setup message.
 
 After authentication the seat starts the configured compositor. Once it is
 ready, the broker starts the session command with the user's credentials, home

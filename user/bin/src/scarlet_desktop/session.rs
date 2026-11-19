@@ -111,7 +111,8 @@ struct Seat {
     password_field: bool,
     failed: bool,
     unavailable: bool,
-    overflow: usize,
+    name_overflow: usize,
+    password_overflow: usize,
     name: std::vec::Vec<u8>,
     password: Zeroizing<std::vec::Vec<u8>>,
 }
@@ -124,17 +125,17 @@ impl Seat {
 
     fn submit(&mut self) {
         if !self.password_field && self.desktop.is_none() {
-            self.password_field = !self.name.is_empty() && self.overflow == 0;
+            self.password_field = !self.name.is_empty() && self.name_overflow == 0;
             return;
         }
-        let account = if self.overflow == 0 {
+        let account = if self.name_overflow == 0 && self.password_overflow == 0 {
             authenticate_local(&self.name, &self.password)
                 .ok()
                 .flatten()
         } else {
             None
         };
-        self.overflow = 0;
+        self.password_overflow = 0;
         self.password.zeroize();
         match (account, self.desktop.as_ref()) {
             (Some(user), Some(session))
@@ -163,7 +164,8 @@ impl Seat {
             if self.unavailable || was_unavailable {
                 self.name.clear();
                 self.password.zeroize();
-                self.overflow = 0;
+                self.password_overflow = 0;
+                self.name_overflow = 0;
                 self.password_field = false;
                 self.failed = false;
                 return;
@@ -194,13 +196,22 @@ impl Seat {
         }
         match byte {
             b'\n' => self.submit(),
+            // Trusted seat focus controls. Selecting a field never submits.
+            // Keep separate overflow counters so switching cannot admit a
+            // silently truncated name or password.
+            17 if self.desktop.is_none() => self.password_field = false,
+            18 if self.desktop.is_none() => self.password_field = true,
+            9 if self.desktop.is_none() => {
+                self.password_field = !self.password_field;
+            }
             27 if self.desktop.is_none() => {
                 self.password_field = false;
-                self.overflow = 0;
+                self.password_overflow = 0;
                 self.failed = false;
                 self.password.zeroize();
             }
-            8 if self.overflow > 0 => self.overflow -= 1,
+            8 if self.password_field && self.password_overflow > 0 => self.password_overflow -= 1,
+            8 if !self.password_field && self.name_overflow > 0 => self.name_overflow -= 1,
             8 if self.password_field => {
                 if let Some(last) = self.password.last_mut() {
                     last.zeroize();
@@ -217,14 +228,14 @@ impl Seat {
                 if self.password.len() < 72 {
                     self.password.push(byte);
                 } else {
-                    self.overflow = self.overflow.saturating_add(1);
+                    self.password_overflow = self.password_overflow.saturating_add(1);
                 }
             }
             b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => {
                 if self.name.len() < 32 {
                     self.name.push(byte);
                 } else {
-                    self.overflow = self.overflow.saturating_add(1);
+                    self.name_overflow = self.name_overflow.saturating_add(1);
                 }
             }
             _ => {}
