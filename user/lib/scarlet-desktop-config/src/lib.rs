@@ -70,6 +70,9 @@ pub const DESKTOP_FILE_MANAGER_SHOW_METHOD: &str = "Show";
 /// Signal emitted after a picker request is accepted or cancelled.
 pub const DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL: &str = "Response";
 
+/// Local application launch socket owned by the desktop session manager.
+pub const DESKTOP_STEMD_SOCKET_PATH: &str = "/tmp/stemd-session.sock";
+
 /// Bus name owned by the desktop service manager.
 pub const DESKTOP_STEMD_BUS_NAME: &str = "org.scarlet-os.stemd";
 

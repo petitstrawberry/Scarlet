@@ -97,8 +97,9 @@ cleanup is performed by this workflow.
 
 ## Discovery and reconciliation
 
-stemd reads `/applications/*.app` and the existing `/etc/stemd.d/apps` catalog
-at startup. Bundle-relative Exec, Icon paths and background paths are Scarlet
+The logged-in user's `stemd --user` reads `/applications/*.app` and the existing
+`/etc/stemd.d/apps` catalog at session startup. Applications and shells it
+starts inherit the login's credentials, home directory and process scope. Bundle-relative Exec, Icon paths and background paths are Scarlet
 app-format semantics, marked by `X-Scarlet-AppFormat=1` and
 `X-Scarlet-Target=<native-target>` in the generated descriptor. Bare Icon values
 remain theme icon names. Legacy desktop entries retain their existing semantics.
@@ -112,7 +113,7 @@ Catalog order is sorted by stable ID for deterministic MIME fallback.
 Explicit reconciliation is available as the no-argument SBUS method
 `org.scarlet-os.stemd.ReloadApplications` on `/org/scarlet/os/stemd`, service
 `org.scarlet-os.stemd`, returning the catalog count as a string. Native socket
-clients can send byte `0x08` to `/tmp/stemd.sock` (empty payload). Reload builds
+clients can launch applications through `/tmp/stemd-session.sock`. Reload builds
 the next catalog before atomically replacing it. Removed entries disappear;
 running processes remain alive. Copy/delete changes require this explicit
 reload; there is no filesystem watcher.

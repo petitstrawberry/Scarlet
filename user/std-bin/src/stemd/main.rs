@@ -14,8 +14,9 @@ use log_protocol::{
 };
 use sbus_client as sbus;
 use scarlet_desktop_config::{
-    DESKTOP_STEMD_LIST_APPLICATIONS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD,
-    DESKTOP_STEMD_RELOAD_APPLICATIONS_METHOD,
+    DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
+    DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD, DESKTOP_STEMD_RELOAD_APPLICATIONS_METHOD,
+    DESKTOP_STEMD_SOCKET_PATH,
 };
 use scarlet_os::handle::capability::StreamOps;
 use scarlet_os::process::{ShutdownType, WAIT_NOHANG, shutdown, waitpid};
@@ -63,6 +64,11 @@ fn application_environment(activation_token: Option<&str>) -> Vec<String> {
         format!("HOME={home}"),
         format!("SHELL={shell}"),
     ];
+    for key in ["LOGNAME", "PATH"] {
+        if let Ok(value) = std::env::var(key) {
+            environment.push(format!("{key}={value}"));
+        }
+    }
     if let Some(token) = activation_token {
         environment.push(format!("{ACTIVATION_TOKEN_ENV}={token}"));
     }
@@ -1225,7 +1231,7 @@ fn read_until(
 }
 
 /// Create the stemd IPC listener before any readiness-reporting service starts.
-fn prepare_ipc_server() -> Option<Socket> {
+fn prepare_ipc_server(path: &str) -> Option<Socket> {
     let server = match Socket::new() {
         Ok(s) => s,
         Err(e) => {
@@ -1234,7 +1240,7 @@ fn prepare_ipc_server() -> Option<Socket> {
         }
     };
 
-    if let Err(e) = server.bind(STEMD_IPC_SOCKET_PATH) {
+    if let Err(e) = server.bind(path) {
         println!("stemd: Failed to bind IPC socket: {:?}", e);
         return None;
     }
@@ -1244,12 +1250,12 @@ fn prepare_ipc_server() -> Option<Socket> {
         return None;
     }
 
-    println!("stemd: IPC socket listening at {}", STEMD_IPC_SOCKET_PATH);
+    println!("stemd: IPC socket listening at {path}");
     Some(server)
 }
 
 /// IPC thread: accept commands from an already-listening socket.
-fn ipc_thread(server: Socket) {
+fn ipc_thread(server: Socket, session: bool) {
     IPC_ACCEPT_LOOP_STARTED.store(true, Ordering::Release);
     println!("stemd: IPC thread started");
 
@@ -1259,7 +1265,7 @@ fn ipc_thread(server: Socket) {
     loop {
         match server.accept() {
             Ok(client) => {
-                let _ = thread::spawn(move || handle_ipc_client(client));
+                let _ = thread::spawn(move || handle_ipc_client(client, session));
             }
             Err(_) => {
                 thread::sleep(core::time::Duration::from_millis(100));
@@ -1269,7 +1275,7 @@ fn ipc_thread(server: Socket) {
 }
 
 /// Handle a single stemd IPC connection (one command per connection).
-fn handle_ipc_client(client: Socket) {
+fn handle_ipc_client(client: Socket, session: bool) {
     let stream = match client.as_stream() {
         Ok(s) => s,
         Err(_) => return,
@@ -1279,8 +1285,14 @@ fn handle_ipc_client(client: Socket) {
     let mut buffer = [0u8; 1024];
     match stream.read(&mut buffer) {
         Ok(mut n) if n > 0 => {
-            // Check if this is a binary launch command.
-            if buffer[0] == cmd::LAUNCH_OR_FOCUS || buffer[0] == cmd::LAUNCH {
+            // The system daemon serves boot and system control requests.
+            // Only the session daemon owns application activation.
+            let launch = matches!(buffer[0], cmd::LAUNCH_OR_FOCUS | cmd::LAUNCH);
+            if session != launch {
+                let _ = stream.write(b"ERROR: Command belongs to a different service\n");
+                return;
+            }
+            if launch {
                 // Parse launch command.
                 // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
                 if read_until(&stream, &mut buffer, &mut n, 9) {
@@ -1524,7 +1536,7 @@ fn read_config_dir(dir_path: &str) -> Result<String, &'static str> {
 /// sbus handler thread: receive and process method calls from sbus
 fn reconnect_stemd_sbus() -> Result<sbus::Connection, sbus::Error> {
     let mut connection = sbus::Connection::connect()?;
-    connection.register_service_timeout("org.scarlet-os.stemd", SBUS_REGISTRATION_TIMEOUT_MS)?;
+    connection.register_service_timeout(DESKTOP_STEMD_BUS_NAME, SBUS_REGISTRATION_TIMEOUT_MS)?;
     Ok(connection)
 }
 
@@ -1971,11 +1983,33 @@ fn run_user_services(dir: &str) -> Result<(), &'static str> {
     if units.iter().any(|unit| unit.user.is_some()) {
         return Err("session units inherit their authenticated user");
     }
+    if units.iter().any(|unit| unit.ready_notify) {
+        return Err("session units do not support system readiness notifications");
+    }
+
+    reload_applications()?;
+    if let Err(error) = capability_launch::initialize() {
+        eprintln!("stemd: Application capability configuration failed: {error}");
+    }
+    let listener = prepare_ipc_server(DESKTOP_STEMD_SOCKET_PATH)
+        .ok_or("cannot start session application socket")?;
+    for attempt in 0..SBUS_REGISTRATION_ATTEMPTS {
+        match reconnect_stemd_sbus() {
+            Ok(connection) => {
+                *SBUS_CONNECTION.lock().expect("stemd mutex poisoned") = Some(connection);
+                break;
+            }
+            Err(_) if attempt + 1 < SBUS_REGISTRATION_ATTEMPTS => {
+                thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return Err("cannot register session application service"),
+        }
+    }
+    thread::spawn(move || ipc_thread(listener, true));
+    thread::spawn(sbus_handler_thread);
+
     let mut failed = Vec::new();
     for unit in &units {
-        if unit.ready_notify {
-            return Err("session units do not support system readiness notifications");
-        }
         if has_failed_dependency(unit, &failed).is_some() || launch_service(unit).is_err() {
             failed.push(unit.name.clone());
         }
@@ -1991,6 +2025,7 @@ fn run_user_services(dir: &str) -> Result<(), &'static str> {
             thread::sleep(std::time::Duration::from_millis(100));
             launch_service(unit)?;
         }
+        remove_running_app_by_pid(pid);
     }
 }
 
@@ -2009,13 +2044,6 @@ fn main() {
     }
     println!("stemd: Stem Daemon starting...");
     println!("stemd: PID={}", std::process::id());
-    if let Err(error) = capability_launch::initialize() {
-        println!(
-            "stemd: Application capability configuration failed: {}",
-            error
-        );
-    }
-
     // Read configuration.
     // Directory structure:
     //   /etc/stemd.d/services/*.toml  - Service definitions
@@ -2096,12 +2124,12 @@ tty = "/dev/tty0"
     // accept task runnable; it does not guarantee that the task has run before
     // a child attempts its SERVICE_READY connection.
     println!("stemd: Starting IPC service");
-    let Some(ipc_server) = prepare_ipc_server() else {
+    let Some(ipc_server) = prepare_ipc_server(STEMD_IPC_SOCKET_PATH) else {
         println!("stemd: Cannot launch services without the IPC listener");
         return;
     };
     IPC_ACCEPT_LOOP_STARTED.store(false, Ordering::Release);
-    let _ipc_handle = thread::spawn(move || ipc_thread(ipc_server));
+    let _ipc_handle = thread::spawn(move || ipc_thread(ipc_server, false));
     while !IPC_ACCEPT_LOOP_STARTED.load(Ordering::Acquire) {
         thread::yield_now();
     }
@@ -2131,65 +2159,6 @@ tty = "/dev/tty0"
         }
     }
 
-    // Phase 2: Register with sbus (now that sbusd should be running)
-    let mut registered = false;
-    for attempt in 0..SBUS_REGISTRATION_ATTEMPTS {
-        // Give CPU time to sbusd to start up
-        for _ in 0..10 {
-            std::thread::yield_now();
-        }
-        if attempt == 0 {
-            println!("stemd: Registering with sbus...");
-        }
-
-        match sbus::Connection::connect() {
-            Ok(mut conn) => {
-                match conn
-                    .register_service_timeout("org.scarlet-os.stemd", SBUS_REGISTRATION_TIMEOUT_MS)
-                {
-                    Ok(_) => {
-                        println!(
-                            "stemd: Successfully registered with sbus as org.scarlet-os.stemd"
-                        );
-
-                        // Store the connection globally for method handling
-                        {
-                            let mut sbus_conn =
-                                SBUS_CONNECTION.lock().expect("stemd mutex poisoned");
-                            *sbus_conn = Some(conn);
-                        }
-
-                        registered = true;
-                        break;
-                    }
-                    Err(e) => {
-                        println!(
-                            "stemd: Attempt {}: Failed to register with sbus: {:?}",
-                            attempt + 1,
-                            e
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                println!(
-                    "stemd: Attempt {}: Failed to connect to sbus: {:?}",
-                    attempt + 1,
-                    e
-                );
-            }
-        }
-    }
-
-    if !registered {
-        println!(
-            "stemd: Could not register with sbus after {} attempts",
-            SBUS_REGISTRATION_ATTEMPTS
-        );
-        println!("stemd: Will retry sbus registration after loading applications");
-    }
-
-    // Phase 3: Launch other services (excluding stemd itself)
     println!("stemd: Launching services...");
     let mut failed_services: Vec<String> = Vec::new();
 
@@ -2227,17 +2196,6 @@ tty = "/dev/tty0"
     }
 
     println!("stemd: All services launched");
-
-    match reload_applications() {
-        Ok(count) => println!("stemd: Loaded {} applications", count),
-        Err(error) => println!("stemd: Application catalog reload failed: {}", error),
-    }
-
-    // The handler also reconnects an absent connection. Start it even when
-    // sbusd was not ready during the initial registration attempts, so the
-    // application catalog and launch service can recover without a reboot.
-    println!("stemd: Starting sbus handler thread");
-    let _sbus_handle = thread::spawn(sbus_handler_thread);
 
     loop {
         let (pid, status) = waitpid(-1, 0);
