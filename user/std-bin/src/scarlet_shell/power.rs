@@ -97,16 +97,20 @@ impl PowerStatus {
         })
     }
 
-    /// Numeric detail belongs in Control Center; the bar renders only icon().
-    pub fn detail(self) -> String {
-        let source = match (self.charge_state, self.external_power) {
+    pub(super) fn source_label(self) -> &'static str {
+        match (self.charge_state, self.external_power) {
             (Some(ChargeState::Charging), power) if power != Some(false) => "Charging",
             (Some(ChargeState::Full), Some(true)) => "Fully charged",
             (Some(ChargeState::Discharging), Some(true)) => "External + battery",
             (_, Some(true)) => "External power",
             (_, Some(false)) if self.battery_detected => "On battery",
             _ => "Power unknown",
-        };
+        }
+    }
+
+    /// Numeric detail belongs in Control Center; the bar renders only icon().
+    pub fn detail(self) -> String {
+        let source = self.source_label();
         if self.battery_detected {
             match self.percent {
                 Some(percent) => alloc::format!("Battery {}%\n{}", percent, source),

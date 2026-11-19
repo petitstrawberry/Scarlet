@@ -78,7 +78,7 @@ use clap::Parser;
 use console::{ConsoleAction, ConsoleSnapshot, ConsoleState, PowerAction};
 use control_center::{
     AudioOutputSnapshot, AudioSnapshot, ControlCenterAction, ControlCenterMetrics,
-    ControlCenterPresentation, ControlCenterSession, ControlCenterSettingsLink,
+    ControlCenterPage, ControlCenterPresentation, ControlCenterSession,
     ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot,
     NetworkInterfaceSnapshot, NetworkInterfaceState, NetworkSnapshot, PercentWriteState,
     SystemSnapshot, boxed, build_control_center_view,
@@ -1455,6 +1455,7 @@ fn collect_network_snapshot(status: &NetworkStatus) -> NetworkSnapshot {
             .iter()
             .map(|interface| NetworkInterfaceSnapshot {
                 name: interface.name.clone(),
+                kind: interface.kind,
                 state: match interface.state {
                     ConnectionState::Connected => NetworkInterfaceState::Connected,
                     ConnectionState::Configuring => NetworkInterfaceState::Configuring,
@@ -1626,6 +1627,7 @@ fn apply_control_center_action(
             // A different output may have different gain/quantization even
             // when its current percentage happens to match the old output.
             *volume_write = PercentWriteState::default();
+            let opening = control_center_session.get().generation();
             let request = id
                 .strip_prefix("path:")
                 .and_then(|value| OutputRequest::new(OUTPUT_PREFERENCE_PATH, value))
@@ -1643,13 +1645,19 @@ fn apply_control_center_action(
             });
             if let Some(state) = result {
                 update_shared_audio_status(status, control_center_volume, state);
+                control_center_session.update(|session| {
+                    if session.open
+                        && session.generation() == opening
+                        && matches!(session.page, ControlCenterPage::AudioOutputs(_))
+                    {
+                        session.page = ControlCenterPage::Controls;
+                    }
+                });
             } else {
                 *audio_client = None;
             }
         }
-        ControlCenterAction::OpenSettings(
-            ControlCenterSettingsLink::Network | ControlCenterSettingsLink::AllSettings,
-        ) => {
+        ControlCenterAction::OpenSettings => {
             launch_app(b"org.scarlet-os.desktop.settings");
             let output = multi_output::session().map_or(0, |bus| bus.panel_output.get());
             dismiss_window(multi_output::key(output, CONTROL_CENTER_SCENE_KEY));
@@ -3966,8 +3974,8 @@ impl Application for ShellApp {
             return;
         }
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
-            // Sync runs before reactive scene rebuilds. Derive the size from
-            // the source snapshot here, never a cache written by that rebuild.
+            // The output determines the window size. Pages and provider
+            // updates only change the content within it.
             let (metrics, (x, y)) = self.control_center_layout(&self.control_center_session.get());
             let desired = metrics.body_size();
             if status_bar_resize_needed(window.managed_size(), desired) {

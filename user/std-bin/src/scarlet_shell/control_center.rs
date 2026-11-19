@@ -8,9 +8,13 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::time::Duration;
 
+use scarlet_ui::animation::{AnimatedValue, Animation, Transaction};
 use scarlet_ui::color::ColorPalette;
-use scarlet_ui::element::{ComponentElement, Element};
+use scarlet_ui::element::{
+    ComponentElement, Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
+};
 use scarlet_ui::geometry::{Alignment, Point, Rect, Size};
 use scarlet_ui::state::State;
 use scarlet_ui::view::{View, ViewExt};
@@ -19,7 +23,9 @@ use scarlet_ui::views::{
     Button, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface, SurfaceRole,
     SurfaceStyle, Text, TextStyle, VStack,
 };
-use scarlet_ui::{Icon, IconSize};
+use scarlet_ui::{Icon, IconSize, IconView};
+
+use super::network_status::NetworkKind;
 
 /// The shell presentation used for the Control Center window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +113,8 @@ pub enum NetworkInterfaceState {
 pub struct NetworkInterfaceSnapshot {
     /// Stable provider-defined interface name.
     pub name: String,
+    /// Link type reported by the network provider.
+    pub kind: NetworkKind,
     /// Current connection state.
     pub state: NetworkInterfaceState,
     /// Optional address or concise provider-supplied detail.
@@ -233,16 +241,8 @@ pub enum ControlCenterPage {
     #[default]
     Controls,
     AudioOutputs(usize),
-    System,
-}
-
-/// Settings destination requested by Control Center.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ControlCenterSettingsLink {
-    /// Open network settings.
     Network,
-    /// Open the settings application root.
-    AllSettings,
+    System,
 }
 
 /// Typed command emitted by standard ScarletUI controls.
@@ -257,7 +257,7 @@ pub enum ControlCenterAction {
     /// Select an available audio output by stable identifier.
     SelectOutput(String),
     /// Open a settings destination.
-    OpenSettings(ControlCenterSettingsLink),
+    OpenSettings,
     /// Confirm a previously armed power-off request.
     ConfirmPowerOff,
     /// Confirm a previously armed reboot request.
@@ -295,9 +295,10 @@ pub struct ControlCenterMetrics {
     margin: u32,
     gap: u32,
     target_height: u32,
+    tile_height: u32,
+    volume_height: u32,
     page: ControlCenterPage,
     details_height: u32,
-    audio_rows: usize,
     audio_pages: usize,
     audio_rows_per_page: usize,
 }
@@ -306,18 +307,17 @@ impl ControlCenterMetrics {
     /// Corner radius shared by the managed window body and floating surface.
     pub const CORNER_RADIUS: f32 = 16.0;
 
-    /// Fit the current page within the logical space below the status bar.
+    /// Fit the panel below the status bar and paginate its contents within that size.
     pub fn resolve(
         presentation: ControlCenterPresentation,
         available: Size,
         page: ControlCenterPage,
         output_count: usize,
     ) -> Self {
-        let (preferred_width, preferred_margin, preferred_target, preferred_details) =
-            match presentation {
-                ControlCenterPresentation::LaptopPopover => (304, 8, 32, 84),
-                ControlCenterPresentation::TabletSheet => (392, 10, 44, 96),
-            };
+        let (preferred_width, preferred_margin, preferred_target) = match presentation {
+            ControlCenterPresentation::LaptopPopover => (304, 8, 32),
+            ControlCenterPresentation::TabletSheet => (392, 10, 44),
+        };
         let width = preferred_width.min((available.width as u32).max(1));
         let height_limit = (available.height as u32).max(1);
         let margin = preferred_margin.min((width.min(height_limit) - 1) / 6);
@@ -325,29 +325,31 @@ impl ControlCenterMetrics {
         let gap = 6.min(inner_height / 12);
         let target_height = preferred_target.min(((inner_height - 3 * gap) / 4).max(1));
         let row_extent = target_height + gap;
-        let details_height = preferred_details.min(inner_height.saturating_sub(2 * row_extent));
-        let audio_rows_per_page = ((inner_height + gap) / row_extent)
-            .saturating_sub(2)
-            .clamp(1, 5) as usize;
-        let audio_rows = output_count.clamp(1, audio_rows_per_page);
+        let controls_extra = inner_height.saturating_sub(4 * row_extent - gap).min(16);
+        let tile_height = target_height + controls_extra / 2;
+        let volume_height = target_height + controls_extra - controls_extra / 2;
+        // Every page uses the Controls page's dimensions. The detail area
+        // sits between one header row and the same pinned Settings footer.
+        let content_height = (4 * row_extent - gap + controls_extra).min(inner_height);
+        let details_height = content_height.saturating_sub(2 * row_extent);
+        let audio_rows_per_page = ((details_height + gap) / row_extent).max(1) as usize;
         let audio_pages = output_count.div_ceil(audio_rows_per_page).max(1);
-        let (page, content_height) = match page {
-            ControlCenterPage::Controls => (page, 4 * row_extent - gap),
-            ControlCenterPage::AudioOutputs(index) => (
-                ControlCenterPage::AudioOutputs(index.min(audio_pages - 1)),
-                (2 + audio_rows as u32) * row_extent - gap,
-            ),
-            ControlCenterPage::System => (page, 2 * row_extent + details_height),
+        let page = match page {
+            ControlCenterPage::AudioOutputs(index) => {
+                ControlCenterPage::AudioOutputs(index.min(audio_pages - 1))
+            }
+            page => page,
         };
         Self {
             width,
-            height: (content_height + 2 * margin).min(height_limit),
+            height: content_height + 2 * margin,
             margin,
             gap,
             target_height,
+            tile_height,
+            volume_height,
             page,
             details_height,
-            audio_rows,
             audio_pages,
             audio_rows_per_page,
         }
@@ -406,20 +408,30 @@ pub fn build_control_center_view(
     session: State<ControlCenterSession>,
 ) -> impl View + Clone {
     let gap = metrics.gap as f32;
-    let mut rows = match metrics.page {
+    let rows = match metrics.page {
         ControlCenterPage::Controls => {
             controls_page(metrics, &snapshot, volume, brightness, &action, &session)
         }
         ControlCenterPage::AudioOutputs(index) => {
             audio_outputs_page(metrics, index, &snapshot, &action, &session)
         }
-        ControlCenterPage::System => system_page(metrics, &snapshot, &action, &session),
+        ControlCenterPage::Network | ControlCenterPage::System => {
+            details_page(metrics, &snapshot, &session)
+        }
     };
-    rows.push(settings_button(metrics, action));
-    let content = VStack::new(DynamicViews::new(rows))
+    let page = VStack::new(DynamicViews::new(rows))
         .spacing(gap)
-        .alignment(Alignment::Leading)
-        .padding(metrics.margin as f32);
+        .alignment(Alignment::Leading);
+    let content = VStack::new(DynamicViews::new(vec![
+        boxed(PageFade {
+            inner: page,
+            page: metrics.page,
+        }),
+        footer_row(metrics, &snapshot, action, &session),
+    ]))
+    .spacing(gap)
+    .alignment(Alignment::Leading)
+    .padding(metrics.margin as f32);
 
     Surface::new(content, SurfaceRole::Floating)
         // SWS filters the desktop behind the managed body. Sliders can
@@ -427,6 +439,121 @@ pub fn build_control_center_view(
         .surface_style(SurfaceStyle::bubble_glass().material(panel_material().blur_radius(0.0)))
         .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
         .frame(metrics.width as f32, metrics.height as f32)
+}
+
+/// Animate page changes on the UI frame clock while leaving the panel and footer in place.
+#[derive(Clone)]
+struct PageFade<V> {
+    inner: V,
+    page: ControlCenterPage,
+}
+
+impl<V: View + Clone + 'static> View for PageFade<V> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(RenderElement::with_view_children_and_updater(
+            self.clone(),
+            |view| PageFadeRenderObject::new(view.page),
+            |render, view| render.show_page(view.page),
+            |view| vec![view.inner.clone_view()],
+        ))
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+struct PageFadeRenderObject {
+    page: ControlCenterPage,
+    opacity: AnimatedValue<f32>,
+    size: Size,
+}
+
+impl PageFadeRenderObject {
+    fn new(page: ControlCenterPage) -> Self {
+        Self {
+            page,
+            opacity: AnimatedValue::new(1.0),
+            size: Size::ZERO,
+        }
+    }
+
+    fn show_page(&mut self, page: ControlCenterPage) -> UpdateResult {
+        if self.page == page {
+            return UpdateResult::NoChange;
+        }
+        self.page = page;
+        if Transaction::current().disables_animations {
+            self.opacity.finish();
+        } else {
+            self.opacity = AnimatedValue::new(0.65);
+            self.opacity
+                .retarget(1.0, Some(Animation::ease_out(Duration::from_millis(140))));
+        }
+        UpdateResult::Updated
+    }
+}
+
+impl ElementRenderObject for PageFadeRenderObject {
+    fn hit_test(&self, _point: Point) -> bool {
+        false
+    }
+    fn presentation_affects_subtree_bounds(&self) -> bool {
+        true
+    }
+    fn has_opacity_scope(&self) -> bool {
+        true
+    }
+    fn update_needs_composite(&self) -> bool {
+        true
+    }
+    fn update_needs_layout(&self) -> bool {
+        false
+    }
+    fn update_needs_subtree_paint(&self) -> bool {
+        false
+    }
+    fn subtree_opacity(&self) -> f32 {
+        self.opacity.value()
+    }
+    fn has_visual_animation(&self) -> bool {
+        self.opacity.is_active()
+    }
+    fn advance_visual_animation(&mut self, delta: Duration) -> bool {
+        self.opacity.advance(delta)
+    }
+    fn finish_visual_animation(&mut self) -> bool {
+        self.opacity.finish()
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.size = constraints.constrain(Size::ZERO);
+        self.size
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        let Some(child) = children.first_mut() else {
+            return self.layout(constraints);
+        };
+        self.size = child.layout(constraints);
+        child.set_position(Point::ZERO);
+        self.size
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+    fn render(&mut self) {}
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 }
 
 fn page_button(
@@ -460,6 +587,31 @@ fn back_button(size: Size, session: &State<ControlCenterSession>) -> Box<dyn Vie
     )
 }
 
+fn details_header(
+    title: &str,
+    metrics: ControlCenterMetrics,
+    session: &State<ControlCenterSession>,
+) -> Box<dyn View> {
+    let width = metrics.content_width();
+    let height = metrics.target_height as f32;
+    let gap = metrics.gap as f32;
+    let back_width = 62.0_f32.min(width / 2.0);
+    control_row(
+        vec![
+            back_button(Size::new(back_width, height), session),
+            boxed(
+                Text::new(title)
+                    .font_size(13.0)
+                    .alignment(Alignment::Leading)
+                    .frame_width((width - back_width - gap).max(1.0)),
+            ),
+        ],
+        width,
+        height,
+        gap,
+    )
+}
+
 fn controls_page(
     metrics: ControlCenterMetrics,
     snapshot: &ControlCenterSnapshot,
@@ -468,114 +620,335 @@ fn controls_page(
     action: &State<Option<ControlCenterAction>>,
     session: &State<ControlCenterSession>,
 ) -> Vec<Box<dyn View>> {
+    let width = metrics.content_width();
+    let gap = metrics.gap as f32;
+    let tile_size = Size::new(metrics.column_width(), metrics.tile_height as f32);
+    let interface = snapshot.network.interfaces.first();
+    let network_title = match interface.map(|link| link.kind) {
+        Some(NetworkKind::Wifi) => "Wi-Fi",
+        Some(NetworkKind::Ethernet) => "Wired network",
+        None => "Network",
+    };
+    let network_icon = match interface.map(|link| link.kind) {
+        Some(NetworkKind::Wifi) => Icon::Wifi,
+        _ => Icon::Network,
+    };
+    let network = status_tile(
+        network_icon,
+        network_title,
+        String::from(network_summary(&snapshot.network)),
+        tile_size,
+        Some(session),
+    );
+    let power = snapshot.power;
+    let power_detail = match power.percent {
+        Some(percent) => alloc::format!("{percent}% · {}", power.source_label()),
+        None => String::from(power.source_label()),
+    };
+    let power_icon = if matches!(
+        power.icon(),
+        Some(super::power::PowerIcon::Charging | super::power::PowerIcon::Plugged)
+    ) {
+        Icon::BatteryCharging
+    } else {
+        Icon::Battery
+    };
+    let power = status_tile(
+        power_icon,
+        if power.battery_detected {
+            "Battery"
+        } else {
+            "Power"
+        },
+        power_detail,
+        tile_size,
+        None,
+    );
+    let status = control_row(vec![network, power], width, tile_size.height, gap);
+    let levels = control_levels(metrics, snapshot, volume, brightness, action, session);
+    vec![status, levels.0, levels.1]
+}
+
+fn status_tile(
+    icon: Icon,
+    title: &str,
+    detail: String,
+    size: Size,
+    network_page: Option<&State<ControlCenterSession>>,
+) -> Box<dyn View> {
     let palette = ColorPalette::default();
-    let control_row_width = metrics.content_width();
-    let detail_size = 12.0;
-    let target_height = metrics.target_height as f32;
-    // Keep both slider tracks aligned when the brightness percentage grows.
-    let control_label_width = 84.0_f32.min(control_row_width / 2.0);
-    let control_slider_width =
-        (control_row_width - control_label_width - metrics.gap as f32).max(1.0);
-
-    let mute_action = action.clone();
-    let mute = Button::new(if snapshot.audio.volume_percent.is_none() {
-        "Unavailable"
-    } else if snapshot.audio.muted == Some(true) {
-        "Muted"
-    } else {
-        "Volume"
-    })
-    .header_style()
-    .font_size(detail_size)
-    .enabled(snapshot.audio.muted.is_some())
-    .padding(0.0)
-    .on_click(move || mute_action.set(Some(ControlCenterAction::ToggleMute)));
-
-    let slider_action = action.clone();
-    let slider = Slider::new(volume)
-        .enabled(snapshot.audio.volume_percent.is_some())
-        .min(0.0)
-        .max(100.0)
-        .on_change(move |value| {
-            slider_action.set(Some(ControlCenterAction::SetVolume(
-                value.clamp(0.0, 100.0).round() as u8,
-            )));
-        });
-
-    let mut rows: Vec<Box<dyn View>> = vec![boxed(
-        HStack::new(DynamicViews::new(vec![
-            boxed(
-                HStack::new(DynamicViews::new(vec![boxed(mute), boxed(Spacer::new())]))
-                    .spacing(0.0)
-                    .frame_width(control_label_width),
-            ),
-            boxed(slider.frame_width(control_slider_width)),
-        ]))
-        .spacing(metrics.gap as f32)
-        .alignment(Alignment::Center)
-        .frame(control_row_width, target_height),
-    )];
-    let brightness_row = if snapshot.brightness_percent.is_some() {
-        // Only the percentage text rebuilds during a drag. The row and the
-        // independently subscribed Slider keep their elements and capture.
-        boxed(BrightnessRow {
-            value: brightness,
-            action: action.clone(),
-            width: control_row_width,
-            label_width: control_label_width,
-            slider_width: control_slider_width,
-            gap: metrics.gap as f32,
-            height: target_height,
-        })
-    } else {
+    let gap = 4.0;
+    let padding = 5.0;
+    let icon_width = 16.0;
+    let disclosure = if network_page.is_some() { 18.0 } else { 0.0 };
+    let label_width = (size.width - 2.0 * padding - icon_width - gap - disclosure).max(1.0);
+    let label = VStack::new((
+        Text::new(title)
+            .font_size(11.0)
+            .line_limit(Some(1))
+            .alignment(Alignment::Leading)
+            .frame(label_width, 13.0),
+        Text::new(detail)
+            .font_size(10.0)
+            .line_limit(Some(1))
+            .color(palette.text_secondary())
+            .alignment(Alignment::Leading)
+            .frame(label_width, 13.0),
+    ))
+    .spacing(0.0)
+    .alignment(Alignment::Leading);
+    let mut children = vec![
         boxed(
-            Text::new("Brightness unavailable")
-                .text_style(TextStyle::Caption)
-                .color(palette.text_secondary())
-                .frame(control_row_width, target_height),
+            IconView::new(icon)
+                .size(IconSize::Small)
+                .frame_width(icon_width),
+        ),
+        boxed(label),
+    ];
+    if let Some(session) = network_page {
+        children.push(page_button(
+            "",
+            Icon::ChevronRight,
+            ControlCenterPage::Network,
+            Size::new(disclosure - gap, size.height),
+            session,
+        ));
+    }
+    let tile = Surface::section(
+        HStack::new(DynamicViews::new(children))
+            .spacing(gap)
+            .alignment(Alignment::Center)
+            .padding_insets(scarlet_ui::geometry::EdgeInsets::symmetric(0.0, padding)),
+    )
+    .fill(palette.header_button_hover())
+    .corner_radius(9.0)
+    .frame(size.width, size.height);
+    if let Some(session) = network_page {
+        let session = session.clone();
+        boxed(
+            tile.on_click(move || {
+                session.update(|current| current.page = ControlCenterPage::Network)
+            }),
+        )
+    } else {
+        boxed(tile)
+    }
+}
+
+fn control_levels(
+    metrics: ControlCenterMetrics,
+    snapshot: &ControlCenterSnapshot,
+    volume: State<f32>,
+    brightness: State<f32>,
+    action: &State<Option<ControlCenterAction>>,
+    session: &State<ControlCenterSession>,
+) -> (Box<dyn View>, Box<dyn View>) {
+    let width = metrics.content_width();
+    let gap = metrics.gap as f32;
+    let brightness_height = metrics.target_height as f32;
+    let volume_height = metrics.volume_height as f32;
+    let leading_width = 26.0;
+    let value_width = 31.0;
+    let track_width = (width - leading_width - value_width - gap * 2.0).max(1.0);
+    let brightness_icon = boxed(
+        IconView::new(Icon::Sun)
+            .size(IconSize::Small)
+            .frame_width(leading_width),
+    );
+
+    let brightness_row = if snapshot.brightness_percent.is_some() {
+        let request = action.clone();
+        let value = brightness.clone();
+        let slider = Slider::new(brightness.clone())
+            .min(0.0)
+            .max(100.0)
+            .on_change(move |next| {
+                request.set(Some(ControlCenterAction::SetBrightness(
+                    next.clamp(0.0, 100.0).round() as u8,
+                )));
+                // Reassert the continuous value if a provider sample arrived during this input.
+                if value.get() != next {
+                    value.set(next);
+                }
+            });
+        control_row(
+            vec![
+                brightness_icon,
+                boxed(level_stack(
+                    boxed(Text::new("Brightness").text_style(TextStyle::Caption)),
+                    slider,
+                    track_width,
+                    brightness_height,
+                )),
+                boxed(LevelValueLabel(brightness).frame_width(value_width)),
+            ],
+            width,
+            brightness_height,
+            gap,
+        )
+    } else {
+        unavailable_level(
+            brightness_icon,
+            "Brightness unavailable",
+            width,
+            brightness_height,
+            gap,
         )
     };
-    rows.insert(0, brightness_row);
-    let multiple_outputs = snapshot.audio.outputs.len() > 1;
-    let nav_width = if multiple_outputs {
-        metrics.column_width()
-    } else {
-        control_row_width
-    };
-    let nav_size = Size::new(nav_width, target_height);
-    let system = page_button(
-        if nav_width >= 108.0 {
-            "System status"
+
+    let muted = snapshot.audio.muted == Some(true);
+    let mute_request = action.clone();
+    let volume_icon = boxed(
+        Button::icon_only(if muted {
+            Icon::VolumeOff
         } else {
-            "Status"
-        },
-        Icon::ChartBar,
-        ControlCenterPage::System,
-        nav_size,
+            Icon::Volume2
+        })
+        .header_style()
+        .icon_size(IconSize::Small)
+        .padding(0.0)
+        .enabled(snapshot.audio.muted.is_some())
+        .on_click(move || mute_request.set(Some(ControlCenterAction::ToggleMute)))
+        .frame(leading_width, volume_height),
+    );
+    let current_output = snapshot
+        .audio
+        .outputs
+        .iter()
+        .find(|output| Some(&output.id) == snapshot.audio.current_output_id.as_ref());
+    let output_name = current_output.map_or("Audio outputs", |output| output.name.as_str());
+    let title = if muted {
+        "Muted"
+    } else if snapshot.audio.volume_percent.is_none() {
+        "Audio unavailable"
+    } else {
+        "Volume"
+    };
+    let mut header = vec![boxed(
+        Text::new(title)
+            .text_style(TextStyle::Caption)
+            .line_limit(Some(1)),
+    )];
+    if !snapshot.audio.outputs.is_empty() {
+        let output_width = (track_width - 56.0).clamp(1.0, 144.0);
+        header.push(boxed(Spacer::new()));
+        header.push(output_disclosure(output_name, output_width, session));
+    }
+    let header = boxed(
+        HStack::new(DynamicViews::new(header))
+            .spacing(2.0)
+            .alignment(Alignment::Center)
+            .frame_width(track_width),
+    );
+    let volume_row = if snapshot.audio.volume_percent.is_some() {
+        let request = action.clone();
+        let slider = Slider::new(volume.clone())
+            .min(0.0)
+            .max(100.0)
+            .on_change(move |next| {
+                request.set(Some(ControlCenterAction::SetVolume(
+                    next.clamp(0.0, 100.0).round() as u8,
+                )));
+            });
+        control_row(
+            vec![
+                volume_icon,
+                boxed(level_stack(header, slider, track_width, volume_height)),
+                boxed(LevelValueLabel(volume).frame_width(value_width)),
+            ],
+            width,
+            volume_height,
+            gap,
+        )
+    } else {
+        control_row(
+            vec![
+                volume_icon,
+                header,
+                boxed(Spacer::new().frame_width(value_width)),
+            ],
+            width,
+            volume_height,
+            gap,
+        )
+    };
+    (brightness_row, volume_row)
+}
+
+fn output_disclosure(
+    label: &str,
+    width: f32,
+    session: &State<ControlCenterSession>,
+) -> Box<dyn View> {
+    let arrow_width = 16.0;
+    let height = 15.0;
+    let arrow = page_button(
+        "",
+        Icon::ChevronRight,
+        ControlCenterPage::AudioOutputs(0),
+        Size::new(arrow_width, height),
         session,
     );
-    if multiple_outputs {
-        let audio = page_button(
-            if nav_width >= 108.0 {
-                "Audio outputs"
-            } else {
-                "Audio"
-            },
-            Icon::Volume2,
-            ControlCenterPage::AudioOutputs(0),
-            nav_size,
-            session,
-        );
-        rows.push(control_row(
-            vec![audio, system],
-            control_row_width,
-            target_height,
-            metrics.gap as f32,
-        ));
-    } else {
-        rows.push(system);
-    }
-    rows
+    let session = session.clone();
+    boxed(
+        HStack::new(DynamicViews::new(vec![
+            boxed(
+                Text::new(label)
+                    .font_size(11.0)
+                    .color(ColorPalette::default().text_secondary())
+                    .alignment(Alignment::Trailing)
+                    .frame_width((width - arrow_width).max(1.0)),
+            ),
+            arrow,
+        ]))
+        .spacing(0.0)
+        .alignment(Alignment::Center)
+        .frame(width, height)
+        .on_click(move || {
+            session.update(|current| current.page = ControlCenterPage::AudioOutputs(0))
+        }),
+    )
+}
+
+fn unavailable_level(
+    icon: Box<dyn View>,
+    label: &str,
+    width: f32,
+    height: f32,
+    gap: f32,
+) -> Box<dyn View> {
+    control_row(
+        vec![
+            icon,
+            boxed(
+                Text::new(label)
+                    .text_style(TextStyle::Caption)
+                    .color(ColorPalette::default().text_secondary()),
+            ),
+            boxed(Spacer::new()),
+        ],
+        width,
+        height,
+        gap,
+    )
+}
+
+fn level_stack(
+    header: Box<dyn View>,
+    slider: Slider,
+    width: f32,
+    height: f32,
+) -> impl View + Clone {
+    VStack::new(DynamicViews::new(vec![
+        boxed(
+            VStack::new(DynamicViews::new(vec![header]))
+                .alignment(Alignment::Leading)
+                .frame(width, 15.0),
+        ),
+        boxed(slider.frame(width, (height - 15.0).max(1.0))),
+    ]))
+    .alignment(Alignment::Leading)
+    .spacing(0.0)
 }
 
 fn audio_outputs_page(
@@ -589,7 +962,7 @@ fn audio_outputs_page(
     let height = metrics.target_height as f32;
     let gap = metrics.gap as f32;
     let header = if metrics.audio_pages == 1 {
-        back_button(Size::new(width, height), session)
+        details_header("Audio outputs", metrics, session)
     } else {
         let back_width = width * 0.35;
         let counter_width = 44.0_f32.min(width * 0.25);
@@ -630,7 +1003,7 @@ fn audio_outputs_page(
             gap,
         )
     };
-    let mut rows = vec![header];
+    let mut rows = Vec::new();
     let outputs = snapshot
         .audio
         .outputs
@@ -668,86 +1041,128 @@ fn audio_outputs_page(
                 .frame(width, height),
         ));
     }
-    while rows.len() <= metrics.audio_rows {
-        rows.push(boxed(Spacer::new().frame(width, height)));
-    }
-    rows
-}
-
-fn system_page(
-    metrics: ControlCenterMetrics,
-    snapshot: &ControlCenterSnapshot,
-    action: &State<Option<ControlCenterAction>>,
-    session: &State<ControlCenterSession>,
-) -> Vec<Box<dyn View>> {
-    let palette = ColorPalette::default();
-    let width = metrics.content_width();
-    let card_width = metrics.column_width();
-    let height = metrics.details_height as f32;
-    let network_detail = network_label(&snapshot.network);
-    let system_detail = system_label(&snapshot.system);
-    let network_action = action.clone();
-    let network_settings = Button::new("Network settings")
-        .padding(0.0)
-        .header_style()
-        .font_size(11.0)
-        .on_click(move || {
-            network_action.set(Some(ControlCenterAction::OpenSettings(
-                ControlCenterSettingsLink::Network,
-            )));
-        });
-
-    let caption = |label: String| {
-        boxed(
-            Text::new(label)
-                .font_size(11.0)
-                .line_limit(Some(1))
-                .color(palette.text_secondary())
-                .frame_width(card_width),
-        )
-    };
-    let mut network = vec![caption(network_detail), boxed(network_settings.clip())];
-    let mut system = vec![caption(system_detail), caption(snapshot.power.detail())];
-    if height >= 78.0 {
-        network.insert(0, boxed(Text::new("Network").font_size(14.0)));
-        system.insert(0, boxed(Text::new("System").font_size(14.0)));
-        system.push(caption(String::from(input_label(
-            &snapshot.input_environment,
-        ))));
-    }
-    let details = control_row(
-        vec![
-            content_section(card_width, height, network, 4.0),
-            content_section(card_width, height, system, 4.0),
-        ],
-        width,
-        height,
-        metrics.gap as f32,
-    );
     vec![
-        back_button(Size::new(width, metrics.target_height as f32), session),
-        details,
+        header,
+        content_section(width, metrics.details_height as f32, rows, gap),
     ]
 }
 
-fn settings_button(
+fn details_page(
     metrics: ControlCenterMetrics,
+    snapshot: &ControlCenterSnapshot,
+    session: &State<ControlCenterSession>,
+) -> Vec<Box<dyn View>> {
+    let width = metrics.content_width();
+    let height = metrics.details_height as f32;
+    let (title, details) = if metrics.page == ControlCenterPage::Network {
+        let mut rows = vec![(
+            "Connection",
+            String::from(network_summary(&snapshot.network)),
+        )];
+        if let Some(link) = snapshot
+            .network
+            .interfaces
+            .first()
+            .filter(|_| snapshot.network.available)
+        {
+            rows.push(("Interface", link.name.clone()));
+            if let Some(address) = &link.detail {
+                rows.push(("IPv4", address.clone()));
+            }
+        }
+        ("Network", rows)
+    } else {
+        let cpu = snapshot.system.cpu_percent.map_or_else(
+            || String::from("Unavailable"),
+            |value| alloc::format!("{value}%"),
+        );
+        let tasks = snapshot.system.task_count.map_or_else(
+            || String::from("Unavailable"),
+            |value| alloc::format!("{value}"),
+        );
+        (
+            "System status",
+            vec![
+                ("CPU", cpu),
+                ("Tasks", tasks),
+                ("Power", snapshot.power.detail().replace('\n', " · ")),
+                (
+                    "Input",
+                    String::from(input_label(&snapshot.input_environment)),
+                ),
+            ],
+        )
+    };
+    let gap = 3.0_f32.min(height / 16.0);
+    let row_height = ((height + gap) / details.len() as f32 - gap).min(22.0);
+    let label_width = 78.0_f32.min(width * 0.4);
+    let details = details
+        .into_iter()
+        .map(|(label, value)| {
+            control_row(
+                vec![
+                    boxed(
+                        Text::new(label)
+                            .font_size(11.0)
+                            .color(ColorPalette::default().text_secondary())
+                            .alignment(Alignment::Leading)
+                            .frame_width(label_width),
+                    ),
+                    boxed(
+                        Text::new(value)
+                            .font_size(12.0)
+                            .alignment(Alignment::Trailing)
+                            .frame_width((width - label_width - gap).max(1.0)),
+                    ),
+                ],
+                width,
+                row_height,
+                gap,
+            )
+        })
+        .collect();
+    vec![
+        details_header(title, metrics, session),
+        content_section(width, height, details, gap),
+    ]
+}
+
+fn footer_row(
+    metrics: ControlCenterMetrics,
+    snapshot: &ControlCenterSnapshot,
     action: State<Option<ControlCenterAction>>,
+    session: &State<ControlCenterSession>,
 ) -> Box<dyn View> {
-    boxed(
-        Button::new("Settings")
-            .icon(Icon::Settings)
+    let width = metrics.content_width();
+    let height = metrics.target_height as f32;
+    let gap = metrics.gap as f32;
+    let settings_width = 30.0;
+    let leading_width = (width - settings_width - gap).max(1.0);
+    let leading = if metrics.page == ControlCenterPage::Controls {
+        let summary = alloc::format!(
+            "{} · {}",
+            system_label(&snapshot.system),
+            input_label(&snapshot.input_environment)
+        );
+        page_button(
+            &summary,
+            Icon::ChartBar,
+            ControlCenterPage::System,
+            Size::new(leading_width, height),
+            session,
+        )
+    } else {
+        boxed(Spacer::new().frame(leading_width, height))
+    };
+    let settings = boxed(
+        Button::icon_only(Icon::Settings)
             .header_style()
             .icon_size(IconSize::Small)
-            .font_size(11.0)
             .padding(0.0)
-            .on_click(move || {
-                action.set(Some(ControlCenterAction::OpenSettings(
-                    ControlCenterSettingsLink::AllSettings,
-                )));
-            })
-            .frame(metrics.content_width(), metrics.target_height as f32),
-    )
+            .on_click(move || action.set(Some(ControlCenterAction::OpenSettings)))
+            .frame(settings_width, height),
+    );
+    control_row(vec![leading, settings], width, height, gap)
 }
 
 fn control_row(children: Vec<Box<dyn View>>, width: f32, height: f32, gap: f32) -> Box<dyn View> {
@@ -765,75 +1180,18 @@ fn content_section(
     children: Vec<Box<dyn View>>,
     spacing: f32,
 ) -> Box<dyn View> {
-    boxed(
-        VStack::new(DynamicViews::new(children))
-            .spacing(spacing)
-            .alignment(Alignment::Leading)
-            .frame(width, height),
-    )
-}
-
-#[derive(Clone)]
-struct BrightnessRow {
-    value: State<f32>,
-    action: State<Option<ControlCenterAction>>,
-    width: f32,
-    label_width: f32,
-    slider_width: f32,
-    gap: f32,
-    height: f32,
-}
-
-impl BrightnessRow {
-    fn content(&self) -> impl View + Clone + use<> {
-        let action = self.action.clone();
-        let value = self.value.clone();
-        HStack::new((
-            VStack::new((
-                Text::new("Brightness").text_style(TextStyle::Caption),
-                BrightnessValueLabel(self.value.clone()),
-            ))
-            .spacing(0.0)
-            .alignment(Alignment::Leading)
-            .frame_width(self.label_width),
-            Slider::new(self.value.clone())
-                .min(0.0)
-                .max(100.0)
-                .on_change(move |next| {
-                    action.set(Some(ControlCenterAction::SetBrightness(
-                        next.clamp(0.0, 100.0).round() as u8,
-                    )));
-                    // Preserve the continuous input even if a concurrent idle
-                    // sample landed between Slider's State.set and callback.
-                    if value.get() != next {
-                        value.set(next);
-                    }
-                })
-                .frame_width(self.slider_width),
-        ))
-        .spacing(self.gap)
-        .alignment(Alignment::Center)
-        .frame(self.width, self.height)
-    }
-}
-
-impl View for BrightnessRow {
-    fn create_element(&self) -> Box<dyn Element> {
-        Box::new(ComponentElement::new_with_builder(self.clone(), |row| {
-            boxed(row.content())
-        }))
-    }
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
+    let content = VStack::new(DynamicViews::new(children))
+        .spacing(spacing)
+        .alignment(Alignment::Leading);
+    boxed(ViewExt::alignment(content, Alignment::TopLeading).frame(width, height))
 }
 
 /// Keep continuous slider updates out of the row's structural reconciliation.
 /// Slider already subscribes to the same value to update its own render object.
 #[derive(Clone)]
-struct BrightnessValueLabel(State<f32>);
+struct LevelValueLabel(State<f32>);
 
-impl View for BrightnessValueLabel {
+impl View for LevelValueLabel {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(ComponentElement::new_with_builder(self.clone(), |label| {
             boxed(
@@ -884,22 +1242,17 @@ pub(super) fn reconcile_brightness(
     });
 }
 
-fn network_label(snapshot: &NetworkSnapshot) -> String {
+fn network_summary(snapshot: &NetworkSnapshot) -> &'static str {
     if !snapshot.available {
-        return String::from("Unavailable");
+        return "Unavailable";
     }
-    let Some(interface) = snapshot.interfaces.first() else {
-        return String::from("No connection");
-    };
-    let mut label = match interface.state {
-        NetworkInterfaceState::Connected => String::from("Connected"),
-        NetworkInterfaceState::Configuring => String::from("Obtaining IP"),
-        NetworkInterfaceState::Disconnected => String::from("Disconnected"),
-        NetworkInterfaceState::Unknown => String::from("Unknown"),
-    };
-    label.push_str(" / ");
-    label.push_str(&interface.name);
-    label
+    match snapshot.interfaces.first().map(|interface| interface.state) {
+        Some(NetworkInterfaceState::Connected) => "Connected",
+        Some(NetworkInterfaceState::Configuring) => "Obtaining IP",
+        Some(NetworkInterfaceState::Disconnected) => "Disconnected",
+        Some(NetworkInterfaceState::Unknown) => "Unknown",
+        None => "No connection",
+    }
 }
 
 fn system_label(snapshot: &SystemSnapshot) -> String {
@@ -911,16 +1264,16 @@ fn system_label(snapshot: &SystemSnapshot) -> String {
         .task_count
         .map(|value| alloc::format!("{}", value))
         .unwrap_or_else(|| String::from("--"));
-    alloc::format!("CPU {}   Tasks {}", cpu, tasks)
+    alloc::format!("CPU {cpu} · Tasks {tasks}")
 }
 
 fn input_label(snapshot: &InputEnvironmentSnapshot) -> &'static str {
     if !snapshot.available {
         "Input unavailable"
     } else if snapshot.tablet_mode == Some(true) {
-        "Tablet input"
+        "Tablet"
     } else {
-        "Laptop input"
+        "Laptop"
     }
 }
 
@@ -1127,10 +1480,10 @@ mod tests {
     }
 
     #[test]
-    fn controls_keep_natural_centers_and_stable_tracks_across_percentages() {
+    fn controls_keep_visible_status_and_stable_tracks_across_percentages() {
         use scarlet_ui::element::LayoutConstraints;
         use scarlet_ui::geometry::{Point, Rect};
-        use scarlet_ui::views::{ButtonRenderObject, TextRenderObject};
+        use scarlet_ui::views::TextRenderObject;
 
         fn collect(element: &dyn Element, origin: Point, out: &mut Vec<(String, Rect)>) {
             let origin = Point::new(
@@ -1151,11 +1504,6 @@ mod tests {
                 .is_some_and(|r| r.as_any().is::<SliderRenderObject>())
             {
                 Some(String::from("slider"))
-            } else if element
-                .render_object()
-                .is_some_and(|r| r.as_any().is::<ButtonRenderObject>())
-            {
-                Some(String::from("button"))
             } else {
                 None
             };
@@ -1171,30 +1519,34 @@ mod tests {
             ControlCenterPresentation::LaptopPopover,
             ControlCenterPresentation::TabletSheet,
         ] {
+            let metrics = ControlCenterMetrics::resolve(
+                presentation,
+                Size::new(284.0, 172.0),
+                ControlCenterPage::Controls,
+                0,
+            );
             let mut previous_tracks = None;
             for percent in [0, 9, 10, 80, 99, 100] {
-                let snapshot = ControlCenterSnapshot {
-                    power: Default::default(),
-                    audio: AudioSnapshot::unavailable(),
-                    brightness_percent: Some(percent),
-                    network: NetworkSnapshot {
-                        available: false,
-                        interfaces: Vec::new(),
-                    },
-                    system: SystemSnapshot {
-                        cpu_percent: None,
-                        task_count: None,
-                    },
-                    input_environment: InputEnvironmentSnapshot {
-                        available: false,
-                        tablet_mode: None,
-                        touch_present: None,
-                        keyboard_present: None,
-                        pointer_present: None,
-                    },
+                let mut snapshot = ControlCenterSnapshot::unavailable();
+                snapshot.audio = AudioSnapshot::from_status(25, false);
+                snapshot.brightness_percent = Some(percent);
+                snapshot.network = NetworkSnapshot {
+                    available: true,
+                    interfaces: vec![NetworkInterfaceSnapshot {
+                        name: String::from("eth0"),
+                        kind: NetworkKind::Ethernet,
+                        detail: None,
+                        state: NetworkInterfaceState::Connected,
+                    }],
+                };
+                snapshot.power = super::super::power::PowerStatus {
+                    battery_detected: true,
+                    percent: Some(78),
+                    charge_state: Some(scarlet_abi::power_supply::ChargeState::Charging),
+                    external_power: Some(true),
                 };
                 let mut element = build_control_center_view(
-                    controls_metrics(presentation, 0),
+                    metrics,
                     snapshot,
                     State::new(scarlet_ui::state::generate_state_id(), 25.0),
                     State::new(scarlet_ui::state::generate_state_id(), percent as f32),
@@ -1238,29 +1590,22 @@ mod tests {
                         track.origin.x >= 0.0 && track.origin.x + track.size.width <= size.width
                     );
                 }
-                let label = rects
-                    .iter()
-                    .find(|(name, _)| name == "Brightness")
-                    .unwrap()
-                    .1;
+                for name in ["Wired network", "Connected", "Battery", "78% · Charging"] {
+                    let rect = rects.iter().find(|(label, _)| label == name).unwrap().1;
+                    assert!(
+                        rect.origin.y >= metrics.margin as f32
+                            && rect.origin.y + rect.size.height
+                                <= (metrics.margin + metrics.tile_height) as f32,
+                        "{name} falls outside its tile at {rect:?}"
+                    );
+                }
+                let percent_label = alloc::format!("{}%", percent);
                 let value = rects
                     .iter()
-                    .find(|(name, _)| name == &alloc::format!("{}%", percent))
+                    .find(|(label, _)| *label == percent_label)
                     .unwrap()
                     .1;
-                assert_eq!(label.origin.x, value.origin.x);
-                assert!(value.origin.y >= label.origin.y + label.size.height);
-                let label_center = (label.origin.y + value.origin.y + value.size.height) / 2.0;
-                assert_eq!(
-                    label_center,
-                    tracks[0].origin.y + tracks[0].size.height / 2.0
-                );
-                let mute = rects.iter().find(|(name, _)| name == "button").unwrap().1;
-                assert_eq!(mute.origin.x, label.origin.x);
-                assert_eq!(
-                    mute.origin.y + mute.size.height / 2.0,
-                    tracks[1].origin.y + tracks[1].size.height / 2.0
-                );
+                assert!(value.origin.x >= tracks[0].origin.x + tracks[0].size.width);
             }
         }
     }
@@ -1272,13 +1617,21 @@ mod tests {
         assert_eq!(laptop.width, 304);
         assert_eq!(
             laptop.height,
-            2 * laptop.margin + 4 * laptop.target_height + 3 * laptop.gap
+            2 * laptop.margin
+                + laptop.tile_height
+                + laptop.volume_height
+                + 2 * laptop.target_height
+                + 3 * laptop.gap
         );
         assert!(laptop.height <= 400);
         assert_eq!(tablet.width, 392);
         assert_eq!(
             tablet.height,
-            2 * tablet.margin + 4 * tablet.target_height + 3 * tablet.gap
+            2 * tablet.margin
+                + tablet.tile_height
+                + tablet.volume_height
+                + 2 * tablet.target_height
+                + 3 * tablet.gap
         );
         assert!(tablet.target_height > laptop.target_height);
     }
@@ -1301,10 +1654,53 @@ mod tests {
     }
 
     #[test]
-    fn multiple_audio_outputs_share_one_link_on_the_controls_page() {
-        let two = controls_metrics(ControlCenterPresentation::LaptopPopover, 2);
-        let three = controls_metrics(ControlCenterPresentation::LaptopPopover, 3);
-        assert_eq!(three.height, two.height);
+    fn page_and_output_changes_keep_the_panel_size() {
+        for presentation in [
+            ControlCenterPresentation::LaptopPopover,
+            ControlCenterPresentation::TabletSheet,
+        ] {
+            for available in [Size::new(284.0, 172.0), Size::new(800.0, 600.0)] {
+                let body = ControlCenterMetrics::resolve(
+                    presentation,
+                    available,
+                    ControlCenterPage::Controls,
+                    0,
+                )
+                .body_size();
+                for page in [
+                    ControlCenterPage::Controls,
+                    ControlCenterPage::Network,
+                    ControlCenterPage::System,
+                    ControlCenterPage::AudioOutputs(2),
+                ] {
+                    for outputs in [0, 1, 6, 12] {
+                        let metrics =
+                            ControlCenterMetrics::resolve(presentation, available, page, outputs);
+                        assert_eq!(metrics.body_size(), body);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn page_fade_only_restarts_when_the_visible_page_changes() {
+        let mut fade = PageFadeRenderObject::new(ControlCenterPage::Controls);
+        assert!(!fade.has_visual_animation());
+        fade.show_page(ControlCenterPage::Network);
+        assert!(fade.has_visual_animation());
+        let initial = fade.subtree_opacity();
+        assert!(fade.advance_visual_animation(Duration::from_millis(70)));
+        let current = fade.subtree_opacity();
+        assert!(current > initial && current < 1.0);
+        assert!(matches!(
+            fade.show_page(ControlCenterPage::Network),
+            UpdateResult::NoChange
+        ));
+        assert_eq!(fade.subtree_opacity(), current);
+        fade.advance_visual_animation(Duration::from_millis(70));
+        assert_eq!(fade.subtree_opacity(), 1.0);
+        assert!(!fade.has_visual_animation());
     }
 
     #[test]
@@ -1317,12 +1713,12 @@ mod tests {
             12,
         );
         assert!(metrics.body_size().height <= available.height);
-        assert_eq!(metrics.audio_rows, 2);
+        assert_eq!(metrics.audio_rows_per_page, 2);
         assert_eq!(metrics.audio_pages, 6);
         assert_eq!(metrics.page, ControlCenterPage::AudioOutputs(5));
         assert_eq!(
             metrics.height,
-            2 * metrics.margin + 4 * metrics.target_height + 3 * metrics.gap
+            2 * (metrics.margin + metrics.target_height + metrics.gap) + metrics.details_height
         );
     }
 
@@ -1375,15 +1771,16 @@ mod tests {
             available: false,
             interfaces: Vec::new(),
         };
-        assert_eq!(network_label(&unavailable), "Unavailable");
+        assert_eq!(network_summary(&unavailable), "Unavailable");
         let connected = NetworkSnapshot {
             available: true,
             interfaces: vec![NetworkInterfaceSnapshot {
                 name: String::from("veth0"),
+                kind: NetworkKind::Ethernet,
                 state: NetworkInterfaceState::Connected,
                 detail: None,
             }],
         };
-        assert_eq!(network_label(&connected), "Connected / veth0");
+        assert_eq!(network_summary(&connected), "Connected");
     }
 }
