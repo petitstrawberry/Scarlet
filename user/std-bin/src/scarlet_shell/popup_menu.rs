@@ -408,7 +408,7 @@ impl MenuModel<'_> {
         build_menu_items(
             entries,
             self.active_window,
-            self.endpoint.open_menu.clone(),
+            self.endpoint,
             self.scarlet_menu(),
         )
     }
@@ -592,9 +592,10 @@ impl MenuCascade {
         };
         let bounds = pane.visible_bounds();
         let renderer = display.renderer(model.items(entries), model);
+        let first_row_top = renderer.menu.item_rect(0).map_or(0.0, |row| row.top());
         let body_origin = submenu_origin(
             bounds,
-            bounds.top() + anchor.top(),
+            bounds.top() + anchor.top() - first_row_top,
             renderer.size(),
             display.size,
         );

@@ -95,6 +95,8 @@ const WINDOW_LIST_TIMEOUT_MS: u64 = 250;
 const WINDOW_LIST_REFRESH_TICKS: u32 = 60;
 const OVERVIEW_MENU_INDEX: usize = usize::MAX;
 const CONTROL_CENTER_SCENE_KEY: &str = "control-center";
+const SESSION_CONFIRMATION_SCENE_KEY: &str = "session-confirmation";
+const SESSION_CONFIRMATION_TITLE: &str = "Session Confirmation";
 const HOME_SCENE_KEY: &str = "home";
 const HOME_BACKDROP_SCENE_KEY: &str = "home-backdrop";
 const OVERVIEW_DRAWER_SCENE_KEY: &str = "overview-drawer";
@@ -364,6 +366,7 @@ fn is_shell_app(app_id: &str) -> bool {
             | "org.scarlet-os.desktop.desktop"
             | "org.scarlet-os.desktop.background"
             | "org.scarlet-os.desktop.launcher"
+            | "org.scarlet-os.popup.session-confirmation"
     )
 }
 
@@ -1018,6 +1021,7 @@ struct ShellApp {
     menu_tree: State<MenuTree>,
     open_menu_index: State<Option<usize>>,
     menu_surfaces: State<Vec<u32>>,
+    session_confirmation: State<Option<SessionAction>>,
     menu_titles_cache: State<BTreeMap<u32, String>>,
     status_snapshot: State<StatusProviderSnapshot>,
     windows: State<Vec<ShellWindow>>,
@@ -1086,6 +1090,7 @@ impl ShellApp {
             menu_tree: State::new(scarlet_ui::state::generate_state_id(), root_menu),
             open_menu_index: State::new(scarlet_ui::state::generate_state_id(), None),
             menu_surfaces: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
+            session_confirmation: State::new(scarlet_ui::state::generate_state_id(), None),
             menu_titles_cache: State::new(scarlet_ui::state::generate_state_id(), BTreeMap::new()),
             status_snapshot: State::new(scarlet_ui::state::generate_state_id(), status_snapshot),
             windows: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
@@ -1175,30 +1180,66 @@ struct MenuEntryPayload {
     items: Option<Vec<MenuEntryPayload>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionAction {
+    LogOut,
+    Restart,
+    PowerOff,
+}
+
+impl SessionAction {
+    const ALL: [Self; 3] = [Self::LogOut, Self::Restart, Self::PowerOff];
+
+    fn menu_id(self) -> &'static str {
+        match self {
+            Self::LogOut => "system_logout",
+            Self::Restart => "system_restart",
+            Self::PowerOff => "system_power_off",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LogOut => "Log out",
+            Self::Restart => "Restart",
+            Self::PowerOff => "Power off",
+        }
+    }
+
+    fn question(self) -> &'static str {
+        match self {
+            Self::LogOut => "Log out of this session?",
+            Self::Restart => "Restart this device?",
+            Self::PowerOff => "Power off this device?",
+        }
+    }
+
+    fn execute(self) {
+        match self {
+            Self::LogOut if session_logout_available() => {
+                std::process::exit(DESKTOP_SESSION_LOGOUT_STATUS);
+            }
+            Self::LogOut => {}
+            Self::Restart => request_system_power(power_request::PowerAction::Reboot),
+            Self::PowerOff => request_system_power(power_request::PowerAction::PowerOff),
+        }
+    }
+}
+
 fn default_root_menu_items() -> Vec<TaskMenuItem> {
-    let confirm = |id: &str, title: &str, confirmation: &str| {
-        TaskMenuEntry::Item(TaskMenuItem {
-            id: format!("{id}_prompt"),
-            title: title.into(),
-            enabled: true,
-            shortcut: None,
-            children: vec![TaskMenuEntry::Item(TaskMenuItem {
-                id: id.into(),
-                title: confirmation.into(),
+    let children = SessionAction::ALL
+        .into_iter()
+        .filter(|action| *action != SessionAction::LogOut || session_logout_available())
+        .map(|action| {
+            TaskMenuEntry::Item(TaskMenuItem {
+                id: action.menu_id().into(),
+                title: format!("{}…", action.label()),
                 enabled: true,
                 shortcut: None,
                 children: Vec::new(),
-            })],
+            })
         })
-    };
-    let mut children = Vec::new();
-    if session_logout_available() {
-        children.push(confirm("system_logout", "Log out…", "Confirm log out"));
-    }
-    children.extend([
-        confirm("system_restart", "Restart…", "Confirm restart"),
-        confirm("system_power_off", "Power off…", "Confirm power off"),
-    ]);
+        .collect();
     vec![TaskMenuItem {
         id: "system_scarlet".into(),
         title: "Scarlet".into(),
@@ -2150,7 +2191,7 @@ fn build_overview_button(
 fn build_menu_items(
     entries: &[TaskMenuEntry],
     active_window_id: u32,
-    open_menu_index: State<Option<usize>>,
+    endpoint: &multi_output::Endpoint,
     scarlet_menu: bool,
 ) -> Vec<MenuItemContent> {
     let mut items = Vec::new();
@@ -2168,26 +2209,29 @@ fn build_menu_items(
                     items.push(content.action(MenuAction::Submenu));
                     continue;
                 }
+                let open_state = endpoint.open_menu.clone();
+                if scarlet_menu {
+                    let action = SessionAction::ALL
+                        .into_iter()
+                        .find(|action| action.menu_id() == item.id);
+                    if let Some(action) = action {
+                        let confirmation = endpoint.session_confirmation.clone();
+                        let output = endpoint.id;
+                        content = content.callback(move || {
+                            open_state.set(None);
+                            if confirmation.get().is_none() {
+                                confirmation.set(Some(action));
+                                open_window(multi_output::key(output, SESSION_CONFIRMATION_SCENE_KEY));
+                            }
+                        });
+                    }
+                    items.push(content);
+                    continue;
+                }
                 let item_id = item.id.clone();
-                let open_state = open_menu_index.clone();
                 let window_id = active_window_id;
                 content = content.callback(move || {
                     open_state.set(None);
-                    if scarlet_menu {
-                        match item_id.as_str() {
-                            "system_logout" if session_logout_available() => {
-                                std::process::exit(DESKTOP_SESSION_LOGOUT_STATUS);
-                            }
-                            "system_restart" => {
-                                request_system_power(power_request::PowerAction::Reboot);
-                            }
-                            "system_power_off" => {
-                                request_system_power(power_request::PowerAction::PowerOff);
-                            }
-                            _ => {}
-                        }
-                        return;
-                    }
                     // Handle system menu items
                     if item_id == "system_terminal" {
                         launch_new_app(b"org.scarlet-os.desktop.terminal");
@@ -3634,6 +3678,68 @@ impl ShellApp {
         .placement(WindowPlacement::At { x: osd_x, y: osd_y })
         .size(osd_size)
     }
+
+    fn session_confirmation_window(&self) -> Window<impl View + Clone + use<>> {
+        let action = self.session_confirmation.get();
+        let confirm = self.session_confirmation.clone();
+        let cancel = self.session_confirmation.clone();
+        let key = self.scene_key(SESSION_CONFIRMATION_SCENE_KEY);
+        let confirm_key = key.clone();
+        let cancel_key = key.clone();
+        let cancel = move || {
+            cancel.set(None);
+            dismiss_window(cancel_key.clone());
+        };
+        let esc = cancel.clone();
+        let palette = ColorPalette::default();
+        let content = vstack! {
+            Text::new(action.map_or("", SessionAction::question)).font_size(18.0),
+            Text::new("Unsaved work may be lost.").color(palette.text_secondary()),
+            hstack! {
+                Spacer::new(),
+                Button::new("Cancel").on_click(cancel),
+                Button::new(action.map_or("", SessionAction::label))
+                    .enabled(action.is_some())
+                    .on_click(move || {
+                        let mut selected = None;
+                        confirm.update(|pending| {
+                            if *pending == action {
+                                selected = pending.take();
+                            }
+                        });
+                        if let Some(action) = selected {
+                            dismiss_window(confirm_key.clone());
+                            action.execute();
+                        }
+                    }),
+            }.spacing(8.0),
+        }
+        .spacing(12.0)
+        .alignment(Alignment::Leading)
+        .padding(18.0)
+        .on_key(move |event| {
+            if matches!(event, KeyEvent::Pressed { keycode: KeyCode::Escape, .. }) {
+                esc();
+                true
+            } else {
+                false
+            }
+        });
+        Window::new(SESSION_CONFIRMATION_TITLE, content)
+            .scene_key(key)
+            .output(self.output_id.get())
+            .open_at_launch(false)
+            .app_id("org.scarlet-os.popup.session-confirmation")
+            .decorated(false)
+            .background_color(palette.window_background())
+            .shadow_elevation(ElevationRole::Floating)
+            .window_type(window_types::ALWAYS_ON_TOP)
+            .active_on_focus(false)
+            .resizable(false)
+            .movable(false)
+            .placement(WindowPlacement::Centered)
+            .size(Size::new(316.0, 140.0))
+    }
 }
 
 impl Application for ShellApp {
@@ -3653,6 +3759,9 @@ impl Application for ShellApp {
         &self,
         key: &scarlet_ui::scene::SceneWindowKey,
     ) -> Option<Vec<&dyn scarlet_ui::state::Listenable>> {
+        if key.as_str() == SESSION_CONFIRMATION_SCENE_KEY {
+            return Some(vec![&self.session_confirmation]);
+        }
         if matches!(
             key.as_str(),
             HOME_BACKDROP_SCENE_KEY | OVERVIEW_DRAWER_SCENE_KEY
@@ -3777,6 +3886,9 @@ impl Application for ShellApp {
     }
 
     fn on_window_close_requested(&mut self, ctx: &WindowContext) -> bool {
+        if ctx.scene_key.as_str() == SESSION_CONFIRMATION_SCENE_KEY {
+            self.session_confirmation.set(None);
+        }
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
             self.control_center_session
                 .update(ControlCenterSession::close);
@@ -3980,6 +4092,7 @@ impl Application for ShellApp {
                 self.console_chrome_window(),
             ),
             self.volume_window(),
+            self.session_confirmation_window(),
         )
     }
 
@@ -3997,6 +4110,7 @@ impl Application for ShellApp {
             HOME_SCENE_KEY => boxed(self.home_window()),
             CONSOLE_CHROME_SCENE_KEY => boxed(self.console_chrome_window()),
             volume_osd::SCENE_KEY => boxed(self.volume_window()),
+            SESSION_CONFIRMATION_SCENE_KEY => boxed(self.session_confirmation_window()),
             _ => return None,
         })
     }
@@ -4419,6 +4533,7 @@ fn is_shell_menu_name(app_name: &str) -> bool {
     matches!(
         app_name,
         "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Overview Drawer" | "Menu" | "Control Center"
+            | SESSION_CONFIRMATION_TITLE
     )
 }
 
