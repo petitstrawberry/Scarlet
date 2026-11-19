@@ -1100,7 +1100,26 @@ pub struct Connection {
     surfaces: Arc<Mutex<BTreeMap<u32, Surface>>>,
 }
 
+#[cfg(feature = "std")]
+std::thread_local! {
+    static INHERITED_CONNECTION: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Connection {
+    /// Route ScarletUI's default-window connections on this thread over an
+    /// already connected capability. No named socket is opened in this scope.
+    #[cfg(feature = "std")]
+    pub fn with_inherited_socket<T>(socket: Socket, run: impl FnOnce() -> T) -> Result<T, Error> {
+        let connection = Self::from_socket(socket)?;
+        struct Restore(Option<Connection>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                INHERITED_CONNECTION.with(|slot| slot.replace(self.0.take()));
+            }
+        }
+        let _restore = Restore(INHERITED_CONNECTION.with(|slot| slot.replace(Some(connection))));
+        Ok(run())
+    }
     /// Connect to SWS at the default socket path (/tmp/sws.sock)
     pub fn connect_default() -> Result<Self, Error> {
         Self::connect("/tmp/sws.sock")
@@ -1108,11 +1127,21 @@ impl Connection {
 
     /// Connect to SWS at the specified socket path
     pub fn connect(socket_path: &str) -> Result<Self, Error> {
+        #[cfg(feature = "std")]
+        if socket_path == "/tmp/sws.sock"
+            && let Some(conn) = INHERITED_CONNECTION.with_borrow(|slot| slot.clone())
+        {
+            return Ok(conn);
+        }
         let socket = Socket::new().map_err(|_| Error::SocketCreation)?;
         socket
             .connect(socket_path)
             .map_err(|_| Error::ConnectionFailed)?;
 
+        Self::from_socket(socket)
+    }
+
+    fn from_socket(socket: Socket) -> Result<Self, Error> {
         // Set socket to non-blocking mode once at connection time
         socket
             .set_nonblocking(true)

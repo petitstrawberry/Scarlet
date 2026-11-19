@@ -50,7 +50,6 @@ use scarlet_desktop_config::{
     StatusPreferences,
 };
 use scarlet_os::socket::Socket;
-use scarlet_os::time;
 use scarlet_os::{network, process, scheduler};
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::{Color, ColorPalette};
@@ -4860,13 +4859,7 @@ impl ShellApp {
 
         std::thread::spawn(move || {
             loop {
-                let secs_of_day = time::system_time_ns()
-                    .map(|ns| {
-                        let offset = time::local_utc_offset_seconds().unwrap_or(0);
-                        let local = (ns / 1_000_000_000) as i64 + offset;
-                        (((local % 86_400) + 86_400) % 86_400) as u32
-                    })
-                    .unwrap_or(0);
+                let secs_of_day = status::local_seconds_of_day().unwrap_or(0);
                 // The displayed clock has minute precision. Poll for the
                 // boundary, but do not rebuild the shell for unseen seconds.
                 set_state_if_changed(&clock, secs_of_day / 60 * 60);

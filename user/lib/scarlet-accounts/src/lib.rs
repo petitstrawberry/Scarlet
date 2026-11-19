@@ -8,8 +8,8 @@ mod database;
 use alloc::{string::String, vec::Vec};
 #[cfg(target_os = "scarlet")]
 pub use database::{
-    authenticate_console, authenticate_local, authorized_keys, login_available, lookup_local,
-    service_account,
+    authenticate_console, authenticate_local, authorized_keys, login_available, login_names,
+    lookup_local, service_account,
 };
 
 pub struct Account {
@@ -111,6 +111,19 @@ fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), 
     Ok((selected, verifier))
 }
 
+#[cfg(any(test, target_os = "scarlet"))]
+fn selectable_names(data: &str) -> Result<Vec<String>, ()> {
+    lookup(data, b"")?;
+    Ok(data
+        .lines()
+        .filter_map(|line| {
+            let (name, rest) = line.split_once(':')?;
+            let (_, verifier) = rest.rsplit_once(':')?;
+            (!verifier.is_empty() && verifier != "!").then(|| String::from(name))
+        })
+        .collect())
+}
+
 fn authenticate(
     data: &str,
     name: &[u8],
@@ -137,6 +150,15 @@ fn authenticate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chooser_includes_only_enabled_graphical_logins() {
+        let db = "root:0:0::
+service:2:2::!
+alice:1000:1000::$2b$12$L6Bc/AlTQHyd9liGgGEZyOFLPHNgyxeEPfgYfBCVxJ7JIlwxyVU3u
+";
+        assert_eq!(selectable_names(db).unwrap(), ["alice"]);
+        assert!(selectable_names(&alloc::format!("{db}bad")).is_err());
+    }
     #[test]
     fn empty_verifier_is_only_for_console_root() {
         let db = "root:0:0::\n";

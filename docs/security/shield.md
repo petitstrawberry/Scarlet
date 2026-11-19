@@ -268,11 +268,25 @@ fresh environment. The supervisor terminates session descendants on logout
 before accepting the next login. SSH uses the same account database and credential transition for shell,
 command and SFTP sessions, including logins as root. The desktop bundle starts `scarlet-seat` with
 `/etc/scarlet-seat.toml`. This file selects the authentication broker, greeter,
-compositor and session command. The seat sends physical keyboard input to
-the broker over a private pipe. The separate greeter receives the login name
-and masked length. With no enabled account the seat displays a setup message.
+compositor and session command. Before authentication, the seat starts SWS with two connected sockets. One belongs to
+the seat's ScarletUI login window and one to the standard soft-keyboard process.
+The broker launches the panel with the anonymous identity, empty grants and
+only its bootstrap standard streams.
+This SWS instance opens no public display or remote listener. Each connection
+has a fixed role and the server admits only the protocol operations needed by
+that role. Local keyboard events go to the focused login window. Tapping a
+text field enables the system input panel through the usual text-input protocol.
+Desktop clients, clipboard and IME services have no login connection.
 
-After authentication the seat starts the configured compositor. Once it is
+The broker offers the accounts enabled for graphical login. Select an account
+to enter its password, or select Other user to type a name. The seat sends
+input to the broker over a private pipe. The password field exposes only mask
+glyphs in its surrounding text. The anonymous shell wallpaper helper receives
+only the requested bitmap dimensions and returns pixels. It uses the shell's
+system background and accepts configured artwork under `/share`.
+
+After authentication the seat tears down the private panel and compositor
+and starts the configured desktop compositor. Once it is
 ready, the broker starts the session command with the user's credentials, home
 and process scope. The bundled session runs `stemd --user /etc/stemd.d/session`.
 Configure desktop components, their dependencies and restart behavior in those

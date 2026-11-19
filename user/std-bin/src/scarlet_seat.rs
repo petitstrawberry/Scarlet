@@ -1,35 +1,39 @@
-//! Own the physical seat until the session supervisor admits a desktop.
-//! The public compositor sockets and input workers are created after this gate.
-use framebuffer::DisplaySurface;
-use scarlet_os::{handle::capability::StreamError, input::InputDevice};
+//! The seat starts a private SWS instance and the system input panel before
+//! authentication. The ordinary desktop starts after those processes have exited.
+#[path = "scarlet_shell/clock.rs"]
+mod clock;
+#[path = "scarlet_shell/fonts.rs"]
+mod fonts;
+mod greeter_ui;
+use scarlet_os::Socket;
+use scarlet_ui::{BitmapImage, RenderingPipeline, prelude::*};
 use std::{
+    fs::File,
     io::{self, Read, Write},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-
-const WIDTH: u32 = 480;
-const HEIGHT: u32 = 240;
-
 struct Worker {
     child: Child,
-    input: Option<ChildStdin>,
-    output: ChildStdout,
+    input: Option<File>,
+    output: File,
 }
 
 impl Worker {
     fn start(program: &str, args: &[&str]) -> io::Result<Self> {
-        let mut child = Command::new(program)
+        let (read_request, write_request) = private_pipe()?;
+        let (read_reply, write_reply) = private_pipe()?;
+        let child = Command::new(program)
             .args(args)
             .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdin(child_stdio(read_request)?)
+            .stdout(child_stdio(write_reply)?)
             .stderr(Stdio::null())
             .spawn()?;
         Ok(Self {
-            input: child.stdin.take(),
-            output: child.stdout.take().unwrap(),
+            input: Some(file_from_handle(write_request)),
+            output: file_from_handle(read_reply),
             child,
         })
     }
@@ -48,150 +52,289 @@ impl Drop for Worker {
     }
 }
 
-#[derive(Default)]
-struct Keyboard {
-    device: Option<InputDevice>,
-    shifts: u8,
-    caps: bool,
-    desynced: bool,
+fn os_err(e: impl std::fmt::Debug) -> io::Error {
+    io::Error::other(format!("{e:?}"))
 }
 
-impl Keyboard {
-    fn read_key(&mut self) -> io::Result<Option<u8>> {
-        let Some(device) = &self.device else {
-            return Ok(None);
-        };
-        let mut record = [0; 16];
-        loop {
-            match device.read(&mut record) {
-                Ok(16) => {}
-                Ok(_) | Err(StreamError::WouldBlock | StreamError::Interrupted) => return Ok(None),
-                Err(_) => {
-                    *self = Self::default();
-                    return Ok(None);
-                }
-            }
-            let kind = u16::from_ne_bytes([record[8], record[9]]);
-            let code = u16::from_ne_bytes([record[10], record[11]]);
-            let value = i32::from_ne_bytes(record[12..16].try_into().unwrap());
-            if kind == 0 && code == 3 {
-                self.desynced = true;
-                self.shifts = 0;
-            }
-            if kind == 0 && code == 0 {
-                self.desynced = false;
-            }
-            if self.desynced || kind != 1 {
-                continue;
-            }
-            if matches!(code, 42 | 54) {
-                let bit = if code == 42 { 1 } else { 2 };
-                if value == 0 {
-                    self.shifts &= !bit;
-                } else {
-                    self.shifts |= bit;
-                }
-            } else if value == 1 {
-                if code == 58 {
-                    self.caps = !self.caps;
-                } else if let Some(byte) = key_byte(code, self.shifts != 0, self.caps) {
-                    return Ok(Some(byte));
-                }
-            }
-        }
-    }
-}
-
-// US evdev layout for the trusted login prompt. IMEs belong to the desktop.
-fn key_byte(code: u16, shift: bool, caps: bool) -> Option<u8> {
-    let (normal, shifted, start): (&[u8], &[u8], u16) = match code {
-        1 => return Some(27),
-        14 => return Some(8),
-        28 | 96 => return Some(b'\n'),
-        57 => return Some(b' '),
-        2..=13 => (b"1234567890-=", b"!@#$%^&*()_+", 2),
-        16..=27 => (b"qwertyuiop[]", b"QWERTYUIOP{}", 16),
-        30..=41 => (b"asdfghjkl;'\x60", b"ASDFGHJKL:\"~", 30),
-        43 => return Some(if shift { b'|' } else { b'\\' }),
-        44..=53 => (b"zxcvbnm,./", b"ZXCVBNM<>?", 44),
-        _ => return None,
+fn set_close_on_exec(handle: &scarlet_os::Handle, enabled: bool) -> io::Result<()> {
+    // SAFETY: set the descriptor-local close-on-exec bit on an owned handle.
+    let result = unsafe {
+        scarlet_sys::syscall2(
+            scarlet_sys::Syscall::HandleSetDescriptorFlags,
+            handle.as_raw() as usize,
+            enabled as usize,
+        )
     };
-    let index = usize::from(code - start);
-    Some(if shift ^ (caps && normal[index].is_ascii_alphabetic()) {
-        shifted[index]
-    } else {
-        normal[index]
-    })
+    if result != 0 {
+        return Err(io::Error::other("cannot isolate login descriptor"));
+    }
+    Ok(())
+}
+fn file_from_handle(handle: scarlet_os::Handle) -> File {
+    use std::os::fd::FromRawFd;
+    let fd = std::mem::ManuallyDrop::new(handle);
+    // SAFETY: transfer sole ownership of this descriptor into the std File.
+    unsafe { File::from_raw_fd(fd.as_raw()) }
+}
+// Scarlet std duplicates the descriptor metadata when assigning child stdio.
+// Clear CLOEXEC only on the endpoints handed to this spawn. The seat spawns
+// children serially, dropping the Command and its endpoints before the next.
+fn child_stdio(handle: scarlet_os::Handle) -> io::Result<File> {
+    set_close_on_exec(&handle, false)?;
+    Ok(file_from_handle(handle))
 }
 
-fn paint(display: &mut DisplaySurface, panel: &[u8]) -> io::Result<()> {
-    let info = display
-        .get_info()
-        .map_err(|_| io::Error::other("login display info"))?;
-    let (w, h) = (info.width, info.height);
-    let stride = (w as usize)
-        .checked_mul(4)
-        .ok_or_else(|| io::Error::other("invalid display width"))?;
-    let size = stride
-        .checked_mul(h as usize)
-        .ok_or_else(|| io::Error::other("invalid display height"))?;
-    let mut frame = vec![0; size];
-    let pw = w.min(WIDTH) as usize;
-    let ph = h.min(HEIGHT) as usize;
-    let x = (w as usize - pw) / 2;
-    let y = (h as usize - ph) / 2;
-    for row in 0..ph {
-        let dest = (row + y) * stride + x * 4;
-        let source = row * WIDTH as usize * 4;
-        frame[dest..dest + pw * 4].copy_from_slice(&panel[source..source + pw * 4]);
+fn private_pipe() -> io::Result<(scarlet_os::Handle, scarlet_os::Handle)> {
+    let (read, write) = scarlet_os::ipc::pipe().map_err(os_err)?;
+    set_close_on_exec(&read, true)?;
+    set_close_on_exec(&write, true)?;
+    Ok((read, write))
+}
+fn private_pair() -> io::Result<(Socket, Socket)> {
+    let (a, b) = Socket::pair().map_err(os_err)?;
+    set_close_on_exec(a.as_handle(), true)?;
+    set_close_on_exec(b.as_handle(), true)?;
+    Ok((a, b))
+}
+
+struct LoginChild(Child);
+impl Drop for LoginChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
-    display
-        .write_bgra_strided(0, 0, w, h, &frame, stride)
-        .map_err(|e| io::Error::other(format!("cannot write login display: {e:?}")))?;
-    display
-        .present()
-        .map_err(|e| io::Error::other(format!("cannot present login screen: {e:?}")))
+}
+impl LoginChild {
+    fn start(command: &mut Command, input: Socket) -> io::Result<Self> {
+        let file = child_stdio(input.into_handle())?;
+        command
+            .env_clear()
+            .env("SCARLET_UI_BACKEND", "cpu")
+            .env("SWS_BACKEND", "cpu")
+            .stdin(Stdio::from(file))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(Self)
+    }
+    fn running(&mut self) -> io::Result<()> {
+        if self.0.try_wait()?.is_some() {
+            return Err(io::Error::other("login display service exited"));
+        }
+        Ok(())
+    }
 }
 
 fn authenticate(broker: &mut Worker, config: &Config) -> io::Result<()> {
-    let mut renderer = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
-    let mut display = DisplaySurface::open_primary()
-        .map_err(|_| io::Error::other("login display unavailable"))?;
-    let mut keys: [Keyboard; 8] = std::array::from_fn(|_| Keyboard::default());
-    let mut scan = None;
-    let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize * 4];
-    let mut state = [0; 37];
-    broker.exchange(&[0], &mut state)?;
+    let (editor, editor_server) = private_pair()?;
+    let (provider, provider_server) = private_pair()?;
+    let (bootstrap, child_socket) = private_pair()?;
+    bootstrap
+        .send_handle(editor_server.as_handle())
+        .map_err(os_err)?;
+    bootstrap
+        .send_handle(provider_server.as_handle())
+        .map_err(os_err)?;
+    drop((editor_server, provider_server));
+    let mut compositor = LoginChild::start(
+        Command::new(&config.compositor[0])
+            .arg("--login-seat")
+            .args(&config.compositor[1..]),
+        child_socket,
+    )?;
+    let mut keyboard =
+        LoginChild::start(Command::new(&config.broker).arg("--login-panel"), provider)?;
+    let mut painter = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
+    sws_client::Connection::with_inherited_socket(editor, || {
+        login_window(broker, &mut painter, || {
+            compositor.running()?;
+            keyboard.running()
+        })
+    })
+    .map_err(os_err)?
+}
+
+fn background(painter: &mut Worker, width: u32, height: u32) -> io::Result<BitmapImage> {
+    let ratio = 1440.0 / (width.max(height).max(1) as f64);
+    let w = ((width as f64 * ratio.min(1.)).round() as u32).max(1);
+    let h = ((height as f64 * ratio.min(1.)).round() as u32).max(1);
+    let mut request = [0; 8];
+    request[..4].copy_from_slice(&w.to_le_bytes());
+    request[4..].copy_from_slice(&h.to_le_bytes());
+    let mut pixels = vec![0; w as usize * h as usize * 4];
+    painter.exchange(&request, &mut pixels)?;
+    Ok(BitmapImage::from_bgra(
+        pixels
+            .chunks_exact(4)
+            .map(|p| u32::from_le_bytes(p.try_into().unwrap()))
+            .collect(),
+        w,
+        h,
+    ))
+}
+
+#[cfg(target_os = "scarlet")]
+fn login_window(
+    broker: &mut Worker,
+    painter: &mut Worker,
+    alive: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    use scarlet_ui::{PlatformWindow, SWSPlatformWindow};
+    let conn = sws_client::Connection::connect_default().map_err(os_err)?;
+    let (w, h) = conn.get_screen_size().map_err(os_err)?;
+    let scale = conn.get_output_scale().map_err(os_err)?.max(1000) as f32 / 1000.;
+    let mut window = SWSPlatformWindow::create_with_type(
+        "org.scarlet-os.shell.login",
+        "Sign in",
+        Size::new(w as f32 / scale, h as f32 / scale),
+        sws_protocol::window_types::NORMAL,
+    )
+    .map_err(os_err)?;
+    window.set_fullscreen(true).map_err(os_err)?;
+    fonts::initialize()?;
+    let wait = conn.clone();
+    run_editor(broker, painter, &mut window, alive, move || {
+        wait.wait_for_subscribed_window_events(Duration::from_millis(80))
+            .map(|_| ())
+            .map_err(os_err)
+    })
+}
+#[cfg(not(target_os = "scarlet"))]
+fn login_window(
+    _: &mut Worker,
+    _: &mut Worker,
+    _: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    Err(io::Error::other("login requires the Scarlet window server"))
+}
+
+fn run_editor(
+    broker: &mut Worker,
+    painter: &mut Worker,
+    window: &mut dyn scarlet_ui::PlatformWindow,
+    mut alive: impl FnMut() -> io::Result<()>,
+    mut wait: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    use greeter_ui::{Actions, Screen};
+    use scarlet_ui::event::Event;
+    let mut reply = [0; 37];
+    broker.exchange(&[19], &mut reply)?;
+    let mut size = window.size();
+    let mut screen = Screen {
+        width: size.width as u32,
+        height: size.height as u32,
+        covered: 0.,
+        display: reply[1..].try_into().unwrap(),
+    };
+    let actions = Actions::default();
+    let value = State::new(scarlet_ui::generate_state_id(), screen.value());
+    let mut pipeline = RenderingPipeline::new();
+    let clock_format = scarlet_desktop_config::load_desktop_config()
+        .status
+        .clock_format;
+    let time_label = State::new(scarlet_ui::generate_state_id(), String::new());
+    let mut next_clock_check = Instant::now();
+    let mut wallpaper = background(painter, screen.width, screen.height)?;
+    let mut rebuild = true;
+    let mut focus = true;
     loop {
-        renderer.exchange(&state[1..], &mut pixels)?;
-        paint(&mut display, &pixels)?;
-        loop {
-            let now = Instant::now();
-            if scan.is_none_or(|last: Instant| now.duration_since(last) >= Duration::from_secs(1)) {
-                scan = Some(now);
-                for (index, kbd) in keys.iter_mut().enumerate() {
-                    if kbd.device.is_none() {
-                        kbd.device = InputDevice::open(&format!("/dev/keyboard{index}"))
-                            .ok()
-                            .filter(|d| d.set_nonblocking(true).is_ok());
-                    }
+        alive()?;
+        if screen.display[0] >= 3 && Instant::now() >= next_clock_check {
+            next_clock_check = Instant::now() + Duration::from_secs(1);
+            if let Some(seconds) = clock::local_seconds_of_day() {
+                let label = clock::format_clock(
+                    (seconds / 3600) as u8,
+                    ((seconds / 60) % 60) as u8,
+                    clock_format,
+                );
+                if time_label.get() != label {
+                    time_label.set(label);
+                    pipeline.request_redraw();
                 }
             }
-            let mut pressed = None;
-            for keyboard in &mut keys {
-                if let Some(byte) = keyboard.read_key()? {
-                    pressed = Some(byte);
+        }
+        if rebuild {
+            pipeline.set_root(
+                screen
+                    .window(
+                        actions.clone(),
+                        wallpaper.clone(),
+                        value.clone(),
+                        focus,
+                        time_label.clone(),
+                    )
+                    .create_element(),
+            );
+            pipeline.layout_initial();
+            pipeline.resize(size);
+            pipeline.set_scale_milli(window.output_scale_milli());
+            rebuild = false;
+        }
+        // Same focused TextField contract as the ScarletUI ApplicationRunner.
+        window.sync_text_input(pipeline.focused_text_input_state().as_ref());
+        if pipeline.has_dirty()
+            && let Some(frame) = pipeline.render()
+        {
+            window.present(frame);
+        }
+        wait()?;
+        while let Some(event) = window.poll_event() {
+            let key = match &event {
+                Event::Quit | Event::Window(scarlet_ui::event::WindowEvent::CloseRequested) => {
+                    return Err(io::Error::other("login surface closed"));
+                }
+                Event::Resize { width, height }
+                | Event::FullscreenConfigure { width, height, .. } => {
+                    if *width == 0 || *height == 0 {
+                        continue;
+                    }
+                    window.resize(*width, *height).map_err(os_err)?;
+                    size = window.size();
+                    screen.width = size.width as u32;
+                    screen.height = size.height as u32;
+                    wallpaper = background(painter, screen.width, screen.height)?;
+                    focus = pipeline.focused_text_input_state().is_some();
+                    rebuild = true;
+                    break;
+                }
+                Event::InputPanelOcclusionChanged { occlusion } => {
+                    let covered =
+                        occlusion.map_or(0., |r| (size.height - r.origin.y).clamp(0., size.height));
+                    if screen.covered != covered {
+                        screen.covered = covered;
+                        focus = pipeline.focused_text_input_state().is_some();
+                        rebuild = true;
+                        break;
+                    }
+                    None
+                }
+                Event::Keyboard(key) => greeter_ui::broker_key(key),
+                // TextField retains only the broker's masked display state.
+                Event::Input(_)
+                | Event::TextInputCommit { .. }
+                | Event::TextInputPreedit { .. }
+                | Event::TextInputDeleteSurroundingText { .. } => None,
+                _ => {
+                    pipeline.handle_event(&event);
+                    actions.take().map(|a| a.broker_byte())
+                }
+            };
+            if let Some(byte) = key {
+                broker.exchange(&[byte], &mut reply)?;
+                if reply[0] == 2 {
+                    return Ok(());
+                }
+                let next: [u8; 36] = reply[1..].try_into().unwrap();
+                rebuild =
+                    next[..2] != screen.display[..2] || (next[0] >= 3 && next != screen.display);
+                screen.display = next;
+                value.set(screen.value());
+                pipeline.request_redraw();
+                if rebuild {
+                    focus = true;
                     break;
                 }
             }
-            if let Some(byte) = pressed {
-                broker.exchange(&[byte], &mut state)?;
-                if state[0] == 2 {
-                    return Ok(());
-                }
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
         }
     }
 }

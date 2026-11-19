@@ -51,23 +51,14 @@ pub fn launcher_icon(
 }
 
 #[cfg(target_os = "scarlet")]
+#[path="fonts.rs"]
+mod fonts;
+#[cfg(target_os = "scarlet")]
 pub fn initialize_fonts() {
     if std::env::var_os("SCARLET_UI_FONT_PATH").is_some() {
         return;
     }
-    // The pinned std font discovery treats all bundled families as SystemUi,
-    // including terminal fonts. Keep the distribution's UI face first in both
-    // shell modes, matching ScarletUI's established non-std font stack.
-    let Ok(primary) = std::fs::read("/share/fonts/Mplus1-Regular.ttf") else {
-        return;
-    };
-    if scarlet_ui::graphics::set_default_font(Box::leak(primary.into_boxed_slice())).is_err() {
-        return;
-    }
-    if let Ok(fallback) = std::fs::read("/share/fonts/JetBrainsMonoNerdFontMono-Regular.ttf") {
-        let _ =
-            scarlet_ui::graphics::add_default_font_fallback(Box::leak(fallback.into_boxed_slice()));
-    }
+    let _ = fonts::initialize();
 }
 
 pub fn icon(name: &str) -> Icon {

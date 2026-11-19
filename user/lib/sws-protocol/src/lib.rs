@@ -331,6 +331,8 @@ pub mod compositor_backends {
 
 /// Stable protocol error codes used by SGFX lifecycle requests.
 pub mod error_codes {
+    /// Operation is unavailable on an isolated login compositor.
+    pub const LOGIN_REQUEST_DENIED: u32 = 125;
     pub const STALE_OUTPUT_GENERATION: u32 = 121;
     pub const INVALID_OUTPUT_CONFIGURATION: u32 = 122;
     pub const OUTPUT_CONFIGURATION_NOT_SAVED: u32 = 123;

@@ -2486,6 +2486,7 @@ fn discover_secondary_endpoints() -> Vec<SecondaryEndpoint> {
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
+    login_seat: bool,
     /// Display outputs: the primary plus any connected secondary displays.
     outputs: OutputSet<DisplayTarget>,
     /// Non-primary display endpoints, connected or not.
@@ -2887,7 +2888,7 @@ impl Compositor {
     }
 
     /// Create a new compositor
-    pub fn new() -> Result<Self, &'static str> {
+    pub fn new(login_clients: Option<[scarlet_os::Socket; 2]>) -> Result<Self, &'static str> {
         println!("[Compositor] Starting initialization...");
 
         // Open the modern display endpoint. The legacy framebuffer node remains
@@ -2914,7 +2915,13 @@ impl Compositor {
         let pixel_width = var_info.xres;
         let pixel_height = var_info.yres;
         let backend = selected_sws_backend()?;
-        let sws_config = load_sws_config();
+        let login_seat = login_clients.is_some();
+        let mut sws_config = load_sws_config();
+        if login_seat {
+            sws_config.shell_action_bindings.clear();
+            sws_config.overview_toggle_bindings.clear();
+            sws_config.ime_toggle_bindings.clear();
+        }
         let output_scale_milli = sws_config.output_scale_milli;
         let logical = sws_protocol::outputs::OutputMode { pixel_width, pixel_height, refresh_millihz: 0 }.logical_size(output_scale_milli).map_err(|_| "Invalid output scale")?;
         let (screen_width, screen_height) = (logical.0.saturating_mul(2), logical.1.saturating_mul(2));
@@ -2958,8 +2965,10 @@ impl Compositor {
         // Claim both public endpoints before starting any compositor workers.
         // A stale or live server address must fail initialization without
         // leaving input, GPU, or accept threads behind.
-        ipc_server.bind()?;
-        remote_server.bind()?;
+        if login_clients.is_none() {
+            ipc_server.bind()?;
+            remote_server.bind()?;
+        }
 
         // Start input threads only after both server addresses are secured.
         InputManager::start_input_thread(screen_width, screen_height)?;
@@ -3037,8 +3046,12 @@ impl Compositor {
             None,
             input_environment.windowing_mode(),
         );
-        ipc_server.listen()?;
-        remote_server.listen()?;
+        if let Some([editor, panel]) = login_clients {
+            ipc_server.start_login_clients(editor, panel)?;
+        } else {
+            ipc_server.listen()?;
+            remote_server.listen()?;
+        }
 
         let mut gesture_recognizer = GestureRecognizer::new(screen_width, screen_height);
         // No contact can be active during construction, so this only installs
@@ -3078,6 +3091,7 @@ impl Compositor {
         );
 
         Ok(Self {
+            login_seat,
             outputs: OutputSet::single(primary_output),
             secondary_endpoints,
             detached_output_geometry: BTreeMap::new(),
@@ -6493,7 +6507,9 @@ impl Compositor {
                 super::input::abs_codes::ABS_Y,
                 window_y,
             );
-            super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+            super::ipc::send_input_to_window(
+                            window_id, 0, super::input::event_types::EV_SYN, 0, 0,
+                        );
         }
     }
 
@@ -6978,7 +6994,8 @@ impl Compositor {
     }
 
     fn tablet_navigation_indicator(&self) -> Option<(i32, i32, u32, u32)> {
-        if !self.tablet_mode
+        if self.login_seat
+            || !self.tablet_mode
             || self.workspace_manager.presentation()
                 != sws_protocol::workspace::ShellPresentation::Workspace
         {
@@ -7713,10 +7730,10 @@ impl Compositor {
             false
         };
 
-        if self.handle_tablet_navigation(&frame) {
+        if !self.login_seat && self.handle_tablet_navigation(&frame) {
             return true;
         }
-        if let Some(shell_redraw) = self.handle_system_touch_navigation(&frame) {
+        if !self.login_seat && let Some(shell_redraw) = self.handle_system_touch_navigation(&frame) {
             return redraw || shell_redraw;
         }
         let context = self.current_input_frame;
@@ -9542,6 +9559,15 @@ impl Compositor {
                             monotonic_time_ns(),
                         );
                     }
+                }
+                if self.login_seat {
+                    if let Some(window_id) = focused_id {
+                        super::ipc::send_input_to_window(
+                            window_id, 0, super::input::event_types::EV_KEY, code, value,
+                        );
+                        super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+                    }
+                    return Ok(false);
                 }
                 if matches!(code, key_codes::KEY_VOLUMEDOWN | key_codes::KEY_VOLUMEUP) {
                     // System controls are independent of app focus, IME and pointer lock.

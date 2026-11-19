@@ -622,6 +622,22 @@ mod panel {
 fn main() {
     #[cfg(target_os = "scarlet")]
     {
+        if std::env::args().nth(1).as_deref() == Some("--login-seat") {
+            // stdin is the provider's connected endpoint, installed by scarlet-seat.
+            // Connection errors terminate this instance without looking up a public service.
+            let socket = unsafe { scarlet_os::Handle::from_raw(0) }
+                .ok()
+                .and_then(|fd| scarlet_os::Socket::from_handle(fd).ok());
+            if let Some(socket) = socket
+                && matches!(
+                    sws_client::Connection::with_inherited_socket(socket, panel::run),
+                    Ok(Ok(()))
+                )
+            {
+                return;
+            }
+            std::process::exit(1);
+        }
         // Keep the stemd-launched process alive across a lost SWS connection or
         // a renderer that needs recreation. Bound repeated startup failures.
         let mut failures = 0u32;
