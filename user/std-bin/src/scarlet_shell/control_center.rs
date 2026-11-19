@@ -25,7 +25,7 @@ use scarlet_ui::views::{
 };
 use scarlet_ui::{Icon, IconSize, IconView};
 
-use super::network_status::NetworkKind;
+use super::{SessionAction, network_status::NetworkKind};
 
 /// The shell presentation used for the Control Center window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,6 +243,9 @@ pub enum ControlCenterPage {
     AudioOutputs(usize),
     Network,
     System,
+    Power,
+    Session,
+    Confirm(SessionAction),
 }
 
 /// Typed command emitted by standard ScarletUI controls.
@@ -258,10 +261,8 @@ pub enum ControlCenterAction {
     SelectOutput(String),
     /// Open a settings destination.
     OpenSettings,
-    /// Confirm a previously armed power-off request.
-    ConfirmPowerOff,
-    /// Confirm a previously armed reboot request.
-    ConfirmReboot,
+    /// Execute a desktop session or power action.
+    Session(SessionAction),
 }
 
 /// Suppress repeated integer writes only while their acknowledged provider
@@ -417,6 +418,12 @@ pub fn build_control_center_view(
         }
         ControlCenterPage::Network | ControlCenterPage::System => {
             details_page(metrics, &snapshot, &session)
+        }
+        ControlCenterPage::Power | ControlCenterPage::Session => {
+            session_page(metrics, &session)
+        }
+        ControlCenterPage::Confirm(confirmed) => {
+            confirmation_page(metrics, confirmed, &action, &session)
         }
     };
     let page = VStack::new(DynamicViews::new(rows))
@@ -1127,6 +1134,78 @@ fn details_page(
     ]
 }
 
+fn session_page(
+    metrics: ControlCenterMetrics,
+    session: &State<ControlCenterSession>,
+) -> Vec<Box<dyn View>> {
+    let (title, options): (_, &[_]) = if metrics.page == ControlCenterPage::Power {
+        ("Power", &[
+            (SessionAction::Restart, Icon::Refresh),
+            (SessionAction::PowerOff, Icon::Power),
+        ])
+    } else {
+        ("Session", &[(SessionAction::LogOut, Icon::Logout)])
+    };
+    let width = metrics.content_width();
+    let gap = (metrics.gap as f32).min(width / 4.0);
+    let height = (metrics.details_height as f32).min(metrics.target_height as f32).max(1.0);
+    let button_width = ((width - gap) / 2.0).max(1.0);
+    let buttons = options.iter().map(|&(command, icon)| {
+        let session = session.clone();
+        boxed(Button::new(alloc::format!("{}…", command.label()))
+            .icon(icon)
+            .icon_size(IconSize::Small)
+            .font_size(12.0)
+            .padding(0.0)
+            .enabled(command.available())
+            .on_click(move || {
+                session.update(|session| session.page = ControlCenterPage::Confirm(command));
+            })
+            .frame(button_width, height)
+            .clip())
+    }).collect();
+    vec![
+        details_header(title, metrics, session),
+        content_section(width, metrics.details_height as f32, vec![
+            control_row(buttons, width, height, gap),
+        ], gap),
+    ]
+}
+
+fn confirmation_page(
+    metrics: ControlCenterMetrics,
+    confirmed: SessionAction,
+    action: &State<Option<ControlCenterAction>>,
+    session: &State<ControlCenterSession>,
+) -> Vec<Box<dyn View>> {
+    let width = metrics.content_width();
+    let gap = metrics.gap as f32;
+    let height = (metrics.details_height as f32 / 2.0).min(metrics.target_height as f32).max(1.0);
+    let previous = if confirmed == SessionAction::LogOut {
+        ControlCenterPage::Session
+    } else {
+        ControlCenterPage::Power
+    };
+    let session = session.clone();
+    let action = action.clone();
+    let buttons = control_row(vec![
+        boxed(Spacer::new()),
+        boxed(Button::new("Cancel").on_click(move || session.update(|s| s.page = previous))),
+        boxed(Button::new(confirmed.label()).on_click(move || {
+            action.set(Some(ControlCenterAction::Session(confirmed)));
+        })),
+    ], width, height, gap);
+    vec![
+        boxed(Text::new(confirmed.question())
+            .font_size(14.0)
+            .frame(width, metrics.target_height as f32)),
+        content_section(width, metrics.details_height as f32, vec![
+            boxed(Text::new("Unsaved work may be lost.").text_style(TextStyle::Caption)),
+            buttons,
+        ], gap),
+    ]
+}
+
 fn footer_row(
     metrics: ControlCenterMetrics,
     snapshot: &ControlCenterSnapshot,
@@ -1135,34 +1214,71 @@ fn footer_row(
 ) -> Box<dyn View> {
     let width = metrics.content_width();
     let height = metrics.target_height as f32;
-    let gap = metrics.gap as f32;
-    let settings_width = 30.0;
-    let leading_width = (width - settings_width - gap).max(1.0);
-    let leading = if metrics.page == ControlCenterPage::Controls {
-        let summary = alloc::format!(
-            "{} · {}",
-            system_label(&snapshot.system),
-            input_label(&snapshot.input_environment)
-        );
+    let gap = (metrics.gap as f32).min(4.0).min(width / 12.0);
+    let icon_width = height.min((width - 3.0 * gap) / 4.0).max(1.0);
+    let icon = |icon, pressed| {
+        let button = Button::icon_only(icon)
+            .header_style()
+            .icon_size(IconSize::Small)
+            .padding(0.0);
+        if pressed {
+            button.background_color(ColorPalette::default().header_button_hover())
+        } else {
+            button
+        }
+    };
+    let shortcut = |icon_id, page| {
+        let session = session.clone();
+        boxed(icon(icon_id, metrics.page == page).on_click(move || {
+            session.update(|session| {
+                session.page = if session.page == page { ControlCenterPage::Controls } else { page };
+            });
+        }).frame(icon_width, height))
+    };
+    let power = shortcut(Icon::Power, ControlCenterPage::Power);
+    let session_menu = shortcut(Icon::Lock, ControlCenterPage::Session);
+    let settings = boxed(icon(Icon::Settings, false)
+        .on_click(move || action.set(Some(ControlCenterAction::OpenSettings)))
+        .frame(icon_width, height));
+    let system_width = (width - 3.0 * icon_width - 4.0 * gap).max(1.0);
+    let status = system_label(&snapshot.system);
+    let input = input_label(&snapshot.input_environment);
+    let summary = alloc::format!("{status} · {input}");
+    let label_width = scarlet_ui::measure_text_sized(&summary, 12.0).0 as f32 + 26.0;
+    let system = if label_width <= system_width {
         page_button(
             &summary,
             Icon::ChartBar,
             ControlCenterPage::System,
-            Size::new(leading_width, height),
+            Size::new(label_width, height),
             session,
         )
     } else {
-        boxed(Spacer::new().frame(leading_width, height))
+        let icon_width = 22.0_f32.min(system_width / 4.0);
+        let text_width = (system_width - icon_width - gap).max(1.0);
+        let line = |label: String| {
+            Text::new(label).font_size(11.0).line_limit(Some(1))
+                .alignment(Alignment::Trailing).frame(text_width, height / 2.0)
+        };
+        let icon = page_button(
+            "",
+            Icon::ChartBar,
+            ControlCenterPage::System,
+            Size::new(icon_width, height),
+            session,
+        );
+        let session = session.clone();
+        boxed(HStack::new(DynamicViews::new(vec![
+            icon,
+            boxed(VStack::new((line(status), line(input.into()))).spacing(0.0)),
+        ]))
+        .spacing(gap)
+        .alignment(Alignment::Center)
+        .frame(system_width, height)
+        .on_click(move || session.update(|current| current.page = ControlCenterPage::System)))
     };
-    let settings = boxed(
-        Button::icon_only(Icon::Settings)
-            .header_style()
-            .icon_size(IconSize::Small)
-            .padding(0.0)
-            .on_click(move || action.set(Some(ControlCenterAction::OpenSettings)))
-            .frame(settings_width, height),
-    );
-    control_row(vec![leading, settings], width, height, gap)
+    control_row(vec![power, session_menu, settings, boxed(Spacer::new()), system],
+        width, height, gap)
 }
 
 fn control_row(children: Vec<Box<dyn View>>, width: f32, height: f32, gap: f32) -> Box<dyn View> {

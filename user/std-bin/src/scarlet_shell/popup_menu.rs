@@ -217,8 +217,6 @@ impl MenuDisplay {
         let available = (self.size.width - 16.0).max(1.0);
         let preferred = if model.overview() {
             420.0
-        } else if model.scarlet_menu() {
-            176.0
         } else {
             220.0
         };
@@ -400,17 +398,8 @@ impl MenuModel<'_> {
         self.tree.items.get(self.index)
     }
 
-    fn scarlet_menu(&self) -> bool {
-        self.index == 0 && self.root().is_some_and(|item| item.id == "system_scarlet")
-    }
-
     fn items(&self, entries: &[TaskMenuEntry]) -> Vec<MenuItemContent> {
-        build_menu_items(
-            entries,
-            self.active_window,
-            self.endpoint,
-            self.scarlet_menu(),
-        )
+        build_menu_items(entries, self.active_window, self.endpoint)
     }
 
     fn root_items(

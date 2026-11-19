@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sws_protocol::outputs::{OutputEvent, OutputSnapshot};
 
 const SCENES: &[&str] = &["main", CONTROL_CENTER_SCENE_KEY, HOME_BACKDROP_SCENE_KEY,
-    OVERVIEW_DRAWER_SCENE_KEY, HOME_SCENE_KEY, CONSOLE_CHROME_SCENE_KEY, volume_osd::SCENE_KEY,
-    SESSION_CONFIRMATION_SCENE_KEY];
+    OVERVIEW_DRAWER_SCENE_KEY, HOME_SCENE_KEY, CONSOLE_CHROME_SCENE_KEY, volume_osd::SCENE_KEY];
 
 pub(super) fn key(output: u32, local: &str) -> String {
     if output == 0 { local.into() } else { format!("output-{output}/{local}") }
@@ -21,7 +20,6 @@ pub(super) struct Endpoint {
     pub commands: State<Vec<WorkspaceCommand>>,
     pub open_menu: State<Option<usize>>,
     pub menu_surfaces: State<Vec<u32>>,
-    pub session_confirmation: State<Option<SessionAction>>,
     pub menu_tree: State<MenuTree>,
     pub active_window: State<u32>,
     pub screen_width: State<f32>,
@@ -34,7 +32,6 @@ impl Endpoint {
         Self { id: app.output_id.get(), workspace: app.workspace_state.clone(),
             commands: app.workspace_commands.clone(), open_menu: app.open_menu_index.clone(),
             menu_surfaces: app.menu_surfaces.clone(), menu_tree: app.menu_tree.clone(),
-            session_confirmation: app.session_confirmation.clone(),
             active_window: app.active_window_id.clone(), screen_width: app.screen_width.clone(),
             layout: app.shell_layout.clone(), windows: app.windows.clone(), overview_page: app.overview_page.clone() }
     }
