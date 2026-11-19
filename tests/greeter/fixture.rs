@@ -1,9 +1,9 @@
 //! CPU-only snapshots of the production View tree; no authentication is run.
 #[path = "../../user/std-bin/src/greeter_ui.rs"]
 mod greeter_ui;
-#[allow(dead_code)]
-#[path = "../../user/std-bin/src/soft_keyboard/layout.rs"]
-mod keyboard_layout;
+#[path = "../../user/std-bin/src/scarlet_shell/wallpaper.rs"]
+mod wallpaper;
+use scarlet_ui::{RenderingPipeline, prelude::*};
 use std::io::Write;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -31,12 +31,23 @@ fn main() {
     let screen = greeter_ui::Screen {
         width,
         height,
-        state,
-        keyboard: true,
-        shift: false,
-        layer: keyboard_layout::Layer::Letters,
+        display: state,
+        covered: args.get(6).and_then(|n| n.parse().ok()).unwrap_or(0.),
     };
-    let mut pipeline = screen.pipeline();
+    let mut pipeline = RenderingPipeline::new();
+    let value = State::new(scarlet_ui::generate_state_id(), screen.value());
+    pipeline.set_root(
+        screen
+            .window(
+                Default::default(),
+                wallpaper::load_background_state().login_bitmap(width, height),
+                value,
+                true,
+                State::new(scarlet_ui::generate_state_id(), "09:41".to_owned()),
+            )
+            .create_element(),
+    );
+    pipeline.layout_initial();
     let frame = pipeline.render().expect("CPU frame");
     let mut output = std::fs::File::create(&args[4]).unwrap();
     write!(output, "P6\n{width} {height}\n255\n").unwrap();

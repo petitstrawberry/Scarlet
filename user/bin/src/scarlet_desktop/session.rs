@@ -1,4 +1,4 @@
-//! Local-seat session supervisor. The compositor owns the private stdio
+//! Local-seat session supervisor. The seat owns the private stdio
 //! channel. Each input byte produces a 37-byte reply: active flag followed
 //! by the greeter's 36-byte display state. No password bytes leave this process.
 #![no_std]
@@ -315,9 +315,22 @@ impl Seat {
     }
 }
 
+fn exec_anonymous(program: &str, argv: &[&str], env: &[&str]) -> i32 {
+    // SAFETY: this exclusive launcher owns only the stdio descriptors. The
+    // transition clears all grants and discards any extra inherited handles.
+    if unsafe { scarlet_os::shield::enter_user_session(u32::MAX, u32::MAX, &[]) }.is_ok() {
+        std::task::execve(program, argv, env);
+    }
+    1
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let args = std::env::args_vec();
+    if args.len() == 2 && args[1] == "--login-panel" {
+        let panel = "/bin/soft-keyboard";
+        return exec_anonymous(panel, &[panel, "--login-seat"], &["SCARLET_UI_BACKEND=cpu"]);
+    }
     let Some((program, rest)) = args.get(2..).and_then(|args| args.split_first()) else {
         return 2;
     };
@@ -326,12 +339,7 @@ fn main() -> i32 {
     }
     match args[1].as_str() {
         "--render-greeter" if rest.is_empty() => {
-            // No configured login may use the anonymous renderer identity.
-            if unsafe { scarlet_os::shield::enter_user_session(u32::MAX, u32::MAX, &[]) }.is_err() {
-                return 1;
-            }
-            std::task::execve(program, &[program], &[]);
-            return 1;
+            return exec_anonymous(program, &[program], &[]);
         }
         "--session" => {}
         _ => return 2,

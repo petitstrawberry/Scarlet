@@ -2445,6 +2445,13 @@ impl IpcServer {
         })
     }
 
+    pub fn start_login_clients(&mut self, editor: Socket, panel: Socket) -> Result<(), &'static str> {
+        start_client(0, editor, Some(LoginPeer::Editor))?;
+        start_client(1, panel, Some(LoginPeer::Panel))?;
+        self.accept_thread_started = true;
+        Ok(())
+    }
+
     /// Bind and listen on the IPC socket without starting worker threads.
     ///
     /// # Returns
@@ -2581,59 +2588,7 @@ fn accept_thread_main(server_socket: Socket) {
                     );
                 }
 
-                // Register client for broadcast messages
-                {
-                    let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
-                    pending.entry(client_id).or_insert_with(Vec::new);
-                    if is_sws_debug_enabled() {
-                        println!(
-                            "[AcceptThread] Registered client {} for broadcast messages",
-                            client_id
-                        );
-                    }
-                }
-
-                let client_wake = match scarlet_os::ipc::pipe() {
-                    Ok((wake_read, wake_write)) => {
-                        CLIENT_WAKES.lock().expect("SWS mutex poisoned").insert(
-                            client_id,
-                            ClientWake {
-                                write_handle: wake_write,
-                                pending: false,
-                            },
-                        );
-                        Some(wake_read)
-                    }
-                    Err(_) => {
-                        println!(
-                            "[AcceptThread] Failed to create wake pipe for client {}",
-                            client_id
-                        );
-                        None
-                    }
-                };
-
-                // A transient thread-allocation failure must reject only this
-                // connection, not panic the process that owns the desktop.
-                if thread::Builder::new()
-                    .spawn(move || {
-                        client_thread_main(client_id, client_socket, client_wake);
-                    })
-                    .is_err()
-                {
-                    PENDING_CLIENT_RESPONSES
-                        .lock()
-                        .expect("SWS mutex poisoned")
-                        .remove(&client_id);
-                    CLIENT_WAKES
-                        .lock()
-                        .expect("SWS mutex poisoned")
-                        .remove(&client_id);
-                    println!(
-                        "[AcceptThread] Failed to start handler for client {}",
-                        client_id
-                    );
-                }
+                let _ = start_client(client_id, client_socket, None);
             }
             Err(scarlet_os::socket::SocketError::WouldBlock) => {
                 thread::sleep(core::time::Duration::from_millis(10));
@@ -2649,8 +2604,73 @@ fn accept_thread_main(server_socket: Socket) {
     }
 }
 
+#[path = "login_access.rs"]
+mod login_access;
+use login_access::{LoginPeer, login_request_allowed};
+fn start_client(
+    client_id: usize,
+    client_socket: Socket,
+    login: Option<LoginPeer>,
+) -> Result<(), &'static str> {
+    // Register client for broadcast messages
+    {
+        let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
+        pending.entry(client_id).or_insert_with(Vec::new);
+        if is_sws_debug_enabled() {
+            println!(
+                "[AcceptThread] Registered client {} for broadcast messages",
+                client_id
+            );
+        }
+    }
+
+    let client_wake = match scarlet_os::ipc::pipe() {
+        Ok((wake_read, wake_write)) => {
+            CLIENT_WAKES.lock().expect("SWS mutex poisoned").insert(
+                client_id,
+                ClientWake {
+                    write_handle: wake_write,
+                    pending: false,
+                },
+            );
+            Some(wake_read)
+        }
+        Err(_) => {
+            println!(
+                "[AcceptThread] Failed to create wake pipe for client {}",
+                client_id
+            );
+            None
+        }
+    };
+
+    // A transient thread-allocation failure must reject only this
+    // connection, not panic the process that owns the desktop.
+    if thread::Builder::new()
+        .spawn(move || {
+            client_thread_main(client_id, client_socket, client_wake, login);
+        })
+        .is_err()
+    {
+        PENDING_CLIENT_RESPONSES
+            .lock()
+            .expect("SWS mutex poisoned")
+            .remove(&client_id);
+        CLIENT_WAKES
+            .lock()
+            .expect("SWS mutex poisoned")
+            .remove(&client_id);
+        println!(
+            "[AcceptThread] Failed to start handler for client {}",
+            client_id
+        );
+        return Err("Failed to start SWS client");
+    }
+    Ok(())
+}
+
 /// Client thread main function
-fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Handle>) {
+fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Handle>, login: Option<LoginPeer>) {
     if is_sws_debug_enabled() {
         println!(
             "[ClientThread {}] Started (socket handle: {})",
@@ -2998,7 +3018,18 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             continue;
         }
 
-        match protocol::parse_client_message(header.msg_type_u32(), &payload) {
+        let message = protocol::parse_client_message(header.msg_type_u32(), &payload);
+        if let Some(peer) = login
+            && !message.as_ref().is_ok_and(|m| login_request_allowed(peer, m, &managed_windows))
+        {
+            let _ = write_protocol_error(
+                &mut stream_writer,
+                request_id,
+                protocol::error_codes::LOGIN_REQUEST_DENIED,
+            );
+            continue;
+        }
+        match message {
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,

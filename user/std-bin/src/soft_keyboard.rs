@@ -8,16 +8,16 @@ mod keyboard_input;
 mod keyboard_layout;
 
 #[cfg(target_os = "scarlet")]
-#[path = "soft_keyboard/view.rs"]
-mod keyboard_view;
-
-#[cfg(target_os = "scarlet")]
 mod panel {
     use super::keyboard_input::{Contact, HeldKeys, Modifiers, Stroke};
-    use super::keyboard_layout::{Action, Layer, panel_height};
-    use scarlet_ui::element::UpdateResult;
+    use super::keyboard_layout::{
+        Action, EDGE_UNITS, GAP_UNITS, GRID_UNITS, Layer, RowGeometry, Tone, VerticalGeometry,
+        panel_height, rows,
+    };
+    use scarlet_ui::element::{ComponentElement, Element, UpdateResult};
     use scarlet_ui::error::{Error as UiError, RenderFailureKind};
     use scarlet_ui::prelude::*;
+    use scarlet_ui::views::containers::ViewTuple;
     use scarlet_ui::{
         PlatformWindow, SWSPlatformWindow, event::Event, pipeline::RenderingPipeline,
         renderer::PresentedFrame,
@@ -32,12 +32,99 @@ mod panel {
         text_input_content_purpose as purpose,
     };
 
+    #[derive(Clone)]
+    struct Views(Vec<Box<dyn View>>);
+    impl ViewTuple for Views {
+        fn create_elements(&self) -> Vec<Box<dyn Element>> {
+            self.0.iter().map(|v| v.create_element()).collect()
+        }
+        fn clone_views(&self) -> Vec<Box<dyn View>> {
+            self.0.clone()
+        }
+        fn collect_listenables<'a>(&'a self, out: &mut Vec<&'a dyn scarlet_ui::state::Listenable>) {
+            for view in &self.0 {
+                out.extend(view.listenables());
+            }
+        }
+    }
     #[derive(Clone, Copy)]
     struct PendingAction {
         context: Context,
         action: Action,
         time_ns: u64,
         contact: Option<Contact>,
+    }
+    #[derive(Clone)]
+    struct KeyboardKeyView {
+        label: &'static str,
+        action: Action,
+        context: Context,
+        background: Color,
+        text_color: Color,
+        width: f32,
+        height: f32,
+        font_size: f32,
+        pending: Rc<RefCell<Vec<PendingAction>>>,
+        dispatch_contact: Rc<Cell<Option<Contact>>>,
+        clock: Instant,
+    }
+    impl KeyboardKeyView {
+        fn body(&self) -> Box<dyn View> {
+            let pending = Rc::clone(&self.pending);
+            let dispatch_contact = Rc::clone(&self.dispatch_contact);
+            let context = self.context;
+            let action = self.action;
+            let clock = self.clock;
+            let icon = match action {
+                Action::Hide => Some(Icon::KeyboardHide),
+                Action::SetLayer(Layer::Tools) => Some(Icon::Dots),
+                _ => None,
+            };
+            let button = if let Some(icon) = icon {
+                Button::icon_only(icon)
+                    .icon_size(IconSize::Medium)
+                    .icon_color(self.text_color)
+            } else {
+                Button::new(self.label)
+            };
+            let button = button
+                .header_style()
+                .font_size(self.font_size)
+                .padding(2.0)
+                .background_color(self.background)
+                .text_color(self.text_color)
+                .on_click(move || {
+                    let time_ns = clock.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                    pending.borrow_mut().push(PendingAction {
+                        context,
+                        action,
+                        time_ns: time_ns.max(1),
+                        contact: dispatch_contact.get(),
+                    });
+                })
+                // All touch keys activate on DOWN. Utility actions must not
+                // depend on an UP routed through a tree replaced after painting.
+                // The pure keyboard tracker owns actual repeat timing; this
+                // Button option supplies press activation and suppresses the
+                // release tap without ever firing a UI-owned repeat.
+                .repeat_while_pressed(Duration::MAX, Duration::MAX);
+            Box::new(button.frame(self.width, self.height))
+        }
+    }
+    fn keyboard_key_body(view: &KeyboardKeyView) -> Box<dyn View> {
+        view.body()
+    }
+    impl View for KeyboardKeyView {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(ComponentElement::new_with_builder(
+                self.clone(),
+                keyboard_key_body,
+            ))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
     fn keyboard_for_context(
         size: Size,
@@ -52,21 +139,126 @@ mod panel {
             context.content_purpose,
             purpose::DIGITS | purpose::NUMBER | purpose::PHONE | purpose::PIN
         );
-        crate::keyboard_view::keyboard(
+        keyboard_for_purpose(
             size,
+            context,
             modifiers,
             layer,
             numeric,
-            Rc::new(move |action| {
-                let time_ns = clock.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-                pending.borrow_mut().push(PendingAction {
-                    context,
-                    action,
-                    time_ns: time_ns.max(1),
-                    contact: dispatch_contact.get(),
-                });
-            }),
-            |_| crate::keyboard_view::KeyTarget::Desktop,
+            pending,
+            dispatch_contact,
+            clock,
+        )
+    }
+    fn keyboard_for_purpose(
+        size: Size,
+        context: Context,
+        modifiers: u32,
+        layer: Layer,
+        numeric: bool,
+        pending: Rc<RefCell<Vec<PendingAction>>>,
+        dispatch_contact: Rc<Cell<Option<Contact>>>,
+        clock: Instant,
+    ) -> Box<dyn View> {
+        let layout = rows(numeric, layer);
+        // One shared unit keeps Q/A/Z widths consistent across staggered rows.
+        let tablet_layout = layout.iter().any(|row| row.geometry == RowGeometry::Tablet);
+        let tablet_unit = size.width / GRID_UNITS;
+        let horizontal_padding = if tablet_layout {
+            tablet_unit * EDGE_UNITS
+        } else {
+            10.0
+        };
+        let tablet_gap = tablet_unit * GAP_UNITS;
+        let fill_gap = if tablet_layout { tablet_gap } else { 7.0 };
+        let vertical_gap = if tablet_layout { tablet_gap } else { 7.0 };
+        let vertical_padding = if tablet_layout {
+            tablet_unit * EDGE_UNITS
+        } else {
+            10.0
+        };
+        let content_width = (size.width - horizontal_padding * 2.0).max(1.0);
+        let vertical = VerticalGeometry::new(size.height, vertical_padding, vertical_gap, &layout);
+        let mut views: Vec<Box<dyn View>> = Vec::new();
+        for row in layout {
+            let row_height = vertical.row_unit * row.height;
+            let weight: f32 = row.keys.iter().map(|key| key.weight).sum();
+            let gap = if row.geometry == RowGeometry::Tablet {
+                tablet_gap
+            } else {
+                fill_gap
+            };
+            let unit = if row.geometry == RowGeometry::Tablet {
+                tablet_unit
+            } else {
+                ((content_width - gap * (row.keys.len() - 1) as f32) / weight).max(1.0)
+            };
+            let inset = row.inset * unit;
+            let keys = row
+                .keys
+                .into_iter()
+                .map(|key| {
+                    let label = if modifiers & input_panel::SHIFT != 0 {
+                        key.shifted
+                    } else {
+                        key.plain
+                    };
+                    let active = matches!(key.action,Action::Modifier(flag) if modifiers & flag!=0)
+                        || (key.action == Action::ToggleFunction && layer == Layer::Function);
+                    let (background, text_color) = if active {
+                        (Color::rgb(224, 225, 229), Color::rgb(28, 29, 33))
+                    } else {
+                        (
+                            match key.tone {
+                                Tone::Character => Color::rgba_f32(0.46, 0.46, 0.49, 0.96),
+                                Tone::Utility => Color::rgba_f32(0.29, 0.29, 0.33, 0.96),
+                                Tone::Toolbar => Color::rgba_f32(1.0, 1.0, 1.0, 0.045),
+                            },
+                            Color::WHITE,
+                        )
+                    };
+                    let width = unit * key.weight;
+                    let font_size = if row.height < 0.8 {
+                        (row_height * 0.32).clamp(12.0, 16.0)
+                    } else if label.chars().count() > 2 || key.action == Action::ToggleFunction {
+                        (row_height * 0.25).clamp(14.0, 19.0)
+                    } else {
+                        (row_height * 0.41).clamp(20.0, 30.0)
+                    };
+                    Box::new(KeyboardKeyView {
+                        label,
+                        action: key.action,
+                        context,
+                        background,
+                        text_color,
+                        width,
+                        height: row_height,
+                        font_size,
+                        pending: Rc::clone(&pending),
+                        dispatch_contact: Rc::clone(&dispatch_contact),
+                        clock,
+                    }) as Box<dyn View>
+                })
+                .collect();
+            views.push(Box::new(
+                HStack::new(Views(keys))
+                    .spacing(gap)
+                    .alignment(Alignment::TopLeading)
+                    .padding_insets(EdgeInsets::new(inset, 0.0, 0.0, 0.0)),
+            ));
+        }
+        Box::new(
+            VStack::new(Views(views))
+                .spacing(vertical_gap)
+                .alignment(Alignment::TopLeading)
+                .padding_insets(EdgeInsets::new(
+                    horizontal_padding,
+                    vertical_padding,
+                    horizontal_padding,
+                    vertical.bottom_padding,
+                ))
+                .background(Color::rgba_f32(0.10, 0.10, 0.13, 0.96))
+                .frame(size.width, size.height),
         )
     }
     pub enum RunError {
@@ -430,6 +622,22 @@ mod panel {
 fn main() {
     #[cfg(target_os = "scarlet")]
     {
+        if std::env::args().nth(1).as_deref() == Some("--login-seat") {
+            // stdin is the provider's connected endpoint, installed by scarlet-seat.
+            // Connection errors terminate this instance without looking up a public service.
+            let socket = unsafe { scarlet_os::Handle::from_raw(0) }
+                .ok()
+                .and_then(|fd| scarlet_os::Socket::from_handle(fd).ok());
+            if let Some(socket) = socket
+                && matches!(
+                    sws_client::Connection::with_inherited_socket(socket, panel::run),
+                    Ok(Ok(()))
+                )
+            {
+                return;
+            }
+            std::process::exit(1);
+        }
         // Keep the stemd-launched process alive across a lost SWS connection or
         // a renderer that needs recreation. Bound repeated startup failures.
         let mut failures = 0u32;

@@ -80,8 +80,24 @@ fn main() -> ExitCode {
     // workers, so every consumer observes the same first-frame policy.
     input_environment::initialize_from_env();
 
-    // Initialize compositor
-    let mut compositor = match Compositor::new() {
+    let login = std::env::args().nth(1).as_deref() == Some("--login-seat");
+    let clients = if login {
+        // The parent transfers exactly two server endpoints over stdin. Only
+        // these peers can reach this compositor; it never binds a public name.
+        let receive = || -> Option<[Socket; 2]> {
+            let bootstrap =
+                Socket::from_handle(unsafe { scarlet_os::Handle::from_raw(0) }.ok()?).ok()?;
+            let next = || Socket::from_handle(bootstrap.recv_handle().ok()?).ok();
+            Some([next()?, next()?])
+        };
+        let Some(clients) = receive() else {
+            return ExitCode::FAILURE;
+        };
+        Some(clients)
+    } else {
+        None
+    };
+    let mut compositor = match Compositor::new(clients) {
         Ok(comp) => comp,
         Err(e) => {
             println!("Failed to initialize compositor: {}", e);
@@ -93,6 +109,13 @@ fn main() -> ExitCode {
     if let Err(e) = compositor.init_display() {
         println!("Failed to initialize display: {}", e);
         return ExitCode::FAILURE;
+    }
+
+    if login {
+        return match compositor.run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
     }
 
     // Sbus integration is optional, so its acknowledgment wait must remain
