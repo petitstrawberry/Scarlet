@@ -3761,6 +3761,35 @@ impl Connection {
             _ => Err(Error::InvalidResponse),
         }
     }
+    /// Connect to the desktop compositor and check that it supports backlight control.
+    pub fn connect_backlight() -> Result<Self, Error> {
+        let connection = Self::connect_default()?;
+        if connection.get_capabilities()?.capabilities & protocol::capabilities::BACKLIGHT_CONTROL == 0 {
+            return Err(Error::ServerError(protocol::error_codes::BACKLIGHT_UNAVAILABLE));
+        }
+        Ok(connection)
+    }
+
+    /// Read the hardware backlight percentage using a connection from `connect_backlight`.
+    pub fn backlight_percent(&self) -> Result<u8, Error> {
+        self.backlight_request(protocol::outputs::OutputRequest::GetBacklight)
+    }
+
+    /// Set the hardware backlight and return the level reported by the device.
+    pub fn set_backlight_percent(&self, percent: u8) -> Result<u8, Error> {
+        if percent > 100 {
+            return Err(Error::InvalidRequest);
+        }
+        self.backlight_request(protocol::outputs::OutputRequest::SetBacklight(percent))
+    }
+
+    fn backlight_request(&self, request: protocol::outputs::OutputRequest) -> Result<u8, Error> {
+        match self.output_request(request)? {
+            protocol::outputs::OutputEvent::Backlight(percent) => Ok(percent),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
     pub fn outputs(&self) -> Result<protocol::outputs::OutputSnapshot, Error> {
         match self.output_request(protocol::outputs::OutputRequest::Get)? {
             protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),

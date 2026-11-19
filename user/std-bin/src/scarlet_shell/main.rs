@@ -29,7 +29,6 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
-use framebuffer::DisplayControl;
 use sas_client::SasClient;
 use sas_protocol::{
     MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE, OUTPUT_ENTRY_FLAG_CURRENT,
@@ -1581,7 +1580,7 @@ fn apply_control_center_action(
     audio_client: &mut Option<SasClient>,
     status: &State<StatusProviderSnapshot>,
     control_center_volume: &State<f32>,
-    display: &mut Option<DisplayControl>,
+    display: &mut Option<sws::Connection>,
     display_brightness_percent: &State<Option<u8>>,
     control_center_session: &State<ControlCenterSession>,
     brightness_write: &mut PercentWriteState,
@@ -1595,12 +1594,11 @@ fn apply_control_center_action(
                 return;
             }
             if display.is_none() {
-                *display = DisplayControl::open_primary().ok();
+                *display = sws::Connection::connect_backlight().ok();
             }
-            let result = display.as_ref().and_then(|display| {
-                display.set_brightness_percent(percent).ok()?;
-                display.get_brightness_percent().ok()
-            });
+            let result = display
+                .as_ref()
+                .and_then(|display| display.set_backlight_percent(percent).ok());
             if let Some(applied) = result {
                 brightness_write.complete(percent, Some(applied));
                 set_state_if_changed(display_brightness_percent, Some(applied));
@@ -1614,7 +1612,7 @@ fn apply_control_center_action(
                 // on screen. Read the actual value, or mark it unavailable.
                 let actual = display
                     .as_ref()
-                    .and_then(|display| display.get_brightness_percent().ok());
+                    .and_then(|display| display.backlight_percent().ok());
                 set_state_if_changed(display_brightness_percent, actual);
                 if actual.is_none() {
                     *display = None;
@@ -4392,11 +4390,11 @@ impl ShellApp {
                 }
                 if std::time::Instant::now() >= next_display_poll {
                     if display.is_none() {
-                        display = DisplayControl::open_primary().ok();
+                        display = sws::Connection::connect_backlight().ok();
                     }
                     let actual = display
                         .as_ref()
-                        .and_then(|display| display.get_brightness_percent().ok());
+                        .and_then(|display| display.backlight_percent().ok());
                     // Observe every sample, including during a drag. Reconcile
                     // only after input releases and queued writes are drained.
                     set_state_if_changed(&display_brightness_percent, actual);

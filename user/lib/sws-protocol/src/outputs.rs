@@ -239,6 +239,8 @@ pub enum OutputRequest {
     Bind { window: u32, output: OutputId },
     Modes(OutputId),
     SetMode { output: OutputId, mode: OutputMode },
+    GetBacklight,
+    SetBacklight(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +254,7 @@ pub enum OutputEvent {
     Workspace { output: OutputId, state: crate::workspace::WorkspaceState },
     Applied,
     Modes { output: OutputId, modes: Vec<OutputMode> },
+    Backlight(u8),
 }
 
 pub fn encode_request(request: &OutputRequest) -> Vec<u8> {
@@ -262,6 +265,11 @@ pub fn encode_request(request: &OutputRequest) -> Vec<u8> {
             for word in [8, *output, mode.pixel_width, mode.pixel_height, mode.refresh_millihz] { put(&mut out, word); }
         }
         OutputRequest::Get => put(&mut out, 0),
+        OutputRequest::GetBacklight => put(&mut out, 9),
+        OutputRequest::SetBacklight(percent) => {
+            put(&mut out, 10);
+            put(&mut out, u32::from(*percent));
+        }
         OutputRequest::Apply(transaction) => { put(&mut out, 1); out.extend(encode_transaction(transaction)); }
         OutputRequest::Workspace(id) => { put(&mut out, 2); put(&mut out, *id); }
         OutputRequest::ApplyWorkspace { output, transaction } => { put(&mut out, 3); put(&mut out, *output); out.extend(crate::workspace::encode_transaction(transaction)); }
@@ -286,6 +294,8 @@ pub fn decode_request(bytes: &[u8]) -> Result<OutputRequest, crate::ProtocolErro
         6 => OutputRequest::Bind { window: r.word()?, output: r.word()? },
         7 => OutputRequest::Modes(r.word()?),
         8 => OutputRequest::SetMode { output: r.word()?, mode: OutputMode { pixel_width: r.word()?, pixel_height: r.word()?, refresh_millihz: r.word()? } },
+        9 => OutputRequest::GetBacklight,
+        10 => OutputRequest::SetBacklight(r.percent()?),
         _ => return Err(crate::ProtocolError::MalformedPayload),
     };
     r.finish()?; Ok(request)
@@ -301,6 +311,10 @@ pub fn encode_event(event: &OutputEvent) -> Vec<u8> {
         }
         OutputEvent::Workspace { output, state } => { put(&mut out, 3); put(&mut out, *output); out.extend(crate::workspace::encode_state(state)); }
         OutputEvent::Applied => put(&mut out, 4),
+        OutputEvent::Backlight(percent) => {
+            put(&mut out, 6);
+            put(&mut out, u32::from(*percent));
+        }
         OutputEvent::Modes { output, modes } => {
             for word in [5, *output, modes.len() as u32] { put(&mut out, word); }
             for mode in modes { for word in [mode.pixel_width, mode.pixel_height, mode.refresh_millihz] { put(&mut out, word); } }
@@ -340,6 +354,7 @@ pub fn decode_event(bytes: &[u8]) -> Result<OutputEvent, crate::ProtocolError> {
             }
             OutputEvent::Modes { output, modes }
         }
+        6 => OutputEvent::Backlight(r.percent()?),
         _ => return Err(crate::ProtocolError::MalformedPayload),
     };
     r.finish()?; Ok(event)
@@ -349,6 +364,14 @@ fn put(out: &mut Vec<u8>, value: u32) { out.extend_from_slice(&value.to_le_bytes
 
 struct Reader<'a> { bytes: &'a [u8], offset: usize }
 impl<'a> Reader<'a> {
+    fn percent(&mut self) -> Result<u8, crate::ProtocolError> {
+        let percent = self.word()?;
+        if percent > 100 {
+            return Err(crate::ProtocolError::MalformedPayload);
+        }
+        Ok(percent as u8)
+    }
+
     fn word(&mut self) -> Result<u32, crate::ProtocolError> {
         let bytes = self.bytes.get(self.offset..self.offset + 4).ok_or(crate::ProtocolError::MalformedPayload)?;
         self.offset += 4;

@@ -17,7 +17,6 @@ use settings_support::{Autosave, TimezoneCommitError, atomic_write, commit_timez
 use core::f32;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use framebuffer::DisplayControl;
 use sas_client::{Error as SasError, SasClient};
 use sas_protocol::{
     CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE,
@@ -152,7 +151,7 @@ fn f32_to_percent(value: f32) -> u32 {
 }
 
 fn load_display_brightness() -> (f32, String) {
-    match DisplayControl::open_primary().and_then(|display| display.get_brightness_percent()) {
+    match Connection::connect_backlight().and_then(|display| display.backlight_percent()) {
         Ok(percent) => {
             let percent = percent.min(100);
             (percent as f32, format!("Current brightness: {}%", percent))
@@ -1554,10 +1553,10 @@ impl SettingsApp {
             return;
         }
 
-        match DisplayControl::open_primary()
-            .and_then(|display| display.set_brightness_percent(percent))
+        match Connection::connect_backlight()
+            .and_then(|display| display.set_backlight_percent(percent))
         {
-            Ok(()) => {
+            Ok(percent) => {
                 let applied = percent as f32;
                 self.display_brightness_percent.set(applied);
                 self.display_brightness_last_good.set(applied);

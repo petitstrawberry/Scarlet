@@ -69,6 +69,8 @@ pub const EXTENSION_MAX_DAMAGE_RECTS: usize = 16;
 pub mod capabilities {
     /// Output catalog, atomic layout, output-scoped workspaces and window scale.
     pub const OUTPUT_MANAGEMENT: u64 = 1 << 21;
+    /// The desktop compositor brokers backlight reads and writes.
+    pub const BACKLIGHT_CONTROL: u64 = 1 << 22;
     /// Shared SGFX images may be registered and committed without CPU copies.
     pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
     /// Focused windows may capture raw relative pointer motion.
@@ -333,6 +335,8 @@ pub mod compositor_backends {
 pub mod error_codes {
     /// Operation is unavailable on an isolated login compositor.
     pub const LOGIN_REQUEST_DENIED: u32 = 125;
+    /// There is no usable backlight, or the device operation failed.
+    pub const BACKLIGHT_UNAVAILABLE: u32 = 126;
     pub const STALE_OUTPUT_GENERATION: u32 = 121;
     pub const INVALID_OUTPUT_CONFIGURATION: u32 = 122;
     pub const OUTPUT_CONFIGURATION_NOT_SAVED: u32 = 123;

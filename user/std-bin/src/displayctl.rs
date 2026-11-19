@@ -1,9 +1,7 @@
 //! Command-line control for Scarlet displays.
 //!
 //! `info` lists every display endpoint and its connector; `get`/`set` control
-//! the backlight. This utility deliberately uses [`framebuffer::DisplayControl`]
-//! rather than [`framebuffer::DisplaySurface`], so it never creates a
-//! framebuffer mapping.
+//! the backlight through the display endpoint or the desktop compositor.
 
 use std::process::ExitCode;
 
@@ -26,11 +24,21 @@ fn usage() {
 }
 
 #[cfg(target_os = "scarlet")]
-fn open_display() -> Result<DisplayControl, ExitCode> {
-    DisplayControl::open_primary().map_err(|error| {
-        eprintln!("displayctl: no brightness-capable display: {error:?}");
-        ExitCode::from(1)
-    })
+fn backlight(percent: Option<u8>) -> Result<u8, String> {
+    if let Ok(display) = DisplayControl::open_primary() {
+        if let Some(percent) = percent {
+            display.set_brightness_percent(percent).map_err(|error| format!("{error:?}"))?;
+        }
+        return display.get_brightness_percent().map_err(|error| format!("{error:?}"));
+    }
+
+    let display = sws_client::Connection::connect_backlight()
+        .map_err(|error| format!("{error:?}"))?;
+    match percent {
+        Some(percent) => display.set_backlight_percent(percent),
+        None => display.backlight_percent(),
+    }
+    .map_err(|error| format!("{error:?}"))
 }
 
 #[cfg(target_os = "scarlet")]
@@ -127,10 +135,7 @@ fn main() -> ExitCode {
     match command.as_str() {
         "info" if args.next().is_none() => print_info(),
         "get" if args.next().is_none() => {
-            let Ok(display) = open_display() else {
-                return ExitCode::from(1);
-            };
-            match display.get_brightness_percent() {
+            match backlight(None) {
                 Ok(percent) => {
                     println!("brightness={percent}%");
                     ExitCode::SUCCESS
@@ -157,11 +162,8 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let Ok(display) = open_display() else {
-                return ExitCode::from(1);
-            };
-            match display.set_brightness_percent(percent) {
-                Ok(()) => {
+            match backlight(Some(percent)) {
+                Ok(percent) => {
                     println!("brightness={percent}%");
                     ExitCode::SUCCESS
                 }

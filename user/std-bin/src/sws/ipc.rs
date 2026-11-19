@@ -887,6 +887,26 @@ struct SystemShellClient {
     full_app_menus: bool,
 }
 
+// Backlight operations can wait on the embedded controller. Keep them in
+// the requesting client thread, outside the compositor's rendering loop.
+static BACKLIGHT: Mutex<Option<framebuffer::DisplayControl>> = Mutex::new(None);
+
+fn control_backlight(percent: Option<u8>) -> Result<u8, u32> {
+    let mut cached = BACKLIGHT.lock().expect("backlight");
+    if cached.is_none() {
+        *cached = framebuffer::DisplayControl::open_primary().ok();
+    }
+    let display = cached.as_ref().ok_or(protocol::error_codes::BACKLIGHT_UNAVAILABLE)?;
+    if let Some(percent) = percent {
+        display.set_brightness_percent(percent)
+            .map_err(|_| protocol::error_codes::BACKLIGHT_UNAVAILABLE)?;
+    }
+    display.get_brightness_percent().map_err(|_| {
+        *cached = None;
+        protocol::error_codes::BACKLIGHT_UNAVAILABLE
+    })
+}
+
 static OUTPUT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 static OUTPUT_CONTEXTS: Mutex<BTreeMap<usize, protocol::outputs::OutputContext>> = Mutex::new(BTreeMap::new());
 pub(super) fn client_output_context(client: usize) -> Option<protocol::outputs::OutputContext> { OUTPUT_CONTEXTS.lock().expect("output contexts").get(&client).copied() }
@@ -4211,7 +4231,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             Ok(ClientMessageRef::GetCapabilities {}) => {
                 let payload = protocol::payload_capabilities(
                     protocol::SWS_PROTOCOL_VERSION,
-                    sws_capabilities(),
+                    sws_capabilities()
+                        | if login.is_none() { protocol::capabilities::BACKLIGHT_CONTROL } else { 0 },
                     compositor_epoch(),
                     compositor_backend_id(),
                 );
@@ -4316,9 +4337,36 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
             }
             Ok(ClientMessageRef::OutputControl { payload }) => {
-                if let Ok(command) = protocol::outputs::decode_request(payload) {
-                    OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").insert(client_id);
-                    push_ipc_event(IpcEvent::OutputControl { client_id, request_id, command });
+                use protocol::outputs::{OutputEvent, OutputRequest};
+
+                let brightness = match protocol::outputs::decode_request(payload) {
+                    Ok(OutputRequest::GetBacklight) => None,
+                    Ok(OutputRequest::SetBacklight(percent)) => Some(percent),
+                    Ok(command) => {
+                        OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").insert(client_id);
+                        push_ipc_event(IpcEvent::OutputControl { client_id, request_id, command });
+                        continue;
+                    }
+                    Err(_) => {
+                        let _ = write_protocol_error(
+                            &mut stream_writer,
+                            request_id,
+                            protocol::error_codes::INVALID_OUTPUT_CONFIGURATION,
+                        );
+                        continue;
+                    }
+                };
+                let result = match control_backlight(brightness) {
+                    Ok(percent) => write_frame_response(
+                        &mut stream_writer,
+                        protocol::server_msg::OUTPUT_CONTROL,
+                        request_id,
+                        &protocol::outputs::encode_event(&OutputEvent::Backlight(percent)),
+                    ),
+                    Err(code) => write_protocol_error(&mut stream_writer, request_id, code),
+                };
+                if result.is_err() {
+                    break;
                 }
             }
             Ok(ClientMessageRef::GetWorkspaceState {}) => {

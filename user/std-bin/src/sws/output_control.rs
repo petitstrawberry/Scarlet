@@ -201,6 +201,9 @@ impl Compositor {
         use sws_protocol::error_codes as errors;
         match command {
             OutputRequest::Get => Ok(OutputEvent::Snapshot(self.outputs.snapshot())),
+            OutputRequest::GetBacklight | OutputRequest::SetBacklight(_) => {
+                Err(errors::BACKLIGHT_UNAVAILABLE)
+            }
             OutputRequest::Modes(id) => {
                 let output = self.outputs.get(id).ok_or(errors::UNKNOWN_OUTPUT)?;
                 let modes = self.secondary_endpoints.iter().find(|endpoint| endpoint.output == Some(id))
