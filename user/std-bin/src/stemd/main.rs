@@ -14,7 +14,8 @@ use log_protocol::{
 };
 use sbus_client as sbus;
 use scarlet_desktop_config::{
-    DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
+    DESKTOP_SESSION_CONTROLLER_ENV, DESKTOP_SESSION_LOGOUT_STATUS, DESKTOP_STEMD_BUS_NAME,
+    DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
     DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD, DESKTOP_STEMD_RELOAD_APPLICATIONS_METHOD,
     DESKTOP_STEMD_SOCKET_PATH,
 };
@@ -105,6 +106,7 @@ fn spawn_command(
     activation_token: Option<&str>,
     stdio_path: Option<&str>,
     log_unit: Option<&str>,
+    session_controller: bool,
 ) -> Result<i32, &'static str> {
     let program = argv.first().ok_or("Invalid empty command")?;
     let mut command = Command::new(program);
@@ -115,6 +117,9 @@ fn spawn_command(
             .split_once('=')
             .ok_or("Invalid application environment")?;
         command.env(key, value);
+    }
+    if session_controller {
+        command.env(DESKTOP_SESSION_CONTROLLER_ENV, "1");
     }
     if let Some(path) = stdio_path {
         configure_command_stdio(&mut command, path)?;
@@ -148,7 +153,7 @@ fn spawn_application(
     activation_token: Option<&str>,
 ) -> Result<i32, &'static str> {
     let Some(grant) = capability_launch::find(app_id, argv)? else {
-        return spawn_command(argv, activation_token, None, Some(app_id));
+        return spawn_command(argv, activation_token, None, Some(app_id), false);
     };
     let environment = application_environment(activation_token);
     let transition = POWER_TRANSITION.lock().expect("stemd mutex poisoned");
@@ -273,6 +278,7 @@ struct Service {
     order: i32,
     user: Option<String>,
     restart: bool,
+    session_controller: bool,
     ready_notify: bool,
     ready_timeout_ms: u32,
 }
@@ -342,6 +348,7 @@ impl ConfigParser {
                 let mut order: i32 = 0;
                 let mut user = None;
                 let mut restart = false;
+                let mut session_controller = false;
                 let mut ready_notify = false;
                 let mut ready_timeout_ms = 5000u32;
 
@@ -407,6 +414,9 @@ impl ConfigParser {
                             }
                             "user" => user = Some(Self::unquote(value)),
                             "restart" => restart = Self::parse_bool(value).unwrap_or(false),
+                            "session_controller" => {
+                                session_controller = Self::parse_bool(value).unwrap_or(false);
+                            }
                             "ready_notify" => {
                                 if let Some(v) = Self::parse_bool(value) {
                                     ready_notify = v;
@@ -434,6 +444,7 @@ impl ConfigParser {
                         order,
                         user,
                         restart,
+                        session_controller,
                         ready_notify,
                         ready_timeout_ms,
                     });
@@ -642,7 +653,7 @@ fn launch_service_and_wait(service: &Service) -> Result<(), &'static str> {
     if service.ready_notify {
         clear_service_ready(&service.name);
     }
-    let pid = launch_service(service)?;
+    let pid = launch_service(service, false)?;
     fence(core::sync::atomic::Ordering::SeqCst);
     wait_for_service_ready(service, pid)
 }
@@ -1036,7 +1047,7 @@ fn open_path(path: &str) -> Result<i32, &'static str> {
 }
 
 /// Launch a service as a child process.
-fn launch_service(service: &Service) -> Result<i32, &'static str> {
+fn launch_service(service: &Service, user_session: bool) -> Result<i32, &'static str> {
     println!("stemd: Launching service: {}", service.name);
 
     let mut argv: Vec<String> = service.exec.split_whitespace().map(String::from).collect();
@@ -1047,7 +1058,14 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
         argv.splice(0..0, ["/bin/run-as".to_owned(), name.clone()]);
     }
     let log_unit = (service.name != "logd").then_some(service.name.as_str());
-    let pid = spawn_command(&argv, None, service.tty.as_deref(), log_unit).map_err(|error| {
+    let pid = spawn_command(
+        &argv,
+        None,
+        service.tty.as_deref(),
+        log_unit,
+        user_session && service.session_controller,
+    )
+    .map_err(|error| {
         println!(
             "stemd: Failed to launch service '{}': {}",
             service.name, error
@@ -2010,20 +2028,26 @@ fn run_user_services(dir: &str) -> Result<(), &'static str> {
 
     let mut failed = Vec::new();
     for unit in &units {
-        if has_failed_dependency(unit, &failed).is_some() || launch_service(unit).is_err() {
+        if has_failed_dependency(unit, &failed).is_some() || launch_service(unit, true).is_err() {
             failed.push(unit.name.clone());
         }
     }
     loop {
-        let (pid, _) = waitpid(-1, 0);
+        let (pid, status) = waitpid(-1, 0);
         if pid < 0 {
             return Ok(());
         }
         if let Some(child) = remove_running_service_by_pid(pid)
-            && let Some(unit) = units.iter().find(|u| u.name == child.name && u.restart)
+            && let Some(unit) = units.iter().find(|u| u.name == child.name)
         {
-            thread::sleep(std::time::Duration::from_millis(100));
-            launch_service(unit)?;
+            if unit.session_controller && status == DESKTOP_SESSION_LOGOUT_STATUS {
+                // The seat broker observes this exit and tears down the session scope.
+                return Ok(());
+            }
+            if unit.restart {
+                thread::sleep(std::time::Duration::from_millis(100));
+                launch_service(unit, true)?;
+            }
         }
         remove_running_app_by_pid(pid);
     }

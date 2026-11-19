@@ -39,7 +39,8 @@ use sbus::{Argument as SbusArgument, Message as SbusMessage};
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
-    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_SETTINGS_BUS_NAME,
+    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_SHOW_METHOD,
+    DESKTOP_SESSION_CONTROLLER_ENV, DESKTOP_SESSION_LOGOUT_STATUS, DESKTOP_SETTINGS_BUS_NAME,
     DESKTOP_SETTINGS_GET_STATUS_PREFERENCES_METHOD, DESKTOP_SETTINGS_INTERFACE,
     DESKTOP_SETTINGS_OBJECT_PATH, DESKTOP_SETTINGS_SERVICE_INTERFACE,
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
@@ -76,9 +77,9 @@ use sws_protocol::window_types;
 use clap::Parser;
 use console::{ConsoleAction, ConsoleSnapshot, ConsoleState, PowerAction};
 use control_center::{
-    ArmedPowerAction, AudioOutputSnapshot, AudioSnapshot, ControlCenterAction,
-    ControlCenterMetrics, ControlCenterPresentation, ControlCenterSession,
-    ControlCenterSettingsLink, ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot,
+    AudioOutputSnapshot, AudioSnapshot, ControlCenterAction, ControlCenterMetrics,
+    ControlCenterPresentation, ControlCenterSession, ControlCenterSettingsLink,
+    ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot,
     NetworkInterfaceSnapshot, NetworkInterfaceState, NetworkSnapshot, PercentWriteState,
     SystemSnapshot, boxed, build_control_center_view,
 };
@@ -892,6 +893,15 @@ fn control_center_body_position(screen_width: f32, popup_y: i32, body_size: Size
     )
 }
 
+fn control_center_available_size(screen: Size, popup_y: i32) -> Size {
+    let outsets = ElevationRole::Floating.paint_outsets();
+    let margins = 2.0 * CONTROL_CENTER_MARGIN as f32;
+    Size::new(
+        (screen.width - margins - outsets.left - outsets.right).max(1.0),
+        (screen.height - popup_y as f32 - margins - outsets.top - outsets.bottom).max(1.0),
+    )
+}
+
 /// Apply one compositor input-environment snapshot to reactive shell state.
 ///
 /// A layout transition closes a popup before the popup worker sees its new
@@ -1022,12 +1032,12 @@ struct ShellApp {
     control_center_session: State<ControlCenterSession>,
     // Opening generation and platform ID; dismissed IDs cannot block a reopen.
     control_center_window: State<Option<(u64, u32)>>,
+    control_center_position: State<Option<(i32, i32)>>,
     control_center_volume: State<f32>,
     control_center_brightness: State<f32>,
     display_brightness_percent: State<Option<u8>>,
     input_environment_snapshot: State<Option<InputEnvironmentSnapshot>>,
     control_center_action: State<Option<ControlCenterAction>>,
-    control_center_armed_power: State<Option<ArmedPowerAction>>,
     home_applications: State<Vec<HomeApplication>>,
     home_filtered_applications: State<Vec<HomeApplication>>,
     home_query: State<String>,
@@ -1089,12 +1099,12 @@ impl ShellApp {
             overview_page: State::new(scarlet_ui::state::generate_state_id(), 0),
             control_center_session: State::new(scarlet_ui::state::generate_state_id(), ControlCenterSession::default()),
             control_center_window: State::new(scarlet_ui::state::generate_state_id(), None),
+            control_center_position: State::new(scarlet_ui::state::generate_state_id(), None),
             control_center_volume: State::new(scarlet_ui::state::generate_state_id(), initial_volume),
             control_center_brightness: State::new(scarlet_ui::state::generate_state_id(), 0.0),
             display_brightness_percent: State::new(scarlet_ui::state::generate_state_id(), None),
             input_environment_snapshot: State::new(scarlet_ui::state::generate_state_id(), None),
             control_center_action: State::new(scarlet_ui::state::generate_state_id(), None),
-            control_center_armed_power: State::new(scarlet_ui::state::generate_state_id(), None),
             home_applications: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
             home_filtered_applications: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
             home_query: State::new(scarlet_ui::state::generate_state_id(), String::new()),
@@ -1173,7 +1183,36 @@ struct MenuEntryPayload {
 }
 
 fn default_root_menu_items() -> Vec<TaskMenuItem> {
-    Vec::new()
+    let confirm = |id: &str, title: &str, confirmation: &str| {
+        TaskMenuEntry::Item(TaskMenuItem {
+            id: format!("{id}_prompt"),
+            title: title.into(),
+            enabled: true,
+            shortcut: None,
+            children: vec![TaskMenuEntry::Item(TaskMenuItem {
+                id: id.into(),
+                title: confirmation.into(),
+                enabled: true,
+                shortcut: None,
+                children: Vec::new(),
+            })],
+        })
+    };
+    let mut children = Vec::new();
+    if session_logout_available() {
+        children.push(confirm("system_logout", "Log out…", "Confirm log out"));
+    }
+    children.extend([
+        confirm("system_restart", "Restart…", "Confirm restart"),
+        confirm("system_power_off", "Power off…", "Confirm power off"),
+    ]);
+    vec![TaskMenuItem {
+        id: "system_scarlet".into(),
+        title: "Scarlet".into(),
+        enabled: true,
+        shortcut: None,
+        children,
+    }]
 }
 
 fn status_preferences_from_arguments(args: &[SbusArgument]) -> Option<StatusPreferences> {
@@ -1622,8 +1661,11 @@ fn apply_control_center_action(
         ControlCenterAction::ConfirmReboot => {
             request_system_power(power_request::PowerAction::Reboot);
         }
-        ControlCenterAction::ArmPowerOff | ControlCenterAction::ArmReboot => {}
     }
+}
+
+fn session_logout_available() -> bool {
+    std::env::var_os(DESKTOP_SESSION_CONTROLLER_ENV).is_some()
 }
 
 fn request_system_power(action: power_request::PowerAction) {
@@ -2122,6 +2164,7 @@ fn build_menu_items(
     active_window_id: u32,
     open_menu_index: State<Option<usize>>,
     submenu_path: State<Vec<usize>>,
+    scarlet_menu: bool,
 ) -> Vec<MenuItemContent> {
     let mut items = Vec::new();
     let current_path = submenu_path.get();
@@ -2164,6 +2207,21 @@ fn build_menu_items(
                 let window_id = active_window_id;
                 content = content.callback(move || {
                     open_state.set(None);
+                    if scarlet_menu {
+                        match item_id.as_str() {
+                            "system_logout" if session_logout_available() => {
+                                std::process::exit(DESKTOP_SESSION_LOGOUT_STATUS);
+                            }
+                            "system_restart" => {
+                                request_system_power(power_request::PowerAction::Reboot);
+                            }
+                            "system_power_off" => {
+                                request_system_power(power_request::PowerAction::PowerOff);
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
                     // Handle system menu items
                     if item_id == "system_terminal" {
                         launch_new_app(b"org.scarlet-os.desktop.terminal");
@@ -2179,11 +2237,6 @@ fn build_menu_items(
                     }
                     if item_id == "system_settings" {
                         launch_app(b"org.scarlet-os.desktop.settings");
-                        return;
-                    }
-                    if item_id == "system_quit" {
-                        // TODO: Show shutdown dialog
-                        println!("[StatusBar] System shutdown requested");
                         return;
                     }
                     // Handle application menu items
@@ -3514,35 +3567,43 @@ impl ShellApp {
         .movable(false)
         .size(shell_layout.status_bar_window_size(screen_width))
     }
-    fn control_center_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
-        let screen_width = self.screen_width.get();
+    fn control_center_layout(
+        &self,
+        session: &ControlCenterSession,
+    ) -> (ControlCenterMetrics, (i32, i32)) {
+        let screen = Size::new(self.screen_width.get(), self.screen_height.get());
         let shell_layout = self.shell_layout.get();
-        let control_center_snapshot = self
-            .control_center_session
-            .get()
-            .snapshot
-            .unwrap_or_default();
-        let control_center_presentation = if shell_layout.tablet_mode {
+        let presentation = if shell_layout.tablet_mode {
             ControlCenterPresentation::TabletSheet
         } else {
             ControlCenterPresentation::LaptopPopover
         };
-        let control_center_metrics = ControlCenterMetrics::resolve(
-            control_center_presentation,
-            control_center_snapshot.audio.outputs.len(),
+        let metrics = ControlCenterMetrics::resolve(
+            presentation,
+            control_center_available_size(screen, shell_layout.popup_y()),
+            session.page,
+            session
+                .snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.audio.outputs.len()),
         );
-        let control_center_size = control_center_metrics.body_size();
-        let (control_center_body_x, control_center_body_y) =
-            control_center_body_position(screen_width, shell_layout.popup_y(), control_center_size);
+        let position =
+            control_center_body_position(screen.width, shell_layout.popup_y(), metrics.body_size());
+        (metrics, position)
+    }
+
+    fn control_center_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
+        let session = self.control_center_session.get();
+        let (metrics, (x, y)) = self.control_center_layout(&session);
         Window::new(
             "Control Center",
             build_control_center_view(
-                control_center_presentation,
-                control_center_snapshot,
+                metrics,
+                session.snapshot.unwrap_or_default(),
                 self.control_center_volume.clone(),
                 self.control_center_brightness.clone(),
                 self.control_center_action.clone(),
-                self.control_center_armed_power.clone(),
+                self.control_center_session.clone(),
             ),
         )
         .scene_key(self.scene_key(CONTROL_CENTER_SCENE_KEY)).output(self.output_id.get())
@@ -3558,11 +3619,8 @@ impl ShellApp {
         .active_on_focus(false)
         .resizable(false)
         .movable(false)
-        .placement(WindowPlacement::At {
-            x: control_center_body_x,
-            y: control_center_body_y,
-        })
-        .size(control_center_size)
+        .placement(WindowPlacement::At { x, y })
+        .size(metrics.body_size())
     }
     fn home_backdrop_window(&self) -> Window<impl scarlet_ui::view::View + Clone + use<>> {
         let screen_width = self.screen_width.get();
@@ -3717,9 +3775,9 @@ impl Application for ShellApp {
         if key.as_str() == CONTROL_CENTER_SCENE_KEY {
             return Some(vec![
                 &self.screen_width,
+                &self.screen_height,
                 &self.shell_layout,
                 &self.control_center_session,
-                &self.control_center_armed_power,
             ]);
         }
         if key.as_str() == "main" {
@@ -3792,6 +3850,7 @@ impl Application for ShellApp {
                 &console::chrome_regions(self.console_snapshot(), self.console_state.clone()),
             );
         } else if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
+            self.control_center_position.set(None);
             self.control_center_window.set(Some((
                 self.control_center_session.get().generation(),
                 ctx.platform_window_id as u32,
@@ -3820,7 +3879,6 @@ impl Application for ShellApp {
             self.control_center_session
                 .update(ControlCenterSession::close);
             self.control_center_window.set(None);
-            self.control_center_armed_power.set(None);
         }
         true
     }
@@ -3910,20 +3968,13 @@ impl Application for ShellApp {
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
             // Sync runs before reactive scene rebuilds. Derive the size from
             // the source snapshot here, never a cache written by that rebuild.
-            let presentation = if self.shell_layout.get().tablet_mode {
-                ControlCenterPresentation::TabletSheet
-            } else {
-                ControlCenterPresentation::LaptopPopover
-            };
-            let snapshot = self
-                .control_center_session
-                .get()
-                .snapshot
-                .unwrap_or_default();
-            let desired = ControlCenterMetrics::resolve(presentation, snapshot.audio.outputs.len())
-                .body_size();
+            let (metrics, (x, y)) = self.control_center_layout(&self.control_center_session.get());
+            let desired = metrics.body_size();
             if status_bar_resize_needed(window.managed_size(), desired) {
                 let _ = window.resize_managed(desired.width as u32, desired.height as u32);
+            }
+            if self.control_center_position.get() != Some((x, y)) && window.move_window(x, y).is_ok() {
+                self.control_center_position.set(Some((x, y)));
             }
             let _ = window.set_surface_regions(
                 true,
@@ -4166,7 +4217,6 @@ impl ShellApp {
             self.control_center_session
                 .update(ControlCenterSession::close);
             self.control_center_window.set(None);
-            self.control_center_armed_power.set(None);
         }
     }
 
@@ -4500,6 +4550,12 @@ impl ShellApp {
 
                 if let Some(index) = open_index {
                     let overview_open = index == OVERVIEW_MENU_INDEX;
+                    // Only the shell's first root menu can issue session actions.
+                    let scarlet_menu = index == 0
+                        && menu_tree_value
+                            .items
+                            .first()
+                            .is_some_and(|item| item.id == "system_scarlet");
                     let menu_entries = menu_tree_value
                         .items
                         .get(index)
@@ -4538,11 +4594,16 @@ impl ShellApp {
                                         active_window_id,
                                         open_menu_index_popup.clone(),
                                         submenu_path.clone(),
+                                        scarlet_menu,
                                     )
                                 };
-                                let max_menu_width = (screen_width_popup.get() - 16.0).max(160.0);
+                                let available_width = screen_width_popup.get() - 16.0;
+                                let min_menu_width = if scarlet_menu { 1.0 } else { 160.0 };
+                                let max_menu_width = available_width.max(min_menu_width);
                                 let menu_width = if overview_open {
                                     max_menu_width.clamp(220.0, 420.0)
+                                } else if scarlet_menu {
+                                    max_menu_width.min(176.0)
                                 } else {
                                     220.0
                                 };

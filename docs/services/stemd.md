@@ -60,6 +60,12 @@ ready_timeout_ms = 10000
 | `order` | No | Integer ordering hint (default 0) |
 | `ready_notify` | No | Expect `SERVICE_READY` from this service (default false) |
 | `ready_timeout_ms` | No | Timeout for readiness notification (default 5000 ms) |
+| `session_controller` | No | Allow this service to end its desktop session (default false, applies to `stemd --user` only) |
+
+`stemd --user` sets `SCARLET_SESSION_CONTROLLER=1` for units with
+`session_controller = true`. If a controller exits with status 77, user `stemd`
+exits so the seat broker can terminate the session scope and show the login
+screen. Other exit statuses follow the unit's usual restart policy.
 
 ## Central Logging
 

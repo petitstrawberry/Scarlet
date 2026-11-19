@@ -5,3 +5,4 @@ restart = true
 [service.scarlet-shell]
 exec = "/bin/scarlet-shell --mode desktop"
 restart = true
+session_controller = true

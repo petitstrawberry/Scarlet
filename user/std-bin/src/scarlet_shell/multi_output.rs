@@ -204,7 +204,6 @@ impl ShellSession {
             app.display_brightness_percent = self.primary.display_brightness_percent.clone();
             app.input_environment_snapshot = self.primary.input_environment_snapshot.clone();
             app.control_center_action = self.primary.control_center_action.clone();
-            app.control_center_armed_power = self.primary.control_center_armed_power.clone();
             app.full_app_menus = self.primary.full_app_menus.clone();
             self.bus.observe(&app.workspace_state); self.bus.observe(&app.home_query);
             added.push(descriptor.id);

@@ -9,14 +9,14 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use scarlet_ui::color::{Color, ColorPalette};
+use scarlet_ui::color::ColorPalette;
 use scarlet_ui::element::{ComponentElement, Element};
 use scarlet_ui::geometry::{Alignment, Point, Rect, Size};
 use scarlet_ui::state::State;
 use scarlet_ui::view::{View, ViewExt};
 use scarlet_ui::views::containers::ViewTuple;
 use scarlet_ui::views::{
-    Button, Divider, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface, SurfaceRole,
+    Button, ElevationRole, GlassMaterial, HStack, Slider, Spacer, Surface, SurfaceRole,
     SurfaceStyle, Text, TextStyle, VStack,
 };
 use scarlet_ui::{Icon, IconSize};
@@ -201,6 +201,7 @@ impl Default for ControlCenterSnapshot {
 pub struct ControlCenterSession {
     pub open: bool,
     pub snapshot: Option<ControlCenterSnapshot>,
+    pub page: ControlCenterPage,
     generation: u64,
 }
 
@@ -208,6 +209,7 @@ impl ControlCenterSession {
     pub fn request_open(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.snapshot = None;
+        self.page = ControlCenterPage::Controls;
         self.open = true;
     }
 
@@ -224,6 +226,14 @@ impl ControlCenterSession {
             self.snapshot = Some(snapshot);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ControlCenterPage {
+    #[default]
+    Controls,
+    AudioOutputs(usize),
+    System,
 }
 
 /// Settings destination requested by Control Center.
@@ -248,12 +258,8 @@ pub enum ControlCenterAction {
     SelectOutput(String),
     /// Open a settings destination.
     OpenSettings(ControlCenterSettingsLink),
-    /// Arm power-off confirmation.
-    ArmPowerOff,
     /// Confirm a previously armed power-off request.
     ConfirmPowerOff,
-    /// Arm reboot confirmation.
-    ArmReboot,
     /// Confirm a previously armed reboot request.
     ConfirmReboot,
 }
@@ -279,15 +285,6 @@ impl PercentWriteState {
     }
 }
 
-/// Power action awaiting a confirming second press.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ArmedPowerAction {
-    /// Power-off is armed.
-    PowerOff,
-    /// Reboot is armed.
-    Reboot,
-}
-
 /// Stable dimensions shared by the scene declaration and its content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlCenterMetrics {
@@ -298,46 +295,61 @@ pub struct ControlCenterMetrics {
     margin: u32,
     gap: u32,
     target_height: u32,
-    controls_height: u32,
+    page: ControlCenterPage,
     details_height: u32,
+    audio_rows: usize,
+    audio_pages: usize,
+    audio_rows_per_page: usize,
 }
 
 impl ControlCenterMetrics {
     /// Corner radius shared by the managed window body and floating surface.
     pub const CORNER_RADIUS: f32 = 16.0;
 
-    /// Resolve the approved compact shell dimensions.
-    ///
-    /// # Arguments
-    ///
-    /// * `presentation` - Current shell presentation.
-    /// * `output_count` - Number of real audio-output rows.
-    ///
-    /// # Returns
-    ///
-    /// Presentation-specific dimensions for pointer and touch targets.
-    pub fn resolve(presentation: ControlCenterPresentation, output_count: usize) -> Self {
-        let (width, margin, gap, target_height, details_height) = match presentation {
-            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 84),
-            ControlCenterPresentation::TabletSheet => (392, 10, 6, 44, 96),
+    /// Fit the current page within the logical space below the status bar.
+    pub fn resolve(
+        presentation: ControlCenterPresentation,
+        available: Size,
+        page: ControlCenterPage,
+        output_count: usize,
+    ) -> Self {
+        let (preferred_width, preferred_margin, preferred_target, preferred_details) =
+            match presentation {
+                ControlCenterPresentation::LaptopPopover => (304, 8, 32, 84),
+                ControlCenterPresentation::TabletSheet => (392, 10, 44, 96),
+            };
+        let width = preferred_width.min((available.width as u32).max(1));
+        let height_limit = (available.height as u32).max(1);
+        let margin = preferred_margin.min((width.min(height_limit) - 1) / 6);
+        let inner_height = height_limit - 2 * margin;
+        let gap = 6.min(inner_height / 12);
+        let target_height = preferred_target.min(((inner_height - 3 * gap) / 4).max(1));
+        let row_extent = target_height + gap;
+        let details_height = preferred_details.min(inner_height.saturating_sub(2 * row_extent));
+        let audio_rows_per_page = ((inner_height + gap) / row_extent)
+            .saturating_sub(2)
+            .clamp(1, 5) as usize;
+        let audio_rows = output_count.clamp(1, audio_rows_per_page);
+        let audio_pages = output_count.div_ceil(audio_rows_per_page).max(1);
+        let (page, content_height) = match page {
+            ControlCenterPage::Controls => (page, 4 * row_extent - gap),
+            ControlCenterPage::AudioOutputs(index) => (
+                ControlCenterPage::AudioOutputs(index.min(audio_pages - 1)),
+                (2 + audio_rows as u32) * row_extent - gap,
+            ),
+            ControlCenterPage::System => (page, 2 * row_extent + details_height),
         };
-        let output_rows = if output_count > 1 {
-            output_count as u32
-        } else {
-            0
-        };
-        let controls_height = (2 + output_rows) * target_height + (1 + output_rows) * gap;
-        // Five compact sections, including two one-pixel dividers. The
-        // controls identify the panel without an extra title/header row.
-        let height = margin * 2 + controls_height + details_height + target_height + gap * 4 + 2;
         Self {
             width,
-            height,
+            height: (content_height + 2 * margin).min(height_limit),
             margin,
             gap,
             target_height,
-            controls_height,
+            page,
             details_height,
+            audio_rows,
+            audio_pages,
+            audio_rows_per_page,
         }
     }
 
@@ -349,6 +361,14 @@ impl ControlCenterMetrics {
     /// semantic shadow surface outside this rectangle.
     pub const fn body_size(&self) -> Size {
         Size::new(self.width as f32, self.height as f32)
+    }
+
+    fn content_width(&self) -> f32 {
+        (self.width - self.margin * 2) as f32
+    }
+
+    fn column_width(&self) -> f32 {
+        ((self.content_width() - self.gap as f32) / 2.0).max(1.0)
     }
 }
 
@@ -376,42 +396,86 @@ pub(super) fn backdrop_region(body: Size) -> scarlet_ui::platform::SurfaceRegion
     }
 }
 
-/// Build the retained ScarletUI Control Center content.
-///
-/// # Arguments
-///
-/// * `presentation` - Laptop popover or tablet sheet.
-/// * `snapshot` - Current provider snapshot.
-/// * `volume` - Shared standard Slider value state.
-/// * `brightness` - Shared display Slider value state, updated after readback.
-/// * `action` - Typed action queue consumed by the StatusBar service loop.
-/// * `armed_power` - Current two-step power confirmation state.
-///
-/// # Returns
-///
-/// A normal ScarletUI view tree. No drawing or input dispatch is implemented
-/// by this module.
+/// Build the active Control Center page with a shared Settings button.
 pub fn build_control_center_view(
-    presentation: ControlCenterPresentation,
+    metrics: ControlCenterMetrics,
     snapshot: ControlCenterSnapshot,
     volume: State<f32>,
     brightness: State<f32>,
     action: State<Option<ControlCenterAction>>,
-    armed_power: State<Option<ArmedPowerAction>>,
+    session: State<ControlCenterSession>,
 ) -> impl View + Clone {
-    let metrics = ControlCenterMetrics::resolve(presentation, snapshot.audio.outputs.len());
+    let gap = metrics.gap as f32;
+    let mut rows = match metrics.page {
+        ControlCenterPage::Controls => {
+            controls_page(metrics, &snapshot, volume, brightness, &action, &session)
+        }
+        ControlCenterPage::AudioOutputs(index) => {
+            audio_outputs_page(metrics, index, &snapshot, &action, &session)
+        }
+        ControlCenterPage::System => system_page(metrics, &snapshot, &action, &session),
+    };
+    rows.push(settings_button(metrics, action));
+    let content = VStack::new(DynamicViews::new(rows))
+        .spacing(gap)
+        .alignment(Alignment::Leading)
+        .padding(metrics.margin as f32);
+
+    Surface::new(content, SurfaceRole::Floating)
+        // SWS filters the desktop behind the managed body. Sliders can
+        // still sample this surface through their ordinary local materials.
+        .surface_style(SurfaceStyle::bubble_glass().material(panel_material().blur_radius(0.0)))
+        .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
+        .frame(metrics.width as f32, metrics.height as f32)
+}
+
+fn page_button(
+    label: &str,
+    icon: Icon,
+    page: ControlCenterPage,
+    size: Size,
+    session: &State<ControlCenterSession>,
+) -> Box<dyn View> {
+    let session = session.clone();
+    boxed(
+        Button::new(label)
+            .icon(icon)
+            .icon_size(IconSize::Small)
+            .header_style()
+            .font_size(12.0)
+            .padding(0.0)
+            .on_click(move || session.update(|session| session.page = page))
+            .frame(size.width, size.height)
+            .clip(),
+    )
+}
+
+fn back_button(size: Size, session: &State<ControlCenterSession>) -> Box<dyn View> {
+    page_button(
+        "Back",
+        Icon::ChevronLeft,
+        ControlCenterPage::Controls,
+        size,
+        session,
+    )
+}
+
+fn controls_page(
+    metrics: ControlCenterMetrics,
+    snapshot: &ControlCenterSnapshot,
+    volume: State<f32>,
+    brightness: State<f32>,
+    action: &State<Option<ControlCenterAction>>,
+    session: &State<ControlCenterSession>,
+) -> Vec<Box<dyn View>> {
     let palette = ColorPalette::default();
-    let content_width = metrics.width as f32 - metrics.margin as f32 * 2.0;
-    let card_width = (content_width - metrics.gap as f32) / 2.0;
-    let title_size = 14.0;
+    let control_row_width = metrics.content_width();
     let detail_size = 12.0;
     let target_height = metrics.target_height as f32;
-    // HStack measures intrinsic child widths; its outer frame alone does not
-    // constrain a Slider. Reserve the same label column for both rows so a
-    // percentage gaining a digit cannot move or shrink the slider track.
-    let control_row_width = content_width;
-    let control_label_width = 84.0;
-    let control_slider_width = control_row_width - control_label_width - metrics.gap as f32;
+    // Keep both slider tracks aligned when the brightness percentage grows.
+    let control_label_width = 84.0_f32.min(control_row_width / 2.0);
+    let control_slider_width =
+        (control_row_width - control_label_width - metrics.gap as f32).max(1.0);
 
     let mute_action = action.clone();
     let mute = Button::new(if snapshot.audio.volume_percent.is_none() {
@@ -438,7 +502,7 @@ pub fn build_control_center_view(
             )));
         });
 
-    let mut audio_rows: Vec<Box<dyn View>> = vec![boxed(
+    let mut rows: Vec<Box<dyn View>> = vec![boxed(
         HStack::new(DynamicViews::new(vec![
             boxed(
                 HStack::new(DynamicViews::new(vec![boxed(mute), boxed(Spacer::new())]))
@@ -451,33 +515,6 @@ pub fn build_control_center_view(
         .alignment(Alignment::Center)
         .frame(control_row_width, target_height),
     )];
-    if snapshot.audio.outputs.len() > 1 {
-        for output in &snapshot.audio.outputs {
-            let selected = snapshot.audio.current_output_id.as_ref() == Some(&output.id);
-            let mut label = output.name.clone();
-            if selected {
-                label.push_str("  Selected");
-            }
-            let output_action = action.clone();
-            let output_id = output.id.clone();
-            let mut button = Button::new(label)
-                .enabled(output.available)
-                .header_style()
-                .font_size(detail_size)
-                .icon(if selected {
-                    Icon::CircleCheck
-                } else {
-                    Icon::Volume2
-                });
-            if output.available {
-                button = button.on_click(move || {
-                    output_action.set(Some(ControlCenterAction::SelectOutput(output_id.clone())));
-                });
-            }
-            audio_rows.push(boxed(button.frame(control_row_width, target_height)));
-        }
-    }
-
     let brightness_row = if snapshot.brightness_percent.is_some() {
         // Only the percentage text rebuilds during a drag. The row and the
         // independently subscribed Slider keep their elements and capture.
@@ -498,174 +535,228 @@ pub fn build_control_center_view(
                 .frame(control_row_width, target_height),
         )
     };
-    audio_rows.insert(0, brightness_row);
-    let controls = content_section(
-        content_width,
-        metrics.controls_height as f32,
-        audio_rows,
+    rows.insert(0, brightness_row);
+    let multiple_outputs = snapshot.audio.outputs.len() > 1;
+    let nav_width = if multiple_outputs {
+        metrics.column_width()
+    } else {
+        control_row_width
+    };
+    let nav_size = Size::new(nav_width, target_height);
+    let system = page_button(
+        if nav_width >= 108.0 {
+            "System status"
+        } else {
+            "Status"
+        },
+        Icon::ChartBar,
+        ControlCenterPage::System,
+        nav_size,
+        session,
+    );
+    if multiple_outputs {
+        let audio = page_button(
+            if nav_width >= 108.0 {
+                "Audio outputs"
+            } else {
+                "Audio"
+            },
+            Icon::Volume2,
+            ControlCenterPage::AudioOutputs(0),
+            nav_size,
+            session,
+        );
+        rows.push(control_row(
+            vec![audio, system],
+            control_row_width,
+            target_height,
+            metrics.gap as f32,
+        ));
+    } else {
+        rows.push(system);
+    }
+    rows
+}
+
+fn audio_outputs_page(
+    metrics: ControlCenterMetrics,
+    index: usize,
+    snapshot: &ControlCenterSnapshot,
+    action: &State<Option<ControlCenterAction>>,
+    session: &State<ControlCenterSession>,
+) -> Vec<Box<dyn View>> {
+    let width = metrics.content_width();
+    let height = metrics.target_height as f32;
+    let gap = metrics.gap as f32;
+    let header = if metrics.audio_pages == 1 {
+        back_button(Size::new(width, height), session)
+    } else {
+        let back_width = width * 0.35;
+        let counter_width = 44.0_f32.min(width * 0.25);
+        let arrow_size = Size::new(
+            ((width - back_width - counter_width - 3.0 * gap) / 2.0).max(1.0),
+            height,
+        );
+        let arrow = |icon, page: Option<usize>| {
+            if let Some(page) = page {
+                page_button(
+                    "",
+                    icon,
+                    ControlCenterPage::AudioOutputs(page),
+                    arrow_size,
+                    session,
+                )
+            } else {
+                boxed(Spacer::new().frame(arrow_size.width, height))
+            }
+        };
+        control_row(
+            vec![
+                back_button(Size::new(back_width, height), session),
+                arrow(Icon::ChevronLeft, index.checked_sub(1)),
+                boxed(
+                    Text::new(alloc::format!("{} / {}", index + 1, metrics.audio_pages))
+                        .text_style(TextStyle::Caption)
+                        .line_limit(Some(1))
+                        .frame(counter_width, height),
+                ),
+                arrow(
+                    Icon::ChevronRight,
+                    (index + 1 < metrics.audio_pages).then_some(index + 1),
+                ),
+            ],
+            width,
+            height,
+            gap,
+        )
+    };
+    let mut rows = vec![header];
+    let outputs = snapshot
+        .audio
+        .outputs
+        .iter()
+        .skip(index * metrics.audio_rows_per_page)
+        .take(metrics.audio_rows_per_page);
+    for output in outputs {
+        let selected = snapshot.audio.current_output_id.as_ref() == Some(&output.id);
+        let mut label = output.name.clone();
+        if selected {
+            label.push_str("  Selected");
+        }
+        let output_action = action.clone();
+        let output_id = output.id.clone();
+        let mut button = Button::new(label)
+            .enabled(output.available)
+            .header_style()
+            .font_size(12.0)
+            .icon(if selected {
+                Icon::CircleCheck
+            } else {
+                Icon::Volume2
+            });
+        if output.available {
+            button = button.on_click(move || {
+                output_action.set(Some(ControlCenterAction::SelectOutput(output_id.clone())));
+            });
+        }
+        rows.push(boxed(button.frame(width, height).clip()));
+    }
+    if snapshot.audio.outputs.is_empty() {
+        rows.push(boxed(
+            Text::new("No audio outputs")
+                .text_style(TextStyle::Caption)
+                .frame(width, height),
+        ));
+    }
+    while rows.len() <= metrics.audio_rows {
+        rows.push(boxed(Spacer::new().frame(width, height)));
+    }
+    rows
+}
+
+fn system_page(
+    metrics: ControlCenterMetrics,
+    snapshot: &ControlCenterSnapshot,
+    action: &State<Option<ControlCenterAction>>,
+    session: &State<ControlCenterSession>,
+) -> Vec<Box<dyn View>> {
+    let palette = ColorPalette::default();
+    let width = metrics.content_width();
+    let card_width = metrics.column_width();
+    let height = metrics.details_height as f32;
+    let network_detail = network_label(&snapshot.network);
+    let system_detail = system_label(&snapshot.system);
+    let network_action = action.clone();
+    let network_settings = Button::new("Network settings")
+        .padding(0.0)
+        .header_style()
+        .font_size(11.0)
+        .on_click(move || {
+            network_action.set(Some(ControlCenterAction::OpenSettings(
+                ControlCenterSettingsLink::Network,
+            )));
+        });
+
+    let caption = |label: String| {
+        boxed(
+            Text::new(label)
+                .font_size(11.0)
+                .line_limit(Some(1))
+                .color(palette.text_secondary())
+                .frame_width(card_width),
+        )
+    };
+    let mut network = vec![caption(network_detail), boxed(network_settings.clip())];
+    let mut system = vec![caption(system_detail), caption(snapshot.power.detail())];
+    if height >= 78.0 {
+        network.insert(0, boxed(Text::new("Network").font_size(14.0)));
+        system.insert(0, boxed(Text::new("System").font_size(14.0)));
+        system.push(caption(String::from(input_label(
+            &snapshot.input_environment,
+        ))));
+    }
+    let details = control_row(
+        vec![
+            content_section(card_width, height, network, 4.0),
+            content_section(card_width, height, system, 4.0),
+        ],
+        width,
+        height,
         metrics.gap as f32,
     );
+    vec![
+        back_button(Size::new(width, metrics.target_height as f32), session),
+        details,
+    ]
+}
 
-    let network_detail = network_label(&snapshot.network);
-    let network_action = action.clone();
-    let network = content_section(
-        card_width,
-        metrics.details_height as f32,
-        vec![
-            boxed(Text::new("Network").font_size(title_size)),
-            boxed(
-                Text::new(network_detail)
-                    .font_size(detail_size)
-                    .line_limit(Some(2))
-                    .color(palette.text_secondary())
-                    .frame_width(card_width),
-            ),
-            boxed(
-                Button::new("Network settings")
-                    .padding(0.0)
-                    .header_style()
-                    .font_size(detail_size)
-                    .on_click(move || {
-                        network_action.set(Some(ControlCenterAction::OpenSettings(
-                            ControlCenterSettingsLink::Network,
-                        )));
-                    }),
-            ),
-        ],
-        4.0,
-    );
+fn settings_button(
+    metrics: ControlCenterMetrics,
+    action: State<Option<ControlCenterAction>>,
+) -> Box<dyn View> {
+    boxed(
+        Button::new("Settings")
+            .icon(Icon::Settings)
+            .header_style()
+            .icon_size(IconSize::Small)
+            .font_size(11.0)
+            .padding(0.0)
+            .on_click(move || {
+                action.set(Some(ControlCenterAction::OpenSettings(
+                    ControlCenterSettingsLink::AllSettings,
+                )));
+            })
+            .frame(metrics.content_width(), metrics.target_height as f32),
+    )
+}
 
-    let system = content_section(
-        card_width,
-        metrics.details_height as f32,
-        vec![
-            boxed(Text::new("System").font_size(title_size)),
-            boxed(
-                Text::new(system_label(&snapshot.system))
-                    .font_size(detail_size)
-                    .line_limit(Some(2))
-                    .frame_width(card_width),
-            ),
-            boxed(
-                Text::new(snapshot.power.detail())
-                    .font_size(11.0)
-                    .line_limit(Some(2))
-                    .frame_width(card_width),
-            ),
-            boxed(
-                Text::new(input_label(&snapshot.input_environment))
-                    .font_size(11.0)
-                    .color(palette.text_secondary()),
-            ),
-        ],
-        4.0,
-    );
-
-    let settings_action = action.clone();
-    let footer_width = (content_width - metrics.gap as f32 * 2.0) / 3.0;
-    let settings = Button::new("Settings")
-        .icon(Icon::Settings)
-        .header_style()
-        .icon_size(IconSize::Small)
-        .font_size(11.0)
-        .padding(0.0)
-        .icon_color(palette.text_secondary())
-        .on_click(move || {
-            settings_action.set(Some(ControlCenterAction::OpenSettings(
-                ControlCenterSettingsLink::AllSettings,
-            )));
-        })
-        .frame(footer_width, target_height);
-
-    let shutdown_action = action.clone();
-    let shutdown_armed = armed_power.clone();
-    let shutdown = Button::new(if armed_power.get() == Some(ArmedPowerAction::PowerOff) {
-        "Confirm off"
-    } else {
-        "Power off"
-    })
-    .icon(Icon::Power)
-    .header_style()
-    .icon_size(IconSize::Small)
-    .font_size(11.0)
-    .padding(0.0)
-    .icon_color(if armed_power.get() == Some(ArmedPowerAction::PowerOff) {
-        palette.primary()
-    } else {
-        palette.text_secondary()
-    })
-    .on_click(move || {
-        let next = if shutdown_armed.get() == Some(ArmedPowerAction::PowerOff) {
-            shutdown_armed.set(None);
-            ControlCenterAction::ConfirmPowerOff
-        } else {
-            shutdown_armed.set(Some(ArmedPowerAction::PowerOff));
-            ControlCenterAction::ArmPowerOff
-        };
-        shutdown_action.set(Some(next));
-    })
-    .frame(footer_width, target_height);
-
-    let reboot_action = action;
-    let reboot_armed = armed_power.clone();
-    let reboot = Button::new(if armed_power.get() == Some(ArmedPowerAction::Reboot) {
-        "Confirm"
-    } else {
-        "Restart"
-    })
-    .icon(Icon::Refresh)
-    .header_style()
-    .icon_size(IconSize::Small)
-    .font_size(11.0)
-    .padding(0.0)
-    .icon_color(if armed_power.get() == Some(ArmedPowerAction::Reboot) {
-        palette.primary()
-    } else {
-        palette.text_secondary()
-    })
-    .on_click(move || {
-        let next = if reboot_armed.get() == Some(ArmedPowerAction::Reboot) {
-            reboot_armed.set(None);
-            ControlCenterAction::ConfirmReboot
-        } else {
-            reboot_armed.set(Some(ArmedPowerAction::Reboot));
-            ControlCenterAction::ArmReboot
-        };
-        reboot_action.set(Some(next));
-    })
-    .frame(footer_width, target_height);
-
-    let details = HStack::new(DynamicViews::new(vec![network, system]))
-        .spacing(metrics.gap as f32)
-        .alignment(Alignment::Top);
-    let footer = HStack::new(DynamicViews::new(vec![
-        boxed(settings),
-        boxed(reboot),
-        boxed(shutdown),
-    ]))
-    .spacing(metrics.gap as f32)
-    .alignment(Alignment::Center)
-    .frame(content_width, target_height);
-
-    let content = VStack::new(DynamicViews::new(vec![
-        controls,
-        boxed(Divider::new().frame_width(content_width)),
-        boxed(details),
-        boxed(Divider::new().frame_width(content_width)),
-        boxed(footer),
-    ]))
-    .spacing(metrics.gap as f32)
-    .alignment(Alignment::Leading)
-    .padding(metrics.margin as f32);
-
-    Surface::new(content, SurfaceRole::Floating)
-        // The managed Window owns the shadow and SWS filters the desktop
-        // behind this body once. Keep the shared tint/rim here, but do not blur
-        // the empty in-app background again. Slider thumbs still sample this
-        // already painted surface through their ordinary local materials.
-        .surface_style(SurfaceStyle::bubble_glass().material(panel_material().blur_radius(0.0)))
-        .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
-        .frame(metrics.width as f32, metrics.height as f32)
+fn control_row(children: Vec<Box<dyn View>>, width: f32, height: f32, gap: f32) -> Box<dyn View> {
+    boxed(
+        HStack::new(DynamicViews::new(children))
+            .spacing(gap)
+            .alignment(Alignment::Center)
+            .frame(width, height),
+    )
 }
 
 fn content_section(
@@ -877,6 +968,18 @@ mod tests {
     use scarlet_ui::state::StateId;
     use scarlet_ui::views::SliderRenderObject;
 
+    fn controls_metrics(
+        presentation: ControlCenterPresentation,
+        output_count: usize,
+    ) -> ControlCenterMetrics {
+        ControlCenterMetrics::resolve(
+            presentation,
+            Size::new(800.0, 600.0),
+            ControlCenterPage::Controls,
+            output_count,
+        )
+    }
+
     #[test]
     fn percent_writes_deduplicate_acks_but_keep_changes_retries_and_final_targets() {
         let mut writes = PercentWriteState::default();
@@ -997,12 +1100,15 @@ mod tests {
                 },
             };
             let view = build_control_center_view(
-                ControlCenterPresentation::LaptopPopover,
+                controls_metrics(ControlCenterPresentation::LaptopPopover, 0),
                 snapshot,
                 State::new(StateId::new(2020 + index as u32), 0.0),
                 brightness.clone(),
                 action.clone(),
-                State::new(StateId::new(2030 + index as u32), None),
+                State::new(
+                    StateId::new(2040 + index as u32),
+                    ControlCenterSession::default(),
+                ),
             );
             let element = view.create_element();
             let slider = brightness_slider(element.as_ref(), brightness.id());
@@ -1088,12 +1194,15 @@ mod tests {
                     },
                 };
                 let mut element = build_control_center_view(
-                    presentation,
+                    controls_metrics(presentation, 0),
                     snapshot,
                     State::new(scarlet_ui::state::generate_state_id(), 25.0),
                     State::new(scarlet_ui::state::generate_state_id(), percent as f32),
                     State::new(scarlet_ui::state::generate_state_id(), None),
-                    State::new(scarlet_ui::state::generate_state_id(), None),
+                    State::new(
+                        scarlet_ui::state::generate_state_id(),
+                        ControlCenterSession::default(),
+                    ),
                 )
                 .create_element();
                 let size = element.layout(LayoutConstraints::unconstrained());
@@ -1158,25 +1267,25 @@ mod tests {
 
     #[test]
     fn brightness_row_fits_pointer_and_touch_metrics() {
-        let laptop = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 1);
-        let tablet = ControlCenterMetrics::resolve(ControlCenterPresentation::TabletSheet, 1);
+        let laptop = controls_metrics(ControlCenterPresentation::LaptopPopover, 1);
+        let tablet = controls_metrics(ControlCenterPresentation::TabletSheet, 1);
         assert_eq!(laptop.width, 304);
         assert_eq!(
-            laptop.controls_height,
-            2 * laptop.target_height + laptop.gap
+            laptop.height,
+            2 * laptop.margin + 4 * laptop.target_height + 3 * laptop.gap
         );
         assert!(laptop.height <= 400);
         assert_eq!(tablet.width, 392);
         assert_eq!(
-            tablet.controls_height,
-            2 * tablet.target_height + tablet.gap
+            tablet.height,
+            2 * tablet.margin + 4 * tablet.target_height + 3 * tablet.gap
         );
         assert!(tablet.target_height > laptop.target_height);
     }
 
     #[test]
     fn scene_declares_only_the_managed_control_center_body() {
-        let metrics = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 1);
+        let metrics = controls_metrics(ControlCenterPresentation::LaptopPopover, 1);
         let body = metrics.body_size();
 
         assert_eq!(body.width, metrics.width as f32);
@@ -1192,10 +1301,29 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_audio_outputs_add_exactly_one_standard_row() {
-        let two = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 2);
-        let three = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 3);
-        assert_eq!(three.height - two.height, two.target_height + two.gap);
+    fn multiple_audio_outputs_share_one_link_on_the_controls_page() {
+        let two = controls_metrics(ControlCenterPresentation::LaptopPopover, 2);
+        let three = controls_metrics(ControlCenterPresentation::LaptopPopover, 3);
+        assert_eq!(three.height, two.height);
+    }
+
+    #[test]
+    fn short_viewport_paginates_audio_outputs_with_all_navigation_visible() {
+        let available = Size::new(280.0, 156.0);
+        let metrics = ControlCenterMetrics::resolve(
+            ControlCenterPresentation::TabletSheet,
+            available,
+            ControlCenterPage::AudioOutputs(99),
+            12,
+        );
+        assert!(metrics.body_size().height <= available.height);
+        assert_eq!(metrics.audio_rows, 2);
+        assert_eq!(metrics.audio_pages, 6);
+        assert_eq!(metrics.page, ControlCenterPage::AudioOutputs(5));
+        assert_eq!(
+            metrics.height,
+            2 * metrics.margin + 4 * metrics.target_height + 3 * metrics.gap
+        );
     }
 
     #[test]
@@ -1204,11 +1332,11 @@ mod tests {
             ControlCenterPresentation::LaptopPopover,
             ControlCenterPresentation::TabletSheet,
         ] {
-            let none = ControlCenterMetrics::resolve(presentation, 0);
-            let one = ControlCenterMetrics::resolve(presentation, 1);
-            let two = ControlCenterMetrics::resolve(presentation, 2);
+            let none = controls_metrics(presentation, 0);
+            let one = controls_metrics(presentation, 1);
+            let two = controls_metrics(presentation, 2);
             assert_eq!(none.height, one.height);
-            assert_eq!(two.height - one.height, 2 * (one.target_height + one.gap));
+            assert_eq!(two.height, one.height);
         }
     }
 

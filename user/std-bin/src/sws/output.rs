@@ -280,6 +280,48 @@ impl<T> OutputSet<T> {
         if transaction.base_generation != self.generation { return Err(ConfigurationError::Stale); }
         protocol::canonical_layout(&self.snapshot().outputs, &transaction.configuration).map_err(|_| ConfigurationError::Invalid)
     }
+    /// Recompute a connected layout for a hardware mode change. Keep the
+    /// placement where possible, then try snapping the resized output.
+    pub(super) fn layout_for_mode(
+        &self,
+        id: OutputId,
+        mode: OutputMode,
+    ) -> Result<Vec<OutputConfiguration>, protocol::LayoutError> {
+        let mut snapshot = self.snapshot();
+        let descriptor = snapshot.outputs.iter_mut().find(|output| output.id == id)
+            .ok_or(protocol::LayoutError::MissingOutput)?;
+        descriptor.mode = mode;
+        let mut configuration = snapshot.configuration;
+        if protocol::validate_layout(&snapshot.outputs, &configuration).is_ok() {
+            return Ok(configuration);
+        }
+        let entry = configuration.iter_mut().find(|entry| entry.id == id)
+            .ok_or(protocol::LayoutError::MissingOutput)?;
+        let desired = (entry.x, entry.y);
+        if let Ok((x, y)) = protocol::snapped_position(&snapshot.outputs, &configuration, id, desired) {
+            let entry = configuration.iter_mut().find(|entry| entry.id == id).unwrap();
+            entry.x = x;
+            entry.y = y;
+            if let Ok(layout) = protocol::canonical_layout(&snapshot.outputs, &configuration) {
+                return Ok(layout);
+            }
+        }
+        // Reconnect a layout that can no longer fit by putting the primary at
+        // the origin and arranging the remaining outputs to its right.
+        let mut x = 0i32;
+        for output in snapshot.outputs.iter().filter(|o| o.primary)
+            .chain(snapshot.outputs.iter().filter(|o| !o.primary))
+        {
+            let entry = configuration.iter_mut().find(|entry| entry.id == output.id).unwrap();
+            entry.x = x;
+            entry.y = 0;
+            let (width, _) = output.mode.logical_size(entry.scale_milli)?;
+            let width = i32::try_from(width).map_err(|_| protocol::LayoutError::CoordinatesOverflow)?;
+            x = x.checked_add(width).ok_or(protocol::LayoutError::CoordinatesOverflow)?;
+        }
+        protocol::canonical_layout(&snapshot.outputs, &configuration)
+    }
+
     pub(super) fn apply_configuration(&mut self, configuration: &[OutputConfiguration]) {
         for entry in configuration {
             let output = self.get_mut(entry.id).expect("validated complete output configuration");
@@ -489,6 +531,35 @@ mod tests {
         let mut set = OutputSet::single(outputs.next().unwrap());
         set.outputs.extend(outputs);
         set
+    }
+
+    #[test]
+    fn primary_hardware_resize_updates_native_and_shell_extents_at_fractional_scale() {
+        use sws_protocol::outputs::OutputMode;
+
+        let mut outputs = OutputSet::single(Output::new(
+            PRIMARY_OUTPUT_ID,
+            OutputRect::new(0, 0, 1280, 800),
+            1500,
+            (),
+        ));
+        let before = outputs.snapshot();
+        let mode = OutputMode {
+            pixel_width: 1024,
+            pixel_height: 768,
+            refresh_millihz: 60_000,
+        };
+        let configuration = outputs.layout_for_mode(PRIMARY_OUTPUT_ID, mode).unwrap();
+        outputs.primary_mut().metadata.mode = mode;
+        outputs.apply_configuration(&configuration);
+
+        let after = outputs.snapshot();
+        assert_ne!(after.generation, before.generation);
+        assert_eq!(after.outputs[0].mode, mode);
+        assert_eq!(outputs.primary().logical_rect.width, 683);
+        assert_eq!(outputs.primary().logical_rect.height, 512);
+        assert_eq!(outputs.primary().projection().scene, (1366, 1024));
+        assert_eq!(outputs.primary().projection().native, (1024, 768));
     }
 
     #[test]

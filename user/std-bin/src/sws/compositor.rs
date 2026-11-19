@@ -3743,54 +3743,61 @@ impl Compositor {
             .display
             .get_var_screen_info()
             .map_err(|_| "Failed to get screen info")?;
-        let new_width = var_info.xres;
-        let new_height = var_info.yres;
-
-        if new_width == 0
-            || new_height == 0
-            || (new_width == self.screen_width() && new_height == self.screen_height())
+        let (pixel_width, pixel_height) = (var_info.xres, var_info.yres);
+        let id = self.outputs.primary_id();
+        let old_mode = self.outputs.primary().metadata.mode;
+        if pixel_width == 0
+            || pixel_height == 0
+            || (pixel_width == old_mode.pixel_width && pixel_height == old_mode.pixel_height)
         {
             return Ok(false);
         }
 
         println!(
             "[Compositor] Display resize: {}x{} -> {}x{}",
-            self.screen_width(),
-            self.screen_height(),
-            new_width,
-            new_height
+            old_mode.pixel_width, old_mode.pixel_height, pixel_width, pixel_height,
         );
 
-        let output = self.outputs.primary_mut();
-        output
-            .target
-            .display
-            .refresh_mapping()
-            .map_err(|_| "Failed to refresh display mapping")?;
+        let refresh_millihz = self.outputs.primary().target.display.get_output_info()
+            .map_or(old_mode.refresh_millihz, |info| info.refresh_mhz);
+        let mode = sws_protocol::outputs::OutputMode {
+            pixel_width,
+            pixel_height,
+            refresh_millihz,
+        };
+        let configuration = self.outputs.layout_for_mode(id, mode)
+            .map_err(|_| "Failed to lay out resized primary display")?;
 
-        output.rect.width = new_width;
-        output.rect.height = new_height;
-        let target = &mut output.target;
-        target.backbuffer_stride = new_width.saturating_mul(target.bytes_per_pixel);
-        let buffer_size = new_width
-            .saturating_mul(new_height)
-            .saturating_mul(target.bytes_per_pixel) as usize;
-        target.backbuffer.resize(buffer_size, 0);
-        super::input::set_screen_size(new_width, new_height);
-        self.cursor
-            .set_position(self.cursor.x, self.cursor.y, new_width, new_height);
+        let output = self.outputs.primary_mut();
+        output.target.display.refresh_mapping()
+            .map_err(|_| "Failed to refresh display mapping")?;
+        output.metadata.mode = mode;
+        if self.install_output_configuration(&configuration, false).is_err() {
+            self.outputs.primary_mut().metadata.mode = old_mode;
+            return Err("Failed to apply resized primary display layout");
+        }
+
+        let target = &mut self.outputs.primary_mut().target;
+        target.backbuffer_stride = pixel_width.saturating_mul(target.bytes_per_pixel);
+        let size = target.backbuffer_stride as usize * pixel_height as usize;
+        target.backbuffer.resize(size, 0);
+        target.presented_damage.clear();
+        target.cpu_backdrops.clear();
+        target.deferred_gpu_damage = None;
+        target.full_redraw = true;
 
         let gpu_resize_failed = match self.gpu_compositor.as_mut() {
-            Some(gpu_compositor) => gpu_compositor.resize_target(new_width, new_height).is_err(),
+            Some(gpu_compositor) => gpu_compositor.resize_target(pixel_width, pixel_height).is_err(),
             None => false,
         };
         if gpu_resize_failed {
             println!("[Compositor] Disabling GPU composition after display resize failure");
             self.disable_gpu_after_runtime_failure("SWS_BACKEND=sgfx target resize failed")?;
         }
+        let (new_width, new_height) = (self.screen_width(), self.screen_height());
         self.capture_session.output_changed(new_width, new_height);
 
-        let payload = sws_protocol::payload_screen_size(new_width, new_height);
+        let payload = sws_protocol::payload_screen_size(pixel_width, pixel_height);
         super::ipc::broadcast_message_to_all_clients(
             sws_protocol::server_msg::SCREEN_SIZE_CHANGED,
             payload.to_vec(),
@@ -3801,7 +3808,7 @@ impl Compositor {
             .get_windows()
             .iter()
             .filter(|window| window.output_id == self.outputs.primary_id())
-            .map(|w| (w.id, w.window_type, w.height, w.fullscreen))
+            .map(|w| (w.id, w.window_type, w.surface_geometry().3, w.fullscreen))
             .collect();
         let mut taskbar_height = 0;
 
@@ -4833,34 +4840,21 @@ impl Compositor {
         let Ok(display) = DisplaySurface::open(&self.secondary_endpoints[index].path) else { return false; };
         let Ok(info) = display.get_var_screen_info() else { return false; };
         let metadata = output_control::describe_output(id, display.get_output_info().ok(), info.xres, info.yres, false);
+        let Ok(configuration) = self.outputs.layout_for_mode(id, metadata.mode) else { return false; };
         let Some(output) = self.outputs.get_mut(id) else { return false; };
-        output.metadata = metadata;
-        output.target.display = display;
-        output.target.backbuffer_stride = info.xres * 4;
-        output.target.backbuffer = vec![0; info.xres as usize * info.yres as usize * 4];
-        output.target.presented_damage.clear();
-        output.target.cpu_backdrops.clear();
-        output.target.deferred_gpu_damage = None;
-        output.target.full_redraw = true;
-        let snapshot = self.outputs.snapshot();
-        let mut configuration = snapshot.configuration;
-        if let Some(entry) = configuration.iter().find(|entry| entry.id == id).copied() {
-            if let Ok((x, y)) = sws_protocol::outputs::snapped_position(&snapshot.outputs, &configuration, id, (entry.x, entry.y)) {
-                let entry = configuration.iter_mut().find(|entry| entry.id == id).unwrap();
-                entry.x = x; entry.y = y;
-            }
+        let old_metadata = core::mem::replace(&mut output.metadata, metadata);
+        if self.install_output_configuration(&configuration, false).is_err() {
+            self.outputs.get_mut(id).unwrap().metadata = old_metadata;
+            return false;
         }
-        // If a complex arrangement no longer touches after resizing, keep all
-        // workspaces and place outputs in a connected row around the primary.
-        if sws_protocol::outputs::validate_layout(&snapshot.outputs, &configuration).is_err() {
-            let mut x = 0i32;
-            for output in snapshot.outputs.iter().filter(|o| o.primary).chain(snapshot.outputs.iter().filter(|o| !o.primary)) {
-                let entry = configuration.iter_mut().find(|entry| entry.id == output.id).unwrap();
-                entry.x = x; entry.y = 0;
-                x += output.mode.logical_size(entry.scale_milli).unwrap().0 as i32;
-            }
-        }
-        if self.install_output_configuration(&configuration, false).is_err() { return false; }
+        let target = &mut self.outputs.get_mut(id).unwrap().target;
+        target.display = display;
+        target.backbuffer_stride = info.xres * 4;
+        target.backbuffer = vec![0; info.xres as usize * info.yres as usize * 4];
+        target.presented_damage.clear();
+        target.cpu_backdrops.clear();
+        target.deferred_gpu_damage = None;
+        target.full_redraw = true;
         let rect = self.outputs.get(id).unwrap().rect;
         let windows: Vec<_> = self.window_manager.get_windows().iter().filter(|w| w.output_id == id).map(|w| w.id).collect();
         for window in windows {

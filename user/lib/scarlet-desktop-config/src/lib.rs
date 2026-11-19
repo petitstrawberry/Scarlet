@@ -73,6 +73,12 @@ pub const DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL: &str = "Response";
 /// Local application launch socket owned by the desktop session manager.
 pub const DESKTOP_STEMD_SOCKET_PATH: &str = "/tmp/stemd-session.sock";
 
+/// Environment flag set by user stemd when launching a session controller unit.
+pub const DESKTOP_SESSION_CONTROLLER_ENV: &str = "SCARLET_SESSION_CONTROLLER";
+
+/// Exit status a session controller uses to ask user stemd to end the session.
+pub const DESKTOP_SESSION_LOGOUT_STATUS: i32 = 77;
+
 /// Bus name owned by the desktop service manager.
 pub const DESKTOP_STEMD_BUS_NAME: &str = "org.scarlet-os.stemd";
 
