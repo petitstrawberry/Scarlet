@@ -246,8 +246,12 @@ existing contents to that user and writes
 the protected account database. With `console-root = true`, an image with
 no explicit root entry gets a root account with an empty verifier. At the
 local TTY, enter `root` and press Enter at the password prompt. An explicit
-root account overrides this default. GUI login requires a configured password,
-and SSH root login requires an authorized public key. Omit `password-hash-file` for a locked
+root account overrides this default. With `initial_admin_setup = true` in
+`/etc/scarlet-seat.toml`, the local graphical seat offers to set and confirm
+the root password when the protected database contains only the factory
+console root record. The desktop bundle enables this option. After setup,
+subsequent graphical and console logins require the new password for root.
+SSH root login uses an authorized public key. Omit `password-hash-file` for a locked
 account. No default password is shipped. An administrator can update the
 database on a running writable filesystem. Rebuilding the image reapplies
 the manifest.

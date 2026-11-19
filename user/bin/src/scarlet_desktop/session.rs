@@ -6,7 +6,9 @@
 
 extern crate scarlet_std as std;
 use core::time::Duration;
-use scarlet_accounts::{Account, authenticate_local};
+use scarlet_accounts::{
+    Account, authenticate_local, initial_admin_available, set_initial_admin_password,
+};
 use scarlet_os::process_scope::ProcessScope;
 use std::{format, fs::File, handle::Handle, task};
 use zeroize::{Zeroize, Zeroizing};
@@ -104,6 +106,66 @@ impl Drop for Desktop {
 }
 
 #[derive(Default)]
+struct InitialAdmin {
+    password: Zeroizing<std::vec::Vec<u8>>,
+    entry: Zeroizing<std::vec::Vec<u8>>,
+    overflow: usize,
+    error: u8,
+}
+
+impl InitialAdmin {
+    fn confirming(&self) -> bool {
+        !self.password.is_empty()
+    }
+
+    fn input(&mut self, byte: u8) -> Result<Option<Account>, ()> {
+        match byte {
+            27 => *self = Self::default(),
+            8 if self.overflow != 0 => self.overflow -= 1,
+            8 => {
+                if let Some(last) = self.entry.last_mut() {
+                    last.zeroize();
+                }
+                self.entry.pop();
+                self.error = 0;
+            }
+            32..=126 => {
+                if self.entry.capacity() == 0 {
+                    self.entry.reserve_exact(72);
+                }
+                if self.entry.len() < 72 {
+                    self.entry.push(byte);
+                } else {
+                    self.overflow = self.overflow.saturating_add(1);
+                }
+                self.error = 0;
+            }
+            b'\n' if self.entry.is_empty() || self.overflow != 0 => {
+                self.error = 3;
+            }
+            b'\n' if !self.confirming() => {
+                self.password = core::mem::take(&mut self.entry);
+                self.error = 0;
+            }
+            b'\n' if *self.entry != *self.password => {
+                self.entry.zeroize();
+                self.error = 4;
+            }
+            b'\n' => match set_initial_admin_password(&self.password) {
+                Ok(Some(account)) => return Ok(Some(account)),
+                Ok(None) => return Err(()),
+                Err(()) => {
+                    *self = Self::default();
+                    self.error = 5;
+                }
+            },
+            _ => {}
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Default)]
 struct Seat {
     desktop: Option<Desktop>,
     authenticated: Option<Account>,
@@ -117,12 +179,17 @@ struct Seat {
     password_overflow: usize,
     name: std::vec::Vec<u8>,
     password: Zeroizing<std::vec::Vec<u8>>,
+    initial_setup: Option<InitialAdmin>,
+    allow_initial_setup: bool,
 }
 
 impl Seat {
     fn reset(&mut self) {
         self.desktop.take();
-        *self = Self::default();
+        *self = Self {
+            allow_initial_setup: self.allow_initial_setup,
+            ..Self::default()
+        };
     }
 
     fn choose_account(&mut self, step: i8) {
@@ -185,11 +252,25 @@ impl Seat {
         if self.desktop.as_mut().is_some_and(Desktop::exited) {
             self.reset();
         }
+        if let Some(mut setup) = self.initial_setup.take() {
+            match setup.input(byte) {
+                Ok(Some(account)) => self.authenticated = Some(account),
+                Ok(None) => self.initial_setup = Some(setup),
+                Err(()) => self.choose_account(0),
+            }
+            return;
+        }
         if self.desktop.is_none()
             && self.authenticated.is_none()
             && (byte == 19 || (self.unavailable && byte == b'\n'))
         {
-            self.choose_account(0);
+            if self.allow_initial_setup && initial_admin_available() {
+                self.clear_entry();
+                self.unavailable = false;
+                self.initial_setup = Some(InitialAdmin::default());
+            } else {
+                self.choose_account(0);
+            }
             return;
         }
         if self.desktop.is_none() && (byte == 0 || byte == b'\n') {
@@ -291,6 +372,12 @@ impl Seat {
 
     fn response(&self) -> [u8; 37] {
         let mut reply = [0; 37];
+        if let Some(setup) = &self.initial_setup {
+            reply[1] = if setup.confirming() { 6 } else { 5 };
+            reply[2] = setup.error;
+            reply[3] = setup.entry.len() as u8;
+            return reply;
+        }
         reply[0] = if self.authenticated.is_some() {
             2
         } else {
@@ -341,11 +428,14 @@ fn main() -> i32 {
         "--render-greeter" if rest.is_empty() => {
             return exec_anonymous(program, &[program], &[]);
         }
-        "--session" => {}
+        "--session" | "--session-first-boot-setup" => {}
         _ => return 2,
     }
     let argv: std::vec::Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
-    let mut seat = Seat::default();
+    let mut seat = Seat {
+        allow_initial_setup: args[1] == "--session-first-boot-setup",
+        ..Seat::default()
+    };
     let mut input = Zeroizing::new([0u8; 1]);
     while let Ok(1) = std::io::stdin().read(&mut *input) {
         seat.event(input[0], &argv);

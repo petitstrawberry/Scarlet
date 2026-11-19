@@ -3,3 +3,4 @@ greeter = "/bin/scarlet-shell-greeter"
 compositor = ["/bin/sws"]
 display_socket = "/tmp/sws.sock"
 session = ["/bin/stemd", "--user", "/etc/stemd.d/session"]
+initial_admin_setup = true

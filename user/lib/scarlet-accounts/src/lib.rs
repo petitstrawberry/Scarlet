@@ -8,9 +8,16 @@ mod database;
 use alloc::{string::String, vec::Vec};
 #[cfg(target_os = "scarlet")]
 pub use database::{
-    authenticate_console, authenticate_local, authorized_keys, login_available, login_names,
-    lookup_local, service_account,
+    authenticate_console, authenticate_local, authorized_keys, initial_admin_available,
+    login_available, login_names, lookup_local, service_account, set_initial_admin_password,
 };
+
+#[cfg(any(test, target_os = "scarlet"))]
+fn unconfigured_admin(data: &[u8]) -> bool {
+    // The image builder emits this exact record for an unprovisioned console
+    // root. A missing database, locked accounts and custom images fail closed.
+    data == b"root:0:0::\n"
+}
 
 pub struct Account {
     pub name: String,
@@ -172,5 +179,18 @@ alice:1000:1000::$2b$12$L6Bc/AlTQHyd9liGgGEZyOFLPHNgyxeEPfgYfBCVxJ7JIlwxyVU3u
         );
         assert!(authenticate("", b"root", b"", true).unwrap().is_none());
         assert!(authenticate("alice:1:1::", b"alice", b"", true).is_err());
+    }
+
+    #[test]
+    fn initial_setup_requires_the_factory_account_record() {
+        assert!(unconfigured_admin(b"root:0:0::\n"));
+        for database in [
+            b"".as_slice(),
+            b"root:0:0::!\n",
+            b"root:0:0::\nservice:2:2::!\n",
+            b"root:0:0::\ninvalid\n",
+        ] {
+            assert!(!unconfigured_admin(database));
+        }
     }
 }

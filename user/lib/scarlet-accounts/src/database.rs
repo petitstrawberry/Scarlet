@@ -1,5 +1,30 @@
 use alloc::vec::Vec;
+use core::ffi::CStr;
+use scarlet_abi::fs::*;
+use scarlet_sys::{Syscall, syscall1, syscall2, syscall3, syscall4};
 use zeroize::Zeroizing;
+
+fn open_with_flags(
+    dir: usize,
+    name: &CStr,
+    flags: u32,
+    mode: usize,
+) -> Result<scarlet_os::Handle, ()> {
+    // SAFETY: name remains live through the call, and success transfers one handle.
+    let raw = unsafe {
+        syscall4(
+            Syscall::VfsOpenAt,
+            dir,
+            name.as_ptr() as usize,
+            flags as usize,
+            mode,
+        )
+    } as isize;
+    if raw < 0 {
+        return Err(());
+    }
+    unsafe { scarlet_os::Handle::from_raw(raw as i32) }.map_err(|_| ())
+}
 
 fn open_at(
     dir: usize,
@@ -8,22 +33,8 @@ fn open_at(
     uid: u32,
     forbidden: u32,
 ) -> Result<scarlet_os::Handle, ()> {
-    use scarlet_abi::fs::*;
     let flags = VFS_O_NOFOLLOW | VFS_O_CLOEXEC | if directory { VFS_O_DIRECTORY } else { 0 };
-    // SAFETY: name lives through the call, and success transfers one handle.
-    let raw = unsafe {
-        scarlet_sys::syscall4(
-            scarlet_sys::Syscall::VfsOpenAt,
-            dir,
-            name.as_ptr() as usize,
-            flags as usize,
-            0,
-        )
-    } as isize;
-    if raw < 0 {
-        return Err(());
-    }
-    let handle = unsafe { scarlet_os::Handle::from_raw(raw as i32) }.map_err(|_| ())?;
+    let handle = open_with_flags(dir, name, flags, 0)?;
     let access = scarlet_os::shield::inode_access(&handle).map_err(|_| ())?;
     if (access.owner != 0 && access.owner != uid)
         || access.has_acl != 0
@@ -44,10 +55,117 @@ fn open_at(
 }
 
 fn load() -> Result<Zeroizing<Vec<u8>>, ()> {
+    load_from(&account_directory()?)
+}
+
+fn account_directory() -> Result<scarlet_os::Handle, ()> {
     let root = open_at(scarlet_abi::fs::CURRENT_DIRECTORY, c"/", true, 0, 0o022)?;
-    let etc = open_at(root.as_raw() as usize, c"etc", true, 0, 0o022)?;
+    open_at(root.as_raw() as usize, c"etc", true, 0, 0o022)
+}
+
+fn load_from(etc: &scarlet_os::Handle) -> Result<Zeroizing<Vec<u8>>, ()> {
     let file = open_at(etc.as_raw() as usize, c"scarlet-users", false, 0, 0o077)?;
     read_bounded(&file)
+}
+
+/// Whether the protected database contains only the image's console root placeholder.
+pub fn initial_admin_available() -> bool {
+    load().is_ok_and(|data| super::unconfigured_admin(&data))
+}
+
+/// Provision root on a factory image. The caller must be the trusted local seat.
+/// Returns no account if the database has already been provisioned.
+pub fn set_initial_admin_password(password: &[u8]) -> Result<Option<super::Account>, ()> {
+    let etc = account_directory()?;
+    if !super::unconfigured_admin(&load_from(&etc)?) {
+        return Ok(None);
+    }
+    if password.is_empty() || password.len() > 72 || password.contains(&0) {
+        return Err(());
+    }
+
+    let mut salt = [0u8; 16];
+    let mut filled = 0;
+    while filled < salt.len() {
+        // SAFETY: the buffer suffix is exclusively writable until this call returns.
+        let length = unsafe {
+            syscall3(
+                Syscall::GetRandom,
+                salt[filled..].as_mut_ptr() as usize,
+                salt.len() - filled,
+                scarlet_sys::GET_RANDOM_FLAG_REQUIRE_ENTROPY,
+            )
+        };
+        if length == 0 || length > salt.len() - filled {
+            return Err(());
+        }
+        filled += length;
+    }
+    let parts = bcrypt::hash_with_salt(password, 12, salt).map_err(|_| ())?;
+    let verifier = Zeroizing::new(parts.format_for_version(bcrypt::Version::TwoB));
+    let record = Zeroizing::new(alloc::format!(
+        "root:0:0::{verifier}\n",
+        verifier = &*verifier
+    ));
+
+    // Keep this inode stable while replacing the database. The advisory lock
+    // follows the open handle and is released even if the broker exits.
+    let lock = open_with_flags(
+        etc.as_raw() as usize,
+        c".scarlet-users.setup-lock",
+        VFS_O_RDWR | VFS_O_CREAT | VFS_O_NOFOLLOW | VFS_O_CLOEXEC,
+        0o600,
+    )?;
+    let access = scarlet_os::shield::inode_access(&lock).map_err(|_| ())?;
+    if access.owner != 0 || access.has_acl != 0 || access.mode & 0o077 != 0 {
+        return Err(());
+    }
+    const LOCK_EX_NB: usize = 2 | 4;
+    // SAFETY: the lock file handle is live and the operation scalar is valid.
+    if unsafe { syscall2(Syscall::FileLock, lock.as_raw() as usize, LOCK_EX_NB) } != 0 {
+        return Err(());
+    }
+    if !super::unconfigured_admin(&load_from(&etc)?) {
+        return Ok(None);
+    }
+
+    let candidate = c"/etc/.scarlet-users.setup-new";
+    // A stopped broker may leave a staging file. Only the lock holder uses it.
+    // SAFETY: candidate is a static NUL-terminated path in the protected directory.
+    unsafe { syscall1(Syscall::VfsRemove, candidate.as_ptr() as usize) };
+    let file = open_with_flags(
+        etc.as_raw() as usize,
+        c".scarlet-users.setup-new",
+        VFS_O_WRONLY | VFS_O_CREAT | VFS_O_EXCL | VFS_O_NOFOLLOW | VFS_O_CLOEXEC,
+        0o600,
+    )?;
+    let install = (|| -> Result<(), ()> {
+        file.as_stream()
+            .map_err(|_| ())?
+            .write_all(record.as_bytes())
+            .map_err(|_| ())?;
+        // SAFETY: the handle remains live until the data and metadata are flushed.
+        if unsafe { syscall1(Syscall::FileSync, file.as_raw() as usize) } != 0 {
+            return Err(());
+        }
+        file.close().map_err(|_| ())?;
+        // SAFETY: both paths are static and the new file is on the same filesystem.
+        let result = unsafe {
+            syscall3(
+                Syscall::VfsRenameWithStatus,
+                candidate.as_ptr() as usize,
+                c"/etc/scarlet-users".as_ptr() as usize,
+                0,
+            )
+        };
+        (result == 0).then_some(()).ok_or(())
+    })();
+    if install.is_err() {
+        // SAFETY: remove only the reserved, protected staging path.
+        unsafe { syscall1(Syscall::VfsRemove, candidate.as_ptr() as usize) };
+    }
+    install?;
+    super::lookup(&record, b"root").map(|(account, _)| account)
 }
 
 fn read_bounded(file: &scarlet_os::Handle) -> Result<Zeroizing<Vec<u8>>, ()> {

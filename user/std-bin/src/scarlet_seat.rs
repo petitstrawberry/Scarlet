@@ -304,7 +304,7 @@ fn run_editor(
     let mut retry_render = false;
     loop {
         alive()?;
-        if screen.display[0] >= 3 && Instant::now() >= next_clock_check {
+        if screen.choosing_account() && Instant::now() >= next_clock_check {
             next_clock_check = Instant::now() + Duration::from_secs(1);
             if let Some(seconds) = clock::local_seconds_of_day() {
                 let label = clock::format_clock(
@@ -400,8 +400,8 @@ fn run_editor(
                     return Ok(());
                 }
                 let next: [u8; 36] = reply[1..].try_into().unwrap();
-                rebuild =
-                    next[..2] != screen.display[..2] || (next[0] >= 3 && next != screen.display);
+                rebuild = next[..2] != screen.display[..2]
+                    || (screen.choosing_account() && next != screen.display);
                 screen.display = next;
                 value.set(screen.value());
                 if rebuild {
@@ -421,10 +421,16 @@ struct Config {
     compositor: Vec<String>,
     display_socket: String,
     session: Vec<String>,
+    #[serde(default)]
+    initial_admin_setup: bool,
 }
 
 fn run_session(config: &Config) -> io::Result<()> {
-    let mut args = vec!["--session"];
+    let mut args = vec![if config.initial_admin_setup {
+        "--session-first-boot-setup"
+    } else {
+        "--session"
+    }];
     args.extend(config.session.iter().map(String::as_str));
     let start_broker = || Worker::start(&config.broker, &args);
     let mut broker = start_broker()?;

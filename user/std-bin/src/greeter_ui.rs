@@ -50,6 +50,10 @@ pub struct Screen {
     pub display: [u8; 36],
 }
 impl Screen {
+    pub fn choosing_account(&self) -> bool {
+        matches!(self.display[0], 3 | 4) && self.display[1] != 2
+    }
+
     pub fn value(&self) -> String {
         if self.display[0] == 0 {
             String::from_utf8_lossy(&self.display[4..4 + usize::from(self.display[3])]).into_owned()
@@ -79,11 +83,14 @@ impl Screen {
         let width = (w - 36.).clamp(120., 312.);
         let field = self.display[0];
         let unavailable = self.display[1] == 2;
-        let choosing = field >= 3 && !unavailable;
+        let choosing = self.choosing_account();
+        let setup = matches!(field, 5 | 6);
         let panel_open = self.covered > 0. && !choosing && !unavailable;
         let name = std::str::from_utf8(&self.display[4..4 + usize::from(self.display[3])]).unwrap();
         let title = if unavailable {
             "No accounts available"
+        } else if setup {
+            "Set up administrator"
         } else if field == 0 {
             "Other user"
         } else {
@@ -99,7 +106,7 @@ impl Screen {
         } else {
             88.
         };
-        let avatar = avatar(title, diameter, field == 0 || unavailable);
+        let avatar = avatar(title, diameter, field == 0 || unavailable || setup);
         let title_size = if choosing {
             22.
         } else if compact {
@@ -125,7 +132,7 @@ impl Screen {
                 .font_size(title_size)
                 .color(TEXT)
                 .line_limit(Some(1));
-            let account: Box<dyn View> = if panel_open && field != 2 {
+            let account: Box<dyn View> = if panel_open && field != 2 && !setup {
                 // The account heading also opens the chooser while typing.
                 let pending = actions.clone();
                 let select = HStack::new((
@@ -147,7 +154,7 @@ impl Screen {
             } else {
                 Box::new(VStack::new(contents).spacing(14.))
             };
-            if panel_open && field != 2 {
+            if panel_open && field != 2 && !setup {
                 let pending = actions.clone();
                 Box::new(
                     ZStack::new(Views(vec![header]))
@@ -186,17 +193,16 @@ impl Screen {
                 &actions,
             )));
         } else {
-            let user = field == 0;
-            let submit_label = if user {
-                "Continue"
-            } else if field == 2 {
-                "Unlock"
-            } else {
-                "Sign in"
+            let (placeholder, submit_label) = match field {
+                0 => ("Username", "Continue"),
+                2 => ("Password", "Unlock"),
+                5 => ("New password for root", "Continue"),
+                6 => ("Confirm password", "Create"),
+                _ => ("Password", "Sign in"),
             };
             let entry = TextField::new(value)
                 .autofocus(focus)
-                .placeholder(if user { "Username" } else { "Password" })
+                .placeholder(placeholder)
                 .font_size(17.)
                 .padding(10.)
                 .background_color(Color::rgba_f32(0.12, 0.12, 0.15, 0.88))
@@ -212,12 +218,15 @@ impl Screen {
                 ))
                 .spacing(8.),
             );
-            let error: Option<Box<dyn View>> = (self.display[1] == 1).then(|| {
-                Box::new(
-                    Text::new("Authentication failed. Try again.")
-                        .color(TEXT)
-                        .font_size(14.),
-                ) as Box<dyn View>
+            let error_message = match self.display[1] {
+                1 => Some("Authentication failed. Try again."),
+                3 => Some("Enter a password of 1–72 characters."),
+                4 => Some("Passwords do not match."),
+                5 => Some("Could not save the password. Try again."),
+                _ => None,
+            };
+            let error: Option<Box<dyn View>> = error_message.map(|message| {
+                Box::new(Text::new(message).color(TEXT).font_size(14.)) as Box<dyn View>
             });
             if panel_open {
                 form.extend(error);
@@ -226,7 +235,7 @@ impl Screen {
                 form.push(entry_row);
                 form.extend(error);
             }
-            if field != 2 && !panel_open {
+            if field != 2 && !setup && !panel_open {
                 form.push(Box::new(action_button(
                     "Switch user",
                     None,
