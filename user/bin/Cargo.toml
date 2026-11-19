@@ -22,6 +22,10 @@ name = "microvm-init"
 path = "src/microvm_init.rs"
 
 [[bin]]
+name = "run-as"
+path = "src/run_as.rs"
+
+[[bin]]
 name = "login"
 path = "src/login.rs"
 

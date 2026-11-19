@@ -14,7 +14,7 @@ const FRAME_BYTES: usize = WIDTH as usize * HEIGHT as usize * 4;
 fn render(request: &[u8; 36], pixels: &mut [u8]) -> io::Result<()> {
     let [field, failed, count, len] = request[..4].try_into().unwrap();
     let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid greeter state");
-    if field > 2 || failed > 1 || count > 72 || len > 32 {
+    if field > 2 || failed > 2 || count > 72 || len > 32 {
         return Err(invalid());
     }
     let name = &request[4..4 + usize::from(len)];
@@ -44,6 +44,18 @@ fn render(request: &[u8; 36], pixels: &mut [u8]) -> io::Result<()> {
         foreground,
         28.,
     );
+    if failed == 2 {
+        c.draw_text_sized(24, 76, "No local account is available.", foreground, 20.);
+        c.draw_text_sized(
+            24,
+            126,
+            "Configure an image user to sign in.",
+            secondary,
+            16.,
+        );
+        c.draw_text_sized(24, 190, "Enter to check again", secondary, 16.);
+        return Ok(());
+    }
     c.draw_text_sized(24, 66, "User", secondary, 15.);
     c.draw_text_sized(24, 85, name, foreground, 20.);
     c.fill_rect(

@@ -71,6 +71,13 @@ to = "/bin/scarlet-shell"
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
+bin = "scarlet-seat"
+to = "/bin/scarlet-seat"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
 bin = "scarlet-shell-greeter"
 to = "/bin/scarlet-shell-greeter"
 

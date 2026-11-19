@@ -28,6 +28,7 @@ source = ".scarlet/active/boot"
 to = "/"
 
 [images.rootfs]
+console-root = true
 format = "ext2"
 output = ".scarlet/images/rootfs.ext2"
 

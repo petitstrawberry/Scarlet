@@ -1,9 +1,9 @@
 # SSH and SFTP
 
 The base bundle starts `/bin/sshd` after netcfgd. SSH passwords are verified
-against the same protected `/etc/scarlet-users` database as TTY logins. Root
-needs an enabled account like every other user. An omitted or locked root
-record disables both password and public-key login as root.
+against the same protected `/etc/scarlet-users` database as TTY logins. SSH login as root always requires proof of possession of a private key
+authorized in `/root/.ssh/authorized_keys`. An explicit locked root record
+disables that login as well.
 
 Install public keys in `.ssh/authorized_keys` under the account's home.
 The home, key directory and key file must be owned by the account or root.

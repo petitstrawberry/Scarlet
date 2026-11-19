@@ -243,7 +243,11 @@ cargo scarlet image --project .
 Both `ext2` and `gpt-ext2` support image users. The builder creates each home
 (`/root` for root, `/home/NAME` for other accounts) with mode 0700, assigns
 existing contents to that user and writes
-the protected account database. Omit `password-hash-file` for a locked
+the protected account database. With `console-root = true`, an image with
+no explicit root entry gets a root account with an empty verifier. At the
+local TTY, enter `root` and press Enter at the password prompt. An explicit
+root account overrides this default. GUI login requires a configured password,
+and SSH root login requires an authorized public key. Omit `password-hash-file` for a locked
 account. No default password is shipped. An administrator can update the
 database on a running writable filesystem. Rebuilding the image reapplies
 the manifest.
@@ -262,5 +266,21 @@ sets supplementary groups, and clears all authority ceilings. The child keeps
 its three terminal descriptors and execs `/bin/sh` in the user's home with a
 fresh environment. The supervisor terminates session descendants on logout
 before accepting the next login. SSH uses the same account database and credential transition for shell,
-command and SFTP sessions, including logins as root. The desktop boot
-configuration currently starts the graphical session as a system service.
+command and SFTP sessions, including logins as root. The desktop bundle starts `scarlet-seat` with
+`/etc/scarlet-seat.toml`. This file selects the authentication broker, greeter,
+compositor and session command. The seat sends physical keyboard input to
+the broker over a private pipe. The separate greeter receives the login name
+and masked length. With no enabled account the seat displays a setup message.
+
+After authentication the seat starts the configured compositor. Once it is
+ready, the broker starts the session command with the user's credentials, home
+and process scope. The bundled session runs `stemd --user /etc/stemd.d/session`.
+Configure desktop components, their dependencies and restart behavior in those
+unit files. System services stay in `/etc/stemd.d/services`.
+
+
+A system service can set `user = "NAME"` to run its command with the
+account's UID, GID and supplementary groups and all management authorities
+cleared. A locked password permits running a service under that identity.
+Omitting `user` preserves the system manager's credentials. User-session
+units inherit their session identity and reject an explicit `user` setting.

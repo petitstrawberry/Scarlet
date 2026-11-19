@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use scarlet_accounts::{Account, authenticate_local};
+use scarlet_accounts::{Account, authenticate_console};
 use scarlet_os::process_scope::ProcessScope;
 use std::{format, handle::Handle, println, tty::Terminal, vec::Vec};
 use zeroize::Zeroizing;
@@ -42,7 +42,7 @@ fn authenticate(tty: &Terminal) -> Result<Account, &'static str> {
             .map_err(|_| "cannot restore terminal echo")?;
         println!();
         let password = password?;
-        let account = authenticate_local(&name, &password)?;
+        let account = authenticate_console(&name, &password)?;
         if let Some(account) = account {
             return Ok(account);
         }

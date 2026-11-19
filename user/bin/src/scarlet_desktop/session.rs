@@ -18,7 +18,7 @@ struct Desktop {
 }
 
 impl Desktop {
-    fn start(owner: Account, console: bool) -> Result<Self, ()> {
+    fn start(owner: Account, argv: &[&str]) -> Result<Self, ()> {
         let scope = ProcessScope::create().map_err(|_| ())?;
         let pid = task::fork();
         if pid < 0 {
@@ -55,10 +55,10 @@ impl Desktop {
                 format!("LOGNAME={}", owner.name),
                 format!("HOME={home}"),
             ];
-            let mode = if console { "console" } else { "desktop" };
+
             task::execve(
-                "/bin/scarlet-desktop",
-                &["scarlet-desktop", "--shell-mode", mode],
+                argv[0],
+                argv,
                 &[
                     &env[0],
                     &env[1],
@@ -106,9 +106,11 @@ impl Drop for Desktop {
 #[derive(Default)]
 struct Seat {
     desktop: Option<Desktop>,
+    authenticated: Option<Account>,
     active: bool,
     password_field: bool,
     failed: bool,
+    unavailable: bool,
     overflow: usize,
     name: std::vec::Vec<u8>,
     password: Zeroizing<std::vec::Vec<u8>>,
@@ -120,7 +122,7 @@ impl Seat {
         *self = Self::default();
     }
 
-    fn submit(&mut self, console: bool) {
+    fn submit(&mut self) {
         if !self.password_field && self.desktop.is_none() {
             self.password_field = !self.name.is_empty() && self.overflow == 0;
             return;
@@ -141,20 +143,42 @@ impl Seat {
                 self.active = true
             }
             (Some(user), None) => {
-                self.desktop = Desktop::start(user, console).ok();
-                self.active = self.desktop.is_some();
+                self.authenticated = Some(user);
             }
             _ => {}
         }
-        self.failed = !self.active;
+        self.failed = !self.active && self.authenticated.is_none();
         if self.failed {
             std::thread::sleep(Duration::from_secs(1));
         }
     }
 
-    fn event(&mut self, byte: u8, console: bool) {
+    fn event(&mut self, byte: u8, argv: &[&str]) {
         if self.desktop.as_mut().is_some_and(Desktop::exited) {
             self.reset();
+        }
+        if self.desktop.is_none() && (byte == 0 || byte == b'\n') {
+            let was_unavailable = self.unavailable;
+            self.unavailable = !scarlet_accounts::login_available();
+            if self.unavailable || was_unavailable {
+                self.name.clear();
+                self.password.zeroize();
+                self.overflow = 0;
+                self.password_field = false;
+                self.failed = false;
+                return;
+            }
+        }
+        if self.unavailable {
+            return;
+        }
+        if let Some(user) = self.authenticated.take() {
+            if byte == 16 {
+                self.desktop = Desktop::start(user, argv).ok();
+                self.active = self.desktop.is_some();
+                self.failed = !self.active;
+            }
+            return;
         }
         // NUL polls state. SO/SI request lock/logout for an active session.
         if self.active {
@@ -169,7 +193,7 @@ impl Seat {
             return;
         }
         match byte {
-            b'\n' => self.submit(console),
+            b'\n' => self.submit(),
             27 if self.desktop.is_none() => {
                 self.password_field = false;
                 self.overflow = 0;
@@ -209,13 +233,21 @@ impl Seat {
 
     fn response(&self) -> [u8; 37] {
         let mut reply = [0; 37];
-        reply[0] = u8::from(self.active);
+        reply[0] = if self.authenticated.is_some() {
+            2
+        } else {
+            u8::from(self.active)
+        };
         reply[1] = if self.desktop.is_some() {
             2
         } else {
             u8::from(self.password_field)
         };
-        reply[2] = u8::from(self.failed);
+        reply[2] = if self.unavailable {
+            2
+        } else {
+            u8::from(self.failed)
+        };
         reply[3] = self.password.len().min(72) as u8;
         reply[4] = self.name.len() as u8;
         reply[5..5 + self.name.len()].copy_from_slice(&self.name);
@@ -225,11 +257,30 @@ impl Seat {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    let console = std::env::args_vec().get(1).map(|s| s.as_str()) == Some("--console");
+    let args = std::env::args_vec();
+    let Some((program, rest)) = args.get(2..).and_then(|args| args.split_first()) else {
+        return 2;
+    };
+    if !program.starts_with('/') {
+        return 2;
+    }
+    match args[1].as_str() {
+        "--render-greeter" if rest.is_empty() => {
+            // No configured login may use the anonymous renderer identity.
+            if unsafe { scarlet_os::shield::enter_user_session(u32::MAX, u32::MAX, &[]) }.is_err() {
+                return 1;
+            }
+            std::task::execve(program, &[program], &[]);
+            return 1;
+        }
+        "--session" => {}
+        _ => return 2,
+    }
+    let argv: std::vec::Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
     let mut seat = Seat::default();
     let mut input = Zeroizing::new([0u8; 1]);
     while let Ok(1) = std::io::stdin().read(&mut *input) {
-        seat.event(input[0], console);
+        seat.event(input[0], &argv);
         input.zeroize();
         if std::io::stdout().write_all(&seat.response()).is_err() {
             return 1;

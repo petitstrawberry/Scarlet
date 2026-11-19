@@ -384,8 +384,9 @@ fn handle_server_event(
                 .map_err(|error| format!("failed to provide host keys: {:?}", error))
         }
         ServEvent::FirstAuth(mut request) => {
+            let allow_password = request.username().is_ok_and(|name| name != "root");
             request
-                .set_auth_methods(true, true)
+                .set_auth_methods(allow_password, true)
                 .map_err(|error| format!("failed to configure authentication: {:?}", error))?;
             request
                 .reject()
@@ -393,7 +394,7 @@ fn handle_server_event(
         }
         ServEvent::PasswordAuth(request) => {
             state.account = match (request.username(), request.password()) {
-                (Ok(name), Ok(password)) => {
+                (Ok(name), Ok(password)) if name != "root" => {
                     authenticate_local(name.as_bytes(), password.as_bytes())
                         .ok()
                         .flatten()

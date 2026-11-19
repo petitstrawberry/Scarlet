@@ -144,6 +144,10 @@ name = "scarlet-shell"
 path = "src/scarlet_shell/main.rs"
 
 [[bin]]
+name = "scarlet-seat"
+path = "src/scarlet_seat.rs"
+
+[[bin]]
 name = "scarlet-shell-greeter"
 path = "src/scarlet_shell/greeter.rs"
 

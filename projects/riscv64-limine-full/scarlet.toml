@@ -36,6 +36,7 @@ kind = "bundle"
 path = "../../bundles/cli-utils/bundle.toml"
 
 [images.rootfs]
+console-root = true
 format = "ext2"
 output = ".scarlet/images/rootfs-riscv64-full.ext2"
 

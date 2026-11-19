@@ -7,7 +7,10 @@ mod database;
 
 use alloc::{string::String, vec::Vec};
 #[cfg(target_os = "scarlet")]
-pub use database::{authenticate_local, authorized_keys, lookup_local};
+pub use database::{
+    authenticate_console, authenticate_local, authorized_keys, login_available, lookup_local,
+    service_account,
+};
 
 pub struct Account {
     pub name: String,
@@ -76,7 +79,8 @@ fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), 
         {
             return Err(());
         }
-        if hash != "!"
+        if !(login == "root" && hash.is_empty())
+            && hash != "!"
             && !(hash.len() == 60
                 && (hash.starts_with("$2b$12$") || hash.starts_with("$2y$12$"))
                 && hash[7..]
@@ -94,7 +98,7 @@ fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), 
                 .collect::<Option<Vec<_>>>()
                 .ok_or(())?
         };
-        if login.as_bytes() == name && hash != "!" {
+        if login.as_bytes() == name {
             selected = Some(Account {
                 name: String::from(login),
                 uid,
@@ -107,8 +111,19 @@ fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), 
     Ok((selected, verifier))
 }
 
-fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Account>, ()> {
+fn authenticate(
+    data: &str,
+    name: &[u8],
+    password: &[u8],
+    console: bool,
+) -> Result<Option<Account>, ()> {
     let (selected, verifier) = lookup(data, name)?;
+    if verifier == "!" {
+        return Ok(None);
+    }
+    if verifier.is_empty() {
+        return Ok(selected.filter(|account| console && account.uid == 0 && password.is_empty()));
+    }
     if password.is_empty() || password.len() > 72 || password.contains(&0) {
         return Ok(None);
     }
@@ -117,4 +132,23 @@ fn authenticate(data: &str, name: &[u8], password: &[u8]) -> Result<Option<Accou
     } else {
         None
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_verifier_is_only_for_console_root() {
+        let db = "root:0:0::\n";
+        assert!(authenticate(db, b"root", b"", true).unwrap().is_some());
+        assert!(authenticate(db, b"root", b"", false).unwrap().is_none());
+        assert!(authenticate(db, b"root", b"wrong", true).unwrap().is_none());
+        assert!(
+            authenticate("root:0:0::!", b"root", b"", true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(authenticate("", b"root", b"", true).unwrap().is_none());
+        assert!(authenticate("alice:1:1::", b"alice", b"", true).is_err());
+    }
 }

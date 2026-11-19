@@ -1,0 +1,7 @@
+[service.desktop-settings]
+exec = "/bin/desktop-settings"
+restart = true
+
+[service.scarlet-shell]
+exec = "/bin/scarlet-shell --mode desktop"
+restart = true

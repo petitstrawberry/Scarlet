@@ -265,6 +265,8 @@ struct Service {
     after: Vec<String>,
     tty: Option<String>,
     order: i32,
+    user: Option<String>,
+    restart: bool,
     ready_notify: bool,
     ready_timeout_ms: u32,
 }
@@ -332,6 +334,8 @@ impl ConfigParser {
                 let mut after = Vec::new();
                 let mut tty: Option<String> = None;
                 let mut order: i32 = 0;
+                let mut user = None;
+                let mut restart = false;
                 let mut ready_notify = false;
                 let mut ready_timeout_ms = 5000u32;
 
@@ -395,6 +399,8 @@ impl ConfigParser {
                                     order = v;
                                 }
                             }
+                            "user" => user = Some(Self::unquote(value)),
+                            "restart" => restart = Self::parse_bool(value).unwrap_or(false),
                             "ready_notify" => {
                                 if let Some(v) = Self::parse_bool(value) {
                                     ready_notify = v;
@@ -420,6 +426,8 @@ impl ConfigParser {
                         after,
                         tty,
                         order,
+                        user,
+                        restart,
                         ready_notify,
                         ready_timeout_ms,
                     });
@@ -1025,7 +1033,13 @@ fn open_path(path: &str) -> Result<i32, &'static str> {
 fn launch_service(service: &Service) -> Result<i32, &'static str> {
     println!("stemd: Launching service: {}", service.name);
 
-    let argv: Vec<String> = service.exec.split_whitespace().map(String::from).collect();
+    let mut argv: Vec<String> = service.exec.split_whitespace().map(String::from).collect();
+    if let Some(name) = &service.user {
+        if name.is_empty() {
+            return Err("empty service user");
+        }
+        argv.splice(0..0, ["/bin/run-as".to_owned(), name.clone()]);
+    }
     let log_unit = (service.name != "logd").then_some(service.name.as_str());
     let pid = spawn_command(&argv, None, service.tty.as_deref(), log_unit).map_err(|error| {
         println!(
@@ -1947,7 +1961,52 @@ fn handle_sbus_message(
     }
 }
 
+/// Run only the units belonging to this authenticated session. System IPC
+/// listeners and PID 1 operations are owned by the system instance.
+fn run_user_services(dir: &str) -> Result<(), &'static str> {
+    let units = resolve_dependencies(&ConfigParser::new(read_config_dir(dir)?).parse_services());
+    if units.is_empty() {
+        return Err("no session units");
+    }
+    if units.iter().any(|unit| unit.user.is_some()) {
+        return Err("session units inherit their authenticated user");
+    }
+    let mut failed = Vec::new();
+    for unit in &units {
+        if unit.ready_notify {
+            return Err("session units do not support system readiness notifications");
+        }
+        if has_failed_dependency(unit, &failed).is_some() || launch_service(unit).is_err() {
+            failed.push(unit.name.clone());
+        }
+    }
+    loop {
+        let (pid, _) = waitpid(-1, 0);
+        if pid < 0 {
+            return Ok(());
+        }
+        if let Some(child) = remove_running_service_by_pid(pid)
+            && let Some(unit) = units.iter().find(|u| u.name == child.name && u.restart)
+        {
+            thread::sleep(std::time::Duration::from_millis(100));
+            launch_service(unit)?;
+        }
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--user") {
+        if let [_, _, dir] = &args[..] {
+            if let Err(error) = run_user_services(dir) {
+                eprintln!("stemd: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        eprintln!("usage: stemd --user UNIT_DIRECTORY");
+        std::process::exit(2);
+    }
     println!("stemd: Stem Daemon starting...");
     println!("stemd: PID={}", std::process::id());
     if let Err(error) = capability_launch::initialize() {

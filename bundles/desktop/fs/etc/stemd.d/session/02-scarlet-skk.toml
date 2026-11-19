@@ -2,5 +2,5 @@
 
 [service.scarlet-skk]
 exec = "/bin/scarlet-skk"
-depends = ["sws"]
+depends = []
 order = 02

@@ -2,5 +2,5 @@
 
 [service.wayland-bridge]
 exec = "/bin/wayland-bridge"
-depends = ["logd", "sws"]
+depends = []
 order = 02

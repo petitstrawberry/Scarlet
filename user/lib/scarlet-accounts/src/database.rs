@@ -66,14 +66,42 @@ fn read_bounded(file: &scarlet_os::Handle) -> Result<Zeroizing<Vec<u8>>, ()> {
     }
 }
 
+/// Report whether the seat can offer a login without exposing account names.
+pub fn login_available() -> bool {
+    let Ok(data) = load() else { return false };
+    let Ok(text) = core::str::from_utf8(&data) else {
+        return false;
+    };
+    super::lookup(text, b"").is_ok()
+        && text
+            .lines()
+            .any(|line| !line.ends_with(":!") && !line.ends_with(':'))
+}
+
 /// Read a fresh protected database for every login or unlock attempt.
 pub fn authenticate_local(
     name: &[u8],
     password: &[u8],
 ) -> Result<Option<super::Account>, &'static str> {
+    authenticate_password(name, password, false)
+}
+
+/// Only the trusted local TTY login service uses the console password policy.
+pub fn authenticate_console(
+    name: &[u8],
+    password: &[u8],
+) -> Result<Option<super::Account>, &'static str> {
+    authenticate_password(name, password, true)
+}
+
+fn authenticate_password(
+    name: &[u8],
+    password: &[u8],
+    console: bool,
+) -> Result<Option<super::Account>, &'static str> {
     let data = load().map_err(|_| "cannot read a protected /etc/scarlet-users")?;
     let text = core::str::from_utf8(&data).map_err(|_| "invalid account database")?;
-    super::authenticate(text, name, password).map_err(|_| "invalid account database")
+    super::authenticate(text, name, password, console).map_err(|_| "invalid account database")
 }
 
 /// Return an enabled account for public-key authentication. The caller must
@@ -82,7 +110,7 @@ pub fn lookup_local(name: &[u8]) -> Result<Option<super::Account>, &'static str>
     let data = load().map_err(|_| "cannot read a protected /etc/scarlet-users")?;
     let text = core::str::from_utf8(&data).map_err(|_| "invalid account database")?;
     super::lookup(text, name)
-        .map(|(account, _)| account)
+        .map(|(account, hash)| account.filter(|_| hash != "!"))
         .map_err(|_| "invalid account database")
 }
 
@@ -107,4 +135,12 @@ pub fn authorized_keys(account: &super::Account) -> Option<Zeroizing<Vec<u8>>> {
     )
     .ok()?;
     read_bounded(&keys).ok()
+}
+
+/// Resolve a preconfigured service identity, including accounts locked for login.
+pub fn service_account(name: &[u8]) -> Option<super::Account> {
+    let data = load().ok()?;
+    super::lookup(core::str::from_utf8(&data).ok()?, name)
+        .ok()?
+        .0
 }
