@@ -5709,8 +5709,21 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                         next_id = Some(idle_id);
                     }
                 }
-                if next_id.is_none() && !must_switch {
-                    ot.state.store(TaskState::Running, Ordering::SeqCst);
+                // Group exit on another CPU may have retired this task since
+                // the eligibility check. Only promote Ready; never overwrite
+                // a blocked or terminal state while keeping the current CPU.
+                if next_id.is_none()
+                    && !must_switch
+                    && matches!(
+                        ot.state.compare_exchange(
+                            TaskState::Ready,
+                            TaskState::Running,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ),
+                        Ok(_) | Err(TaskState::Running)
+                    )
+                {
                     account_current_task_slice_boundary(cpu_id);
                     replace_local_slice(cpu_id, Some(oid));
                     set_current_task_id(cpu_id, Some(oid));
@@ -5996,6 +6009,13 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
     if task_state_requires_exit_reschedule(current_task.get_state()) {
         schedule(trapframe);
         return;
+    }
+
+    // Once teardown starts, a sibling finishing an I/O syscall must not
+    // return to userspace with errors from the now-closing shared handle table.
+    // This boundary is reached after driver guards have been dropped.
+    if current_task.thread_group_exit_started() {
+        current_task.park_for_group_exit(trapframe);
     }
 
     match current_task.process_pending_events() {

@@ -655,6 +655,7 @@ impl FbCompatFlushHandler {
                     region.width.min(config.width.saturating_sub(region.x)),
                     region.height.min(config.height.saturating_sub(region.y)),
                 );
+                let _transaction = crate::task::device_transaction()?;
                 graphics_device.present_current_framebuffer_region(region)?;
                 if physical_addr == 0 {
                     return Err("Graphics device framebuffer address is null");
@@ -1392,6 +1393,7 @@ impl FramebufferCharDevice {
                     region.width.min(config.width.saturating_sub(region.x)),
                     region.height.min(config.height.saturating_sub(region.y)),
                 );
+                let _transaction = crate::task::device_transaction()?;
                 graphics_device.present_current_framebuffer_region(region)?;
 
                 // Verify that the framebuffer address is still valid

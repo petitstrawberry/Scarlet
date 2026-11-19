@@ -39,6 +39,7 @@ pub fn count() -> usize {
 }
 
 pub fn snapshot(id: u32) -> Result<PowerSupplySnapshot, &'static str> {
+    let _transaction = crate::task::device_transaction()?;
     let supply = { SUPPLIES.lock().get(id as usize).cloned() }.ok_or("unknown power supply ID")?;
     let result = supply.read();
     let mut snapshot = PowerSupplySnapshot {

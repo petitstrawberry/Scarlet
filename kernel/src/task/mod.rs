@@ -5,6 +5,8 @@
 pub mod elf_loader;
 pub mod namespace;
 pub mod process_scope;
+mod group_exit;
+pub(crate) use group_exit::device_transaction;
 pub mod reclaim_preference;
 pub mod resource_group;
 pub mod syscall;
@@ -772,7 +774,7 @@ pub struct Task {
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
     /// A single caller owns thread-group teardown and the process exit status.
-    thread_group_exit_started: Arc<AtomicBool>,
+    group_exit: Arc<group_exit::GroupExit>,
     /// Legacy task group ID mirror.
     ///
     /// New job-control code should use `process_group_id`; this field is kept
@@ -1121,7 +1123,7 @@ impl Task {
             parent_id: AtomicUsize::new(0),
             parent_thread_group_id: AtomicUsize::new(0),
             thread_group_id: 0,
-            thread_group_exit_started: Arc::new(AtomicBool::new(false)),
+            group_exit: Arc::new(group_exit::GroupExit::new()),
             task_group_id: AtomicUsize::new(0),
             session_id: AtomicUsize::new(0),
             process_group_id: AtomicUsize::new(0),
@@ -1963,7 +1965,7 @@ impl Task {
     }
 
     pub(crate) fn thread_group_exit_started(&self) -> bool {
-        self.thread_group_exit_started.load(Ordering::Acquire)
+        self.group_exit.started()
     }
 
     pub fn set_thread_group_id(&mut self, thread_group_id: usize) {
@@ -3256,7 +3258,7 @@ impl Task {
         if flags.is_set(CloneFlagsDef::Thread) {
             // Thread: share parent's thread group ID
             child.thread_group_id = self.thread_group_id;
-            child.thread_group_exit_started = self.thread_group_exit_started.clone();
+            child.group_exit = self.group_exit.clone();
         } else {
             child.thread_group_id = 0;
         }
@@ -3439,6 +3441,20 @@ impl Task {
         complete_non_current_task_exit(self.id);
     }
 
+    /// Suspend a sibling at a user-return boundary until the group exit owner
+    /// retires it. A remote CPU may already have published its terminal state.
+    pub(crate) fn park_for_group_exit(&self, trapframe: &mut Trapframe) -> ! {
+        loop {
+            let _ = self.state.compare_exchange(
+                TaskState::Running,
+                TaskState::Blocked(BlockedType::Uninterruptible),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            schedule(trapframe);
+        }
+    }
+
     /// Exit all tasks in the thread group
     ///
     /// This terminates all tasks with the same TGID (thread group).
@@ -3452,23 +3468,19 @@ impl Task {
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
     pub fn exit_group(&self, status: i32) {
-        if self.thread_group_exit_started.swap(true, Ordering::AcqRel) {
+        if !self.group_exit.start() {
             // A sibling can fault while the winning caller closes shared
             // handles. Wait for that caller to retire this thread without
             // publishing a second process exit.
             if let Some(current) = mytask().filter(|task| task.get_id() == self.id) {
-                loop {
-                    let _ = self.state.compare_exchange(
-                        TaskState::Running,
-                        TaskState::Blocked(BlockedType::Uninterruptible),
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                    schedule(current.get_trapframe());
-                }
+                self.park_for_group_exit(current.get_trapframe());
             }
             return;
         }
+        // A sibling can be asleep in the display or EC driver with a hardware
+        // mutex on its kernel stack. Let it retire the transaction before
+        // closing shared handles or discarding that stack.
+        self.group_exit.wait_for_transactions();
         self.begin_exit();
         let thread_group_id = self.thread_group_id;
         let my_id = self.id;
@@ -3767,7 +3779,7 @@ impl Task {
             .namespace_id
             .store(self.try_get_namespace_id().unwrap_or(0), Ordering::Relaxed);
         image.thread_group_id = self.thread_group_id;
-        image.thread_group_exit_started = self.thread_group_exit_started.clone();
+        image.group_exit = self.group_exit.clone();
         image.resource_membership.retire();
         *image.process_scope.write() = self.process_scope.read().clone();
         *image.security_subject.write() = self.security_subject.read().clone();
