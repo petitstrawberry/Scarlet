@@ -863,6 +863,15 @@ impl BackdropTextures {
             .is_some_and(|&(_, w, h)| w == width && h == height)
             && self.radius == radius.clamp(1, 64)
     }
+
+    pub(crate) fn allocation_bytes(&self) -> u64 {
+        let pixels = |&(_, w, h): &(TextureId, u32, u32)| u64::from(w) * u64::from(h);
+        let capture = pixels(&self.levels[0]);
+        let reductions = self.levels[1..].iter().map(pixels).sum::<u64>();
+        let filter = pixels(self.levels.last().unwrap());
+        // Capture, finished target/image, reduction target/image pairs and filter target/image.
+        (3 * capture + 2 * reductions + 2 * filter) * 4
+    }
 }
 
 /// Clip the sampled projection once, including the integer UV crop used by

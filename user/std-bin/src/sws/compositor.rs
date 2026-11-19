@@ -14741,13 +14741,16 @@ impl Compositor {
                     return Ok(false);
                 }
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                    if window.surface_regions != regions
-                        || window.restrict_input_to_regions != restrict_input
-                    {
-                        window.surface_regions = regions;
-                        window.restrict_input_to_regions = restrict_input;
-                        self.full_redraw_needed = true;
-                        self.damage_profile.full(line!());
+                    let is_backdrop = |region: &&sws_protocol::surface_regions::SurfaceRegion| {
+                        region.flags & sws_protocol::surface_regions::BACKDROP != 0
+                    };
+                    let changed = !window.surface_regions.iter().filter(is_backdrop)
+                        .eq(regions.iter().filter(is_backdrop));
+                    window.surface_regions = regions;
+                    window.restrict_input_to_regions = restrict_input;
+                    if changed && window.is_presented() {
+                        let rect = window.surface_geometry();
+                        self.add_pending_damage(rect);
                     }
                 }
             }

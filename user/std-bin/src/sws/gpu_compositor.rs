@@ -115,6 +115,8 @@ impl fmt::Display for GpuCompositionError {
 
 const MAX_RETIRED_WINDOW_TEXTURES: usize = 8;
 const MAX_RETIRED_WINDOW_TEXTURE_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_INACTIVE_BACKDROPS: usize = 8;
+const MAX_INACTIVE_BACKDROP_BYTES: u64 = 24 * 1024 * 1024;
 const COMPOSITION_QUAD_CAPACITY: usize = 2048;
 
 fn direct_extension_shm_import_enabled() -> bool {
@@ -413,6 +415,7 @@ pub(super) struct GpuCompositor {
     completed_outputs: Vec<usize>,
     force_full_repaint: bool,
     backdrops: Vec<(WindowId, BackdropGeometry, BackdropTextures)>,
+    active_backdrops: Vec<(WindowId, BackdropGeometry)>,
 }
 
 impl GpuCompositor {
@@ -535,6 +538,7 @@ impl GpuCompositor {
             completed_outputs: Vec::new(),
             force_full_repaint: false,
             backdrops: Vec::new(),
+            active_backdrops: Vec::new(),
         })
     }
 
@@ -1454,11 +1458,7 @@ impl GpuCompositor {
         // cached allocation once. Moving a region only invalidates its content;
         // it must not drain presentation, rebuild the context/cursor atlas and
         // reimport every client image on every animation frame.
-        if self
-            .backdrops
-            .iter()
-            .any(|(owner, old, _)| !backdrops.contains(&(*owner, *old)))
-        {
+        if self.active_backdrops.iter().any(|old| !backdrops.contains(old)) {
             // Keep the old rebuild's conservative invalidation for changed
             // placement/rounding and overlapping upper materials. Only the
             // expensive allocation/context reset is removed.
@@ -1467,13 +1467,26 @@ impl GpuCompositor {
                 profile.gpu_forced |= 2;
             }
         }
-        // The table is append-only. Retire incompatible/removed allocations
-        // through the existing bounded rebuild; new regions can append below.
+        // Keep a bounded set of inactive extents. Menus can return to a previous
+        // size without draining presentation and reimporting all client images.
         if retarget_backdrops(&mut self.backdrops, backdrops, |geometry| {
             (geometry.source.2, geometry.source.3, geometry.radius)
         }) {
-            self.rebuild_pending = true;
+            let mut inactive = 0;
+            let mut bytes = 0u64;
+            for (owner, geometry, textures) in &mut self.backdrops {
+                if !backdrops.contains(&(*owner, *geometry)) {
+                    textures.valid = false;
+                    inactive += 1;
+                    bytes = bytes.saturating_add(textures.allocation_bytes());
+                }
+            }
+            if inactive > MAX_INACTIVE_BACKDROPS || bytes > MAX_INACTIVE_BACKDROP_BYTES {
+                self.rebuild_pending = true;
+            }
         }
+        self.active_backdrops.clear();
+        self.active_backdrops.extend_from_slice(backdrops);
         // Retire changed layouts with the same bounded resource-table rebuild
         // policy used by window textures. A buffer swap at the same extent
         // reuses the source texture; it does not allocate a new GPU resource.
@@ -2091,8 +2104,8 @@ impl GpuCompositor {
             .map_err(|_| GpuCompositionError::Backend("GPU primary output is missing"))?;
         let presented = self.frame_profile.as_ref().map(|_| Instant::now());
         for (index, geometry) in frame.backdrops {
-            if let Some((_, current, textures)) = self.backdrops.get_mut(index) {
-                if *current == geometry {
+            if let Some((owner, current, textures)) = self.backdrops.get_mut(index) {
+                if *current == geometry && self.active_backdrops.contains(&(*owner, geometry)) {
                     textures.valid = true;
                 }
             }

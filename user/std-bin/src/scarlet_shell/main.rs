@@ -52,7 +52,6 @@ use scarlet_desktop_config::{
 };
 use scarlet_os::socket::Socket;
 use scarlet_os::{network, process, scheduler};
-use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::{Color, ColorPalette};
 use scarlet_ui::geometry::Size;
 use scarlet_ui::graphics;
@@ -87,7 +86,6 @@ use home_catalog::{ApplicationEntry, HomeApplication};
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
 use network_status::{ConnectionState, NetworkKind, NetworkStatus};
 use options::{Options, ShellMode};
-use popup_menu::PopupMenuRenderer;
 use power::{PowerIcon, PowerStatus};
 use status::{StatusPresentation, StatusProvider, StatusProviderSnapshot};
 
@@ -802,11 +800,6 @@ fn unscale_u32(value: u32, scale_milli: u32) -> u32 {
     (((value as u64) * 1000 + scale_milli - 1) / scale_milli).max(1) as u32
 }
 
-fn unscale_i32(value: i32, scale_milli: u32) -> i32 {
-    let scale_milli = scale_milli_or_default(scale_milli) as i64;
-    ((value as i64) * 1000 / scale_milli) as i32
-}
-
 fn query_output_scale(conn: &sws::Connection) -> u32 {
     conn.get_output_scale().unwrap_or(1000).max(1)
 }
@@ -1024,7 +1017,7 @@ struct ShellApp {
     active_window_id: State<u32>,
     menu_tree: State<MenuTree>,
     open_menu_index: State<Option<usize>>,
-    popup_surface_id: State<Option<u32>>,
+    menu_surfaces: State<Vec<u32>>,
     menu_titles_cache: State<BTreeMap<u32, String>>,
     status_snapshot: State<StatusProviderSnapshot>,
     windows: State<Vec<ShellWindow>>,
@@ -1092,7 +1085,7 @@ impl ShellApp {
             active_window_id: State::new(scarlet_ui::state::generate_state_id(), 0),
             menu_tree: State::new(scarlet_ui::state::generate_state_id(), root_menu),
             open_menu_index: State::new(scarlet_ui::state::generate_state_id(), None),
-            popup_surface_id: State::new(scarlet_ui::state::generate_state_id(), None),
+            menu_surfaces: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
             menu_titles_cache: State::new(scarlet_ui::state::generate_state_id(), BTreeMap::new()),
             status_snapshot: State::new(scarlet_ui::state::generate_state_id(), status_snapshot),
             windows: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
@@ -2154,61 +2147,26 @@ fn build_overview_button(
         })
 }
 
-fn submenu_at_path<'a>(mut menu: &'a TaskMenuItem, path: &[usize]) -> Option<&'a TaskMenuItem> {
-    for &index in path {
-        let TaskMenuEntry::Item(child) = menu.children.get(index)? else {
-            return None;
-        };
-        if !child.enabled || child.children.is_empty() {
-            return None;
-        }
-        menu = child;
-    }
-    Some(menu)
-}
-
 fn build_menu_items(
     entries: &[TaskMenuEntry],
     active_window_id: u32,
     open_menu_index: State<Option<usize>>,
-    submenu_path: State<Vec<usize>>,
     scarlet_menu: bool,
 ) -> Vec<MenuItemContent> {
     let mut items = Vec::new();
-    let current_path = submenu_path.get();
-    if !current_path.is_empty() {
-        let back_state = submenu_path.clone();
-        let mut parent_path = current_path.clone();
-        parent_path.pop();
-        items.push(MenuItemContent::new("‹ Back").callback(move || {
-            back_state.set(parent_path.clone());
-        }));
-        items.push(MenuItemContent::separator());
-    }
-    for (index, entry) in entries.iter().enumerate() {
+    for entry in entries {
         match entry {
             TaskMenuEntry::Separator => {
                 items.push(MenuItemContent::separator());
             }
             TaskMenuEntry::Item(item) => {
                 let mut content = MenuItemContent::new(item.title.clone()).enabled(item.enabled);
-                if !item.children.is_empty() {
-                    let next_state = submenu_path.clone();
-                    let mut next_path = current_path.clone();
-                    next_path.push(index);
-                    // Shared menu paint owns the submenu chevron and its gutter.
-                    if let Some(ref shortcut) = item.shortcut {
-                        content = content.shortcut(shortcut.clone());
-                    }
-                    items.push(
-                        content
-                            .action(MenuAction::Submenu)
-                            .callback(move || next_state.set(next_path.clone())),
-                    );
-                    continue;
-                }
                 if let Some(ref shortcut) = item.shortcut {
                     content = content.shortcut(shortcut.clone());
+                }
+                if !item.children.is_empty() {
+                    items.push(content.action(MenuAction::Submenu));
+                    continue;
                 }
                 let item_id = item.id.clone();
                 let open_state = open_menu_index.clone();
@@ -2369,70 +2327,6 @@ fn build_overview_items(
         );
     }
     items
-}
-
-enum ShellPopupRenderer {
-    Menu(PopupMenuRenderer),
-}
-
-impl ShellPopupRenderer {
-    fn size(&self) -> Size {
-        match self {
-            Self::Menu(renderer) => renderer.size(),
-        }
-    }
-
-    fn menu(&self) -> &PopupMenuRenderer {
-        match self {
-            Self::Menu(renderer) => renderer,
-        }
-    }
-
-    /// Returns whether the hover state changed and a repaint is needed.
-    fn handle_move(&mut self, x: i32, y: i32, pressed: bool) -> bool {
-        match self {
-            Self::Menu(renderer) => renderer.handle_move(x as f32, y as f32),
-        }
-    }
-
-    fn handle_press(&mut self, x: i32, y: i32) -> Option<ControlCenterAction> {
-        match self {
-            Self::Menu(_) => None,
-        }
-    }
-
-    fn handle_release(&mut self, x: i32, y: i32) -> Option<ControlCenterAction> {
-        match self {
-            Self::Menu(renderer) => {
-                renderer.handle_click(x as f32, y as f32);
-                None
-            }
-        }
-    }
-
-    fn handle_cancel(&mut self) -> Option<ControlCenterAction> {
-        match self {
-            Self::Menu(_) => None,
-        }
-    }
-
-    fn handle_exit(&mut self) -> bool {
-        match self {
-            Self::Menu(renderer) => renderer.handle_move(-1.0, -1.0),
-        }
-    }
-
-    fn render(&mut self) {
-        match self {
-            Self::Menu(renderer) => renderer.render(),
-        }
-    }
-
-    fn buffer(&self) -> Option<&Buffer> {
-        match self {
-            Self::Menu(renderer) => renderer.buffer(),
-        }
-    }
 }
 
 fn launch_home_application(source_window_id: u32, application: &HomeApplication) -> bool {
@@ -4305,7 +4199,6 @@ impl ShellApp {
 
     fn start_background_tasks(&mut self) {
         let default_endpoint = multi_output::Endpoint::of(self);
-        let screen_width_popup = self.screen_width.clone();
         let status_snapshot_provider = self.status_snapshot.clone();
         let console_audio_provider = self.console_audio.clone();
         let status_snapshot_listener = self.status_snapshot.clone();
@@ -4437,491 +4330,7 @@ impl ShellApp {
             }
         });
 
-        // Menu popup handling thread (still needed for interactive menu popup)
-        std::thread::spawn(move || {
-            let SwsScreenConnection {
-                connection: conn,
-                logical_width: popup_screen_width,
-                logical_height: mut popup_screen_height,
-                mut scale_milli,
-                ..
-            } = match connect_sws_with_screen_size_retry() {
-                Ok(connection) => connection,
-                Err(()) => {
-                    println!("[StatusBar] Failed to connect to SWS for menu popup after retries");
-                    return;
-                }
-            };
-            graphics::set_current_scale_milli(scale_milli);
-            screen_width_popup.set(popup_screen_width as f32);
-            let native_touch = conn
-                .get_capabilities()
-                .is_ok_and(|capabilities| capabilities.supports_touch_input());
-
-            let mut popup_surface_id: Option<u32> = None;
-            let mut popup_focus_observed = false;
-            let mut popup_renderer: Option<ShellPopupRenderer> = None;
-            let mut last_open_index: Option<usize> = None;
-            // A single popup displays one level at a time; callbacks only
-            // change this path. The popup loop owns surface replacement.
-            let submenu_path = State::new(StateId::new(44), Vec::<usize>::new());
-            let mut last_submenu_path = Vec::new();
-            let mut last_menu_tree = MenuTree::default();
-            let mut last_active_window_id = 0;
-            let mut last_overview_windows: Vec<ShellWindow> = Vec::new();
-            let mut last_overview_page = 0usize;
-
-            let mut pointer_x = 0i32;
-            let mut pointer_y = 0i32;
-            let mut pointer_pressed = false;
-            let mut popup_touch_id: Option<u64> = None;
-            let mut pending_move = false;
-            let mut needs_render = false;
-
-            let mut endpoint = default_endpoint;
-            let mut output_origin = (0i32, 0i32);
-            let mut endpoint_generation = 0;
-            loop {
-                if let Some(bus) = multi_output::session() {
-                    let endpoints = bus.endpoints.get();
-                    let requested = endpoints.iter().find(|candidate| candidate.id != endpoint.id && candidate.open_menu.get().is_some())
-                        .or_else(|| endpoints.iter().find(|candidate| candidate.id == endpoint.id))
-                        .or_else(|| endpoints.first());
-                    let generation = bus.topology_generation();
-                    if let Some(requested) = requested {
-                        if requested.id != endpoint.id || generation != endpoint_generation {
-                            if let Some(surface) = popup_surface_id.take() { let _ = conn.destroy_surface(surface); }
-                            endpoint.popup_surface.set(None);
-                            if requested.id != endpoint.id { endpoint.open_menu.set(None); }
-                            endpoint = requested.clone();
-                            endpoint_generation = generation;
-                            popup_renderer = None; popup_touch_id = None; pointer_pressed = false;
-                            popup_focus_observed = false; last_open_index = None; last_menu_tree = MenuTree::default();
-                            submenu_path.set(Vec::new()); last_submenu_path.clear(); needs_render = false;
-                            if let Ok(context) = conn.output_context(endpoint.id) {
-                                scale_milli = context.scale_milli;
-                                output_origin = (context.rect.x, context.rect.y);
-                                popup_screen_height = context.rect.height;
-                                graphics::set_current_scale_milli(scale_milli);
-                            }
-                        }
-                    }
-                }
-                let open_menu_index_popup = &endpoint.open_menu;
-                let popup_surface_id_popup = &endpoint.popup_surface;
-                let menu_tree_popup = &endpoint.menu_tree;
-                let active_window_id_popup = &endpoint.active_window;
-                let screen_width_popup = &endpoint.screen_width;
-                let shell_layout_popup = &endpoint.layout;
-                let windows_popup = &endpoint.windows;
-                let overview_page_popup = &endpoint.overview_page;
-                let open_index = open_menu_index_popup.get();
-                let menu_tree_value = menu_tree_popup.get();
-                let active_window_id = active_window_id_popup.get();
-
-                let menu_changed = open_index != last_open_index
-                    || active_window_id != last_active_window_id
-                    || menu_tree_value != last_menu_tree;
-                if menu_changed {
-                    submenu_path.set(Vec::new());
-                    last_active_window_id = active_window_id;
-                    last_menu_tree = menu_tree_value.clone();
-                }
-                let current_submenu_path = submenu_path.get();
-                if menu_changed || current_submenu_path != last_submenu_path {
-                    if let Some(surface_id) = popup_surface_id.take() {
-                        let _ = conn.destroy_surface(surface_id);
-                    }
-                    popup_surface_id_popup.set(None);
-                    popup_renderer = None;
-                    pointer_pressed = false;
-                    popup_touch_id = None;
-                    pending_move = false;
-                    last_open_index = open_index;
-                    last_submenu_path = current_submenu_path.clone();
-                }
-
-                let current_overview_windows = windows_popup.get();
-                let current_overview_page = overview_page_popup.get();
-                if open_index == Some(OVERVIEW_MENU_INDEX)
-                    && popup_renderer.is_some()
-                    && (current_overview_windows != last_overview_windows
-                        || current_overview_page != last_overview_page)
-                {
-                    if let Some(surface_id) = popup_surface_id.take() {
-                        let _ = conn.destroy_surface(surface_id);
-                    }
-                    popup_surface_id_popup.set(None);
-                    popup_renderer = None;
-                    popup_touch_id = None;
-                }
-
-                if let Some(index) = open_index {
-                    let overview_open = index == OVERVIEW_MENU_INDEX;
-                    // Only the shell's first root menu can issue session actions.
-                    let scarlet_menu = index == 0
-                        && menu_tree_value
-                            .items
-                            .first()
-                            .is_some_and(|item| item.id == "system_scarlet");
-                    let menu_entries = menu_tree_value
-                        .items
-                        .get(index)
-                        .and_then(|item| submenu_at_path(item, &current_submenu_path))
-                        .map(|item| &item.children);
-                    if overview_open || menu_entries.is_some_and(|entries| !entries.is_empty()) {
-                        if popup_renderer.is_none() {
-                            let layout = shell_layout_popup.get();
-                            let geometry = OverviewGeometry::for_layout(layout);
-                            let renderer = {
-                                let items = if overview_open {
-                                    last_overview_windows = current_overview_windows.clone();
-                                    let page_capacity =
-                                        overview_page_capacity(popup_screen_height, layout);
-                                    let dynamic_count = overview_app_menu_indices(&menu_tree_value)
-                                        .len()
-                                        .saturating_add(current_overview_windows.len());
-                                    let page_count =
-                                        overview_page_count(dynamic_count, page_capacity);
-                                    let page = current_overview_page.min(page_count - 1);
-                                    if page != current_overview_page {
-                                        overview_page_popup.set(page);
-                                    }
-                                    last_overview_page = page;
-                                    build_overview_items(
-                                        &current_overview_windows,
-                                        &menu_tree_value,
-                                        page,
-                                        page_capacity,
-                                        overview_page_popup.clone(),
-                                        open_menu_index_popup.clone(),
-                                    )
-                                } else {
-                                    build_menu_items(
-                                        menu_entries.map_or(&[], Vec::as_slice),
-                                        active_window_id,
-                                        open_menu_index_popup.clone(),
-                                        submenu_path.clone(),
-                                        scarlet_menu,
-                                    )
-                                };
-                                let available_width = screen_width_popup.get() - 16.0;
-                                let min_menu_width = if scarlet_menu { 1.0 } else { 160.0 };
-                                let max_menu_width = available_width.max(min_menu_width);
-                                let menu_width = if overview_open {
-                                    max_menu_width.clamp(220.0, 420.0)
-                                } else if scarlet_menu {
-                                    max_menu_width.min(176.0)
-                                } else {
-                                    220.0
-                                };
-                                ShellPopupRenderer::Menu(PopupMenuRenderer::new(
-                                    items,
-                                    geometry.row_height,
-                                    menu_width,
-                                    max_menu_width,
-                                    scale_milli,
-                                ))
-                            };
-                            let size = renderer.size();
-                            let width = size.width as u32;
-                            let (physical_width, physical_height) = renderer.menu().physical_size();
-                            let geometry = renderer.menu().window_geometry();
-                            let regions = renderer.menu().surface_regions();
-                            needs_render = true;
-
-                            let screen_width = screen_width_popup.get().max(1.0);
-                            let popup_x = if overview_open {
-                                8.0
-                            } else {
-                                menu_bar_popup_x(&menu_tree_value.items, index, layout)
-                                    .min((screen_width - width as f32).max(0.0))
-                            };
-                            let popup_app_id = "org.scarlet-os.popup.menu";
-                            let popup_title = "Menu";
-                            let _surface_id = match popup_surface_id {
-                                Some(id) => id,
-                                None => {
-                                    match conn.create_surface_with_type_and_policies_at(
-                                        popup_app_id,
-                                        popup_title,
-                                        "",
-                                        physical_width,
-                                        physical_height,
-                                        window_types::ALWAYS_ON_TOP,
-                                        false,
-                                        true,
-                                        false,
-                                        scale_i32((popup_x as i32).saturating_add(output_origin.0), scale_milli),
-                                        scale_i32(output_origin.1, scale_milli).saturating_add(layout.physical_popup_y(scale_milli)),
-                                    ) {
-                                        Ok(id) => {
-                                            // Transparent shadow padding surrounds the visible
-                                            // rounded menu. Only its body accepts input and
-                                            // requests compositor backdrop diffusion.
-                                            let _ = conn.set_window_has_alpha_content(id, true);
-                                            let _ = conn.set_window_geometry(id, geometry);
-                                            let _ = conn.set_surface_regions(id, true, &regions);
-                                            popup_surface_id = Some(id);
-                                            popup_focus_observed = false;
-                                            popup_surface_id_popup.set(Some(id));
-                                            if native_touch {
-                                                let _ = conn.set_touch_input(id, true);
-                                            }
-                                            // Creating a surface with
-                                            // `focus_on_create` focuses it, but
-                                            // older SWS versions did not also
-                                            // raise it within its window-type
-                                            // layer. Explicitly raise the
-                                            // popup so it stays above the
-                                            // application menu and content.
-                                            let _ = conn.focus_window(id);
-                                            id
-                                        }
-                                        Err(e) => {
-                                            println!(
-                                                "[StatusBar] Failed to create {} popup: {:?}",
-                                                popup_title, e
-                                            );
-                                            popup_renderer = None;
-                                            last_open_index = None;
-                                            std::thread::sleep(Duration::from_millis(16));
-                                            continue;
-                                        }
-                                    }
-                                }
-                            };
-                            popup_renderer = Some(renderer);
-                        }
-                    } else {
-                        if let Some(surface_id) = popup_surface_id.take() {
-                            let _ = conn.destroy_surface(surface_id);
-                        }
-                        popup_surface_id_popup.set(None);
-                        popup_renderer = None;
-                        popup_touch_id = None;
-                        last_open_index = None;
-                        open_menu_index_popup.set(None);
-                    }
-                }
-
-                let _ = conn.dispatch();
-                while let Some(ev) = conn.poll_event() {
-                    match ev {
-                        sws::event::Event::FocusChanged {
-                            window_id,
-                            app_id,
-                            app_name,
-                            ..
-                        } => {
-                            if popup_surface_id_popup.get() == Some(window_id) {
-                                popup_focus_observed = true;
-                                continue;
-                            }
-                            if app_id == "org.scarlet-os.desktop.taskbar"
-                                || app_name == "TaskBar"
-                                || app_name == "Menu"
-                            {
-                                continue;
-                            }
-                            // Destroying the previous popup queues a focus return
-                            // to its app. Do not let that older event close the
-                            // replacement before its own focus notification arrives.
-                            if popup_focus_observed {
-                                open_menu_index_popup.set(None);
-                            }
-                        }
-                        sws::event::Event::Input(input) => {
-                            if Some(input.surface_id) != popup_surface_id {
-                                continue;
-                            }
-                            match (input.type_, input.code) {
-                                (sws::event::event_type::EV_KEY, sws::event::key_code::KEY_ESC)
-                                    if input.value == 1 =>
-                                {
-                                    if submenu_path.get().is_empty() {
-                                        open_menu_index_popup.set(None);
-                                    } else {
-                                        submenu_path.update(|path| {
-                                            path.pop();
-                                        });
-                                    }
-                                }
-                                (
-                                    sws::event::event_type::EV_KEY,
-                                    sws::event::key_code::KEY_LEFT
-                                    | sws::event::key_code::KEY_BACKSPACE,
-                                ) if input.value == 1 => {
-                                    submenu_path.update(|path| {
-                                        path.pop();
-                                    });
-                                }
-                                (sws::event::event_type::EV_ABS, sws::event::abs_code::ABS_X) => {
-                                    pointer_x = unscale_i32(input.value, scale_milli);
-                                    pending_move = true;
-                                }
-                                (sws::event::event_type::EV_ABS, sws::event::abs_code::ABS_Y) => {
-                                    pointer_y = unscale_i32(input.value, scale_milli);
-                                    pending_move = true;
-                                }
-                                (
-                                    sws::event::event_type::EV_KEY,
-                                    sws::event::key_code::BTN_LEFT,
-                                ) => {
-                                    if input.value == 1 {
-                                        pointer_pressed = true;
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            let _ = renderer.handle_press(pointer_x, pointer_y);
-                                            needs_render = true;
-                                        }
-                                    } else if let Some(renderer) = popup_renderer.as_mut() {
-                                        let _ = if pointer_x < 0 || pointer_y < 0 {
-                                            renderer.handle_cancel()
-                                        } else {
-                                            renderer.handle_release(pointer_x, pointer_y)
-                                        };
-                                        pointer_pressed = false;
-                                        needs_render = true;
-                                    }
-                                }
-                                (sws::event::event_type::EV_SYN, _) => {
-                                    if pending_move {
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            // Repaint only when the hovered row
-                                            // changes; a full CPU repaint per
-                                            // pointer sample made menus lag.
-                                            needs_render |= if pointer_x < 0 || pointer_y < 0 {
-                                                renderer.handle_exit()
-                                            } else {
-                                                renderer.handle_move(
-                                                    pointer_x,
-                                                    pointer_y,
-                                                    pointer_pressed,
-                                                )
-                                            };
-                                        }
-                                        pending_move = false;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        sws::event::Event::TouchFrame { surface_id, frame }
-                            if Some(surface_id) == popup_surface_id =>
-                        {
-                            for change in frame.changes {
-                                let x = unscale_i32(change.x, scale_milli);
-                                let y = unscale_i32(change.y, scale_milli);
-                                match change.phase {
-                                    sws_protocol::touch::Phase::Down
-                                        if popup_touch_id.is_none() =>
-                                    {
-                                        popup_touch_id = Some(change.id);
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            let _ = renderer.handle_press(x, y);
-                                            needs_render = true;
-                                        }
-                                    }
-                                    sws_protocol::touch::Phase::Move
-                                        if popup_touch_id == Some(change.id) =>
-                                    {
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            needs_render |= renderer.handle_move(x, y, true);
-                                        }
-                                    }
-                                    sws_protocol::touch::Phase::Up
-                                        if popup_touch_id == Some(change.id) =>
-                                    {
-                                        popup_touch_id = None;
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            let _ = renderer.handle_release(x, y);
-                                            needs_render = true;
-                                        }
-                                    }
-                                    sws_protocol::touch::Phase::Cancel
-                                        if popup_touch_id == Some(change.id) =>
-                                    {
-                                        popup_touch_id = None;
-                                        if let Some(renderer) = popup_renderer.as_mut() {
-                                            let _ = renderer.handle_cancel();
-                                            needs_render = true;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        sws::event::Event::ScreenSizeChanged { .. }
-                        | sws::event::Event::OutputScaleChanged { .. } if multi_output::session().is_some() => {}
-                        sws::event::Event::ScreenSizeChanged { width, height } => {
-                            screen_width_popup.set(unscale_u32(width, scale_milli) as f32);
-                            popup_screen_height = unscale_u32(height, scale_milli);
-                            open_menu_index_popup.set(None);
-                            if let Some(surface_id) = popup_surface_id.take() {
-                                let _ = conn.destroy_surface(surface_id);
-                            }
-                            popup_surface_id_popup.set(None);
-                            popup_renderer = None;
-                            popup_touch_id = None;
-                            last_open_index = None;
-                        }
-                        sws::event::Event::OutputScaleChanged {
-                            scale_milli: next_scale_milli,
-                        } => {
-                            scale_milli = next_scale_milli.max(1);
-                            graphics::set_current_scale_milli(scale_milli);
-                            if let Ok((width, height)) = conn.get_screen_size() {
-                                screen_width_popup.set(unscale_u32(width, scale_milli) as f32);
-                                popup_screen_height = unscale_u32(height, scale_milli);
-                            }
-                            open_menu_index_popup.set(None);
-                            if let Some(surface_id) = popup_surface_id.take() {
-                                let _ = conn.destroy_surface(surface_id);
-                            }
-                            popup_surface_id_popup.set(None);
-                            popup_renderer = None;
-                            popup_touch_id = None;
-                            last_open_index = None;
-                        }
-                        _ => {}
-                    }
-                }
-
-                if needs_render {
-                    if let (Some(renderer), Some(surface_id)) =
-                        (popup_renderer.as_mut(), popup_surface_id)
-                    {
-                        renderer.render();
-                        if let Some(buffer) = renderer.buffer() {
-                            let src = buffer.as_slice();
-                            let src_bytes = unsafe {
-                                core::slice::from_raw_parts(
-                                    src.as_ptr() as *const u8,
-                                    src.len() * 4,
-                                )
-                            };
-                            if conn
-                                .with_surface_mut(surface_id, |surface| {
-                                    surface.with_buffer(|dst, w, h| {
-                                        let len = (w as usize)
-                                            .saturating_mul(h as usize)
-                                            .saturating_mul(4);
-                                        let copy_len = len.min(dst.len()).min(src_bytes.len());
-                                        dst[..copy_len].copy_from_slice(&src_bytes[..copy_len]);
-                                    });
-                                })
-                                .is_some()
-                            {
-                                let _ = conn.commit(surface_id);
-                            }
-                        }
-                    }
-                    needs_render = false;
-                }
-
-                std::thread::sleep(Duration::from_millis(16));
-            }
-        });
+        std::thread::spawn(move || popup_menu::run(default_endpoint));
 
         // Poll wall time once per second, but publish only the displayed minute.
         let clock = self.clock.clone();
@@ -4952,7 +4361,7 @@ impl ShellApp {
             menu_titles
         );
 
-        if self.popup_surface_id.get() == Some(window_id) {
+        if self.menu_surfaces.get().contains(&window_id) {
             status_bar_debug!("[StatusBar] Skipping popup surface {}", window_id);
             return;
         }

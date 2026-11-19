@@ -19,7 +19,7 @@ pub(super) struct Endpoint {
     pub workspace: State<Option<sws::WorkspaceState>>,
     pub commands: State<Vec<WorkspaceCommand>>,
     pub open_menu: State<Option<usize>>,
-    pub popup_surface: State<Option<u32>>,
+    pub menu_surfaces: State<Vec<u32>>,
     pub menu_tree: State<MenuTree>,
     pub active_window: State<u32>,
     pub screen_width: State<f32>,
@@ -31,7 +31,7 @@ impl Endpoint {
     pub(super) fn of(app: &ShellApp) -> Self {
         Self { id: app.output_id.get(), workspace: app.workspace_state.clone(),
             commands: app.workspace_commands.clone(), open_menu: app.open_menu_index.clone(),
-            popup_surface: app.popup_surface_id.clone(), menu_tree: app.menu_tree.clone(),
+            menu_surfaces: app.menu_surfaces.clone(), menu_tree: app.menu_tree.clone(),
             active_window: app.active_window_id.clone(), screen_width: app.screen_width.clone(),
             layout: app.shell_layout.clone(), windows: app.windows.clone(), overview_page: app.overview_page.clone() }
     }
@@ -170,7 +170,7 @@ impl ShellSession {
     fn owner(&self, window: u32) -> u32 {
         if let Some(output) = self.scene_owners.get(&window) { return *output; }
         self.bus.endpoints.get().iter().find_map(|endpoint| {
-            (endpoint.popup_surface.get() == Some(window)
+            (endpoint.menu_surfaces.get().contains(&window)
                 || endpoint.workspace.get().is_some_and(|state| state.workspaces.iter().any(|workspace| workspace.window_ids.contains(&window))))
                 .then_some(endpoint.id)
         }).unwrap_or(0)
