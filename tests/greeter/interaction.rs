@@ -6,12 +6,22 @@ use greeter_ui::{Actions, Screen};
 use scarlet_ui::{BitmapImage, RenderingPipeline, prelude::*};
 
 fn form(w: u32, h: u32, field: u8, covered: f32) -> (RenderingPipeline, Actions, State<String>) {
+    form_with_status(w, h, field, covered, 0)
+}
+
+fn form_with_status(
+    w: u32,
+    h: u32,
+    field: u8,
+    covered: f32,
+    status: u8,
+) -> (RenderingPipeline, Actions, State<String>) {
     scarlet_ui::graphics::set_default_font(include_bytes!(
         "../../bundles/desktop/fs/share/fonts/Mplus1-Regular.ttf"
     ))
     .unwrap();
     let mut display = [0; 36];
-    display[..4].copy_from_slice(&[field, 0, if field == 1 { 3 } else { 0 }, 5]);
+    display[..4].copy_from_slice(&[field, status, if field == 1 { 3 } else { 0 }, 5]);
     display[4..9].copy_from_slice(b"alice");
     let screen = Screen {
         width: w,
@@ -160,6 +170,7 @@ fn account_selection_manual_entry_and_submit_dispatch_from_visible_controls() {
             (4, "Other user", Action::Manual),
             (0, "Continue", Action::Submit),
             (1, "Sign in", Action::Submit),
+            (1, "", Action::Accounts), // The account menu beside the name.
         ] {
             let (mut p, actions, _) = form(w, h, field, if field < 2 { covered } else { 0. });
             let (x, y) =
@@ -252,5 +263,32 @@ fn clock_and_account_actions_share_the_centered_stack_and_yield_to_the_editor() 
         assert!(account_y as f32 > at.y + size.height);
         let (p, _, _) = form(w, h, 1, 120.);
         assert!(clock_bounds(p.element_tree().root().unwrap(), Point::ZERO).is_none());
+    }
+}
+
+#[test]
+fn active_editor_stays_at_mid_screen_until_the_keyboard_reaches_it() {
+    for (w, h, covered) in [
+        (320, 360, 141.),
+        (800, 480, 240.),
+        (800, 480, 270.),
+        (600, 1024, 226.),
+    ] {
+        for field in [0, 1] {
+            let mut previous = None;
+            for status in [0, 1] {
+                let (p, _, _) = form_with_status(w, h, field, covered, status);
+                let rect = p.focused_text_input_state().unwrap().input_rect;
+                let midpoint = rect.origin.y + rect.size.height / 2.;
+                let clearance = h as f32 - covered - (rect.origin.y + rect.size.height);
+                assert!(clearance > 0.);
+                assert!(midpoint <= h as f32 / 2. + 1.);
+                assert!((midpoint - h as f32 / 2.).abs() <= 1. || clearance <= 14.);
+                if let Some(prior) = previous {
+                    assert_eq!(rect, prior, "showing an error moved the field");
+                }
+                previous = Some(rect);
+            }
+        }
     }
 }

@@ -80,6 +80,7 @@ impl Screen {
         let field = self.display[0];
         let unavailable = self.display[1] == 2;
         let choosing = field >= 3 && !unavailable;
+        let panel_open = self.covered > 0. && !choosing && !unavailable;
         let name = std::str::from_utf8(&self.display[4..4 + usize::from(self.display[3])]).unwrap();
         let title = if unavailable {
             "No accounts available"
@@ -120,14 +121,40 @@ impl Screen {
                     .on_click(move || pending.set(Some(Action::Choose))),
             )
         } else {
-            let title = Text::new(title)
+            let label = Text::new(title)
                 .font_size(title_size)
                 .color(TEXT)
                 .line_limit(Some(1));
-            if compact {
-                Box::new(HStack::new((avatar, title)).spacing(12.))
+            let account: Box<dyn View> = if panel_open && field != 2 {
+                // The account heading also opens the chooser while typing.
+                let pending = actions.clone();
+                let select = HStack::new((
+                    label,
+                    Button::icon_only(Icon::ChevronDown)
+                        .header_style()
+                        .icon_size(IconSize::Small)
+                        .icon_color(TEXT)
+                        .on_click(move || pending.set(Some(Action::Accounts))),
+                ))
+                .spacing(2.);
+                Box::new(select)
             } else {
-                Box::new(VStack::new((avatar, title)).spacing(14.))
+                Box::new(label)
+            };
+            let contents = Views(vec![Box::new(avatar), account]);
+            let header: Box<dyn View> = if compact {
+                Box::new(HStack::new(contents).spacing(12.))
+            } else {
+                Box::new(VStack::new(contents).spacing(14.))
+            };
+            if panel_open && field != 2 {
+                let pending = actions.clone();
+                Box::new(
+                    ZStack::new(Views(vec![header]))
+                        .on_click(move || pending.set(Some(Action::Accounts))),
+                )
+            } else {
+                header
             }
         };
         if choosing && field == 4 {
@@ -178,21 +205,28 @@ impl Screen {
                 .border_color(LINE)
                 .focused_border_color(Color::rgba_f32(0.86, 0.87, 0.91, 0.68))
                 .frame(width - 88., ACTION_HEIGHT);
-            form.push(Box::new(
+            let entry_row = Box::new(
                 HStack::new((
                     entry,
                     action_button(submit_label, None, Action::Submit, &actions),
                 ))
                 .spacing(8.),
-            ));
-            if self.display[1] == 1 {
-                form.push(Box::new(
+            );
+            let error: Option<Box<dyn View>> = (self.display[1] == 1).then(|| {
+                Box::new(
                     Text::new("Authentication failed. Try again.")
                         .color(TEXT)
                         .font_size(14.),
-                ));
+                ) as Box<dyn View>
+            });
+            if panel_open {
+                form.extend(error);
+                form.push(entry_row);
+            } else {
+                form.push(entry_row);
+                form.extend(error);
             }
-            if field != 2 {
+            if field != 2 && !panel_open {
                 form.push(Box::new(action_button(
                     "Switch user",
                     None,
@@ -214,9 +248,19 @@ impl Screen {
         } else {
             Box::new(controls)
         };
+        // Keep the editing row at the display midline when it fits. Its lower
+        // edge follows the panel only when the panel would cover the row.
+        let (alignment, height) = if panel_open {
+            (
+                Alignment::Bottom,
+                (h / 2. + ACTION_HEIGHT / 2.).min(free - gap).max(1.),
+            )
+        } else {
+            (Alignment::Center, free)
+        };
         let foreground = ZStack::new(Views(vec![content]))
-            .alignment(Alignment::Center)
-            .frame(w, free);
+            .alignment(alignment)
+            .frame(w, height);
         Window::new(
             "Sign in",
             ZStack::new((
