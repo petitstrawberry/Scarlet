@@ -924,10 +924,12 @@ impl AudioCharDevice {
             }
         }
         if let Err(error) = self.backend.start() {
-            let _irq_guard = IrqGuard::new();
-            let mut guard = self.ring.lock();
-            if let Some(ring) = guard.as_mut() {
-                ring.state = AUDIO_STATE_XRUN;
+            {
+                let _irq_guard = IrqGuard::new();
+                let mut guard = self.ring.lock();
+                if let Some(ring) = guard.as_mut() {
+                    ring.state = AUDIO_STATE_XRUN;
+                }
             }
             let _ = self.backend.stop();
             return Err(error);

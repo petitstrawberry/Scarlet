@@ -257,18 +257,40 @@ fn read_linux_epoll_event(task: &crate::task::Task, event_ptr: usize) -> Option<
     Some((events, data))
 }
 
-fn write_linux_epoll_event(
-    task: &crate::task::Task,
+fn epoll_event_output(
+    mapping: &crate::vm::manager::MappingTransaction<'_>,
     event_ptr: usize,
     index: usize,
-    events: u32,
-    data: u64,
-) -> bool {
+) -> Option<(usize, usize, usize)> {
+    let address = event_ptr.checked_add(index.checked_mul(EPOLL_EVENT_SIZE)?)?;
+    address.checked_add(EPOLL_EVENT_SIZE - 1)?;
+    let page_left = crate::environment::PAGE_SIZE - (address & (crate::environment::PAGE_SIZE - 1));
+    let first_len = page_left.min(EPOLL_EVENT_SIZE);
+    let first = mapping.write_alias(address)?;
+    let second = if first_len < EPOLL_EVENT_SIZE {
+        mapping.write_alias(address + first_len)?
+    } else {
+        0
+    };
+    Some((first, first_len, second))
+}
+
+/// The caller retains the VM transaction that resolved the output pages.
+unsafe fn write_linux_epoll_event(output: (usize, usize, usize), events: u32, data: u64) {
     let mut buf = [0u8; EPOLL_EVENT_SIZE];
     buf[0..4].copy_from_slice(&events.to_ne_bytes());
     buf[EPOLL_EVENT_DATA_OFFSET..EPOLL_EVENT_DATA_OFFSET + 8].copy_from_slice(&data.to_ne_bytes());
-    let ptr = event_ptr.saturating_add(index.saturating_mul(EPOLL_EVENT_SIZE));
-    copy_to_user_pagewise(ptr, &buf, &task.vm_manager) == EPOLL_EVENT_SIZE
+    let (first, first_len, second) = output;
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), first as *mut u8, first_len);
+        if first_len < EPOLL_EVENT_SIZE {
+            core::ptr::copy_nonoverlapping(
+                buf[first_len..].as_ptr(),
+                second as *mut u8,
+                EPOLL_EVENT_SIZE - first_len,
+            );
+        }
+    }
 }
 
 fn acknowledge_linux_ready(task: &crate::task::Task, handle: u32, events: u32) {
@@ -374,10 +396,8 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: &Epoll
     ready
 }
 
-/// Copy bytes from a kernel buffer into a userspace virtual address range,
-/// resolving each page independently via `translate_to_kva`.
-///
-/// Returns the number of bytes actually copied.
+/// Copy bytes into a userspace range.
+/// Returns the number of bytes copied before the first inaccessible page.
 fn copy_to_user_pagewise(
     dst_user_vaddr: usize,
     src: &[u8],
@@ -1888,6 +1908,9 @@ fn read_stream_to_user(
     if length == 0 {
         return Ok(0);
     }
+    if address == 0 {
+        return Err(errno::EFAULT);
+    }
     address.checked_add(length - 1).ok_or(errno::EFAULT)?;
     let mut offset = 0;
     while offset < length {
@@ -1908,7 +1931,11 @@ fn read_stream_to_user(
         Err(StreamError::EndOfStream) => return Ok(0),
         Err(error) => return Err(stream_error_to_errno(error)),
     };
-    let copied = copy_to_user_pagewise(address, &buffer[..amount], &task.vm_manager);
+    let copied = crate::library::std::usercopy::copy_to_user_prefix(
+        &task.vm_manager,
+        address,
+        &buffer[..amount],
+    );
     if amount != 0 && copied == 0 {
         Err(errno::EFAULT)
     } else {
@@ -1960,8 +1987,7 @@ fn current_file_status_flags(abi: &LinuxAbi, task: &crate::task::Task, fd: usize
 }
 
 // Objects may return WouldBlock even for a blocking descriptor. Retry after
-// readiness instead of inventing EOF or EPERM. Keep this shared by both the
-// single-page and staged read paths.
+// readiness instead of inventing EOF or EPERM.
 fn read_stream_retry(
     stream: &dyn crate::object::capability::StreamOps,
     buffer: &mut [u8],
@@ -2013,7 +2039,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let nonblocking = current_file_status_flags(abi, &task, fd)
         .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0)
         || selectable.is_some_and(|selectable| selectable.is_nonblocking());
-    let mut read = |buffer: &mut [u8]| {
+    let read = |buffer: &mut [u8]| {
         read_stream_retry(stream, buffer, nonblocking, || {
             let Some(selectable) = selectable else {
                 return Err(StreamError::WouldBlock);
@@ -2030,21 +2056,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Ok(())
         })
     };
-    let page_remaining =
-        crate::environment::PAGE_SIZE - (user_buf & (crate::environment::PAGE_SIZE - 1));
-    if count <= page_remaining {
-        let Some(address) = task.vm_manager.translate_to_kva_for_write(user_buf) else {
-            return errno::to_result(errno::EFAULT);
-        };
-        let buffer = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, count) };
-        match read(buffer) {
-            Ok(amount) => amount,
-            Err(StreamError::EndOfStream) => 0,
-            Err(error) => errno::to_result(stream_error_to_errno(error)),
-        }
-    } else {
-        read_stream_to_user(read, &task, user_buf, count).unwrap_or_else(errno::to_result)
-    }
+    read_stream_to_user(read, &task, user_buf, count).unwrap_or_else(errno::to_result)
 }
 
 pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -2120,61 +2132,38 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .as_selectable()
             .is_some_and(|selectable| selectable.is_nonblocking());
 
-    // Fast path: buffer fits within a single page
+    // Keep one write as one stream operation. Splitting a <= PIPE_BUF write
+    // defeats the pipe's atomic capacity check. Bionic also writes an entire
+    // GNU RELRO segment at once and requires the complete result.
+    let length = count.min((i32::MAX as usize) & !(crate::environment::PAGE_SIZE - 1));
+    if user_buf == 0 || user_buf.checked_add(length - 1).is_none() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(length).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(length, 0);
+    if crate::library::std::usercopy::copy_from_user(&task, user_buf, &mut buffer).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    // Preserve the legacy retry behavior for a write wholly inside one page.
     let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
-    if count <= crate::environment::PAGE_SIZE - page_offset {
-        let buf_ptr = match task.vm_manager.translate_to_kva(user_buf) {
-            Some(kva) => kva as *const u8,
-            None => return usize::MAX,
-        };
-        let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-        match stream.write(buffer) {
-            Ok(n) => {
-                if let Some(file) = kernel_obj.as_file() {
-                    log_mozc_ipc_file(file, "write", n);
-                }
-                n
+    match stream.write(&buffer) {
+        Ok(n) => {
+            if let Some(file) = kernel_obj.as_file() {
+                log_mozc_ipc_file(file, "write", n);
             }
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    return errno::to_result(errno::EAGAIN);
-                } else {
-                    schedule(trapframe);
-                    usize::MAX
-                }
-            }
-            Err(error) => errno::to_result(stream_error_to_errno(error)),
+            n
         }
-    } else {
-        // Keep one write as one stream operation across user pages. Splitting
-        // a <= PIPE_BUF write into page fragments defeats the pipe's atomic
-        // capacity check, and splitting datagrams changes record boundaries.
-        // Preserve a single write when staging discontiguous user pages.
-        // In particular, Bionic serializes an entire GNU RELRO segment with
-        // one write and requires the complete result before remapping it.
-        // Apply Linux's per-call transfer ceiling, rather than introducing
-        // an unconditional 1 MiB short write even when memory is available.
-        let length = count.min((i32::MAX as usize) & !(crate::environment::PAGE_SIZE - 1));
-        if user_buf == 0 || user_buf.checked_add(length - 1).is_none() {
-            return errno::to_result(errno::EFAULT);
+        Err(StreamError::WouldBlock)
+            if !nonblocking && count <= crate::environment::PAGE_SIZE - page_offset =>
+        {
+            schedule(trapframe);
+            usize::MAX
         }
-        let mut buffer = Vec::new();
-        if buffer.try_reserve_exact(length).is_err() {
-            return errno::to_result(errno::ENOMEM);
-        }
-        buffer.resize(length, 0);
-        if crate::library::std::usercopy::copy_from_user(&task, user_buf, &mut buffer).is_err() {
-            return errno::to_result(errno::EFAULT);
-        }
-        match stream.write(&buffer) {
-            Ok(n) => {
-                if let Some(file) = kernel_obj.as_file() {
-                    log_mozc_ipc_file(file, "write", n);
-                }
-                n
-            }
-            Err(error) => errno::to_result(stream_error_to_errno(error)),
-        }
+        Err(error) => errno::to_result(stream_error_to_errno(error)),
     }
 }
 
@@ -2306,6 +2295,8 @@ fn positional_vector_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, write: bo
 }
 
 pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    use crate::{environment::PAGE_SIZE, library::std::usercopy::copy_to_user};
+
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_addr = trapframe.get_arg(1);
@@ -2354,113 +2345,59 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false);
 
-    let page_offset = buf_addr & (crate::environment::PAGE_SIZE - 1);
-    if page_offset + count <= crate::environment::PAGE_SIZE {
-        let buf_ptr = match task.vm_manager.translate_to_kva_for_write(buf_addr) {
-            Some(ptr) => ptr as *mut u8,
-            None => {
-                trapframe.increment_pc_next(&task);
-                return errno::to_result(errno::EFAULT);
-            }
-        };
+    if buf_addr == 0 || buf_addr.checked_add(count - 1).is_none() {
+        trapframe.increment_pc_next(&task);
+        return errno::to_result(errno::EFAULT);
+    }
+    let capacity = count.min(PAGE_SIZE);
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(capacity).is_err() {
+        trapframe.increment_pc_next(&task);
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(capacity, 0);
 
-        if buf_ptr.is_null() {
-            trapframe.increment_pc_next(&task);
-            return errno::to_result(errno::EFAULT);
+    let single_page = count <= PAGE_SIZE - (buf_addr & (PAGE_SIZE - 1));
+    let mut total_read = 0;
+    let mut error = None;
+    while total_read < count {
+        let address = buf_addr + total_read;
+        let page_offset = address & (PAGE_SIZE - 1);
+        let chunk = (PAGE_SIZE - page_offset).min(count - total_read);
+        if task.vm_manager.translate_to_kva_for_write(address).is_none() {
+            error = Some(errno::EFAULT);
+            break;
         }
-
-        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-
-        match file.read_at(position as u64, &mut buffer) {
-            Ok(n) => {
-                trapframe.increment_pc_next(&task);
-                n
-            }
-            Err(StreamError::EndOfStream) => {
-                trapframe.increment_pc_next(&task);
-                0
-            }
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    trapframe.increment_pc_next(&task);
-                    errno::to_result(errno::EAGAIN)
-                } else {
+        let offset = position as u64 + total_read as u64;
+        let read = match file.read_at(offset, &mut buffer[..chunk]) {
+            Ok(read) => read.min(chunk),
+            Err(StreamError::EndOfStream) => break,
+            Err(StreamError::WouldBlock) if !nonblocking => {
+                if single_page {
                     schedule(trapframe);
-                    usize::MAX
+                    return usize::MAX;
                 }
+                break;
             }
             Err(err) => {
-                trapframe.increment_pc_next(&task);
-                errno::to_result(stream_error_to_errno(err))
+                error = Some(stream_error_to_errno(err));
+                break;
             }
+        };
+        if copy_to_user(&task, address, &buffer[..read]).is_err() {
+            error = Some(errno::EFAULT);
+            break;
         }
-    } else {
-        let mut total_read = 0usize;
-        let mut remaining = count;
-        let mut cur_user = buf_addr;
-
-        while remaining > 0 {
-            let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
-            let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
-            let buf_ptr = match task.vm_manager.translate_to_kva_for_write(cur_user) {
-                Some(ptr) => ptr as *mut u8,
-                None => {
-                    if total_read == 0 {
-                        trapframe.increment_pc_next(&task);
-                        return errno::to_result(errno::EFAULT);
-                    }
-                    break;
-                }
-            };
-
-            if buf_ptr.is_null() {
-                if total_read == 0 {
-                    trapframe.increment_pc_next(&task);
-                    return errno::to_result(errno::EFAULT);
-                }
-                break;
-            }
-
-            let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, chunk_size) };
-
-            let n = match file.read_at(position as u64 + total_read as u64, &mut buffer) {
-                Ok(n) => n,
-                Err(StreamError::EndOfStream) => break,
-                Err(StreamError::WouldBlock) => {
-                    if nonblocking {
-                        if total_read > 0 {
-                            break;
-                        }
-                        trapframe.increment_pc_next(&task);
-                        return errno::to_result(errno::EAGAIN);
-                    } else {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    if total_read == 0 {
-                        trapframe.increment_pc_next(&task);
-                        return errno::to_result(stream_error_to_errno(err));
-                    }
-                    break;
-                }
-            };
-
-            if n == 0 {
-                break;
-            }
-
-            total_read += n;
-            remaining -= n;
-            cur_user += n;
-            if n < chunk_size {
-                break;
-            }
+        total_read += read;
+        if read < chunk {
+            break;
         }
-
-        trapframe.increment_pc_next(&task);
-        total_read
     }
+    trapframe.increment_pc_next(&task);
+    if total_read == 0 && let Some(error) = error {
+        return errno::to_result(error);
+    }
+    total_read
 }
 
 pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -5533,15 +5470,29 @@ fn epoll_wait_for_task(
             // racing the scan then remains visible on the next iteration.
             let generations = interest.generations();
             let raw_ready = epoll_ready_events(abi, &task, interest);
+            if interest.delivery.lock().pending(interest.events, raw_ready, &generations) == 0 {
+                continue;
+            }
+
+            // Resolve lazy output pages before taking the delivery spinlock.
+            // Another waiter may consume the event during that work.
+            let mapping = task.vm_manager.mapping_transaction();
+            let output = epoll_event_output(&mapping, events_ptr, ready_count);
+            let generations = interest.generations();
+            let raw_ready = epoll_ready_events(abi, &task, interest);
             let mut state = interest.delivery.lock();
             let ready = state.pending(interest.events, raw_ready, &generations);
             if ready == 0 {
                 continue;
             }
-            if !write_linux_epoll_event(&task, events_ptr, ready_count, ready, interest.data) {
+            let Some(output) = output else {
                 return errno::to_result(errno::EFAULT);
-            }
+            };
+            // SAFETY: the transaction keeps both writable aliases alive.
+            unsafe { write_linux_epoll_event(output, ready, interest.data) };
             state.delivered(interest.events, ready, generations);
+            drop(state);
+            drop(mapping);
             acknowledge_linux_ready(task, interest.watched_handle, ready);
             delivered.push(interest.delivery.clone());
             ready_count += 1;
@@ -7690,6 +7641,34 @@ mod tests {
         crate::library::std::usercopy::copy_from_user(&task, address, &mut bytes).unwrap();
         assert_eq!(bytes, [42; 16]);
         assert_eq!(reader.available_bytes(), 0);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn stream_read_leaves_mapping_transaction_available_during_io() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("stream-read-transaction".into(), 0, TaskType::User);
+        let address = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(address, 1).unwrap();
+        let amount = super::read_stream_to_user(
+            |buffer| {
+                copy_to_user(&task, address + 8, &[0x5a]).unwrap();
+                buffer[0] = 0x31;
+                Ok(1)
+            },
+            &task,
+            address,
+            1,
+        )
+        .unwrap();
+        assert_eq!(amount, 1);
+        let mut result = [0; 9];
+        copy_from_user(&task, address, &mut result).unwrap();
+        assert_eq!(result[0], 0x31);
+        assert_eq!(result[8], 0x5a);
     }
 
     #[test_case]

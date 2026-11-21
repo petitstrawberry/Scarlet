@@ -63,7 +63,56 @@ pub struct FramebufferResource {
     pub connector_index: u32,
 }
 
+/// One coherent framebuffer generation, retained through every raw access.
+#[derive(Clone)]
+pub(super) struct FramebufferSnapshot {
+    pub config: FramebufferConfig,
+    pub physical_addr: u64,
+    pub size: usize,
+    pub memory_attribute: crate::vm::vmem::MemoryAttribute,
+    _device: Option<SharedDevice>,
+}
+
 impl FramebufferResource {
+    pub(super) fn snapshot(
+        &self,
+        manager: &DeviceManager,
+    ) -> Result<FramebufferSnapshot, &'static str> {
+        if let Some(source) = manager.get_device(self.source_device_id) {
+            let graphics = source
+                .as_graphics_device()
+                .ok_or("Invalid framebuffer source")?;
+            let backing = graphics.connector_mapping_device(self.connector_index)?;
+            let exact = backing.is_some();
+            let device = backing.unwrap_or(source);
+            let graphics = device
+                .as_graphics_device()
+                .ok_or("Invalid framebuffer backing")?;
+            let (config, physical_addr) = if exact {
+                graphics.get_framebuffer_info()?
+            } else {
+                graphics.connector_framebuffer_info(self.connector_index)?
+            };
+            let size = graphics.framebuffer_mapping_size(&config)?;
+            let memory_attribute = graphics.framebuffer_memory_attribute();
+            return Ok(FramebufferSnapshot {
+                config,
+                physical_addr,
+                size,
+                memory_attribute,
+                _device: Some(device),
+            });
+        }
+        // Static firmware/bare-metal resources may not have a registered source.
+        Ok(FramebufferSnapshot {
+            config: self.config.clone(),
+            physical_addr: self.physical_addr,
+            size: self.size,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::DeviceBurstable,
+            _device: None,
+        })
+    }
+
     /// Create a new framebuffer resource
     pub fn new(
         source_device_id: usize,
@@ -309,7 +358,12 @@ impl GraphicsManager {
         );
 
         // Extract framebuffer configuration
-        let config = graphics_device.get_framebuffer_config()?;
+        let backing = graphics_device.connector_mapping_device(0)?;
+        let backing_graphics = backing
+            .as_ref()
+            .and_then(|device| device.as_graphics_device())
+            .unwrap_or(graphics_device);
+        let (config, physical_addr) = backing_graphics.get_framebuffer_info()?;
         crate::println!(
             "[GraphicsManager] Graphics device {} config {}x{}",
             device_id,
@@ -318,7 +372,6 @@ impl GraphicsManager {
         );
 
         // Extract framebuffer address
-        let physical_addr = graphics_device.get_framebuffer_address()?;
         if retire_boot_framebuffers && physical_addr == 0 {
             return Err("Graphics device framebuffer address is null");
         }
@@ -328,12 +381,8 @@ impl GraphicsManager {
             physical_addr
         );
 
-        // Calculate framebuffer size
-        // The logical size is what the pixels actually use
-        let logical_size = config.size();
-        // The physical size must be page-aligned for memory mapping
-        let physical_size = (logical_size + crate::environment::PAGE_SIZE - 1)
-            & !(crate::environment::PAGE_SIZE - 1);
+        // Use the exact backing's mapping granule (which may exceed PAGE_SIZE).
+        let physical_size = backing_graphics.framebuffer_mapping_size(&config)?;
 
         if retire_boot_framebuffers {
             let mut takeover_state = self.takeover_state.lock();
@@ -951,7 +1000,8 @@ impl GraphicsManager {
     ///
     /// The byte at the specified position, or None if invalid
     pub fn read_byte_from_framebuffer(&self, fb_name: &str, position: usize) -> Option<u8> {
-        let fb_resource = self.get_framebuffer(fb_name)?;
+        let resource = self.get_framebuffer(fb_name)?;
+        let fb_resource = resource.snapshot(DeviceManager::get_manager()).ok()?;
 
         if position >= fb_resource.size {
             return None;
@@ -984,6 +1034,7 @@ impl GraphicsManager {
         let fb_resource = self
             .get_framebuffer(fb_name)
             .ok_or("Framebuffer not found")?;
+        let fb_resource = fb_resource.snapshot(DeviceManager::get_manager())?;
 
         if position >= fb_resource.size {
             return Err("Position beyond framebuffer size");
@@ -1015,6 +1066,9 @@ impl GraphicsManager {
             None => return 0,
         };
 
+        let Ok(fb_resource) = fb_resource.snapshot(DeviceManager::get_manager()) else {
+            return 0;
+        };
         let available_bytes = fb_resource.size.saturating_sub(position);
         let bytes_to_read = buffer.len().min(available_bytes);
 
@@ -1057,6 +1111,7 @@ impl GraphicsManager {
         let fb_resource = self
             .get_framebuffer(fb_name)
             .ok_or("Framebuffer not found")?;
+        let fb_resource = fb_resource.snapshot(DeviceManager::get_manager())?;
 
         let available_space = fb_resource.size.saturating_sub(position);
         let bytes_to_write = buffer.len().min(available_space);

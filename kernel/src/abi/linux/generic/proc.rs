@@ -899,9 +899,11 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
         PR_GET_NAME => {
             let mut name = [0u8; TASK_COMM_LEN];
-            let task_name = task.name.read();
-            let copied = task_name.as_bytes().len().min(TASK_COMM_LEN - 1);
-            name[..copied].copy_from_slice(&task_name.as_bytes()[..copied]);
+            {
+                let task_name = task.name.read();
+                let copied = task_name.as_bytes().len().min(TASK_COMM_LEN - 1);
+                name[..copied].copy_from_slice(&task_name.as_bytes()[..copied]);
+            }
             if copy_to_user(&task, arg2, &name).is_err() {
                 errno::to_result(errno::EFAULT)
             } else {
@@ -2257,7 +2259,7 @@ mod tests {
         let replacement = image.vm_manager.process_entry_stack();
         assert_eq!(parent.vm_manager.process_entry_stack(), Some(initial));
         drop(sibling);
-        parent.vm_manager.exchange_exec_image(&image.vm_manager);
+        parent.vm_manager.mapping_transaction().exchange_exec_image(&image.vm_manager);
         assert_eq!(parent.vm_manager.process_entry_stack(), replacement);
         assert_eq!(fork.vm_manager.process_entry_stack(), Some(initial));
         assert_eq!(image.vm_manager.process_entry_stack(), Some(initial));

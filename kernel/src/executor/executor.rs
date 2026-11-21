@@ -570,8 +570,9 @@ impl TransparentExecutor {
 
         // All fallible operations are complete. Locks here only exchange owned
         // state; no filesystem I/O, loader callbacks, or allocation occurs.
+        let mappings = task.vm_manager.mapping_transaction();
         let commit_guard = crate::sync::IrqGuard::new();
-        task.vm_manager.exchange_exec_image(&image.vm_manager);
+        mappings.exchange_exec_image(&image.vm_manager);
         core::mem::swap(
             &mut *task.security_subject.write(),
             &mut *image.security_subject.write(),
@@ -619,6 +620,7 @@ impl TransparentExecutor {
             crate::arch::get_cpu().set_next_address_space(task.vm_manager.get_asid());
         }
         drop(commit_guard);
+        drop(mappings);
         // The image now owns the retired memory and handles. Drop outside locks.
         drop(image);
         Ok(())

@@ -347,7 +347,7 @@ impl GpuDisplayResource {
     /// # Returns
     ///
     /// A GPU display resource descriptor.
-    pub(crate) const fn new(
+    pub const fn new(
         resource_id: u32,
         width: u32,
         height: u32,
@@ -513,7 +513,7 @@ impl GpuDisplayResource {
     }
 
     /// Return the backend resource identifier.
-    pub(crate) const fn resource_id(&self) -> u32 {
+    pub const fn resource_id(&self) -> u32 {
         self.resource_id
     }
 
@@ -528,7 +528,7 @@ impl GpuDisplayResource {
     }
 
     /// Return the opaque identity of the graphics backend that owns this resource.
-    pub(crate) const fn backend_cookie(&self) -> u64 {
+    pub const fn backend_cookie(&self) -> u64 {
         self.backend_cookie
     }
 
@@ -598,7 +598,10 @@ pub trait GraphicsDevice: Device {
         Err("Display mode switching is not supported")
     }
 
-    /// Retain the exact scanout allocation across modesets and VMA lifetime.
+    /// Return a device whose framebuffer address, geometry, and memory
+    /// attribute describe one retained allocation. Replaceable framebuffers
+    /// supply a snapshot for every connector they expose, including zero.
+    /// Static framebuffers can use the default.
     fn connector_mapping_device(&self, _connector: u32) -> Result<Option<alloc::sync::Arc<dyn Device>>, &'static str> {
         Ok(None)
     }
@@ -645,6 +648,12 @@ pub trait GraphicsDevice: Device {
 
     /// Get framebuffer memory address
     fn get_framebuffer_address(&self) -> Result<u64, &'static str>;
+
+    /// Size of the CPU-mappable allocation including the driver-owned last page.
+    fn framebuffer_mapping_size(&self, config: &FramebufferConfig) -> Result<usize, &'static str> {
+        config.size().checked_next_multiple_of(crate::environment::PAGE_SIZE)
+            .ok_or("Display backing size overflow")
+    }
 
     /// Memory attribute for CPU mappings of this device's framebuffer storage.
     fn framebuffer_memory_attribute(&self) -> crate::vm::vmem::MemoryAttribute {

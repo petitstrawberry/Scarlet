@@ -1,0 +1,5 @@
+# SGFX supplies the link settings for native Scarlet applications.
+include = [".scarlet/sgfx/userspace.toml"]
+
+[target.aarch64-unknown-scarlet]
+rustflags = ["-C", "target-feature=+reserve-x18"]

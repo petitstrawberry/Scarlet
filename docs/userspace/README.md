@@ -181,18 +181,17 @@ Debian's `libnspr4`. Settings opens without starting a CDM check. Use
 the media category and starts a check on a worker. The settings window has its
 own size, focus and presentation lifecycle, independent of the browser page.
 
-Myrica owns the app and host recipe in `platforms/scarlet/bundle.toml` of its
-pinned source. The service is installed at `/usr/libexec/myrica/widevine-host`
-in the **linux-aarch64 view** (native image path
-`/systems/linux-aarch64/usr/libexec/myrica/widevine-host`). The user installs the
-CDM in Debian; its standard locations and the existing `/shared/widevine` CDM
-are discovered automatically. Explicit `MYRICA_WIDEVINE_*` overrides remain
-supported. See [Myrica's installation instructions](https://github.com/petitstrawberry/myrica/blob/bbd8f0e4d9a58b4ba3bf40eb6dab8b2d8da91f35/README.md#widevine-setup-on-scarlet).
+The AArch64 desktop bundle verifies and extracts a SHA-256-pinned Myrica
+release archive containing the WebKit browser, Vulkan probe and Widevine host.
+The host is installed at `/usr/libexec/myrica/widevine-host` in the
+**linux-aarch64 view** (`/systems/linux-aarch64/usr/libexec/myrica/widevine-host`
+in the native image). Install the CDM separately in Debian. The host discovers
+standard Debian locations and `/shared/widevine` automatically and supports
+explicit `MYRICA_WIDEVINE_*` overrides.
+[Myrica installation instructions](https://github.com/petitstrawberry/myrica/blob/bbd8f0e4d9a58b4ba3bf40eb6dab8b2d8da91f35/README.md#widevine-setup-on-scarlet)
 
-Validation on 2026-10-19: native Myrica started the bundled Linux host without
-path overrides, discovered CDM 4.10.2662.3, and reported successful initialization.
-The generated rootfs and the running normal disk contain the same Myrica and
-host SHA256 values recorded in `projects/aarch64-limine-full/scarlet.lock`.
+On 2026-10-19, native Myrica started the Linux host with the default paths,
+discovered CDM 4.10.2662.3, and reported successful initialization.
 
 Validation on 2026-10-20: the separate settings scene and its navigation passed
 74 host tests, including page-image lease, fullscreen and viewport isolation.

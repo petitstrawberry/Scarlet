@@ -262,6 +262,7 @@ struct State {
     spawn: Option<SpawnRequest>,
     threads: BTreeMap<usize, Thread>,
     arena: Option<Arc<Arena>>,
+    arena_creating: bool,
     node: (usize, usize),
     node_flags: u32,
 }
@@ -332,6 +333,7 @@ pub(super) fn new_file(task: &Task, device: u8) -> Result<Arc<BinderFile>, usize
             spawn: None,
             threads: BTreeMap::new(),
             arena: None,
+            arena_creating: false,
             node: (0, 0),
             node_flags: 0,
         }),
@@ -1452,6 +1454,7 @@ mod tests {
                 spawn: None,
                 threads: BTreeMap::new(),
                 arena: None,
+                arena_creating: false,
                 node: (0, 0),
                 node_flags: 0,
             }),

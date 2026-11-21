@@ -335,7 +335,7 @@ fn native_syscall_numbers() {
         StreamReadWithStatus = 203, StreamWriteWithStatus = 204,
         FileTruncate = 301, FileMetadata = 302, FileSetTimes = 303, FileSync = 304,
         FileSeekWithStatus = 305, FileTruncateWithStatus = 306,
-        FileReadAtWithStatus = 308, FileWriteAtWithStatus = 309, FileLock = 310,
+        FileReadAtWithStatus = 308, FileWriteAtWithStatus = 309, FileLock = 310, FileSetMode = 311,
         VfsOpen = 400, VfsRemove = 401,
         VfsCreateFile = 402, VfsCreateDirectory = 403, VfsChangeDirectory = 404,
         VfsTruncate = 405, VfsCreateSymlink = 406, VfsReadlink = 407,

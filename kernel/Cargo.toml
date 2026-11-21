@@ -21,6 +21,7 @@ sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"]
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
 limine = { version = "0.6", optional = true }
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+scarlet-hosted-runtime = { path = "hosted/runtime", optional = true }
 
 [features]
 default = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
@@ -35,3 +36,4 @@ hypervisor = []
 limine = ["dep:limine"]
 # Architecture-specific Linux-compatible entry and early initialization.
 linux-boot = []
+hosted = ["dep:scarlet-hosted-runtime"]

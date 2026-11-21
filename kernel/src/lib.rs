@@ -278,6 +278,7 @@
 
 #![no_std]
 #![cfg_attr(test, no_main)]
+#![cfg_attr(feature = "hosted", feature(integer_atomics))]
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
@@ -293,6 +294,8 @@ pub mod earlyfb;
 pub mod environment;
 pub mod executor;
 pub mod fs;
+#[cfg(feature = "hosted")]
+pub mod hosted;
 #[cfg(feature = "hypervisor")]
 pub mod hypervisor;
 pub mod initcall;
@@ -323,6 +326,14 @@ pub mod vm;
 pub mod test;
 
 extern crate alloc;
+#[cfg(feature = "hosted")]
+extern crate std;
+
+#[cfg(all(
+    feature = "hosted",
+    any(feature = "limine", feature = "linux-boot", feature = "hypervisor")
+))]
+compile_error!("The hosted kernel selects its own boot and execution platform");
 use crate::mem::address::{PhysAddr, VirtAddr};
 use crate::vm::direct_map::DirectMapWindow;
 use alloc::string::ToString;
@@ -346,11 +357,13 @@ use sched::scheduler::{enqueue_task, get_task_by_id, register_task, start_schedu
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
-    boot::switch_to_boot_page_table,
     direct_map::DirectMapRegions,
-    kernel_vm_init, phys_to_virt, transition_kernel_memory_layout,
+    phys_to_virt,
     vmem::{MemoryArea, PhysicalMemoryArea},
 };
+
+#[cfg(not(feature = "hosted"))]
+use vm::{boot::switch_to_boot_page_table, kernel_vm_init, transition_kernel_memory_layout};
 
 fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
     for parent_path in ["/soc", "/"] {
@@ -378,7 +391,7 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
 }
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "hosted")))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // A fatal CPU must not resume IRQ handlers or scheduling over interrupted
@@ -413,6 +426,9 @@ pub enum DeviceSource {
     /// Advanced Configuration and Power Interface (ACPI) source
     /// x86/x86_64 standard for hardware configuration and power management
     Acpi,
+    /// Platform-owned device population for a hosted BSP. The callback is
+    /// responsible for idempotent driver registration at each priority.
+    Hosted(fn(&DeviceManager, DriverPriority)),
     /// No device information available
     /// Fallback when no hardware description is provided by firmware
     None,
@@ -685,6 +701,7 @@ impl BootInfo {
 ///
 /// This function never returns - it transitions to the scheduler and
 /// enters normal kernel operation mode.
+#[cfg(not(feature = "hosted"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     crate::earlyfb::configure(boot_info.get_cmdline());
@@ -696,6 +713,42 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
     println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
+    let heap_paddr = prepare_bare_metal_memory(boot_info);
+    /* After this point, we can use the heap */
+    early_initcall_call();
+    fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
+    driver_initcall_call();
+
+    println!("[Scarlet Kernel] Initializing Virtual Memory...");
+    kernel_vm_init(
+        boot_info.direct_map_regions,
+        boot_info.initramfs_paddr,
+        heap_paddr,
+    );
+    /* After this point, we can use the heap and virtual memory */
+    /* We will also be restricted to the kernel address space */
+
+    lsm::symbol::init_kernel_symbols();
+
+    start_prepared_kernel(PreparedBoot {
+        cpu_id,
+        cpu_count,
+        cmdline: boot_info.get_cmdline(),
+        device_source: boot_info.device_source,
+        initramfs: boot_info.get_initramfs_vaddr(),
+        probe_buses: probe_bare_metal_pci,
+        seed_wall_clock: seed_bare_metal_wall_clock,
+        probe_secondary_cpus: boot_info.probe_secondary_cpus_hook,
+        start_secondary_cpus: || {
+            if let Some(start) = boot_info.start_secondary_cpus_hook {
+                start();
+            }
+        },
+    })
+}
+
+#[cfg(not(feature = "hosted"))]
+fn prepare_bare_metal_memory(boot_info: &BootInfo) -> PhysicalMemoryArea {
     let usable_memory_paddr = boot_info.usable_memory_paddr;
     let usable_memory_regions = boot_info.usable_memory_regions;
     let direct_map_regions = boot_info.direct_map_regions;
@@ -819,17 +872,25 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::Release);
 
-    /* After this point, we can use the heap */
-    early_initcall_call();
-    fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
-    driver_initcall_call();
+    heap_paddr
+}
 
-    println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    kernel_vm_init(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
-    /* After this point, we can use the heap and virtual memory */
-    /* We will also be restricted to the kernel address space */
+struct PreparedBoot<'a, Start> {
+    cpu_id: usize,
+    cpu_count: usize,
+    cmdline: &'a str,
+    device_source: DeviceSource,
+    initramfs: Option<MemoryArea>,
+    probe_buses: fn(),
+    seed_wall_clock: fn(),
+    probe_secondary_cpus: Option<fn()>,
+    start_secondary_cpus: Start,
+}
 
-    lsm::symbol::init_kernel_symbols();
+/// Enter subsystem initialization with the platform's allocator, CPU binding,
+/// and kernel address space ready. The initramfs is a retained kernel alias.
+fn start_prepared_kernel(boot: PreparedBoot<'_, impl FnOnce()>) -> ! {
+    let cpu_id = boot.cpu_id;
 
     /* Create and register init before driver workers can consume PID 1. */
     println!("[boot] Creating initial user task...");
@@ -845,7 +906,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     // 2) Initialize interrupt controllers.
     // 3) Discover remaining devices (which may enable specific IRQ lines).
     device_manager
-        .populate_devices_from_source(&boot_info.device_source, Some(&[DriverPriority::Critical]));
+        .populate_devices_from_source(&boot.device_source, Some(&[DriverPriority::Critical]));
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
 
     /* Initialize interrupt controllers (stage 1) */
@@ -867,7 +928,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Discover remaining devices */
     println!("[Scarlet Kernel] Populating remaining devices...");
     device_manager.populate_devices_from_source(
-        &boot_info.device_source,
+        &boot.device_source,
         Some(&[
             DriverPriority::Core,
             DriverPriority::Standard,
@@ -875,23 +936,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         ]),
     );
 
-    if let Some(fdt) = FdtManager::get_manager().get_fdt() {
-        if let Some((ecam_base, ecam_size)) = find_pci_ecam(fdt) {
-            println!(
-                "[PCI] ECAM discovered from FDT paddr={:#x} size={:#x}",
-                ecam_base, ecam_size
-            );
-            let pci_bus = PciBus::new(ecam_base, ecam_size);
-            if let Err(error) = pci_bus.scan_and_register() {
-                println!("[Scarlet Kernel] PCI scan skipped: {}", error);
-            }
-        } else {
-            println!("[PCI] no PCI ECAM found in FDT");
-        }
-    } else {
-        println!("[PCI] no FDT available, skipping PCI scan");
-    }
-    DeviceManager::get_manager().probe_pci_devices();
+    (boot.probe_buses)();
     fence(Ordering::SeqCst);
 
     /* After this point, we can use the device manager */
@@ -953,26 +998,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Initialize timer */
     println!("[boot] Initializing timer...");
     // Initialize timer for the boot CPU (from BootInfo)
-    get_kernel_timer().init(boot_info.cpu_id);
+    get_kernel_timer().init(cpu_id);
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
-    // Seed the wall clock from Limine's "Date at Boot" (EFI/UEFI boot path).
-    // The arch counter's absolute zero is VM-start, not kernel boot, so we
-    // cannot treat the snapshot as "wall at timer zero". Instead capture the
-    // counter at the seed instant, anchor that instant to the boot RTC value,
-    // and let the wall clock advance by the monotonic counter delta from there.
-    // RTC drivers remain a fallback for non-EFI boots (first-wins).
-    #[cfg(feature = "limine")]
-    {
-        if let Some(epoch_ns) = crate::boot::limine::date_at_boot_ns() {
-            let mono = crate::time::current_time_ns();
-            match crate::time::initialize_wall_clock_from_rtc_sample(epoch_ns, mono, mono) {
-                Ok(()) => println!("[boot] wall clock seeded from Limine Date at Boot"),
-                Err(e) => println!("[boot] Date at Boot wall clock seed failed: {}", e),
-            }
-        }
-    }
+    (boot.seed_wall_clock)();
 
     /* Initialize scheduler */
     println!("[boot] Initializing scheduler...");
@@ -982,13 +1012,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[boot] Initializing global VFS...");
     let manager = init_global_vfs_manager();
 
-    /* Initialize initramfs from BootInfo if available */
-    if let Some(initramfs_paddr) = boot_info.initramfs_paddr {
+    /* Mount the platform's initramfs alias if available. */
+    if let Some(initramfs_vaddr) = boot.initramfs {
         println!("[Scarlet Kernel] Initializing initramfs from BootInfo...");
-        let initramfs_vaddr = MemoryArea::new(
-            phys_to_virt(initramfs_paddr.start),
-            phys_to_virt(initramfs_paddr.end),
-        );
         if let Err(e) = init_initramfs(&manager, initramfs_vaddr) {
             println!(
                 "[Scarlet Kernel] Warning: Failed to initialize initramfs: {}",
@@ -1009,7 +1035,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Apply network configuration from cmdline */
     #[cfg(feature = "network")]
     {
-        let cmdline = boot_info.get_cmdline();
+        let cmdline = boot.cmdline;
         if !cmdline.is_empty() {
             crate::network::config::apply_cmdline_config(cmdline);
         }
@@ -1022,7 +1048,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     #[cfg(feature = "wireless-mock")]
-    if let Err(error) = crate::device::wireless::init_mocks(boot_info.get_cmdline()) {
+    if let Err(error) = crate::device::wireless::init_mocks(boot.cmdline) {
         println!("wireless mock initialization failed: {}", error);
     }
 
@@ -1035,7 +1061,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         .unwrap()
         .set_cwd_by_path("/")
         .expect("Failed to set initial working directory");
-    let init_cmdline = boot_info.get_cmdline();
+    let init_cmdline = boot.cmdline;
     task.bootstrap_environment.store(true, Ordering::Release);
     let init_path = init_cmdline
         .split_whitespace()
@@ -1049,10 +1075,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         &init_argv_with_cmdline
     };
 
-    if let Some(hook) = boot_info.probe_secondary_cpus_hook {
+    if let Some(hook) = boot.probe_secondary_cpus {
         hook();
     }
-    crate::arch::publish_user_cpu_features(boot_info.cpu_count);
+    crate::arch::publish_user_cpu_features(boot.cpu_count);
 
     match TransparentExecutor::execute_binary(
         init_path,
@@ -1101,18 +1127,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     // the BSP's ready queue before the boot CPU enters it, which makes early
     // userspace startup nondeterministic on SMP systems. The BSP is not
     // assumed to have CPU ID 0.
-    if let Some(hook) = boot_info.start_secondary_cpus_hook {
-        // println!("[boot] releasing secondary CPUs");
-        hook();
-        fence(Ordering::SeqCst);
-        // println!("[boot] secondary CPUs released");
-    }
+    (boot.start_secondary_cpus)();
+    fence(Ordering::SeqCst);
+    enter_first_task(next_task_id)
+}
+
+fn enter_first_task(next_task_id: Option<usize>) -> ! {
     if let Some(next_task_id) = next_task_id {
         let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
-        // println!(
-        //     "[boot] first switch: task={} type={:?}",
-        //     next_task_id, next_task.task_type
-        // );
         if next_task.task_type == crate::task::TaskType::Kernel {
             drop(next_task);
             crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
@@ -1130,6 +1152,45 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[Scarlet Kernel] No runnable task; entering idle loop");
     loop {
         crate::arch::instruction::idle();
+    }
+}
+
+fn probe_bare_metal_pci() {
+    if let Some(fdt) = FdtManager::get_manager().get_fdt() {
+        if let Some((ecam_base, ecam_size)) = find_pci_ecam(fdt) {
+            println!(
+                "[PCI] ECAM discovered from FDT paddr={:#x} size={:#x}",
+                ecam_base, ecam_size
+            );
+            let pci_bus = PciBus::new(ecam_base, ecam_size);
+            if let Err(error) = pci_bus.scan_and_register() {
+                println!("[Scarlet Kernel] PCI scan skipped: {}", error);
+            }
+        } else {
+            println!("[PCI] no PCI ECAM found in FDT");
+        }
+    } else {
+        println!("[PCI] no FDT available, skipping PCI scan");
+    }
+    DeviceManager::get_manager().probe_pci_devices();
+}
+
+fn seed_bare_metal_wall_clock() {
+    // Seed the wall clock from Limine's "Date at Boot" (EFI/UEFI boot path).
+    // The arch counter's absolute zero is VM-start, not kernel boot, so we
+    // cannot treat the snapshot as "wall at timer zero". Instead capture the
+    // counter at the seed instant, anchor that instant to the boot RTC value,
+    // and let the wall clock advance by the monotonic counter delta from there.
+    // RTC drivers remain a fallback for non-EFI boots (first-wins).
+    #[cfg(feature = "limine")]
+    {
+        if let Some(epoch_ns) = crate::boot::limine::date_at_boot_ns() {
+            let mono = crate::time::current_time_ns();
+            match crate::time::initialize_wall_clock_from_rtc_sample(epoch_ns, mono, mono) {
+                Ok(()) => println!("[boot] wall clock seeded from Limine Date at Boot"),
+                Err(e) => println!("[boot] Date at Boot wall clock seed failed: {}", e),
+            }
+        }
     }
 }
 
@@ -1151,6 +1212,7 @@ pub fn wait_for_ap_release() {
 /// # Arguments
 ///
 /// * `cpu_id` - Logical CPU ID assigned by the architecture boot code.
+#[cfg(not(feature = "hosted"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     use core::sync::atomic::Ordering;
@@ -1168,33 +1230,16 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
 
-    crate::sched::scheduler::spawn_idle_task(cpu_id);
+    enter_first_task(prepare_secondary_scheduler(cpu_id))
+}
 
-    let next_task_id = crate::sched::scheduler::start_scheduler();
+fn prepare_secondary_scheduler(cpu_id: usize) -> Option<usize> {
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
+    let next = start_scheduler();
     crate::sched::scheduler::register_online_cpu(cpu_id);
     println!(
         "[Scarlet Kernel] AP {}: scheduler online; local timer ready",
         cpu_id
     );
-    if let Some(next_task_id) = next_task_id {
-        let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
-            .expect("AP: first runnable task must exist");
-        if next_task.task_type == crate::task::TaskType::Kernel {
-            drop(next_task);
-            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
-        } else {
-            let task_ptr = &*next_task as *const crate::task::Task;
-            drop(next_task);
-            // SAFETY: start_scheduler() selected and claimed this task for the
-            // current CPU. Its running_cpu token prevents TaskPool removal,
-            // which requires Terminated && running_cpu == NO_CPU, until the
-            // first user transition owns the task's execution.
-            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
-        }
-    }
-
-    println!("[Scarlet Kernel] AP {}: idle", cpu_id);
-    loop {
-        crate::arch::instruction::idle();
-    }
+    next
 }

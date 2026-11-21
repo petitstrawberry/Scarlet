@@ -23,7 +23,7 @@ fn kernel_interrupt_breadcrumb(trap_kind: usize, spsr: u64, current_is_idle: boo
 // -------------------------------------------------------------------------
 // Kernel Trap Vector
 // -------------------------------------------------------------------------
-#[unsafe(link_section = ".text")] // カーネル内コードなので通常の.textでOK
+#[cfg_attr(not(feature = "hosted"), unsafe(link_section = ".text"))]
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
@@ -151,7 +151,7 @@ pub extern "C" fn _kernel_trap_entry() {
             mov x0, sp              // x0 (Arg1) = &Trapframe
             
             // Branch with Link (bl) because we expect it to return!
-            bl  arch_kernel_trap_handler
+            bl  {handler}
 
             // -------------------------------------------------------------
             // Exit Point (Restore Context)
@@ -189,7 +189,8 @@ pub extern "C" fn _kernel_trap_entry() {
             add sp, sp, #304
 
             eret
-        "#
+        "#,
+        handler = sym arch_kernel_trap_handler,
     );
 }
 

@@ -31,5 +31,16 @@ pub const IOREMAP_END: usize = 0xFFFF_C000_3FFF_FFFF; // 1 GiB
 
 /// Capacity of the kernel's direct-map virtual window (64 TiB).
 pub const KERNEL_DIRECT_MAP_SIZE: usize = IOREMAP_START - SCARLET_HHDM_BASE;
+
+#[cfg(not(feature = "hosted"))]
 pub const DEFAULT_USER_MMAP_BASE: usize = 0x1_0000_0000;
+#[cfg(not(feature = "hosted"))]
 pub const USER_LOWER_CANONICAL_END: usize = 0x0000_8000_0000_0000;
+
+// Leave room for the worker Mach-O, dyld shared region, and host thread stacks.
+#[cfg(feature = "hosted")]
+pub const DEFAULT_USER_MMAP_BASE: usize = 0x7b_0000_0000;
+#[cfg(feature = "hosted")]
+pub const USER_LOWER_CANONICAL_END: usize = 0x80_0000_0000;
+#[cfg(feature = "hosted")]
+pub(crate) const HOSTED_PIE_BASE: u64 = 0x70_0000_0000;

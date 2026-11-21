@@ -17,6 +17,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+const COMPOSITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct Worker {
     child: Child,
     input: Option<File>,
@@ -191,24 +194,29 @@ fn authenticate(broker: &mut Worker, config: &Config, force_cpu: bool) -> io::Re
             .args(&config.compositor[1..]),
         child_socket,
     )?;
-    let mut keyboard = SeatChild::with_login_socket(
-        Command::new(&config.broker)
-            .env_clear()
-            .arg("--login-panel"),
-        provider,
-    )?;
-    let mut painter = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
     let result = sws_client::Connection::with_inherited_socket(editor, || {
-        login_window(broker, &mut painter, force_cpu, || {
+        // SWS queues the editor socket before initializing its display. Wait for
+        // its first reply before the panel or editor starts ordinary requests.
+        let conn = sws_client::Connection::connect_default().map_err(os_err)?;
+        let size = conn
+            .get_screen_size_timeout(COMPOSITOR_STARTUP_TIMEOUT.as_millis() as u64)
+            .map_err(os_err)?;
+        let mut keyboard = SeatChild::with_login_socket(
+            Command::new(&config.broker)
+                .env_clear()
+                .arg("--login-panel"),
+            provider,
+        )?;
+        let mut painter = Worker::start(&config.broker, &["--render-greeter", &config.greeter])?;
+        let result = login_window(broker, &mut painter, size, force_cpu, || {
             compositor.running()?;
             keyboard.running()
-        })
+        });
+        result.and(keyboard.stop())
     })
     .map_err(os_err)
     .and_then(|result| result);
-    let stop_keyboard = keyboard.stop();
-    let stop_compositor = compositor.stop();
-    result.and(stop_keyboard).and(stop_compositor)
+    result.and(compositor.stop())
 }
 
 fn background(painter: &mut Worker, width: u32, height: u32) -> io::Result<BitmapImage> {
@@ -234,12 +242,12 @@ fn background(painter: &mut Worker, width: u32, height: u32) -> io::Result<Bitma
 fn login_window(
     broker: &mut Worker,
     painter: &mut Worker,
+    (w, h): (u32, u32),
     force_cpu: bool,
     alive: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     use scarlet_ui::{PlatformWindow, SWSPlatformWindow};
     let conn = sws_client::Connection::connect_default().map_err(os_err)?;
-    let (w, h) = conn.get_screen_size().map_err(os_err)?;
     let scale = conn.get_output_scale().map_err(os_err)?.max(1000) as f32 / 1000.;
     let mut window = SWSPlatformWindow::create_with_type(
         "org.scarlet-os.shell.login",
@@ -256,6 +264,7 @@ fn login_window(
 fn login_window(
     _: &mut Worker,
     _: &mut Worker,
+    _: (u32, u32),
     _: bool,
     _: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
@@ -364,10 +373,13 @@ fn run_editor(
                         continue;
                     }
                     window.resize(*width, *height).map_err(os_err)?;
-                    size = window.size();
-                    screen.width = size.width as u32;
-                    screen.height = size.height as u32;
-                    wallpaper = background(painter, screen.width, screen.height)?;
+                    let configured = window.size();
+                    if size != configured {
+                        size = configured;
+                        screen.width = size.width as u32;
+                        screen.height = size.height as u32;
+                        wallpaper = background(painter, screen.width, screen.height)?;
+                    }
                     focus = pipeline.focused_text_input_state().is_some();
                     rebuild = true;
                     break;
@@ -451,7 +463,7 @@ fn run_session(config: &Config) -> io::Result<()> {
         while !sws_client::Connection::connect(&config.display_socket)
             .is_ok_and(|conn| conn.get_screen_size().is_ok())
         {
-            if compositor.exited()? || start.elapsed() >= Duration::from_secs(30) {
+            if compositor.exited()? || start.elapsed() >= COMPOSITOR_STARTUP_TIMEOUT {
                 return Err(io::Error::other("compositor did not become ready"));
             }
             thread::sleep(Duration::from_millis(50));

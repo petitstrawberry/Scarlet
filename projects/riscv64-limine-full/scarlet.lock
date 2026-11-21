@@ -1184,21 +1184,6 @@ rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-git = "https://github.com/petitstrawberry/myrica"
-git_ref = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9"
-resolved_rev = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9"
-package = "myrica"
-bin = "myrica"
-to = "/bin/myrica"
-hash = ""
-
-[sections.rootfs.layers.source]
-type = "git"
-url = "https://github.com/petitstrawberry/myrica"
-rev = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
 git_ref = "87a0f17173a7be09ead750f913b64b1fc5e0c785"
 resolved_rev = "87a0f17173a7be09ead750f913b64b1fc5e0c785"

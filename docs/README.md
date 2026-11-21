@@ -38,6 +38,8 @@ this is not a claim that every historical document or device was revalidated.
   AArch64.
 - [Multi-architecture support](architecture/multi-architecture.md) - RISC-V and
   AArch64 build, test, linker, and target layout.
+- [User-mode kernel design](architecture/user-mode-kernel.md) - running unmodified
+  Scarlet applications on AArch64 Linux and macOS.
 - [Memory map](architecture/memory-map.md) - higher-half kernel and ioremap
   address layout.
 - [Scheduler placement and fairness](architecture/scheduler.md) - capacity-aware

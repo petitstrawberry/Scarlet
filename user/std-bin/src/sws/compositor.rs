@@ -2278,39 +2278,11 @@ fn load_cursor_theme(theme_path: &str, output_scale_milli: u32) -> Result<Cursor
     let theme = CursorTheme::load(theme_path)?;
     let render_scale_milli =
         cursor_render_scale_milli(output_scale_milli, theme.image_scale_milli());
-    let arrow = theme
-        .image(sws_protocol::CursorIcon::Arrow)
-        .ok_or("Cursor theme does not contain an arrow image")?;
-    let mut cursor = Cursor::from_png_file(
-        &arrow.image_path,
-        render_scale_milli,
-        arrow.hotspot_x,
-        arrow.hotspot_y,
-    )?;
-    let mut loaded = 1;
-    for image in theme.images() {
-        if image.icon == sws_protocol::CursorIcon::Arrow {
-            continue;
-        }
-        match cursor.load_png_icon(
-            image.icon,
-            &image.image_path,
-            render_scale_milli,
-            image.hotspot_x,
-            image.hotspot_y,
-        ) {
-            Ok(()) => loaded += 1,
-            Err(error) => println!(
-                "[Compositor] Cursor theme image {} unavailable: {}",
-                image.image_path, error
-            ),
-        }
-    }
+    let cursor = Cursor::from_theme(&theme, render_scale_milli)?;
     println!(
-        "[Compositor] Cursor theme: {} from {} ({} of {} images loaded; asset scale {}.{:03})",
+        "[Compositor] Cursor theme: {} from {} ({} images; asset scale {}.{:03})",
         theme.name(),
         theme_path,
-        loaded,
         theme.images().len(),
         theme.image_scale_milli() / 1000,
         theme.image_scale_milli() % 1000

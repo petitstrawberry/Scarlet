@@ -11,6 +11,7 @@ const AT_EXECFN: usize = 31;
 pub(crate) const PAGE_SIZE: usize = 4096;
 
 pub(crate) struct Process {
+    pub page_size: usize,
     pub envp: usize,
     pub path: String,
     pub bytes: Vec<u8>,
@@ -50,6 +51,53 @@ fn u64_at(bytes: &[u8], at: usize) -> Result<usize, Error> {
     .map_err(|_| Error::Overflow)
 }
 
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn load_byte_vector(chunk: &[u8; 16]) -> core::arch::aarch64::uint8x16_t {
+    let value;
+    // SAFETY: LD1 with byte elements accepts byte alignment and reads exactly
+    // 16 initialized bytes. Scarlet's strict-align target otherwise expands
+    // even vld1q_u8 on a byte slice into individual byte loads.
+    unsafe {
+        core::arch::asm!(
+            "ld1 {{{value:v}.16b}}, [{address}]",
+            value = out(vreg) value,
+            address = in(reg) chunk.as_ptr(),
+            options(readonly, nostack, preserves_flags),
+        );
+    }
+    value
+}
+
+/// Compare the file-backed bytes before relocation. Keep wide mapped loads
+/// aligned so a single load never straddles a guest page boundary.
+fn mapped_bytes_equal(mapped: &[u8], expected: &[u8]) -> bool {
+    if mapped.len() != expected.len() {
+        return false;
+    }
+    const WIDTH: usize = 16;
+    let prefix = mapped.as_ptr().align_offset(WIDTH).min(mapped.len());
+    let (head, body) = mapped.split_at(prefix);
+    let (file_head, file_body) = expected.split_at(prefix);
+    let (chunks, tail) = body.as_chunks::<WIDTH>();
+    let (file_chunks, file_tail) = file_body.as_chunks::<WIDTH>();
+    if head != file_head || tail != file_tail {
+        return false;
+    }
+    chunks.iter().zip(file_chunks).all(|(a, b)| {
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        {
+            use core::arch::aarch64::{vceqq_u8, vminvq_u8};
+            // SAFETY: This implementation is compiled only for a NEON target.
+            unsafe { vminvq_u8(vceqq_u8(load_byte_vector(a), load_byte_vector(b))) == 0xff }
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+        {
+            u128::from_ne_bytes(*a) == u128::from_ne_bytes(*b)
+        }
+    })
+}
+
 struct MainLayout {
     bias: usize,
     segments: Vec<(usize, usize, Permissions)>,
@@ -75,12 +123,24 @@ impl MainLayout {
 
 /// Validate all adopted ranges before creating per-page metadata or reading
 /// memory through addresses derived from the file.
+#[cfg(test)]
 fn main_layout(
     bytes: &[u8],
     phdr: usize,
     phent: usize,
     phnum: usize,
     entry: usize,
+) -> Result<MainLayout, Error> {
+    main_layout_with_page_size(bytes, phdr, phent, phnum, entry, PAGE_SIZE)
+}
+
+fn main_layout_with_page_size(
+    bytes: &[u8],
+    phdr: usize,
+    phent: usize,
+    phnum: usize,
+    entry: usize,
+    page_size: usize,
 ) -> Result<MainLayout, Error> {
     if bytes.get(..7) != Some(b"\x7fELF\x02\x01\x01") || phent != 56 || phnum == 0 || phnum > 1024 {
         return Err(Error::Format("invalid main ELF or program-header auxv"));
@@ -150,11 +210,11 @@ fn main_layout(
         if memsz == 0 {
             continue;
         }
-        let begin = vaddr & !(PAGE_SIZE - 1);
+        let begin = vaddr & !(page_size - 1);
         let end = memory_end
-            .checked_add(PAGE_SIZE - 1)
+            .checked_add(page_size - 1)
             .ok_or(Error::Overflow)?
-            & !(PAGE_SIZE - 1);
+            & !(page_size - 1);
         lowest = lowest.min(begin);
         highest = highest.max(end);
         metadata_span = metadata_span
@@ -197,11 +257,11 @@ fn main_layout(
     for (vaddr, memsz, offset, filesz, permissions) in load_headers {
         let address = bias.checked_add(vaddr).ok_or(Error::Overflow)?;
         let memory_end = address.checked_add(memsz).ok_or(Error::Overflow)?;
-        let begin = address & !(PAGE_SIZE - 1);
+        let begin = address & !(page_size - 1);
         let end = memory_end
-            .checked_add(PAGE_SIZE - 1)
+            .checked_add(page_size - 1)
             .ok_or(Error::Overflow)?
-            & !(PAGE_SIZE - 1);
+            & !(page_size - 1);
         segments.push((begin, end - begin, permissions));
         if filesz != 0 {
             file_segments.push((address, offset, filesz));
@@ -248,7 +308,7 @@ impl AuxiliaryVector {
         if !terminated
             || aux.phdr == 0
             || aux.entry == 0
-            || aux.pagesz != PAGE_SIZE
+            || !matches!(aux.pagesz, PAGE_SIZE | 16384)
             || aux.execfd.is_none()
         {
             return Err(Error::Format("missing or unsupported interpreter auxv"));
@@ -345,13 +405,13 @@ impl Process {
         // The optional path is only an origin/identity hint. The authoritative
         // executable is always read through AT_EXECFD, never reopened by name.
         let path = supplied_path.unwrap_or_else(|| format!("<main@{phdr:x}>"));
-        let layout = main_layout(&bytes, phdr, phent, phnum, entry)?;
+        let layout = main_layout_with_page_size(&bytes, phdr, phent, phnum, entry, aux.pagesz)?;
         let phoff = u64_at(&bytes, 32)?;
         let table_size = phent.checked_mul(phnum).ok_or(Error::Overflow)?;
         // SAFETY: Kernel auxv supplies this readable mapped program-header
         // table. main_layout validated the matching file table's full bounds.
         let mapped_headers = unsafe { std::slice::from_raw_parts(phdr as *const u8, table_size) };
-        if mapped_headers != &bytes[phoff..phoff + table_size] {
+        if !mapped_bytes_equal(mapped_headers, &bytes[phoff..phoff + table_size]) {
             return Err(Error::Format(
                 "executable file differs from the kernel-mapped headers",
             ));
@@ -363,9 +423,11 @@ impl Process {
         layout.verify_file_segments(&bytes, |address, expected| {
             // SAFETY: The validated, byte-identical kernel program headers
             // establish this readable mapped range, as described above.
-            unsafe { std::slice::from_raw_parts(address as *const u8, expected.len()) == expected }
+            let mapped = unsafe { std::slice::from_raw_parts(address as *const u8, expected.len()) };
+            mapped_bytes_equal(mapped, expected)
         })?;
         Ok(Self {
+            page_size: aux.pagesz,
             envp,
             path,
             bytes,
@@ -485,6 +547,32 @@ mod tests {
     }
 
     #[test]
+    fn mapped_comparison_checks_every_byte_at_independent_alignments() {
+        let mut file = [0u8; 128];
+        let mut memory = [0u8; 128];
+        for (i, byte) in file.iter_mut().enumerate() {
+            *byte = i.wrapping_mul(37) as u8;
+        }
+        for mapped_start in 0..16 {
+            for file_start in 0..16 {
+                for len in [0, 1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65] {
+                    let expected = &file[file_start..file_start + len];
+                    let mapped = &mut memory[mapped_start..mapped_start + len];
+                    mapped.copy_from_slice(expected);
+                    assert!(mapped_bytes_equal(mapped, expected));
+                    for i in 0..len {
+                        mapped[i] ^= 1;
+                        assert!(!mapped_bytes_equal(mapped, expected));
+                        mapped[i] ^= 1;
+                    }
+                }
+            }
+        }
+        assert!(!mapped_bytes_equal(&[], &[0]));
+        assert!(!mapped_bytes_equal(&[0], &[]));
+    }
+
+    #[test]
     fn compares_load_contents_even_when_program_headers_match() {
         let mut bytes = elf();
         bytes.extend_from_slice(b"original payload");
@@ -496,7 +584,7 @@ mod tests {
             layout
                 .verify_file_segments(&bytes, |address, expected| {
                     let offset = address - 0x802000;
-                    expected == &mapped[offset..offset + expected.len()]
+                    mapped_bytes_equal(&mapped[offset..offset + expected.len()], expected)
                 })
                 .is_ok()
         );
@@ -506,7 +594,7 @@ mod tests {
             layout
                 .verify_file_segments(&bytes, |address, expected| {
                     let offset = address - 0x802000;
-                    expected == &mapped[offset..offset + expected.len()]
+                    mapped_bytes_equal(&mapped[offset..offset + expected.len()], expected)
                 })
                 .is_err()
         );

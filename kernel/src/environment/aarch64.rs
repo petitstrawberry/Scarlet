@@ -26,10 +26,9 @@ pub const TRAMPOLINE_VA_END: usize = 0xffff_ffff_ffff_ffff;
 // static reserve so user/kernel stacks don't collide with the `... ..= TRAMPOLINE_VA_END` mapping.
 pub const TRAMPOLINE_VA_RESERVE: usize = 0x0001_0000; // 64KiB
 
-const VMMAX_EXCLUSIVE: usize = VMMAX + 1;
-
 // User stack end address (exclusive)
-pub const USER_STACK_END: usize = (VMMAX_EXCLUSIVE - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1);
+pub const USER_STACK_END: usize =
+    (super::layout::USER_LOWER_CANONICAL_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1);
 
 // Kernel VM stack addresses (within 48-bit address space)
 // Keep kernel stack window below the trampoline-reserved region at the top of the

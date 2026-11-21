@@ -111,6 +111,24 @@ pub(crate) fn probed_cpu_mask() -> u64 {
 }
 
 /// Publish once, before any initial or subsequent exec can construct auxv.
+#[cfg(feature = "hosted")]
+pub(crate) fn publish(cpu_count: usize) {
+    // Darwin's worker mcontext preserves FP and SIMD. Its process-wide
+    // feature set is valid on every host thread a vCPU can migrate to.
+    let mut hwcap = HWCAP_FP | HWCAP_ASIMD;
+    if std::arch::is_aarch64_feature_detected!("lse") {
+        hwcap |= HWCAP_ATOMICS;
+    }
+    if std::arch::is_aarch64_feature_detected!("crc") {
+        hwcap |= HWCAP_CRC32;
+    }
+    for cpu in 0..cpu_count {
+        REGISTRY.report(cpu, CpuCapabilities { hwcap, hwcap2: 0 });
+    }
+    REGISTRY.publish();
+}
+
+#[cfg(not(feature = "hosted"))]
 pub(crate) fn publish(cpu_count: usize) {
     let expected = (1u64 << cpu_count.min(MAX_NUM_CPUS)) - 1;
     let frequency: u64;

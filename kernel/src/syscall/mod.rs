@@ -381,6 +381,7 @@ syscall_table! {
     FileReadAtWithStatus = 308 => crate::fs::vfs_v2::descriptor::sys_file_read_at_with_status,
     FileWriteAtWithStatus = 309 => crate::fs::vfs_v2::descriptor::sys_file_write_at_with_status,
     FileLock = 310 => crate::fs::vfs_v2::file_lock::sys_file_lock,
+    FileSetMode = 311 => crate::fs::vfs_v2::descriptor::sys_file_set_mode,
 
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open

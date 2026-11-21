@@ -64,8 +64,8 @@ impl OomHandler for DynamicHeapHandler {
     }
 }
 
-#[global_allocator]
-#[unsafe(link_section = ".data")]
+#[cfg_attr(not(feature = "hosted"), global_allocator)]
+#[cfg_attr(not(feature = "hosted"), unsafe(link_section = ".data"))]
 static ALLOCATOR: Talck<RawIrqSpinLock, DynamicHeapHandler> = Talc::new(DynamicHeapHandler).lock();
 
 /// Initialize heap with the given memory region

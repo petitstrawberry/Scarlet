@@ -44,15 +44,13 @@ use alloc::{
 };
 
 use crate::abi::EventProcessOutcome;
-use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_next_mode;
 use crate::print;
 use crate::println;
 use crate::sync::{IrqSpinLock, Once};
-use crate::{arch::set_trapvector, vm::get_trampoline_trap_vector};
 use crate::{
     arch::{
-        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
+        Arch, Trapframe, get_cpu, instruction::idle, task_context,
         trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
@@ -699,7 +697,7 @@ impl TaskPool {
         Ok(task_id)
     }
 
-    fn task_generation(&self, task_id: usize) -> Option<usize> {
+    pub(crate) fn task_generation(&self, task_id: usize) -> Option<usize> {
         let tasks = self.tasks.lock();
         Some(tasks.tasks.get(&task_id)?.generation)
     }
@@ -6560,15 +6558,7 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             // mutation while the scheduler saves it.
             from_ctx_ptr = unsafe { from_task.kernel_context.as_mut_ptr() };
 
-            #[cfg(feature = "user-fpu")]
-            crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
-
-            #[cfg(feature = "user-vector")]
-            crate::arch::fpu::kernel_switch_out_user_vector(
-                cpu_id,
-                from_task_id,
-                &mut *from_task.vcpu.lock(),
-            );
+            task_context::save_kernel_context(cpu_id, from_task_id, &from_task);
         }
         if let Some(to_task) = TaskPool::get_task(to_task_id) {
             // `pick_next()` successfully claimed `to_task.running_cpu` for this
@@ -6657,53 +6647,16 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
                     resumed_cpu_id as u64,
                     from_task_id as u64,
                 );
-                setup_task_cpu_state(get_cpu(), &from_task);
+                task_context::configure_cpu(get_cpu(), &from_task);
                 crate::breadcrumb::drop(
                     crate::breadcrumb::SETUP_DONE,
                     resumed_cpu_id as u64,
                     from_task_id as u64,
                 );
-                set_trapvector(get_kernel_trapvector_paddr());
-
-                #[cfg(feature = "user-fpu")]
-                {
-                    crate::breadcrumb::drop(
-                        crate::breadcrumb::VCPU_LOCK_BEGIN,
-                        resumed_cpu_id as u64,
-                        from_task_id as u64,
-                    );
-                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
-                    crate::breadcrumb::drop(
-                        crate::breadcrumb::VCPU_LOCK_DONE,
-                        resumed_cpu_id as u64,
-                        from_task_id as u64,
-                    );
-                }
+                task_context::restore_kernel_context(resumed_cpu_id, from_task_id, &from_task);
             }
         }
     }
-}
-
-/// Bind CPU-local scheduler/trampoline state to the task that is about to run.
-fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
-    let cpuid = cpu.get_cpuid();
-    let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-        base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE
-    } else {
-        task.get_kernel_stack_top()
-    };
-
-    let trampoline_arch = crate::vm::get_trampoline_arch(cpuid);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::TRAMP_GET, trampoline_arch as u64);
-    crate::arch::set_arch(trampoline_arch);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp as u64);
-    cpu.set_kernel_stack(sp);
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp as u64);
-    cpu.set_trap_handler(get_user_trap_handler());
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETTH_DONE, 0);
-    let asid = task.vm_manager.get_asid();
-    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETAS_ASID_DONE, asid as u64);
-    cpu.set_next_address_space(asid);
 }
 
 /// Setup task execution by configuring hardware and user context.
@@ -6727,13 +6680,12 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &Task) {
         }
     }
 
-    setup_task_cpu_state(cpu, task);
+    task_context::configure_cpu(cpu, task);
     let task_mode = task.vcpu.lock().get_mode();
     let trapframe = task.get_trapframe();
     task.vcpu.lock().switch(trapframe);
 
-    set_next_mode(task_mode);
-    set_trapvector(get_trampoline_trap_vector());
+    task_context::prepare_task_entry(task_mode);
 }
 
 /// Reset the scheduler to initial state (test-only).

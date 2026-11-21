@@ -1099,6 +1099,8 @@ pub enum Syscall {
     FileWriteAtWithStatus = 309,
     /// (fd, operation): nonblocking whole-file advisory lock, zero or -errno.
     FileLock = 310,
+    /// Set rwx permissions on the inode referenced by a native file descriptor.
+    FileSetMode = 311,
 
     // VFS operations
     VfsOpen = 400,

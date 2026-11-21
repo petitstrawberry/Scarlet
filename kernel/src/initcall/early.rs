@@ -5,17 +5,21 @@ use crate::println;
 #[macro_export]
 macro_rules! early_initcall {
     ($func:ident) => {
-        #[unsafe(link_section = ".initcall.early")]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__sc_init_early"))]
+        #[cfg_attr(target_os = "linux", unsafe(link_section = "sc_init_early"))]
+        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), unsafe(link_section = ".initcall.early"))]
         #[used]
         static __EARLY_INITCALL__: fn() = $func;
     };
 }
 
+#[cfg(not(feature = "hosted"))]
 unsafe extern "C" {
     static __INITCALL_EARLY_START: usize;
     static __INITCALL_EARLY_END: usize;
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn early_initcall_call() {
     unsafe {
         let size = core::mem::size_of::<fn()>();
@@ -33,3 +37,6 @@ pub fn early_initcall_call() {
         }
     }
 }
+
+#[cfg(feature = "hosted")]
+pub use super::hosted::early_initcall_call;

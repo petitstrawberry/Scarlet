@@ -104,6 +104,20 @@ impl DeviceEvent for InputEvent {
     }
 }
 
+/// The lower endpoint disconnected. Previously buffered input can still be
+/// drained, and no further input will arrive.
+pub struct HangupEvent;
+
+impl DeviceEvent for HangupEvent {
+    fn event_type(&self) -> &'static str {
+        "hangup"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Output complete event for character devices.
 ///
 /// This event is emitted when a character device completes output.

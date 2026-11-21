@@ -3044,6 +3044,11 @@ impl DeviceManager {
                 println!("Populating devices from ACPI...");
                 self.populate_devices_from_acpi(priorities);
             }
+            DeviceSource::Hosted(populate) => {
+                for &priority in priorities.unwrap_or(DriverPriority::all()) {
+                    populate(self, priority);
+                }
+            }
             DeviceSource::None => {
                 println!("No device source available - skipping device population");
             }

@@ -4011,7 +4011,12 @@ impl Connection {
     ///
     /// This is a synchronous request: it blocks until the server responds with SCREEN_SIZE.
     pub fn get_screen_size(&self) -> Result<(u32, u32), Error> {
-        let response = self.request(protocol::client_msg::GET_SCREEN_SIZE, &[])?;
+        self.get_screen_size_timeout(DEFAULT_RESPONSE_TIMEOUT_MS)
+    }
+
+    /// Get the screen size, allowing a newly launched server time to initialize.
+    pub fn get_screen_size_timeout(&self, timeout_ms: u64) -> Result<(u32, u32), Error> {
+        let response = self.request_timeout(protocol::client_msg::GET_SCREEN_SIZE, &[], timeout_ms)?;
         match response.message() {
             ServerMessage::ScreenSize { width, height } => Ok((width, height)),
             _ => Err(Error::InvalidResponse),
