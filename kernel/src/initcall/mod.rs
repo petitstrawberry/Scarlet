@@ -20,18 +20,26 @@
 //! to the console. After all initialization routines have been executed, the
 //! processor enters an idle state.
 
+#[cfg(not(feature = "hosted"))]
 use crate::println;
 
 pub mod driver;
 pub mod early;
 pub mod late;
 
+#[cfg(feature = "hosted")]
+mod macho;
+#[cfg(feature = "hosted")]
+pub use macho::call_initcalls;
+
+#[cfg(not(feature = "hosted"))]
 #[allow(improper_ctypes)]
 unsafe extern "C" {
     static mut __INITCALL_DRIVER_END: usize;
     static mut __INITCALL_END: usize;
 }
 
+#[cfg(not(feature = "hosted"))]
 #[allow(static_mut_refs)]
 pub fn call_initcalls() {
     unsafe {

@@ -4,6 +4,7 @@
 //! includes functions for managing virtual address spaces.
 
 pub mod addr;
+#[cfg(not(feature = "hosted"))]
 pub mod boot;
 pub mod direct_map;
 pub mod fault;
@@ -62,7 +63,7 @@ fn align_up(addr: usize, align: usize) -> usize {
 }
 
 pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
-    KERNEL_VM_MANAGER.call_once(|| VirtualMemoryManager::new())
+    KERNEL_VM_MANAGER.call_once(VirtualMemoryManager::new_kernel)
 }
 
 /// Retags one fully covered physical range in the live kernel direct map.
@@ -72,6 +73,15 @@ pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
 /// leaves synchronized while serializing concurrent retag transactions. The
 /// runtime direct-map metadata lock is held only while planning and publishing
 /// the metadata change, never while acquiring the kernel page-table lock.
+#[cfg(feature = "hosted")]
+pub(crate) fn retag_direct_map_memory_attribute(
+    _physical_area: PhysicalMemoryArea,
+    _memory_attribute: MemoryAttribute,
+) -> Result<MemoryAttribute, &'static str> {
+    Err("Hosted RAM uses normal host cacheability")
+}
+
+#[cfg(not(feature = "hosted"))]
 pub(crate) fn retag_direct_map_memory_attribute(
     physical_area: PhysicalMemoryArea,
     memory_attribute: MemoryAttribute,
@@ -144,6 +154,7 @@ static KERNEL_AREA: Once<MemoryArea> = Once::new();
 ///
 /// This function returns after the runtime kernel page table is active.
 #[allow(static_mut_refs)]
+#[cfg(not(feature = "hosted"))]
 pub fn kernel_vm_init(
     direct_map_regions: DirectMapRegions,
     initramfs_paddr: Option<PhysicalMemoryArea>,
@@ -377,21 +388,23 @@ pub fn kernel_vm_init(
     finalize_runtime_memory_layout();
 }
 
+#[cfg(feature = "hosted")]
+pub fn user_kernel_vm_init(_: &Task) {}
+
+#[cfg(feature = "hosted")]
+pub fn setup_trampoline_for_task_kstack_window(_: &Task) -> Result<(), &'static str> {
+    // Hosted KernelContext allocates its guarded stack when the Task is constructed.
+    Ok(())
+}
+
+#[cfg(feature = "hosted")]
+pub fn teardown_trampoline_for_task_kstack_window(_: &mut Task) {}
+
 pub fn user_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
     task.vm_manager.set_asid(asid);
 
-    /* User stack page */
-    let num_of_stack_page = 256; // 1MB user stack (4KB pages)
-    let stack_start = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
-    task.allocate_stack_pages(stack_start, num_of_stack_page)
-        .map_err(|e| panic!("Failed to allocate user stack pages: {}", e))
-        .unwrap();
-
-    /* Guard page */
-    task.allocate_guard_pages(stack_start - PAGE_SIZE, 1)
-        .map_err(|e| panic!("Failed to allocate guard page: {}", e))
-        .unwrap();
+    setup_user_stack(task).expect("Failed to allocate the initial user stack");
 
     crate::arch::vm::setup_trampoline_for_user(&task.vm_manager);
 
@@ -402,6 +415,7 @@ pub fn user_vm_init(task: &Task) {
         .unwrap();
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn user_kernel_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
     task.vm_manager.set_asid(asid);
@@ -628,6 +642,7 @@ pub(crate) fn configure_kstack_capacity(
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
+#[cfg(not(feature = "hosted"))]
 pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'static str> {
     // Hold this lock through the shared page-table update so concurrent slots
     // cannot allocate competing intermediate tables for the same parent PTE.
@@ -755,6 +770,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
 
 /// Unmap and free the task's kernel stack window from the shared kernel PT.
 #[allow(static_mut_refs)]
+#[cfg(not(feature = "hosted"))]
 pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
     if let Some((slot_idx, base)) = task.get_kernel_stack_window_base() {
         let mut allocator = kstack_alloc().lock();
@@ -780,6 +796,7 @@ pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
 
 /// Verify that a task's kernel stack guard page is unmapped and stack pages are mapped.
 /// Returns true if the guard page has no associated memory map and a sample stack address is mapped.
+#[cfg(not(feature = "hosted"))]
 pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
     let (slot_idx, base) = match task.get_kernel_stack_window_base() {
         Some(v) => v,
@@ -813,6 +830,14 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
 
 pub(crate) const DEFAULT_USER_STACK_BYTES: usize = 1024 * 1024;
 
+#[cfg(feature = "hosted")]
+pub(crate) use crate::hosted::executable_page_size as execution_page_size;
+
+#[cfg(not(feature = "hosted"))]
+pub(crate) const fn execution_page_size() -> usize {
+    PAGE_SIZE
+}
+
 pub fn setup_user_stack(task: &Task) -> Result<(usize, usize), &'static str> {
     setup_user_stack_with_size(task, DEFAULT_USER_STACK_BYTES)
 }
@@ -821,22 +846,22 @@ pub(crate) fn setup_user_stack_with_size(
     task: &Task,
     minimum_bytes: usize,
 ) -> Result<(usize, usize), &'static str> {
+    let page_size = execution_page_size();
     let size = minimum_bytes
         .max(DEFAULT_USER_STACK_BYTES)
-        .checked_add(PAGE_SIZE - 1)
-        .ok_or("User stack size overflow")?
-        & !(PAGE_SIZE - 1);
+        .checked_next_multiple_of(page_size)
+        .ok_or("User stack size overflow")?;
     let stack_base = USER_STACK_END
         .checked_sub(size)
         .ok_or("User stack base underflow")?;
     let guard_base = stack_base
-        .checked_sub(PAGE_SIZE)
+        .checked_sub(page_size)
         .ok_or("User stack guard underflow")?;
     let num_of_stack_page = size / PAGE_SIZE;
     task.allocate_stack_pages(stack_base, num_of_stack_page)
         .map_err(|_| "Failed to allocate user stack pages")?;
     /* Guard page */
-    task.allocate_guard_pages(guard_base, 1)
+    task.allocate_guard_pages(guard_base, page_size / PAGE_SIZE)
         .map_err(|_| "Failed to allocate guard page")?;
 
     Ok((stack_base, USER_STACK_END))
@@ -880,6 +905,7 @@ pub fn get_trampoline_arch(cpu_id: usize) -> usize {
     arch
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn switch_to_kernel_vm() {
     let manager = get_kernel_vm_manager();
     let root_page_table = manager
@@ -889,6 +915,7 @@ pub fn switch_to_kernel_vm() {
     root_page_table.switch();
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn switch_to_user_vm(cpu: &mut Arch) {
     let cpu_id = cpu.get_cpuid();
     let task = current_task(cpu_id).expect("No current task found");

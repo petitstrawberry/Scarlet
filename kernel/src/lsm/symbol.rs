@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use crate::println;
 
+#[cfg(not(feature = "hosted"))]
 unsafe extern "C" {
     static __SCARLET_KSYMS_START: u8;
     static __SCARLET_KSYMS_END: u8;
@@ -78,6 +79,7 @@ pub fn get_symbol_registry() -> &'static IrqSpinLock<SymbolRegistry> {
 ///   u64  name_len   (byte length, NOT including null terminator)
 ///   [name_len bytes] name (UTF-8, NOT null-terminated)
 /// ```
+#[cfg(not(feature = "hosted"))]
 pub fn init_kernel_symbols() {
     // SAFETY: __SCARLET_KSYMS_START/END are linker-defined symbols bounding
     // the .scarlet_ksyms section. The section is in read-only memory and was

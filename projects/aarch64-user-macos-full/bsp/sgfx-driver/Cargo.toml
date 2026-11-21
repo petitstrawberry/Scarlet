@@ -1,0 +1,18 @@
+[package]
+name = "sgfx-hosted"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "sgfx_hosted"
+crate-type = ["cdylib"]
+
+[dependencies]
+gpu-raw = { path = "../../../../user/lib/gpu-raw", default-features = false, features = ["std"] }
+scarlet-os = { path = "../../../../user/lib/scarlet-os", default-features = false, features = ["std"] }
+scarlet-hosted-sgfx-protocol = { path = "../sgfx-protocol" }
+sgfx-backend-abi = { git = "https://github.com/petitstrawberry/sgfx", rev = "61e5ddd0f0e31309d2468ace3c4afe67d949fa72" }
+sgfx-core = { git = "https://github.com/petitstrawberry/sgfx", rev = "3a6a987aaa5284056d4b1dcb0cd45326d30b3fe1", features = ["backend-abi"] }
+
+[workspace]

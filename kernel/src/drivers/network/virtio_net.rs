@@ -23,7 +23,7 @@
 //! Each network packet is handled through the VirtIO descriptor chain mechanism,
 //! with proper memory management for packet buffers.
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock, Lazy};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{boxed::Box, collections::VecDeque, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     mem,
@@ -40,6 +40,7 @@ use crate::mem::page::ContiguousPages;
 use crate::network::config::apply_pending_ip_for_interface;
 use crate::network::ethernet_interface::EthernetNetworkInterface;
 use crate::network::get_network_manager;
+use crate::network::receive::{enqueue_rx_packets, ensure_rx_worker_started};
 use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::{
@@ -93,8 +94,6 @@ fn network_queue_capacity(maximum: usize, preferred: usize) -> Option<usize> {
     (limit != 0).then(|| 1usize << (usize::BITS - 1 - limit.leading_zeros()))
 }
 
-const RX_WORKER_QUEUE_LIMIT: usize = 1024;
-const RX_WORKER_BUDGET: usize = 64;
 const TX_PENDING_LIMIT: usize = 256;
 
 struct TxBuffer {
@@ -216,17 +215,6 @@ impl TxState {
     }
 }
 
-struct QueuedRxPacket {
-    interface_name: Arc<str>,
-    packet: DevicePacket,
-}
-
-static RX_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
-static RX_PACKET_QUEUE: Lazy<IrqSpinLock<VecDeque<QueuedRxPacket>>> =
-    Lazy::new(|| IrqSpinLock::new(VecDeque::new()));
-static RX_PACKET_WAKER: crate::sync::Waker =
-    crate::sync::Waker::new_uninterruptible("virtio-net-rx");
-
 /// VirtIO Network Device Configuration
 #[repr(C)]
 pub struct VirtioNetConfig {
@@ -234,101 +222,6 @@ pub struct VirtioNetConfig {
     pub status: u16,              // Status
     pub max_virtqueue_pairs: u16, // Maximum number of virtqueue pairs
     pub mtu: u16,                 // MTU
-}
-
-fn ensure_rx_worker_started() {
-    if RX_WORKER_STARTED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-
-    let mut task =
-        crate::task::new_kernel_task(String::from("virtio-net-rx"), 1, virtio_net_rx_worker_entry);
-    task.init();
-    crate::sched::scheduler::add_task(task, crate::arch::get_cpu().get_cpuid());
-}
-
-fn virtio_net_rx_worker_entry() {
-    loop {
-        let processed = drain_queued_rx_packets(RX_WORKER_BUDGET);
-
-        let Some(task) = crate::task::mytask() else {
-            crate::arch::instruction::idle();
-        };
-
-        if processed == RX_WORKER_BUDGET {
-            // The queue guard is released before this scheduling point. Bound
-            // each pass so sustained ingress cannot starve the socket reader.
-            crate::sched::scheduler::schedule(task.get_trapframe());
-        } else {
-            RX_PACKET_WAKER.wait(task.get_id(), task.get_trapframe());
-        }
-    }
-}
-
-fn drain_queued_rx_packets(budget: usize) -> usize {
-    let manager = crate::network::get_network_manager();
-    crate::network::tcp::begin_rx_batch();
-    let mut processed = 0usize;
-    while processed < budget {
-        let Some(queued) = pop_queued_rx_packet() else {
-            break;
-        };
-        manager.handle_received_packet(&queued.interface_name, &queued.packet);
-        processed += 1;
-        if processed.is_multiple_of(crate::network::tcp::TX_ACK_INPUT_BATCH_SIZE) {
-            crate::network::tcp::flush_ack_input();
-        }
-        if processed.is_multiple_of(crate::network::tcp::RX_NOTIFY_BATCH_SIZE) {
-            crate::network::tcp::flush_rx_batch();
-        }
-    }
-    crate::network::tcp::end_rx_batch();
-    processed
-}
-
-fn pop_queued_rx_packet() -> Option<QueuedRxPacket> {
-    RX_PACKET_QUEUE.lock().pop_front()
-}
-
-fn enqueue_rx_packets(interface_name: Arc<str>, mut packets: Vec<DevicePacket>) -> usize {
-    if packets.is_empty() {
-        return 0;
-    }
-
-    ensure_rx_worker_started();
-
-    // Stamp at ingress observation, before the deferred RX queue. The interface
-    // may have been replaced by a controlled wireless facade in the test image.
-    let Some(interface) = get_network_manager().get_interface(&interface_name) else {
-        return 0;
-    };
-    packets.retain_mut(|packet| interface.prepare_receive(packet));
-
-    let mut enqueued = 0usize;
-    {
-        let mut queue = RX_PACKET_QUEUE.lock();
-        for packet in packets {
-            if queue.len() >= RX_WORKER_QUEUE_LIMIT {
-                interface.receive_dropped(&packet);
-                continue;
-            }
-
-            queue.push_back(QueuedRxPacket {
-                interface_name: interface_name.clone(),
-                packet,
-            });
-            enqueued += 1;
-        }
-    }
-
-    if enqueued > 0 {
-        RX_PACKET_WAKER.wake_one();
-    }
-
-    enqueued
 }
 
 /// VirtIO Network Header (for packet transmission/reception)

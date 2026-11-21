@@ -7,6 +7,7 @@ pub mod anon_owner;
 pub mod syscall;
 
 use crate::vm::vmem::MemoryAttribute;
+use alloc::sync::Arc;
 
 pub use syscall::{sys_memory_map, sys_memory_protect, sys_memory_query, sys_memory_unmap};
 
@@ -57,6 +58,38 @@ impl MemoryMappingInfo {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct MappingRequest {
+    pub offset: usize,
+    pub length: usize,
+    pub is_shared: bool,
+    pub permissions: usize,
+    /// Explicit private demand mapping. An unspecified sharing mode may
+    /// still request initial backing.
+    pub private_demand: bool,
+    /// Linux device mappings may admit a shorter page-aligned prefix.
+    pub allow_shorter: bool,
+}
+
+pub struct PreparedMapping {
+    pub length: usize,
+    pub info: Option<MemoryMappingInfo>,
+    /// The range owner retains the backing and binds the requested offset.
+    /// If absent, the caller retains the original object.
+    pub owner: Option<Arc<dyn MemoryMappingOps>>,
+    /// Optional target for the initial on_mapped callback. Later lifecycle
+    /// callbacks are delivered to the VMA owner.
+    pub notification: Option<Arc<dyn MemoryMappingOps>>,
+    pub maximum_permissions: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MappingError {
+    PermissionDenied,
+    Unsupported,
+    InvalidRange(&'static str),
+}
+
 /// Memory mapping operations capability
 ///
 /// This trait represents the ability to provide memory mapping information
@@ -67,6 +100,41 @@ impl MemoryMappingInfo {
 /// closing the originating handle does not by itself release that owner. These
 /// hooks supply backing/lifecycle behavior; they do not install PTEs themselves.
 pub trait MemoryMappingOps: Send + Sync {
+    /// Admit a mapping and capture its initial backing, owner and permission
+    /// ceiling together. Objects with replaceable backing override this to
+    /// obtain both the address and its lease from the same snapshot.
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        let maximum_permissions = self.new_mapping_permissions(request.is_shared);
+        if request.permissions & !maximum_permissions != 0 {
+            return Err(MappingError::PermissionDenied);
+        }
+        if !self.supports_mmap() || (request.private_demand && !self.supports_private_mmap()) {
+            return Err(MappingError::Unsupported);
+        }
+
+        let mut length = request.length;
+        let info = if request.private_demand {
+            None
+        } else {
+            loop {
+                match self.get_mapping_info_with(request.offset, length, request.is_shared) {
+                    Ok(info) => break Some(info),
+                    Err(_) if request.allow_shorter && length > crate::environment::PAGE_SIZE => {
+                        length -= crate::environment::PAGE_SIZE;
+                    }
+                    Err(error) => return Err(MappingError::InvalidRange(error)),
+                }
+            }
+        };
+        Ok(PreparedMapping {
+            length,
+            info,
+            owner: self.mapping_owner_for_range(request.offset, length),
+            notification: None,
+            maximum_permissions,
+        })
+    }
+
     /// Whether a process fork inherits this mapping. Process-specific receive
     /// buffers can opt out; threads sharing the address space keep the mapping.
     fn inherit_on_fork(&self) -> bool {
@@ -272,7 +340,8 @@ pub trait MemoryMappingOps: Send + Sync {
     ///
     /// # Returns
     /// The resolved backing page, or an error describing why the fault cannot be
-    /// resolved. The default returns `ResolveFaultError::Unmapped`.
+    /// resolved. The default returns `ResolveFaultError::NoResolver`,
+    /// permitting a VMA with initial physical backing to use that backing.
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
@@ -285,7 +354,7 @@ pub trait MemoryMappingOps: Send + Sync {
         let _ = access;
         let _ = page_idx;
         let _ = vm_start;
-        Err(crate::object::capability::memory_mapping::ResolveFaultError::Unmapped)
+        Err(crate::object::capability::memory_mapping::ResolveFaultError::NoResolver)
     }
 
     /// Choose the actual page-table permissions for a resolved fault.
@@ -309,6 +378,44 @@ pub trait MemoryMappingOps: Send + Sync {
     ) -> usize {
         let _ = access;
         default_permissions
+    }
+
+    /// An extent whose physical backing remains contiguous and live while this
+    /// mapping retains the owner. Per-access permissions still apply.
+    fn stable_physical_extent(&self, _page_index: usize, _pages: usize) -> Option<u64> {
+        None
+    }
+
+    /// True only when this owner's publication view is fixed for its entire
+    /// lifetime. Changes that replace the VMA still invalidate the VM snapshot.
+    #[cfg(feature = "hosted")]
+    fn has_fixed_publication(&self) -> bool { false }
+
+    /// Version of the complete hosted publication view: resident extents,
+    /// per-access permissions, private-copy policy and instruction intervals.
+    /// Return None unless *every* mutation of that view changes the version.
+    /// Read the version under the same lock as publication; advance it before
+    /// releasing that lock. Versions must never be reused during owner life.
+    /// This is a cache key, not a replacement for revocation/quiescence.
+    #[cfg(feature = "hosted")]
+    fn publication_generation(&self) -> Option<u64> { None }
+
+    /// Visit nonoverlapping resident spans in ascending owner-relative page order.
+    /// Sparse owners leave unpopulated spans to the ordinary fault path.
+    #[cfg(feature = "hosted")]
+    fn visit_resident_extents(&self, start: usize, count: usize, visit: &mut dyn FnMut(usize, usize, u64)) {
+        if let Some(pa) = self.stable_physical_extent(start, count) {
+            visit(start, count, pa);
+        }
+    }
+
+    /// ELF instruction intervals relative to this mapping's original start.
+    #[cfg(feature = "hosted")]
+    fn instruction_ranges(&self) -> Option<Arc<[core::ops::Range<usize>]>> { None }
+
+    /// All pages of this owner resolve to immutable zero-filled normal memory.
+    fn has_immutable_zero_backing(&self) -> bool {
+        false
     }
 
     /// Decide whether a private mapping fault must copy the resolved backing page.
@@ -376,6 +483,9 @@ pub struct ResolveFaultResult {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ResolveFaultError {
+    /// The owner only tracks an eager mapping's lifetime. Its VMA supplies
+    /// the physical backing directly.
+    NoResolver,
     Invalid,
     Unmapped,
     /// Backing could not be allocated. Unlike an invalid address, this may
@@ -474,6 +584,30 @@ mod tests {
         // Test on_unmapped notification
         mock_obj.on_unmapped(0x10000000, 8192);
         assert_eq!(mock_obj.mapped_regions.read().len(), 0);
+    }
+
+    #[test_case]
+    fn only_explicit_private_mapping_skips_initial_backing() {
+        let object = MockMappableObject::new(false);
+        let request = MappingRequest {
+            offset: 0,
+            length: crate::environment::PAGE_SIZE,
+            is_shared: false,
+            permissions: 1,
+            private_demand: false,
+            allow_shorter: false,
+        };
+        assert!(object.prepare_mapping(request).unwrap().info.is_some());
+        assert!(
+            object
+                .prepare_mapping(MappingRequest {
+                    private_demand: true,
+                    ..request
+                })
+                .unwrap()
+                .info
+                .is_none()
+        );
     }
 
     #[test_case]

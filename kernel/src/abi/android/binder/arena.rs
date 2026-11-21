@@ -8,15 +8,18 @@ use crate::{
         vmem::{MemoryArea, PhysicalMemoryArea, VirtualMemoryMap},
     },
 };
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 const ALIGNMENT: usize = 8;
+const ARENA_PENDING: u8 = 0;
+const ARENA_LIVE: u8 = 1;
+const ARENA_INVALID: u8 = 2;
 pub(super) struct Arena {
     backing: SharedMemory,
     paddr: u64,
     size: usize,
     base: AtomicUsize,
-    live: AtomicBool,
+    lifecycle: AtomicU8,
     allocations: IrqSpinLock<BTreeMap<usize, usize>>,
 }
 impl Arena {
@@ -35,7 +38,7 @@ impl Arena {
             paddr,
             size,
             base: AtomicUsize::new(0),
-            live: AtomicBool::new(false),
+            lifecycle: AtomicU8::new(ARENA_PENDING),
             allocations: IrqSpinLock::new(BTreeMap::new()),
         }))
     }
@@ -56,7 +59,7 @@ impl Arena {
         (self.size.checked_sub(offset)? >= size).then_some(offset)
     }
     pub(super) fn reserve(&self, size: usize) -> Result<usize, usize> {
-        if !self.live.load(Ordering::Acquire) {
+        if self.lifecycle.load(Ordering::Acquire) != ARENA_LIVE {
             return Err(errno::EINVAL);
         }
         let size = Self::aligned_size(size)?;
@@ -69,7 +72,7 @@ impl Arena {
         Ok(self.base.load(Ordering::Relaxed) + offset)
     }
     pub(super) fn has_space(&self, size: usize) -> bool {
-        if !self.live.load(Ordering::Acquire) {
+        if self.lifecycle.load(Ordering::Acquire) != ARENA_LIVE {
             return true;
         } // let delivery report invalidation
         let Ok(size) = Self::aligned_size(size) else {
@@ -98,7 +101,7 @@ impl Arena {
         let offset = self.offset(address)?;
         let allocations = self.allocations.lock();
         let size = *allocations.get(&offset).ok_or(errno::EINVAL)?;
-        if bytes.len() > size || !self.live.load(Ordering::Acquire) {
+        if bytes.len() > size || self.lifecycle.load(Ordering::Acquire) != ARENA_LIVE {
             return Err(errno::EINVAL);
         }
         // SAFETY: source is owned RPC bytes, disjoint from the reserved backing.
@@ -122,12 +125,14 @@ impl MemoryMappingOps for Arena {
     }
     fn on_mapped(&self, vaddr: usize, _: u64, _: usize, _: usize) {
         self.base.store(vaddr, Ordering::Relaxed);
-        self.live.store(true, Ordering::Release);
+        let _ = self.lifecycle.compare_exchange(
+            ARENA_PENDING, ARENA_LIVE, Ordering::Release, Ordering::Relaxed,
+        );
     }
     fn on_unmapped(&self, _: usize, _: usize) {
         // Any partial unmap invalidates the receive arena. Do not deliver
         // pointers into a range whose ownership is no longer intact.
-        self.live.store(false, Ordering::Release);
+        self.lifecycle.store(ARENA_INVALID, Ordering::Release);
     }
     fn inherit_on_fork(&self) -> bool {
         false
@@ -160,25 +165,39 @@ impl BinderFile {
             {
                 return Err(errno::EINVAL);
             }
-            let mut state = self.state.lock();
-            if state.arena.is_some() {
-                return Err(errno::EBUSY);
+            {
+                let mut state = self.state.lock();
+                if state.closed {
+                    return Err(errno::EPIPE);
+                }
+                if state.arena.is_some() || state.arena_creating {
+                    return Err(errno::EBUSY);
+                }
+                state.arena_creating = true;
             }
-            let arena = Arena::new(length)?;
-            let area = MemoryArea::new(0, length - 1);
-            let map = VirtualMemoryMap::new(
-                PhysicalMemoryArea::new(arena.paddr, arena.paddr + length as u64 - 1),
-                area,
-                9,
-                true,
-                Some(arena.clone()),
-            );
-            let base = task
-                .vm_manager
-                .add_memory_map_anywhere(map)
-                .map_err(|_| errno::ENOMEM)?;
-            arena.on_mapped(base, arena.paddr, length, 0);
-            state.arena = Some(arena);
+            // Shared storage allocation and VMA installation may sleep.
+            let created: Result<_, usize> = (|| {
+                let arena = Arena::new(length)?;
+                let area = MemoryArea::new(0, length - 1);
+                let map = VirtualMemoryMap::new(
+                    PhysicalMemoryArea::new(arena.paddr, arena.paddr + length as u64 - 1),
+                    area,
+                    9,
+                    true,
+                    Some(arena.clone()),
+                );
+                let base = task.vm_manager.add_memory_map_anywhere(map).map_err(|_| errno::ENOMEM)?;
+                arena.on_mapped(base, arena.paddr, length, 0);
+                Ok((base, arena))
+            })();
+            let mut state = self.state.lock();
+            state.arena_creating = false;
+            let (base, arena) = created?;
+            if !state.closed {
+                state.arena = Some(arena);
+            }
+            // If group close raced publication, the installed VMA retains
+            // its backing alone. There is no longer a Binder receiver.
             Ok(base)
         })();
         result.unwrap_or_else(errno::to_result)

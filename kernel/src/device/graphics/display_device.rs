@@ -6,8 +6,8 @@
 
 extern crate alloc;
 
-use crate::sync::{IrqGuard, IrqRwSpinLock};
-use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use crate::sync::IrqGuard;
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::any::Any;
 
 use super::{
@@ -17,6 +17,9 @@ use super::{
 };
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+use crate::object::capability::memory_mapping::{
+    MappingError, MappingRequest, MemoryMappingInfo, PreparedMapping,
+};
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::vm::addr::phys_to_virt;
@@ -265,11 +268,45 @@ struct DisplayBackingInfo {
     size: usize,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+/// Retains the exact scanout allocation and byte range admitted for one VMA.
 struct DisplayMapping {
-    vaddr: usize,
+    _device: Arc<dyn Device>,
+    info: MemoryMappingInfo,
     length: usize,
+}
+
+impl MemoryMappingOps for DisplayMapping {
+    fn stable_physical_extent(&self, page: usize, count: usize) -> Option<u64> {
+        use crate::environment::PAGE_SIZE;
+        let offset = page.checked_mul(PAGE_SIZE)?;
+        let length = count.checked_mul(PAGE_SIZE)?;
+        self.get_mapping_info(offset, length).ok().map(|info| info.paddr)
+    }
+
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.length)
+        {
+            return Err("Display mapping range exceeded");
+        }
+        Ok(MemoryMappingInfo {
+            paddr: self
+                .info
+                .paddr
+                .checked_add(offset as u64)
+                .ok_or("Display backing physical address overflow")?,
+            ..self.info
+        })
+    }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::string::String::from("display")
+    }
 }
 
 /// Modern display device backed by a graphics scanout resource.
@@ -281,11 +318,6 @@ struct DisplayMapping {
 pub struct DisplayCharDevice {
     /// The graphics resource this display surface presents.
     fb_resource: Arc<FramebufferResource>,
-    // Retained by the open file (and hence by its VMAs) when a connector
-    // replaces its framebuffer on modeset. Control-only opens pin no pages.
-    mapping_device: IrqRwSpinLock<Option<Arc<dyn Device>>>,
-    /// Track mappings for testing and diagnostics.
-    mappings: IrqRwSpinLock<BTreeMap<usize, DisplayMapping>>,
     #[cfg(test)]
     device_manager_addr: Option<usize>,
 }
@@ -303,8 +335,6 @@ impl DisplayCharDevice {
     pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
         Self {
             fb_resource,
-            mapping_device: IrqRwSpinLock::new(None),
-            mappings: IrqRwSpinLock::new(BTreeMap::new()),
             #[cfg(test)]
             device_manager_addr: None,
         }
@@ -327,8 +357,6 @@ impl DisplayCharDevice {
     ) -> Self {
         Self {
             fb_resource,
-            mapping_device: IrqRwSpinLock::new(None),
-            mappings: IrqRwSpinLock::new(BTreeMap::new()),
             device_manager_addr: Some(device_manager as *const DeviceManager as usize),
         }
     }
@@ -346,27 +374,91 @@ impl DisplayCharDevice {
         DeviceManager::get_manager()
     }
 
-    fn page_aligned_size(size: usize) -> Result<usize, &'static str> {
-        size.checked_add(crate::environment::PAGE_SIZE - 1)
-            .map(|size| size & !(crate::environment::PAGE_SIZE - 1))
-            .ok_or("Display backing size overflow")
+    fn snapshot_backing(&self) -> Result<(DisplayBackingInfo, Arc<dyn Device>), &'static str> {
+        let connector = self.fb_resource.connector_index;
+        let source = self.source_graphics_device()?;
+        let source_graphics = source
+            .as_graphics_device()
+            .ok_or("Invalid graphics device")?;
+        let exact_backing = source_graphics.connector_mapping_device(connector)?;
+        let (config, physical_addr, size) = if let Some(backing) = exact_backing.as_ref() {
+            let graphics = backing.as_graphics_device().ok_or("Invalid display backing device")?;
+            let (config, address) = graphics.get_framebuffer_info()?;
+            let size = graphics.framebuffer_mapping_size(&config)?;
+            (config, address, size)
+        } else {
+            let (config, address) = source_graphics.connector_framebuffer_info(connector)?;
+            let size = source_graphics.framebuffer_mapping_size(&config)?;
+            (config, address, size)
+        };
+        Ok((
+            DisplayBackingInfo {
+                config,
+                physical_addr,
+                size,
+            },
+            exact_backing.unwrap_or(source),
+        ))
     }
 
-    fn mapped_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
-        if self.fb_resource.connector_index == 0 { return self.current_backing_info(); }
-        let backing = {
-            let mut pinned = self.mapping_device.write();
-            if pinned.is_none() {
-                let source = self.source_graphics_device()?;
-                *pinned = source.as_graphics_device().unwrap()
-                    .connector_mapping_device(self.fb_resource.connector_index)?;
-            }
-            pinned.clone()
+    fn snapshot_mapping(
+        &self,
+        offset: usize,
+        length: usize,
+        allow_shorter: bool,
+    ) -> Result<DisplayMapping, &'static str> {
+        use crate::environment::PAGE_SIZE;
+
+        if !offset.is_multiple_of(PAGE_SIZE) || !length.is_multiple_of(PAGE_SIZE) {
+            return Err("Display mmap range must be page-aligned");
+        }
+        let (
+            DisplayBackingInfo {
+                physical_addr,
+                size,
+                ..
+            },
+            device,
+        ) = self.snapshot_backing()?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Invalid display backing device")?;
+        let connector = self.fb_resource.connector_index;
+        if physical_addr == 0 || size == 0 {
+            return Err("Invalid display backing configuration");
+        }
+        if !physical_addr.is_multiple_of(PAGE_SIZE as u64) {
+            return Err("Display backing physical address must be page-aligned");
+        }
+
+        let (base, buffer_offset) = if offset < size {
+            (physical_addr, offset)
+        } else if connector == 0 {
+            let relative = offset - size;
+            let (_, address) = graphics.get_scanout_buffer_info(relative / size)?;
+            (address, relative % size)
+        } else {
+            return Err("Secondary display mmap exceeds framebuffer");
         };
-        let Some(device) = backing else { return self.current_backing_info(); };
-        let (config, physical_addr) = device.as_graphics_device()
-            .ok_or("Invalid display backing device")?.get_framebuffer_info()?;
-        Ok(DisplayBackingInfo { size: Self::page_aligned_size(config.size())?, config, physical_addr })
+        let available = size - buffer_offset;
+        let length = if allow_shorter {
+            length.min(available)
+        } else {
+            length
+        };
+        if length > available {
+            return Err("Requested length exceeds available display backing size");
+        }
+        let paddr = base
+            .checked_add(buffer_offset as u64)
+            .ok_or("Display backing physical address overflow")?;
+        let info = MemoryMappingInfo::new(paddr, 0x3, true)
+            .with_memory_attribute(graphics.framebuffer_memory_attribute());
+        Ok(DisplayMapping {
+            _device: device,
+            info,
+            length,
+        })
     }
 
     fn current_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
@@ -377,7 +469,7 @@ impl DisplayCharDevice {
             if let Some(graphics_device) = device.as_graphics_device() {
                 let (config, physical_addr) =
                     graphics_device.connector_framebuffer_info(self.fb_resource.connector_index)?;
-                let size = Self::page_aligned_size(config.size())?;
+                let size = graphics_device.framebuffer_mapping_size(&config)?;
                 return Ok(DisplayBackingInfo {
                     config,
                     physical_addr,
@@ -676,7 +768,7 @@ impl DisplayCharDevice {
         if front_buffer >= count {
             return Err("Display front scanout buffer is invalid");
         }
-        let buffer_len = Self::page_aligned_size(config.size())?;
+        let buffer_len = graphics.framebuffer_mapping_size(&config)?;
         let buffer_count = u32::try_from(count).map_err(|_| "Display scanout count exceeds ABI")?;
         let buffer_len_u32 =
             u32::try_from(buffer_len).map_err(|_| "Display scanout size exceeds ABI")?;
@@ -983,7 +1075,7 @@ impl CharDevice for DisplayCharDevice {
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        let info = self.mapped_backing_info()?;
+        let (info, _backing) = self.snapshot_backing()?;
         if info.physical_addr == 0 {
             return Err("Invalid display backing address");
         }
@@ -1006,7 +1098,7 @@ impl CharDevice for DisplayCharDevice {
     }
 
     fn write_at(&self, position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
-        let info = self.mapped_backing_info()?;
+        let (info, _backing) = self.snapshot_backing()?;
         if info.physical_addr == 0 {
             return Err("Invalid display backing address");
         }
@@ -1103,82 +1195,42 @@ impl ControlOps for DisplayCharDevice {
 }
 
 impl MemoryMappingOps for DisplayCharDevice {
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        let maximum_permissions = self.new_mapping_permissions(request.is_shared);
+        if request.permissions & !maximum_permissions != 0 {
+            return Err(MappingError::PermissionDenied);
+        }
+        if request.private_demand {
+            if !self.supports_mmap() {
+                return Err(MappingError::Unsupported);
+            }
+            return Ok(PreparedMapping {
+                length: request.length,
+                info: None,
+                owner: None,
+                notification: None,
+                maximum_permissions,
+            });
+        }
+        let mapping = self
+            .snapshot_mapping(request.offset, request.length, request.allow_shorter)
+            .map_err(MappingError::InvalidRange)?;
+        Ok(PreparedMapping {
+            length: mapping.length,
+            info: Some(mapping.info),
+            owner: Some(Arc::new(mapping)),
+            notification: None,
+            maximum_permissions,
+        })
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
-        let info = self.mapped_backing_info()?;
-
-        let source = self
-            .device_manager()
-            .get_device(self.fb_resource.source_device_id)
-            .ok_or("Display source device not found")?;
-        let memory_attribute = source
-            .as_graphics_device()
-            .ok_or("Display source device is not graphics-capable")?
-            .framebuffer_memory_attribute();
-
-        if offset % crate::environment::PAGE_SIZE != 0 {
-            return Err("Display mmap offset must be page-aligned");
-        }
-        if length % crate::environment::PAGE_SIZE != 0 {
-            return Err("Display mmap length must be page-aligned");
-        }
-        if info.physical_addr == 0 || info.size == 0 {
-            return Err("Invalid display backing configuration");
-        }
-        if info.physical_addr % crate::environment::PAGE_SIZE as u64 != 0 {
-            return Err("Display backing physical address must be page-aligned");
-        }
-        if self.fb_resource.connector_index != 0 && offset >= info.size { return Err("Secondary display mmap exceeds framebuffer"); }
-        if offset >= info.size {
-            let device = self
-                .device_manager()
-                .get_device(self.fb_resource.source_device_id)
-                .ok_or("Display source device not found")?;
-            let graphics = device
-                .as_graphics_device()
-                .ok_or("Display source device is not graphics-capable")?;
-            let relative = offset - info.size;
-            let index = relative / info.size;
-            let buffer_offset = relative % info.size;
-            let (_, physical_addr) = graphics.get_scanout_buffer_info(index)?;
-            if length > info.size - buffer_offset {
-                return Err("Requested length exceeds scanout buffer size");
-            }
-            let mapping_paddr = physical_addr
-                .checked_add(buffer_offset as u64)
-                .ok_or("Display scanout physical address overflow")?;
-            return Ok(
-                crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
-                    .with_memory_attribute(memory_attribute),
-            );
-        }
-
-        let available_size = info.size - offset;
-        if length > available_size {
-            return Err("Requested length exceeds available display backing size");
-        }
-
-        let mapping_paddr = info
-            .physical_addr
-            .checked_add(offset as u64)
-            .ok_or("Display backing physical address overflow")?;
-        Ok(
-            crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
-                .with_memory_attribute(memory_attribute),
-        )
-    }
-
-    fn on_mapped(&self, vaddr: usize, _paddr: u64, length: usize, _offset: usize) {
-        self.mappings
-            .write()
-            .insert(vaddr, DisplayMapping { vaddr, length });
-    }
-
-    fn on_unmapped(&self, vaddr: usize, _length: usize) {
-        self.mappings.write().remove(&vaddr);
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        self.snapshot_mapping(offset, length, false)
+            .map(|mapping| mapping.info)
     }
 
     fn supports_mmap(&self) -> bool {
@@ -1224,7 +1276,7 @@ mod tests {
     use super::{
         DISPLAY_CONNECTOR_KIND_INTERNAL, DISPLAY_CONNECTOR_KIND_UNKNOWN,
         DISPLAY_CONNECTOR_NAME_LEN, DISPLAY_OUTPUT_FLAG_CONNECTED, DISPLAY_OUTPUT_INFO_VERSION,
-        DisplayCharDevice, DisplayOutputInfo, display_commands,
+        DisplayCharDevice, DisplayOutputInfo, MappingRequest, display_commands,
     };
     use crate::device::{
         Device, DeviceType,
@@ -1237,6 +1289,7 @@ mod tests {
     };
     use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
     use crate::object::capability::{ControlOps, MemoryMappingOps};
+    use crate::sync::IrqRwSpinLock;
     use alloc::{string::ToString, sync::Arc};
     use core::{
         any::Any,
@@ -1245,12 +1298,14 @@ mod tests {
 
     struct TestBrightnessGraphicsDevice {
         brightness: AtomicU8,
+        backing: IrqRwSpinLock<Option<Arc<dyn Device>>>,
     }
 
     impl TestBrightnessGraphicsDevice {
         fn new(brightness: u8) -> Self {
             Self {
                 brightness: AtomicU8::new(brightness),
+                backing: IrqRwSpinLock::new(None),
             }
         }
     }
@@ -1302,6 +1357,13 @@ mod tests {
     }
 
     impl GraphicsDevice for TestBrightnessGraphicsDevice {
+        fn connector_mapping_device(
+            &self,
+            _connector: u32,
+        ) -> Result<Option<Arc<dyn Device>>, &'static str> {
+            Ok(self.backing.read().clone())
+        }
+
         fn get_display_name(&self) -> &'static str {
             "test-brightness-graphics"
         }
@@ -1352,6 +1414,50 @@ mod tests {
             config.size(),
         ));
         DisplayCharDevice::new_with_device_manager(resource, manager)
+    }
+
+    #[test_case]
+    fn display_remap_on_the_same_open_captures_the_new_backing() {
+        use crate::environment::PAGE_SIZE;
+
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TestBrightnessGraphicsDevice::new(42));
+        let display = Arc::new(display_for_test(&manager, graphics.clone()))
+            .open()
+            .unwrap();
+        let make_backing = |paddr| {
+            let mut backing = GenericGraphicsDevice::new("test-scanout-allocation");
+            backing.set_framebuffer_config(FramebufferConfig::new(1, 1, PixelFormat::XRGB8888));
+            backing.set_framebuffer_address(paddr);
+            Arc::new(backing)
+        };
+        let first = make_backing(PAGE_SIZE as u64);
+        let first_weak = Arc::downgrade(&first);
+        *graphics.backing.write() = Some(first);
+        let request = MappingRequest {
+            offset: 0,
+            length: PAGE_SIZE,
+            is_shared: true,
+            permissions: 3,
+            private_demand: false,
+            allow_shorter: false,
+        };
+        let old = display.prepare_mapping(request).unwrap();
+        *graphics.backing.write() = Some(make_backing(2 * PAGE_SIZE as u64));
+        let new = display.prepare_mapping(request).unwrap();
+
+        assert_eq!(old.info.unwrap().paddr, PAGE_SIZE as u64);
+        assert_eq!(new.info.unwrap().paddr, 2 * PAGE_SIZE as u64);
+        let owner = old.owner.unwrap();
+        assert_eq!(
+            owner.get_mapping_info(0, PAGE_SIZE).unwrap(),
+            old.info.unwrap()
+        );
+        assert_eq!(owner.stable_physical_extent(0, 1), Some(PAGE_SIZE as u64));
+        assert_eq!(owner.stable_physical_extent(1, 1), None);
+        assert!(first_weak.upgrade().is_some());
+        drop(owner);
+        assert!(first_weak.upgrade().is_none());
     }
 
     #[test_case]

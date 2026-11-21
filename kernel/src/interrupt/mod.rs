@@ -1244,6 +1244,29 @@ impl InterruptManager {
         Ok(())
     }
 
+    /// Unregister a source from future IRQ dispatches. An already claimed IRQ
+    /// can retain its source snapshot until that delivery completes.
+    pub fn unregister_interrupt_source(
+        &self,
+        interrupt_id: InterruptId,
+        source: &Arc<dyn InterruptSource>,
+    ) {
+        let mut sources = self.interrupt_sources.lock();
+        let Some(siblings) = sources.get(&interrupt_id) else {
+            return;
+        };
+        let remaining: Vec<_> = siblings
+            .iter()
+            .filter(|other| !Arc::ptr_eq(other, source))
+            .cloned()
+            .collect();
+        if remaining.is_empty() {
+            sources.remove(&interrupt_id);
+        } else {
+            sources.insert(interrupt_id, Arc::from(remaining));
+        }
+    }
+
     /// Register and enable a maskable interrupt source in lifecycle-safe order.
     ///
     /// The guaranteed order is:

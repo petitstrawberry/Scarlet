@@ -1,0 +1,24 @@
+[package]
+name = "scarlet-aarch64-user-macos-full-bsp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+pollster = "0.4"
+wgpu = { version = "24", default-features = false, features = ["metal", "wgsl"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+scarlet = { path = "../../../kernel", default-features = false, features = ["hosted", "network", "user-fpu", "user-vector"] }
+scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
+scarlet-hosted-runtime = { path = "../../../kernel/hosted/runtime" }
+scarlet-module-prototype = { path = "../../../modules/scarlet-module-prototype" }
+
+scarlet-hosted-sgfx-protocol = { path = "sgfx-protocol" }
+sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/sgfx", rev = "c373416e8dc3d86e7ff1bc397d6b5383aa093409" }
+sgfx-core = { git = "https://github.com/petitstrawberry/sgfx", rev = "3a6a987aaa5284056d4b1dcb0cd45326d30b3fe1", features = ["backend-abi"] }
+sgfx-backend-abi = { git = "https://github.com/petitstrawberry/sgfx", rev = "040dbb5cf42b75489504e1765183d37f6131f54c" }
+
+[[bin]]
+name = "scarlet"
+path = "src/main.rs"

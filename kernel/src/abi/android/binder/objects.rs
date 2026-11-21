@@ -1041,6 +1041,7 @@ mod tests {
                 spawn: None,
                 threads: BTreeMap::new(),
                 arena: None,
+                arena_creating: false,
                 node: (0, 0),
                 node_flags: 0,
             }),

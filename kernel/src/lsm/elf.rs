@@ -280,7 +280,7 @@ fn parse_elf_header(data: &[u8]) -> Result<(Elf64_Ehdr, bool), &'static str> {
     ))
 }
 
-fn parse_shdr(
+pub(crate) fn parse_shdr(
     data: &[u8],
     offset: usize,
     is_little_endian: bool,

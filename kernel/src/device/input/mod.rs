@@ -78,6 +78,10 @@ pub mod syn_codes {
 
 /// Absolute-axis codes used by Linux-compatible multitouch devices.
 pub mod abs_codes {
+    /// Absolute horizontal coordinate.
+    pub const ABS_X: u16 = 0;
+    /// Absolute vertical coordinate.
+    pub const ABS_Y: u16 = 1;
     /// Multitouch contact slot selector.
     pub const ABS_MT_SLOT: u16 = 0x2f;
     /// Multitouch contact major-axis size.

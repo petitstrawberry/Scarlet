@@ -1,5 +1,6 @@
 //! Mouse cursor image loading, scaling, and composition.
 
+use super::cursor_theme::{CursorTheme, CursorThemeImage};
 use png::{BitDepth, BlendOp, ColorType, Decoder, DisposeOp, Limits, OutputInfo, Transformations};
 use std::fs::File;
 use std::io::BufReader;
@@ -329,6 +330,8 @@ pub struct Cursor {
     hotspot_x: u32,
     hotspot_y: u32,
     images: Vec<CursorImage>,
+    pending_images: Vec<CursorThemeImage>,
+    scale_milli: u32,
     active_index: usize,
     active_frame_index: usize,
     next_animation_deadline_ns: Option<u64>,
@@ -336,26 +339,17 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Load and scale a PNG cursor image.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Absolute path to an RGBA, RGB, grayscale, or paletted PNG.
-    /// * `scale_milli` - Output scale in thousandths, where `1000` is 1x.
-    /// * `hotspot_x` - Unscaled x-coordinate of the pointer hotspot.
-    /// * `hotspot_y` - Unscaled y-coordinate of the pointer hotspot.
-    ///
-    /// # Returns
-    ///
-    /// A cursor containing scaled straight-alpha BGRA pixels, or a decode error.
-    pub fn from_png_file(
-        path: &str,
-        scale_milli: u32,
-        hotspot_x: u32,
-        hotspot_y: u32,
-    ) -> Result<Self, &'static str> {
-        let decoded = decode_png_file(path)?;
-        Self::from_decoded(decoded, scale_milli, hotspot_x, hotspot_y)
+    /// Decode the initial pointer now. Other theme images are decoded once,
+    /// when a client or a resize grip first selects that shape.
+    pub(super) fn from_theme(theme: &CursorTheme, scale_milli: u32) -> Result<Self, &'static str> {
+        let arrow = theme.image(sws_protocol::CursorIcon::Arrow)
+            .ok_or("Cursor theme does not contain an arrow image")?;
+        let decoded = decode_png_file(&arrow.image_path)?;
+        let mut cursor = Self::from_decoded(decoded, scale_milli, arrow.hotspot_x, arrow.hotspot_y)?;
+        cursor.pending_images.extend(theme.images().iter()
+            .filter(|entry| entry.icon != sws_protocol::CursorIcon::Arrow)
+            .cloned());
+        Ok(cursor)
     }
 
     /// Create the built-in cursor used when the configured image cannot load.
@@ -421,6 +415,8 @@ impl Cursor {
             hotspot_x,
             hotspot_y,
             images: vec![image],
+            pending_images: Vec::new(),
+            scale_milli,
             active_index: 0,
             active_frame_index: 0,
             next_animation_deadline_ns: None,
@@ -499,35 +495,12 @@ impl Cursor {
         })
     }
 
-    /// Load one additional image into the cursor theme.
-    ///
-    /// # Arguments
-    ///
-    /// * `icon` - Cursor state represented by the image.
-    /// * `path` - Absolute path to an RGBA, RGB, grayscale, or paletted PNG.
-    /// * `scale_milli` - Output scale in thousandths, where `1000` is 1x.
-    /// * `hotspot_x` - Unscaled x-coordinate of the pointer hotspot.
-    /// * `hotspot_y` - Unscaled y-coordinate of the pointer hotspot.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` after inserting or replacing the image, or a decode error.
-    pub fn load_png_icon(
-        &mut self,
-        icon: sws_protocol::CursorIcon,
-        path: &str,
-        scale_milli: u32,
-        hotspot_x: u32,
-        hotspot_y: u32,
-    ) -> Result<(), &'static str> {
-        let decoded = decode_png_file(path)?;
-        let image =
-            Self::scaled_image_from_decoded(icon, decoded, scale_milli, hotspot_x, hotspot_y)?;
-        if let Some(index) = self.images.iter().position(|entry| entry.icon == icon) {
-            self.images[index] = image;
-        } else {
-            self.images.push(image);
-        }
+    fn load_image(&mut self, entry: &CursorThemeImage) -> Result<(), &'static str> {
+        let decoded = decode_png_file(&entry.image_path)?;
+        let image = Self::scaled_image_from_decoded(
+            entry.icon, decoded, self.scale_milli, entry.hotspot_x, entry.hotspot_y,
+        )?;
+        self.images.push(image);
         Ok(())
     }
 
@@ -543,6 +516,15 @@ impl Cursor {
     ///
     /// `true` when the effective cursor image changed.
     pub fn set_icon(&mut self, icon: sws_protocol::CursorIcon) -> bool {
+        if self.images[self.active_index].icon == icon {
+            return false;
+        }
+        if let Some(index) = self.pending_images.iter().position(|entry| entry.icon == icon) {
+            let entry = self.pending_images.swap_remove(index);
+            if let Err(error) = self.load_image(&entry) {
+                println!("[Compositor] Cursor theme image {} unavailable: {}", entry.image_path, error);
+            }
+        }
         let next_index = self
             .images
             .iter()
@@ -934,6 +916,20 @@ mod tests {
         assert_eq!(cursor.height, 4);
         assert_eq!(cursor.hotspot(), (2, 2));
         assert_eq!(cursor.draw_position(), (8, 10));
+    }
+
+    #[test]
+    fn theme_decodes_each_requested_shape_once() {
+        let theme = super::CursorTheme::load(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../bundles/desktop/fs/share/cursors/default"
+        )).unwrap();
+        let mut cursor = Cursor::from_theme(&theme, 1000).unwrap();
+        assert_eq!(cursor.image_count(), 1);
+        assert!(cursor.set_icon(CursorIcon::Pointer));
+        assert_eq!(cursor.image_count(), 2);
+        assert!(cursor.set_icon(CursorIcon::Arrow));
+        assert!(cursor.set_icon(CursorIcon::Pointer));
+        assert_eq!(cursor.image_count(), 2);
     }
 
     #[test]

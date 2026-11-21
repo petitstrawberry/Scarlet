@@ -71,6 +71,22 @@ pub struct File {
 /// Protection calls are page aligned, may include inaccessible pages, and must
 /// synchronize instruction caches before making new code executable.
 pub trait Platform {
+    fn page_size(&self) -> usize {
+        PAGE_SIZE
+    }
+
+    /// Protection granule for an adopted main or a newly allocated object.
+    /// Platforms with logical subpages may keep DSOs independent of the main.
+    fn object_page_size(&self, _adopted: bool) -> usize {
+        self.page_size()
+    }
+
+    /// Larger granule available for compatible Scarlet DSOs. The ordinary
+    /// object granule remains the fallback for all other layouts and ABIs.
+    fn preferred_dso_page_size(&self) -> usize {
+        self.object_page_size(false)
+    }
+
     fn read_file(&mut self, requester: Option<&str>, name: &str) -> Result<File, Error>;
     fn map(&mut self, size: usize, align: usize) -> Result<usize, Error>;
     fn write(&mut self, address: usize, bytes: &[u8]) -> Result<(), Error>;
@@ -98,6 +114,7 @@ pub trait Platform {
 pub struct ObjectId(usize);
 
 struct Object {
+    page_size: usize,
     identity: String,
     parsed: Parsed,
     bias: usize,
@@ -242,7 +259,22 @@ impl<P: Platform> LoaderContext<P> {
         if self.objects.len() >= MAX_OBJECTS {
             return Err(Error::Unsupported("too many shared objects"));
         }
-        let parsed = Parsed::parse(&file.bytes, self.machine)?;
+        let mut page_size = self.platform.object_page_size(adopt.is_some());
+        if !page_size.is_power_of_two() || !(PAGE_SIZE..=MAX_IMAGE_SIZE).contains(&page_size) {
+            return Err(Error::Unsupported("unsupported platform page size"));
+        }
+        let mut parsed = Parsed::parse_with_page_size(&file.bytes, self.machine, page_size)?;
+        const NATIVE_PAGE: usize = 16 * 1024;
+        if adopt.is_none()
+            && !parsed.executable
+            && self.machine == Machine::Aarch64
+            && file.bytes[7] == b'S' // EI_OSABI Scarlet
+            && page_size == PAGE_SIZE
+            && self.platform.preferred_dso_page_size() == NATIVE_PAGE
+            && parsed.try_native_pages(NATIVE_PAGE)
+        {
+            page_size = NATIVE_PAGE;
+        }
         if parsed.tls.is_some() && adopt.is_none() {
             return Err(Error::Unsupported("dynamic shared-object TLS"));
         }
@@ -311,6 +343,7 @@ impl<P: Platform> LoaderContext<P> {
         };
         let id = ObjectId(self.objects.len());
         self.objects.push(Object {
+            page_size,
             identity: file.identity,
             parsed,
             bias,
@@ -464,38 +497,52 @@ impl<P: Platform> LoaderContext<P> {
     }
     fn protect(&mut self, id: ObjectId) -> Result<(), Error> {
         let object = self.object(id)?;
+        let page_size = object.page_size;
         let mut ranges: Vec<(usize, usize, Permissions)> = Vec::new();
         let mut page = object.parsed.min_vaddr;
         while page < object.parsed.max_vaddr {
             let mut permissions = Permissions::default();
             let mut loaded = false;
+            let mut relro = false;
             for segment in &object.parsed.segments {
-                if page < segment.vaddr + segment.memory_size && page + PAGE_SIZE > segment.vaddr {
-                    loaded = true;
-                    permissions.read |= segment.permissions.read;
-                    permissions.write |= segment.permissions.write;
-                    permissions.execute |= segment.permissions.execute;
+                let start = page.max(segment.vaddr);
+                let end = (page + page_size).min(segment.vaddr + segment.memory_size);
+                if start >= end {
+                    continue;
+                }
+                loaded = true;
+                permissions.read |= segment.permissions.read;
+                permissions.execute |= segment.permissions.execute;
+                if segment.permissions.write {
+                    if let Some((begin, limit)) = object.parsed.relro {
+                        relro |= start < limit && end > begin;
+                        permissions.write |= start < begin || end > limit;
+                    } else {
+                        permissions.write = true;
+                    }
                 }
             }
-            if let Some((begin, end)) = object.parsed.relro {
-                // Partial trailing pages retain their segment permissions.
-                if page >= begin && page < end {
-                    permissions.write = false;
-                }
+            if relro && permissions.write {
+                return Err(Error::Unsupported(
+                    "RELRO shares a protection page with writable data",
+                ));
+            }
+            if permissions.write && permissions.execute {
+                return Err(Error::Unsupported("writable executable shared page"));
             }
             if object.owned_mapping.is_some() || loaded {
                 let address = object.bias.checked_add(page).ok_or(Error::Overflow)?;
                 if let Some((start, size, previous)) = ranges.last_mut() {
                     if *previous == permissions && *start + *size == address {
-                        *size += PAGE_SIZE;
+                        *size += page_size;
                     } else {
-                        ranges.push((address, PAGE_SIZE, permissions));
+                        ranges.push((address, page_size, permissions));
                     }
                 } else {
-                    ranges.push((address, PAGE_SIZE, permissions));
+                    ranges.push((address, page_size, permissions));
                 }
             }
-            page += PAGE_SIZE;
+            page += page_size;
         }
         if let Some((base, _)) = object.owned_mapping {
             let image_base = object.bias + object.parsed.min_vaddr;

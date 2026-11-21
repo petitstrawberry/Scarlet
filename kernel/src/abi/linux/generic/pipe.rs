@@ -8,7 +8,7 @@ use crate::{
     },
     arch::Trapframe,
     ipc::UnidirectionalPipe,
-    object::capability::selectable::Selectable,
+    library::std::usercopy::copy_to_user,
     task::mytask,
 };
 
@@ -29,11 +29,6 @@ pub fn sys_pipe2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if flags & !allowed != 0 {
         return errno::to_result(errno::EINVAL);
     }
-
-    let pipefd_ptr = match task.vm_manager.translate_to_kva(pipefd_user) {
-        Some(ptr) => ptr as *mut u32,
-        None => return errno::to_result(errno::EFAULT),
-    };
 
     let (read_end, write_end) = UnidirectionalPipe::create_pair(4096);
 
@@ -108,9 +103,15 @@ pub fn sys_pipe2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    unsafe {
-        core::ptr::write_unaligned(pipefd_ptr, read_fd as u32);
-        core::ptr::write_unaligned(pipefd_ptr.add(1), write_fd as u32);
+    let mut descriptors = [0; 8];
+    descriptors[..4].copy_from_slice(&(read_fd as u32).to_ne_bytes());
+    descriptors[4..].copy_from_slice(&(write_fd as u32).to_ne_bytes());
+    if copy_to_user(&task, pipefd_user, &descriptors).is_err() {
+        let _ = abi.remove_fd(write_fd);
+        let _ = abi.remove_fd(read_fd);
+        let _ = task.handle_table.remove(write_handle);
+        let _ = task.handle_table.remove(read_handle);
+        return errno::to_result(errno::EFAULT);
     }
 
     0

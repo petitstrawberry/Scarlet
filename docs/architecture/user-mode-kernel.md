@@ -1,11 +1,24 @@
 # User-mode kernel
 
+This is an implementation design, not a description of an available hosted
+build. The [implementation plan](user-mode-kernel-implementation.md) specifies
+the replacement boundaries, ownership rules, required common changes, and
+acceptance tests against the current kernel.
+
 The Scarlet user-mode kernel boots a full Scarlet system inside AArch64 Linux
 or Apple Silicon macOS. From a host terminal, a user starts Scarlet, logs in
 to its console or desktop, and runs applications in the guest filesystem.
 The system supports arbitrary unmodified AArch64 Scarlet applications,
 including binaries installed after boot. It runs on the host CPU without
 requiring a hypervisor.
+
+The first supported build must run the existing full distribution on multiple
+vCPUs. The default is four vCPUs, matching the current AArch64 full runner.
+The full bundle, normal service graph, native and Linux application paths,
+network, accelerated graphics, input, audio, and media workloads form one
+acceptance target. All configured vCPUs are ready before initial Task execution.
+The same address space may execute several guest threads on different vCPUs
+at the same time.
 
 ## System architecture
 
@@ -55,6 +68,10 @@ Each worker represents one guest address space. Threads that share a guest addre
 worker and retain separate register state. A vCPU runs a thread selected by
 the Scarlet scheduler. A Scarlet task ID, a worker process ID, and a vCPU ID
 identify different resources with independent lifetimes.
+Each guest thread has its own exception stack, mailbox, and run epoch.
+Concurrent syscalls execute on their owning kernel vCPU threads. A short
+address-space admission gate prevents new guest entry during VM changes;
+it does not serialize ordinary guest execution or syscall dispatch.
 
 ### User entry, traps, and ABI dispatch
 
@@ -77,7 +94,11 @@ under Scarlet's other AArch64 ABI modules.
 
 A map, protection change, or unmap completes once Scarlet's VM state and the
 worker's mappings agree. Conflicting updates synchronize within the affected
-address space. After `fork`, shared mappings retain the same backing and
+address space. Close its guest-entry gate, cancel or park all issued run
+permits, and collect mapping acknowledgements before publishing the next
+generation. Threads already handling syscalls are guest-stopped; the
+transaction does not wait for their syscalls to finish. Other address spaces
+and kernel vCPU threads continue to run. After `fork`, shared mappings retain the same backing and
 private writes remain local to each process. For `exec`, the kernel prepares
 the new address space, ABI, and entry registers before replacing the running
 image. A failed preparation returns an error in the original process.
@@ -130,6 +151,17 @@ paths and socket APIs.
 [BlockDevice](../../kernel/src/device/block/mod.rs) and
 [NetworkDevice](../../kernel/src/device/network/mod.rs).
 
+**Audio and media.** A host AudioPlaybackDevice provides the PCM output and
+period-consumption completions used by the existing SAS service. SAS is a
+dependency of scarlet-seat in the full distribution, so audio belongs to the
+initial boot contract. A host VideoDecodeBackend serves the decoder device
+API used by the installed video applications. Both drivers retain their
+kernel buffer/session leases and deliver host completions through vCPU IRQ
+ingress.
+[Audio device](../../kernel/src/device/audio/mod.rs),
+[video device](../../kernel/src/device/video.rs), and
+[seat dependencies](../../bundles/desktop/fs/etc/stemd.d/services/01-sws.toml).
+
 **Terminal and entropy.** Terminal input enters the Scarlet TTY. Ctrl-C is
 delivered to the guest foreground process group. A separate host control
 stops the instance even when the guest is unresponsive and restores the
@@ -158,6 +190,11 @@ Sampled-image import therefore needs a distinct SGFX operation. Scarlet's
 GPU device and display retain the image references until the corresponding
 work completes. Composition and presentation keep GPU images on the GPU.
 Explicit readback transfers pixels to the caller.
+The hosted SGFX dynamic driver implements both BackendApi and DriverApi:
+the latter is required by the native Vulkan ICD included in the full bundle.
+Its programmable, depth, texture/buffer, and readback paths are part of the
+first full-system acceptance target. Concurrent client/SWS/Vulkan submissions
+retain per-queue ordering and attachment snapshots across vCPUs.
 [SWS image import](../../user/std-bin/src/sgfx_ir_support.rs),
 [SGFX wgpu](https://github.com/petitstrawberry/sgfx/blob/61e5ddd0f0e31309d2468ace3c4afe67d949fa72/crates/sgfx-backend-wgpu/src/lib.rs),
 and [GPU completion](../graphics/gpu-async-submission.md).

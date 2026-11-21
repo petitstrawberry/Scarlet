@@ -1,7 +1,8 @@
 #[macro_export]
 macro_rules! late_initcall {
     ($func:ident) => {
-        #[unsafe(link_section = ".initcall.late")]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__sc_init_late"))]
+        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".initcall.late"))]
         #[used]
         static __LATE_INITCALL__: fn() = $func;
     };

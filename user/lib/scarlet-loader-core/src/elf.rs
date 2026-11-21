@@ -46,6 +46,7 @@ pub(crate) struct Parsed {
     pub min_vaddr: usize,
     pub max_vaddr: usize,
     pub align: usize,
+    min_load_align: usize,
     pub needed: Vec<String>,
     pub symbols: Vec<Symbol>,
     pub relocations: Vec<Relocation>,
@@ -58,7 +59,48 @@ impl Parsed {
     pub fn export(&self, name: &[u8]) -> Option<&Symbol> {
         self.exports.get(name).map(|index| &self.symbols[*index])
     }
+    /// Only round padding belonging to a single PT_LOAD. Alignment and file
+    /// residue have already been validated for each segment by the parser.
+    pub fn try_native_pages(&mut self, page: usize) -> bool {
+        if self.min_load_align < page || self.segments.windows(2).any(|pair| {
+            let last = pair[0].vaddr + pair[0].memory_size - 1;
+            down(last, page) == down(pair[1].vaddr, page)
+        }) {
+            return false;
+        }
+        // A RELRO boundary inside a writable segment must still separate its
+        // sealed and writable bytes after rounding to the native page size.
+        if let Some((begin, end)) = self.relro {
+            for s in self.segments.iter().filter(|s| s.permissions.write) {
+                if [begin, end].into_iter().any(|edge| {
+                    s.vaddr < edge && edge < s.vaddr + s.memory_size && edge % page != 0
+                }) {
+                    return false;
+                }
+            }
+        }
+        let start = down(self.min_vaddr, page);
+        let Ok(end) = up(self.max_vaddr, page) else {
+            return false;
+        };
+        if end - start > MAX_IMAGE_SIZE {
+            return false;
+        }
+        self.min_vaddr = start;
+        self.max_vaddr = end;
+        true
+    }
+
+    #[cfg(test)]
     pub fn parse(bytes: &[u8], machine: Machine) -> Result<Self, Error> {
+        Self::parse_with_page_size(bytes, machine, PAGE_SIZE)
+    }
+
+    pub fn parse_with_page_size(
+        bytes: &[u8],
+        machine: Machine,
+        page_size: usize,
+    ) -> Result<Self, Error> {
         if bytes.get(..4) != Some(b"\x7fELF") {
             return Err(Error::Format("bad ELF magic"));
         }
@@ -97,7 +139,8 @@ impl Parsed {
             segments: Vec::new(),
             min_vaddr: usize::MAX,
             max_vaddr: 0,
-            align: PAGE_SIZE,
+            align: page_size,
+            min_load_align: usize::MAX,
             needed: Vec::new(),
             symbols: Vec::new(),
             relocations: Vec::new(),
@@ -168,9 +211,10 @@ impl Parsed {
                 if alignment > MAX_IMAGE_SIZE {
                     return Err(Error::Unsupported("segment alignment exceeds limit"));
                 }
+                parsed.min_load_align = parsed.min_load_align.min(alignment);
                 parsed.align = parsed.align.max(alignment);
-                parsed.min_vaddr = parsed.min_vaddr.min(down(vaddr));
-                parsed.max_vaddr = parsed.max_vaddr.max(up(end)?);
+                parsed.min_vaddr = parsed.min_vaddr.min(down(vaddr, page_size));
+                parsed.max_vaddr = parsed.max_vaddr.max(up(end, page_size)?);
                 parsed.segments.push(Segment {
                     offset,
                     vaddr,
@@ -204,7 +248,7 @@ impl Parsed {
             if a.vaddr + a.memory_size > b.vaddr {
                 return Err(Error::Unsupported("overlapping PT_LOAD segments"));
             }
-            if up(a.vaddr + a.memory_size)? > down(b.vaddr)
+            if up(a.vaddr + a.memory_size, PAGE_SIZE)? > down(b.vaddr, PAGE_SIZE)
                 && ((a.permissions.write && b.permissions.execute)
                     || (a.permissions.execute && b.permissions.write))
             {
@@ -218,7 +262,13 @@ impl Parsed {
             if !parsed.segments.iter().any(|s| s.contains(start, size)) {
                 return Err(Error::Format("RELRO is outside a load segment"));
             }
-            parsed.relro = Some((down(start), down(end)));
+            // RELRO covers whole ELF pages. A larger host protection unit
+            // cannot extend that boundary over unrelated writable bytes.
+            let begin = down(start, PAGE_SIZE);
+            let end = down(end, PAGE_SIZE);
+            if begin < end {
+                parsed.relro = Some((begin, end));
+            }
         }
         if let Some(tls) = &parsed.tls {
             if tls.file_size != 0 && parsed.file_offset(tls.vaddr, tls.file_size)? != tls.offset {
@@ -704,9 +754,9 @@ fn string(strings: &[u8], index: usize) -> Result<&[u8], Error> {
         .ok_or(Error::Format("unterminated dynamic string"))?;
     Ok(&tail[..end])
 }
-fn down(address: usize) -> usize {
-    address & !(PAGE_SIZE - 1)
+fn down(address: usize, page_size: usize) -> usize {
+    address & !(page_size - 1)
 }
-fn up(address: usize) -> Result<usize, Error> {
-    Ok(address.checked_add(PAGE_SIZE - 1).ok_or(Error::Overflow)? & !(PAGE_SIZE - 1))
+fn up(address: usize, page_size: usize) -> Result<usize, Error> {
+    Ok(address.checked_add(page_size - 1).ok_or(Error::Overflow)? & !(page_size - 1))
 }
