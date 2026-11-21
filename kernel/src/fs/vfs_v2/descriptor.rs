@@ -59,6 +59,26 @@ fn vfs_file(object: &KernelObject) -> Option<&VfsFileObject> {
     object.as_file()?.as_any().downcast_ref()
 }
 
+/// Set ordinary access bits on an open inode. The filesystem checks ownership.
+pub fn sys_file_set_mode(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let handle = tf.get_arg(0);
+    let mode = tf.get_arg(1);
+    tf.increment_pc_next(&task);
+    let result = (|| {
+        let (object, _) = descriptor(&task.handle_table, handle)?;
+        if mode & !0o777 != 0 {
+            return Err(negative(ERRNO_EINVAL));
+        }
+        let file = vfs_file(&object).ok_or(negative(ERRNO_EOPNOTSUPP))?;
+        file.get_vfs_entry()
+            .node()
+            .set_mode(mode as u32)
+            .map_err(super::syscall::fs_errno)
+    })();
+    result.err().unwrap_or(0)
+}
+
 fn check_stream(table: &HandleTable, handle: usize, write: bool) -> Result<KernelObject, usize> {
     let (object, metadata) = descriptor(table, handle)?;
     use crate::shield::access::{FileGrant, READ, WRITE};

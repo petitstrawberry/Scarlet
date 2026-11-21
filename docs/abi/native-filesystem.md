@@ -9,10 +9,15 @@ record has the same explicit layout on all architectures.
 | --- | --- | --- | --- |
 | 303 | `FileSetTimes` | handle, `RawFileTimes*` | 0 |
 | 304 | `FileSync` | handle | 0 |
+| 311 | `FileSetMode` | handle, rwx mode bits (0000–0777) | 0 |
 | 413 | `VfsCanonicalize` | path, output buffer, capacity | bytes excluding NUL |
 | 414 | `VfsSetTimes` | path, `RawFileTimes*`, flags, base directory handle | 0 |
 | 415 | `VfsMetadataWithStatus` | path, `RawFileMetadata*`, nofollow (0 or 1) | 0 |
 | 416 | `VfsCreateDirectoryWithStatus` | path | 0 |
+
+`FileSetMode` changes the referenced inode, including after rename or unlink.
+The filesystem checks attribute-change authority and inode ownership. Bits
+outside 0777 return `EINVAL`. An invalid descriptor returns `EBADF`.
 
 `VfsSetTimes` uses `usize::MAX` for cwd. Absolute paths ignore the base handle.
 Flag 1 prevents following the final symbolic link; other bits are invalid.
