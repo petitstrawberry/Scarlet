@@ -30,7 +30,8 @@ use crate::println;
 macro_rules! driver_initcall {
     ($func:ident) => {
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__sc_init_driver"))]
-        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".initcall.driver"))]
+        #[cfg_attr(target_os = "linux", unsafe(link_section = "sc_init_driver"))]
+        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), unsafe(link_section = ".initcall.driver"))]
         #[used]
         static __DRIVER_INITCALL__: fn() = $func;
     };
@@ -62,4 +63,4 @@ pub fn driver_initcall_call() {
 }
 
 #[cfg(feature = "hosted")]
-pub use super::macho::driver_initcall_call;
+pub use super::hosted::driver_initcall_call;

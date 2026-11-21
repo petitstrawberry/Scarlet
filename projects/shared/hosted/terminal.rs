@@ -64,6 +64,7 @@ pub struct HostTerminal {
 impl HostTerminal {
     /// Use the terminal device that owns this session. On Darwin the
     /// /dev/tty forwarding device does not implement the PTY's poll interface.
+    #[cfg(target_os = "macos")]
     pub fn attach_console(
         cpu: CpuId,
         irq: InterruptId,
@@ -123,6 +124,16 @@ impl HostTerminal {
         let basename = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
         let path = Path::new("/dev").join(std::ffi::OsStr::from_bytes(basename.to_bytes()));
         Self::attach(&path, cpu, irq, stop)
+    }
+
+    /// Use Linux's pollable controlling terminal.
+    #[cfg(target_os = "linux")]
+    pub fn attach_console(
+        cpu: CpuId,
+        irq: InterruptId,
+        stop: impl FnOnce(io::Result<()>) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::attach(Path::new("/dev/tty"), cpu, irq, stop)
     }
 
     /// Register a serial device before the TTY late initcall. Ctrl-C remains
@@ -308,6 +319,7 @@ struct RawTerminal {
 impl RawTerminal {
     // A GUI launch may have no controlling tty. Keep the normal guest serial
     // device alive and forward its output to the launcher's stdout.
+    #[cfg(target_os = "macos")]
     fn detached() -> io::Result<Self> {
         let (port, mut reader) = UnixStream::pair()?;
         port.set_nonblocking(true)?;

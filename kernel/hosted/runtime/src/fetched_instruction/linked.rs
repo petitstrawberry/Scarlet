@@ -197,8 +197,10 @@ pub(crate) struct Crossings {
     request: bool,
     // Count repeated native patch entries without allocating in the signal
     // handler. A failed compilation stays cold until either publication changes.
+    #[cfg(target_os = "macos")]
     native_sites: [Option<NativeSite>; 8],
 }
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 struct NativeSite {
     key: (u64, u64),
@@ -220,6 +222,7 @@ impl Crossings {
 
     // Called with guest signals masked in the signal handler. No allocation
     // or locking. The registry read guard spans the entire native transition.
+    #[cfg(target_os = "macos")]
     pub(crate) fn observe(&mut self, pc: u64, lr: u64) -> bool {
         let key = (pc, lr);
         if self.previous != Some(key) {
@@ -237,6 +240,7 @@ impl Crossings {
         self.request
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn observe_native(&mut self, pc: u64, lr: u64, callee: &Mapping, maps: &Registry) -> bool {
         let Some(caller) = owner(maps, lr) else { return false };
         let key = (pc, lr);
@@ -284,6 +288,7 @@ impl Crossings {
         self.pairs.iter().find_map(|p| Some(p.pcs[p.offset(pc)?]))
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn architectural_lr(&self, pc: u64) -> Option<u64> {
         self.pairs
             .iter()

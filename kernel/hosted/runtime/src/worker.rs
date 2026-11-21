@@ -1,4 +1,4 @@
-//! One Darwin process owns an installed guest address space.
+//! One host process owns an installed guest address space.
 
 use crate::{
     run_gate::{RunPermit, TaskId},
@@ -9,18 +9,25 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, c_char},
-    fs::File,
     io::{self, Read, Write},
     ops::Range,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
+        fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::net::UnixStream,
     },
     path::Path,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, RwLock, Weak},
 };
+
+#[cfg(target_os = "macos")]
+use std::{ffi::{CStr, c_char}, fs::File as ExecutionStream, os::fd::AsRawFd};
+#[cfg(target_os = "linux")]
+use UnixStream as ExecutionStream;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::confine;
 
 mod lanes;
 pub use lanes::WorkerThread;
@@ -160,7 +167,8 @@ impl Worker {
 
 // The execution stream carries only bytes. Use read/write on the socket fd
 // and report a disconnected peer as EPIPE even with SIGPIPE enabled.
-fn execution_stream(fd: OwnedFd) -> io::Result<File> {
+#[cfg(target_os = "macos")]
+fn execution_stream(fd: OwnedFd) -> io::Result<ExecutionStream> {
     let enabled: libc::c_int = 1;
     let status = unsafe {
         libc::setsockopt(
@@ -174,6 +182,12 @@ fn execution_stream(fd: OwnedFd) -> io::Result<File> {
     if status != 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(fd.into())
+}
+
+#[cfg(target_os = "linux")]
+fn execution_stream(fd: OwnedFd) -> io::Result<ExecutionStream> {
+    // UnixStream sends with MSG_NOSIGNAL on Linux.
     Ok(fd.into())
 }
 
@@ -211,7 +225,7 @@ impl WorkerProcess {
     }
 }
 
-fn read_stop(channel: &mut File) -> io::Result<Stop> {
+fn read_stop(channel: &mut ExecutionStream) -> io::Result<Stop> {
     let frame = read_words::<{ STOP_HEADER + REGISTER_WORDS }>(channel)?;
     if frame[0] != STOP {
         return Err(invalid("Expected a worker stop"));
@@ -421,7 +435,7 @@ fn read_command(channel: &mut UnixStream) -> io::Result<Option<u64>> {
 }
 
 fn serve_thread(
-    mut channel: File,
+    mut channel: ExecutionStream,
     thread: &mut Thread,
     mappings: &RwLock<BTreeMap<usize, Mapping>>,
 ) -> io::Result<()> {
@@ -527,6 +541,7 @@ fn decode_registers(words: &[u64]) -> Registers {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn confine() -> io::Result<()> {
     unsafe extern "C" {
         static kSBXProfilePureComputation: c_char;

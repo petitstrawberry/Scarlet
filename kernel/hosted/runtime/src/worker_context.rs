@@ -1,6 +1,9 @@
-//! Register state supplied by the Darwin AArch64 exception context.
+//! Register state and trap normalization for AArch64 signals.
 
 use crate::worker_memory::{Mapping, PatchedInstruction, SYSCALL_BREAKPOINT};
+
+#[cfg(target_os = "linux")]
+pub(super) mod linux;
 
 const NZCV: u32 = 0xf000_0000;
 const BREAKPOINT_CLASS: u32 = 0x3c;
@@ -19,6 +22,7 @@ pub struct SyscallTrap {
 }
 
 impl Exception {
+    #[cfg(target_os = "macos")]
     pub fn capture(context: &libc::__darwin_mcontext64) -> Self {
         Self {
             registers: Registers::capture(context),
@@ -64,6 +68,7 @@ pub struct Registers {
 impl Registers {
     /// Capture the saved registers before changing the host's resume context.
     /// This does not read the signal handler's live registers or use TLS.
+    #[cfg(target_os = "macos")]
     pub fn capture(context: &libc::__darwin_mcontext64) -> Self {
         let state = &context.__ss;
         let mut x = [0; 31];
@@ -82,6 +87,7 @@ impl Registers {
     }
 
     /// Preserve host-controlled status bits in the kernel-provided context.
+    #[cfg(target_os = "macos")]
     pub fn restore(self, context: &mut libc::__darwin_mcontext64) {
         let state = &mut context.__ss;
         state.__x.copy_from_slice(&self.x[..29]);
@@ -114,9 +120,17 @@ mod tests {
     const TRAP_PC: usize = ENTRY + 4;
     static TEXT: AtomicPtr<Mapping> = AtomicPtr::new(ptr::null_mut());
 
-    unsafe extern "C" fn stop(_: i32, _: *mut libc::siginfo_t, raw: *mut c_void) {
+    unsafe extern "C" fn stop(signal: i32, info: *mut libc::siginfo_t, raw: *mut c_void) {
+        #[cfg(target_os = "macos")]
+        let _ = (signal, info);
+        #[cfg(target_os = "macos")]
         let context = unsafe { &mut *(*raw.cast::<libc::ucontext_t>()).uc_mcontext };
+        #[cfg(target_os = "macos")]
         let exception = Exception::capture(context);
+        #[cfg(target_os = "linux")]
+        let mut context = unsafe { linux::SignalContext::new(raw) };
+        #[cfg(target_os = "linux")]
+        let exception = unsafe { context.exception(signal, info) };
         let mapping = TEXT.load(Ordering::Acquire);
         if mapping.is_null() || exception.registers.pc as usize != TRAP_PC {
             unsafe { libc::_exit(1) };
@@ -134,7 +148,10 @@ mod tests {
         }
         registers.x[0] = 43;
         registers.pc = syscall.elr;
+        #[cfg(target_os = "macos")]
         registers.restore(context);
+        #[cfg(target_os = "linux")]
+        context.restore(registers);
     }
 
     #[test]

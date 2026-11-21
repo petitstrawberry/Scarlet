@@ -1,18 +1,15 @@
 //! Shared RAM backing for Scarlet's logical frame addresses.
 
 use std::{
-    ffi::CString,
     fs::File,
     io,
     os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
     ptr::NonNull,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
-
-static NEXT_ARENA: AtomicU64 = AtomicU64::new(0);
 
 pub fn host_page_size() -> io::Result<usize> {
     // SAFETY: sysconf has no pointer arguments.
@@ -253,7 +250,22 @@ impl Drop for RamReservation {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn create_backing(len: libc::off_t) -> io::Result<File> {
+    let fd = unsafe { libc::memfd_create(c"scarlet-ram".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let backing = unsafe { File::from_raw_fd(fd) };
+    backing.set_len(len as u64)?;
+    Ok(backing)
+}
+
+#[cfg(target_os = "macos")]
+fn create_backing(len: libc::off_t) -> io::Result<File> {
+    use std::{ffi::CString, sync::atomic::AtomicU64};
+
+    static NEXT_ARENA: AtomicU64 = AtomicU64::new(0);
     let backing = loop {
         let next = NEXT_ARENA
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))

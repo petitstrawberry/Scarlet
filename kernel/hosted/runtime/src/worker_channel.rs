@@ -23,15 +23,15 @@ pub(super) fn send_backing(channel: &UnixStream, backing: BorrowedFd<'_>) -> io:
     msg.msg_iov = &mut payload;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = len;
+    msg.msg_controllen = len as _;
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&msg);
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32);
+        (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
         ptr::write_unaligned(libc::CMSG_DATA(header).cast(), backing.as_raw_fd());
     }
-    retry(|| unsafe { libc::sendmsg(channel.as_raw_fd(), &msg, 0) })?;
+    retry(|| unsafe { libc::sendmsg(channel.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) })?;
     Ok(())
 }
 
@@ -46,7 +46,7 @@ pub(super) fn receive_backing(channel: &UnixStream) -> io::Result<OwnedFd> {
     msg.msg_iov = &mut payload;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) };
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
     if retry(|| unsafe { libc::recvmsg(channel.as_raw_fd(), &mut msg, 0) })? != 1 {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
@@ -57,7 +57,7 @@ pub(super) fn receive_backing(channel: &UnixStream) -> io::Result<OwnedFd> {
         if header.is_null()
             || (*header).cmsg_level != libc::SOL_SOCKET
             || (*header).cmsg_type != libc::SCM_RIGHTS
-            || (*header).cmsg_len != libc::CMSG_LEN(size_of::<libc::c_int>() as u32)
+            || (*header).cmsg_len as usize != libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

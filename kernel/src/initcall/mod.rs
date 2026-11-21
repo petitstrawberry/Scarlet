@@ -28,9 +28,9 @@ pub mod early;
 pub mod late;
 
 #[cfg(feature = "hosted")]
-mod macho;
+mod hosted;
 #[cfg(feature = "hosted")]
-pub use macho::call_initcalls;
+pub use hosted::call_initcalls;
 
 #[cfg(not(feature = "hosted"))]
 #[allow(improper_ctypes)]

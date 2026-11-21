@@ -6,7 +6,8 @@ use crate::println;
 macro_rules! early_initcall {
     ($func:ident) => {
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__sc_init_early"))]
-        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".initcall.early"))]
+        #[cfg_attr(target_os = "linux", unsafe(link_section = "sc_init_early"))]
+        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), unsafe(link_section = ".initcall.early"))]
         #[used]
         static __EARLY_INITCALL__: fn() = $func;
     };
@@ -38,4 +39,4 @@ pub fn early_initcall_call() {
 }
 
 #[cfg(feature = "hosted")]
-pub use super::macho::early_initcall_call;
+pub use super::hosted::early_initcall_call;

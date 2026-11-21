@@ -1,8 +1,7 @@
-//! Thread-local guest transitions through the Darwin signal context.
+//! Thread-local guest transitions through the host signal context.
 
 use crate::{
     fetched_instruction::{self, Fetch, Slots},
-    platform_register::Action,
     worker_context::{Exception, Registers},
     worker_memory::{Mapping, PatchedInstruction},
 };
@@ -16,8 +15,15 @@ use std::{
     },
 };
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod linked_tests;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::handle_signal;
+
+#[cfg(target_os = "macos")]
+use crate::platform_register::Action;
 
 const STACK_SIZE: usize = 128 * 1024;
 
@@ -60,14 +66,17 @@ struct Control {
     interrupted: bool,
     // Borrowed only between the entry BRK and the return to the host.
     mappings: *const BTreeMap<usize, Mapping>,
+    #[cfg(target_os = "macos")]
     x18: u64,
     tls: u64,
+    #[cfg(target_os = "macos")]
     step: Option<NativeStep>,
     pending: Option<Registers>,
     host: Option<Registers>,
     stop: Option<Exception>,
 }
 
+#[cfg(target_os = "macos")]
 struct NativeStep {
     guest_pc: u64,
     step_pc: u64,
@@ -77,6 +86,7 @@ struct NativeStep {
     saved_high: Option<u64>,
 }
 
+#[cfg(target_os = "macos")]
 impl NativeStep {
     // The sealed code has the same instruction offsets as the guest and ends
     // at a private BRK. Restore the faulting or interrupted guest boundary.
@@ -103,6 +113,7 @@ impl NativeStep {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Control {
     fn read_register(&self, state: &libc::__darwin_arm_thread_state64, register: u8) -> u64 {
         match register {
@@ -243,25 +254,7 @@ impl Thread {
                 install_actions().map_err(|error| error.raw_os_error().unwrap_or(libc::EINVAL))
             })
             .map_err(io::Error::from_raw_os_error)?;
-        // The signal trampoline masks SP to find Control at the bottom.
-        // Request alignment from Mach to reserve exactly one stack.
-        let rw = libc::VM_PROT_READ | libc::VM_PROT_WRITE;
-        let mut address = 0;
-        const VM_INHERIT_NONE: libc::vm_inherit_t = 2;
-        #[allow(deprecated)]
-        let status = unsafe {
-            libc::mach_vm_map(
-                libc::mach_task_self_, &mut address, STACK_SIZE as u64,
-                STACK_SIZE as u64 - 1, libc::VM_FLAGS_ANYWHERE,
-                0, 0, 0, rw, rw, VM_INHERIT_NONE,
-            )
-        };
-        if status != libc::KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "Cannot reserve worker signal stack: Mach error {status}"
-            )));
-        }
-        let mapping = ptr::with_exposed_provenance_mut::<c_void>(address as usize);
+        let mapping = signal_stack()?;
         let control = mapping.cast::<Control>();
         let header = size_of::<Control>().next_multiple_of(16);
         let stack = libc::stack_t {
@@ -277,8 +270,10 @@ impl Thread {
                 epoch: 0,
                 interrupted: false,
                 mappings: ptr::null(),
+                #[cfg(target_os = "macos")]
                 x18: 0,
                 tls: 0,
+                #[cfg(target_os = "macos")]
                 step: None,
                 pending: None,
                 host: None,
@@ -664,6 +659,32 @@ impl Drop for Thread {
     }
 }
 
+#[cfg(target_os = "linux")]
+use linux::signal_stack;
+
+#[cfg(target_os = "macos")]
+fn signal_stack() -> io::Result<*mut c_void> {
+        // The signal trampoline masks SP to find Control at the bottom.
+        // Request alignment from Mach to reserve exactly one stack.
+        let rw = libc::VM_PROT_READ | libc::VM_PROT_WRITE;
+        let mut address = 0;
+        const VM_INHERIT_NONE: libc::vm_inherit_t = 2;
+        #[allow(deprecated)]
+        let status = unsafe {
+            libc::mach_vm_map(
+                libc::mach_task_self_, &mut address, STACK_SIZE as u64,
+                STACK_SIZE as u64 - 1, libc::VM_FLAGS_ANYWHERE,
+                0, 0, 0, rw, rw, VM_INHERIT_NONE,
+            )
+        };
+        if status != libc::KERN_SUCCESS {
+            return Err(io::Error::other(format!(
+                "Cannot reserve worker signal stack: Mach error {status}"
+            )));
+        }
+        Ok(ptr::with_exposed_provenance_mut::<c_void>(address as usize))
+}
+
 fn install_actions() -> io::Result<()> {
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = handle_signal as *const () as usize;
@@ -686,6 +707,7 @@ fn install_actions() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn handle_signal(signal: i32, _: *mut libc::siginfo_t, raw: *mut c_void) {
     let stack: usize;
     unsafe {
@@ -831,7 +853,7 @@ unsafe extern "C" fn handle_signal(signal: i32, _: *mut libc::siginfo_t, raw: *m
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

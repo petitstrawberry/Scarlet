@@ -4,11 +4,14 @@
 compile_error!("This BSP requires AArch64 macOS");
 
 pub mod audio;
+#[path = "../../../shared/hosted/block.rs"]
+pub mod block;
 pub mod gpu;
 pub(crate) mod latency_trace;
 pub mod network;
+#[path = "../../../shared/hosted/root_image.rs"]
 pub mod root_image;
-pub mod block;
+#[path = "../../../shared/hosted/terminal.rs"]
 pub mod terminal;
 pub mod video;
 pub mod window;

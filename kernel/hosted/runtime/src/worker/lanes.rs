@@ -15,7 +15,7 @@ struct Lease {
 #[derive(Debug)]
 struct Lane {
     id: u64,
-    channel: File,
+    channel: ExecutionStream,
 }
 
 #[derive(Default, Debug)]

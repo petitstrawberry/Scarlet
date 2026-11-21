@@ -10,25 +10,7 @@ use std::{
 
 use crate::{fetched_instruction::shadow::Shadows, ram::host_page_size};
 
-const VM_FLAGS_FIXED: libc::c_int = 0;
-
-unsafe extern "C" {
-    static mach_task_self_: libc::mach_port_t;
-    fn mach_vm_allocate(
-        task: libc::mach_port_t,
-        address: *mut u64,
-        length: u64,
-        flags: libc::c_int,
-    ) -> libc::kern_return_t;
-    fn mach_vm_protect(
-        task: libc::mach_port_t,
-        address: u64,
-        length: u64,
-        set_maximum: libc::c_int,
-        protection: libc::c_int,
-    ) -> libc::kern_return_t;
-    fn sys_icache_invalidate(start: *const c_void, length: usize);
-}
+use crate::platform_vm::{limit_permissions, reserve, synchronize_instructions};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Protection<'a> {
@@ -77,7 +59,17 @@ struct Patch {
     instruction: PatchedInstruction,
 }
 
+#[cfg(target_os = "macos")]
 mod canonical_x18;
+
+#[cfg(target_os = "macos")]
+use crate::platform_register::plan as plan_platform_register;
+
+#[cfg(target_os = "linux")]
+fn plan_platform_register(_: u32, _: &mut Vec<u32>) -> Option<crate::platform_register::Action> {
+    // The Linux AArch64 ABI leaves x18 available to the guest.
+    None
+}
 
 fn patch_instructions(
     bytes: &mut [u8],
@@ -109,7 +101,7 @@ fn patch_instructions(
                 (0xd420_0000 | (0x5400 << 5), ReadThreadPointer { register })
             } else if original & !31 == 0xd51b_d040 {
                 (0xd420_0000 | (0x5500 << 5), WriteThreadPointer { register })
-            } else if let Some(action) = crate::platform_register::plan(original, steps) {
+            } else if let Some(action) = plan_platform_register(original, steps) {
                 (0xd420_0000 | (0x5700 << 5), PlatformRegister(action))
             } else {
                 continue;
@@ -123,6 +115,7 @@ fn patch_instructions(
         }
         previous_end = range.end;
     }
+    #[cfg(target_os = "macos")]
     canonical_x18::plan(bytes, ranges, &mut patches, steps);
     for patch in &patches {
         bytes[patch.offset..patch.offset + 4].copy_from_slice(&patch.replacement.to_le_bytes());
@@ -168,18 +161,12 @@ impl NativeSteps {
         };
         unsafe {
             ptr::copy_nonoverlapping(words.as_ptr(), base.cast(), words.len());
-            sys_icache_invalidate(base, size);
+            synchronize_instructions(base, size);
             let rx = libc::PROT_READ | libc::PROT_EXEC;
             if libc::mprotect(base, length, rx) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            if mach_vm_protect(mach_task_self_, base as u64, length as u64, 1, rx)
-                != libc::KERN_SUCCESS
-            {
-                return Err(io::Error::other(
-                    "Cannot seal platform-register instructions",
-                ));
-            }
+            limit_permissions(base, length, rx)?;
         }
         Ok(Some(steps))
     }
@@ -288,7 +275,7 @@ impl Mapping {
                     mapping.patches = patch_instructions(bytes, instructions, &mut words)?;
                     mapping.steps = NativeSteps::seal(&words)?;
                     mapping.native_text = instructions.into();
-                    sys_icache_invalidate(mapping.base.as_ptr(), len);
+                    synchronize_instructions(mapping.base.as_ptr(), len);
                 },
                 Protection::ReadExecuteOnFetch(ranges) | Protection::ExecuteOnFetch(ranges) => {
                     let mut end = 0;
@@ -344,27 +331,18 @@ impl Mapping {
                 return Err(io::Error::last_os_error());
             }
         }
-        mapping.limit_permissions(native)?;
+        limit_permissions(mapping.base.as_ptr(), len, native)?;
         Ok(mapping)
-    }
-
-    fn limit_permissions(&self, native: libc::c_int) -> io::Result<()> {
-        let result = unsafe {
-            mach_vm_protect(mach_task_self_, self.base.as_ptr() as u64, self.len as u64, 1, native)
-        };
-        if result != libc::KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "Cannot bound guest mapping permissions: Mach error {result}"
-            )));
-        }
-        Ok(())
     }
 
     // The checked access path resolves data from the original guest backing.
     // Nothing from that backing is accessible at this worker address.
     pub(super) fn guard(address: usize, len: usize) -> io::Result<Self> {
         let mapping = Self::reserve(address, len)?;
-        mapping.limit_permissions(libc::PROT_NONE)?;
+        if unsafe { libc::mprotect(mapping.base.as_ptr(), len, libc::PROT_NONE) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        limit_permissions(mapping.base.as_ptr(), len, libc::PROT_NONE)?;
         Ok(mapping)
     }
 
@@ -375,19 +353,11 @@ impl Mapping {
         {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid worker range"));
         }
-        let mut reserved = address as u64;
-        // SAFETY: FIXED without OVERWRITE cannot clobber the worker's existing VM.
-        let result =
-            unsafe { mach_vm_allocate(mach_task_self_, &mut reserved, len as u64, VM_FLAGS_FIXED) };
-        if result != libc::KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "Cannot reserve guest range at {address:#x}: Mach error {result}"
-            )));
-        }
+        let reserved = reserve(address, len)?;
         static NEXT_PUBLICATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Ok(Self {
             publication: NEXT_PUBLICATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            base: NonNull::new(ptr::with_exposed_provenance_mut(reserved as usize))
+            base: NonNull::new(reserved)
                 .expect("The reserved address was nonzero"),
             len,
             patches: Vec::new(),
@@ -443,6 +413,7 @@ impl Mapping {
         interval.shadows.entry(&interval.words, index, guest_base)
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(super) fn cached_shadow_entry(&self, pc: usize) -> Option<u64> {
         let (interval, index) = self.fetch_entry(pc)?;
         interval.shadows.cached_entry(index)
@@ -468,6 +439,7 @@ impl Mapping {
         pc.wrapping_sub(self.address()) < self.len
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn step_address(&self, slot: usize) -> u64 {
         let steps = self.steps.as_ref().expect("Native step without backing");
         debug_assert!((slot + 2) * 4 <= steps.length);
@@ -586,6 +558,7 @@ mod tests {
             assert_eq!(mapped.read(), 7);
             mapped.write(9);
             assert_eq!(data.alias.as_ptr().read(), 9);
+            #[cfg(target_os = "macos")]
             assert_ne!(
                 libc::mprotect(text.base.as_ptr(), page, libc::PROT_WRITE),
                 0

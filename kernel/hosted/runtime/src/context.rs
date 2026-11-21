@@ -222,7 +222,7 @@ mod tests {
         // SAFETY: pthread_self reads the current host thread identity.
         exchange
             .first_thread
-            .store(unsafe { libc::pthread_self() }, Ordering::Relaxed);
+            .store(unsafe { libc::pthread_self() as usize }, Ordering::Relaxed);
         // SAFETY: The current vCPU published its stopped scheduler registers
         // before switching into the task. The task owns its running slot.
         unsafe {
@@ -234,7 +234,7 @@ mod tests {
 
         exchange
             .resumed_thread
-            .store(unsafe { libc::pthread_self() }, Ordering::Relaxed);
+            .store(unsafe { libc::pthread_self() as usize }, Ordering::Relaxed);
         exchange
             .resumed_cpu
             .store(crate::cpu_binding::current().unwrap(), Ordering::Relaxed);
@@ -259,7 +259,7 @@ mod tests {
         // SAFETY: This thread exclusively owns the suspended context and
         // keeps the scheduler slot alive until the task returns control.
         unsafe { switch(&raw mut scheduler, task) };
-        unsafe { libc::pthread_self() }
+        unsafe { libc::pthread_self() as usize }
     }
 
     #[test]

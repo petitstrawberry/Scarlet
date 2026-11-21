@@ -43,6 +43,7 @@ fn interior_entries_keep_stride_and_exits_have_guest_pcs() {
         shadows.original_offset(start + (code.len() + 1) as u64 * 4),
         None
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         unsafe {
             libc::mprotect(

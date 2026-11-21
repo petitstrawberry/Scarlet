@@ -1,4 +1,4 @@
-//! Memory ordering for coherent hosted buffers and Darwin instruction-cache
+//! Memory ordering for coherent hosted buffers and host instruction-cache
 //! synchronization.
 
 use core::sync::atomic::{Ordering, fence};
@@ -19,12 +19,8 @@ pub use order_host_memory as clean_invalidate_dcache_to_poc_range;
 pub use order_host_memory as invalidate_dcache_to_poc_range;
 
 pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
-    unsafe extern "C" {
-        fn sys_icache_invalidate(start: *const core::ffi::c_void, len: usize);
-    }
-
     if len != 0 {
         // SAFETY: Callers supply the still-mapped kernel alias they just wrote.
-        unsafe { sys_icache_invalidate(start_vaddr as *const core::ffi::c_void, len) };
+        unsafe { scarlet_hosted_runtime::synchronize_instructions(start_vaddr as *const core::ffi::c_void, len) };
     }
 }

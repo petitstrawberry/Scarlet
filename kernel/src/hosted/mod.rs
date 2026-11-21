@@ -101,6 +101,10 @@ pub fn prepare(cpu_count: usize, ram_bytes: usize) -> Result<Platform, &'static 
     if !(2..=MAX_NUM_CPUS).contains(&cpu_count) {
         return Err("Hosted vCPU count is outside Scarlet's supported range");
     }
+    #[cfg(target_os = "linux")]
+    if scarlet_hosted_runtime::ram::host_page_size().ok() != Some(crate::environment::PAGE_SIZE) {
+        return Err("AArch64 Linux hosted Scarlet requires a 4 KiB host page size");
+    }
     let bsp = cpu::CpuBinding::bind(0)?;
     let area = memory::initialize(ram_bytes)?;
     crate::mem::pmm::add_region(area)?;
@@ -136,7 +140,7 @@ unsafe extern "C" {
 
 impl EntropySource for HostEntropy {
     fn name(&self) -> &'static str {
-        "macOS system entropy"
+        "host system entropy"
     }
 
     fn read_entropy(&self, buffer: &mut [u8]) -> usize {
