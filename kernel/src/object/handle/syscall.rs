@@ -4,6 +4,7 @@
 
 use crate::{
     arch::Trapframe,
+    library::std::usercopy::copy_to_user,
     object::{
         handle::HandleMetadata, handle::HandleType, handle::StandardInputOutput,
         introspection::KernelObjectInfo,
@@ -35,23 +36,16 @@ pub fn sys_handle_query(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Translate the pointer to get access to the info structure
-    let info_vaddr = match task.vm_manager.translate_to_kva(info_ptr) {
-        Some(addr) => addr as *mut KernelObjectInfo,
-        None => return usize::MAX, // Invalid pointer
+    let Some(info) = task.handle_table.get_object_info(handle) else {
+        return usize::MAX;
     };
-
-    // Get object information
-    match task.handle_table.get_object_info(handle) {
-        Some(info) => {
-            // Write the information to user space
-            unsafe {
-                *info_vaddr = info;
-            }
-            0 // Success
-        }
-        None => usize::MAX, // Invalid handle
-    }
+    // KernelObjectInfo is three u32 fields and eight one-byte bools, with
+    // repr(C) and no padding. Copy it through the task's writable mapping.
+    const _: () = assert!(size_of::<KernelObjectInfo>() == 20);
+    let bytes = unsafe {
+        core::slice::from_raw_parts((&raw const info).cast::<u8>(), size_of::<KernelObjectInfo>())
+    };
+    copy_to_user(&task, info_ptr, bytes).map_or(usize::MAX, |()| 0)
 }
 
 /// Change handle role after creation
