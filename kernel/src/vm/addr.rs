@@ -280,7 +280,12 @@ pub fn init_boot_addressing(
 
 #[inline(always)]
 pub fn address_translation_ready() -> bool {
-    layout().phase() != KernelMemoryPhase::Uninitialized
+    #[cfg(feature = "hosted")]
+    return crate::hosted::ram_area().is_some();
+    #[cfg(not(feature = "hosted"))]
+    {
+        layout().phase() != KernelMemoryPhase::Uninitialized
+    }
 }
 
 /// Validate and prepare runtime metadata before the page-table handoff.
@@ -312,15 +317,23 @@ pub fn finalize_runtime_memory_layout() {
 
 /// Broad inclusive physical bounds; sparse holes are not evidence of mapped RAM.
 pub fn get_current_direct_map_phys_range() -> (u64, u64) {
-    let area = match layout().current_runtime() {
-        Some(runtime) => runtime
-            .regions
-            .lock()
-            .bounding_area()
-            .expect("runtime direct map is empty"),
-        None => layout().boot().direct_map.physical_area(),
-    };
-    (area.start, area.end)
+    #[cfg(feature = "hosted")]
+    {
+        let area = crate::hosted::ram_area().expect("Hosted RAM arena is not initialized");
+        return (area.start, area.end);
+    }
+    #[cfg(not(feature = "hosted"))]
+    {
+        let area = match layout().current_runtime() {
+            Some(runtime) => runtime
+                .regions
+                .lock()
+                .bounding_area()
+                .expect("runtime direct map is empty"),
+            None => layout().boot().direct_map.physical_area(),
+        };
+        (area.start, area.end)
+    }
 }
 
 /// The original mapping is retained even after runtime publication.
@@ -334,9 +347,20 @@ pub fn get_current_direct_map() -> DirectMapWindow {
 }
 
 pub fn runtime_direct_map_regions() -> Option<DirectMapRegions> {
-    layout()
-        .current_runtime()
-        .map(|runtime| *runtime.regions.lock())
+    #[cfg(feature = "hosted")]
+    {
+        let mut regions = DirectMapRegions::new();
+        regions
+            .insert(crate::hosted::ram_area()?, MemoryAttribute::Normal)
+            .expect("invalid hosted RAM range");
+        return Some(regions);
+    }
+    #[cfg(not(feature = "hosted"))]
+    {
+        layout()
+            .current_runtime()
+            .map(|runtime| *runtime.regions.lock())
+    }
 }
 
 pub(crate) fn lock_runtime_direct_map_regions()
@@ -386,10 +410,16 @@ pub fn boot_phys_to_virt(paddr: u64) -> usize {
 #[inline(always)]
 #[track_caller]
 pub fn virt_to_phys(vaddr: usize) -> u64 {
-    layout()
-        .virt_to_current_phys(VirtAddr::new(vaddr))
-        .unwrap_or_else(|| panic!("virt_to_phys: unmapped kernel virtual address {:#x}", vaddr))
-        .as_u64()
+    #[cfg(feature = "hosted")]
+    return crate::hosted::logical_address(vaddr)
+        .unwrap_or_else(|| panic!("virt_to_phys: unmapped hosted alias {vaddr:#x}"));
+    #[cfg(not(feature = "hosted"))]
+    {
+        layout()
+            .virt_to_current_phys(VirtAddr::new(vaddr))
+            .unwrap_or_else(|| panic!("virt_to_phys: unmapped kernel virtual address {:#x}", vaddr))
+            .as_u64()
+    }
 }
 
 /// Translate a boot-protocol pointer using retained boot metadata.
@@ -410,9 +440,15 @@ pub fn boot_virt_to_phys(vaddr: usize) -> u64 {
 /// Return the current direct-map address; panics for unmapped physical memory.
 #[inline(always)]
 pub fn phys_to_virt(paddr: u64) -> usize {
-    layout()
-        .phys_to_current_virt(PhysAddr::new(paddr))
-        .as_usize()
+    #[cfg(feature = "hosted")]
+    return crate::hosted::alias_for(paddr)
+        .unwrap_or_else(|| panic!("phys_to_virt: unknown hosted frame {paddr:#x}"));
+    #[cfg(not(feature = "hosted"))]
+    {
+        layout()
+            .phys_to_current_virt(PhysAddr::new(paddr))
+            .as_usize()
+    }
 }
 
 #[inline(always)]
@@ -437,22 +473,25 @@ pub fn phys_to_kernel_image_virt(paddr: u64) -> usize {
 
 #[inline(always)]
 pub fn is_direct_mapped(vaddr: usize) -> bool {
-    layout().direct_map_phys(VirtAddr::new(vaddr)).is_some()
+    #[cfg(feature = "hosted")]
+    return crate::hosted::logical_address(vaddr).is_some();
+    #[cfg(not(feature = "hosted"))]
+    {
+        layout().direct_map_phys(VirtAddr::new(vaddr)).is_some()
+    }
 }
 
 impl PhysAddr {
     /// Translate through the current direct map; panics for unmapped memory.
     pub fn to_virt(self) -> VirtAddr {
-        layout().phys_to_current_virt(self)
+        VirtAddr::new(phys_to_virt(self.as_u64()))
     }
 }
 
 impl VirtAddr {
     /// Translate a kernel image, heap or direct-map address.
     pub fn to_phys(self) -> PhysAddr {
-        layout()
-            .virt_to_current_phys(self)
-            .expect("unmapped kernel virtual address")
+        PhysAddr::new(virt_to_phys(self.as_usize()))
     }
 }
 

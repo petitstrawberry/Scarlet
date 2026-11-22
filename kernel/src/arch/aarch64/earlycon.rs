@@ -108,6 +108,7 @@ fn emergency_uart_putc(c: u8) {
 /// # Arguments
 ///
 /// * `c` - Byte to emit.
+#[cfg(not(feature = "hosted"))]
 pub fn early_putc(c: u8) {
     if try_uart_putc(c) {
         #[cfg(feature = "linux-boot")]
@@ -271,4 +272,10 @@ mod tests {
         assert_eq!(EarlyUartKind::from_raw(2), EarlyUartKind::QcomGeni);
         assert_eq!(EarlyUartKind::from_raw(3), EarlyUartKind::Ns16550);
     }
+}
+
+#[cfg(feature = "hosted")]
+pub fn early_putc(c: u8) {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(&[c]);
 }

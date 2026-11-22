@@ -223,6 +223,7 @@ mod tests {
     }
 }
 
+#[cfg(not(feature = "hosted"))]
 fn register_arm_generic_timer() {
     // Register for all CPUs that Scarlet is configured to support.
     let controller = alloc::boxed::Box::new(ArmGenericTimer::new());
@@ -240,6 +241,7 @@ fn register_arm_generic_timer() {
     );
 }
 
+#[cfg(not(feature = "hosted"))]
 crate::early_initcall!(register_arm_generic_timer);
 
 fn platform_timer_probe(device: &PlatformDeviceInfo) -> Result<(), &'static str> {

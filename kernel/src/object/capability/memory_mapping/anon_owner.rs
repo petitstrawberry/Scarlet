@@ -4,8 +4,12 @@ use alloc::string::String;
 use alloc::sync::Arc;
 
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::{ContiguousPages, allocate_raw_pages, free_raw_pages};
-use crate::vm::addr::{phys_to_virt, virt_to_phys};
+use crate::mem::page::ContiguousPages;
+#[cfg(not(feature = "hosted"))]
+use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+use crate::vm::addr::phys_to_virt;
+#[cfg(not(feature = "hosted"))]
+use crate::vm::addr::virt_to_phys;
 
 use super::{AccessKind, AccessOp, MemoryMappingOps, ResolveFaultError, ResolveFaultResult};
 
@@ -26,6 +30,20 @@ impl AnonymousZeroPageOwner {
 }
 
 impl MemoryMappingOps for AnonymousZeroPageOwner {
+    #[cfg(feature = "hosted")]
+    fn has_fixed_publication(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "hosted")]
+    fn publication_generation(&self) -> Option<u64> {
+        // The hosted resident view and copy policy are immutable. A private
+        // fault publishes a replacement VMA, covered by the VM generation.
+        Some(0)
+    }
+    fn has_immutable_zero_backing(&self) -> bool {
+        true
+    }
     fn supports_private_relocation(&self) -> bool {
         true
     }
@@ -78,10 +96,18 @@ impl MemoryMappingOps for AnonymousZeroPageOwner {
     // or in-flight fault handlers retain this owner; its final drop releases it.
 }
 
+#[cfg(feature = "hosted")]
+#[path = "hosted_anon.rs"]
+mod hosted_anon;
+#[cfg(feature = "hosted")]
+pub use hosted_anon::{AnonymousPageOwner, fork_clone_owner};
+
+#[cfg(not(feature = "hosted"))]
 pub struct AnonymousPageOwner {
     pages: IrqRwSpinLock<BTreeMap<usize, u64>>,
 }
 
+#[cfg(not(feature = "hosted"))]
 impl AnonymousPageOwner {
     pub fn new() -> Self {
         Self {
@@ -98,6 +124,7 @@ impl AnonymousPageOwner {
     }
 }
 
+#[cfg(not(feature = "hosted"))]
 impl Drop for AnonymousPageOwner {
     fn drop(&mut self) {
         let pages = core::mem::take(&mut *self.pages.write());
@@ -109,6 +136,7 @@ impl Drop for AnonymousPageOwner {
     }
 }
 
+#[cfg(not(feature = "hosted"))]
 impl MemoryMappingOps for AnonymousPageOwner {
     fn supports_private_relocation(&self) -> bool {
         true
@@ -136,6 +164,19 @@ impl MemoryMappingOps for AnonymousPageOwner {
 
     fn is_page_resident(&self, page_idx: usize) -> Option<bool> {
         Some(self.pages.read().contains_key(&page_idx))
+    }
+
+    #[cfg(feature = "hosted")]
+    fn visit_resident_extents(
+        &self,
+        start: usize,
+        count: usize,
+        visit: &mut dyn FnMut(usize, usize, u64),
+    ) {
+        let pages = self.pages.read();
+        for (&index, &pa) in pages.range(start..start.saturating_add(count)) {
+            visit(index, 1, pa);
+        }
     }
 
     fn resolve_fault(
@@ -181,6 +222,7 @@ impl MemoryMappingOps for AnonymousPageOwner {
     }
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn fork_clone_owner(owner: &AnonymousPageOwner) -> Option<Arc<dyn MemoryMappingOps>> {
     let pages = owner.pages.read();
     let mut new_pages = BTreeMap::new();
@@ -241,6 +283,25 @@ impl ForkCowPageOwner {
 }
 
 impl MemoryMappingOps for ForkCowPageOwner {
+    #[cfg(feature = "hosted")]
+    fn has_fixed_publication(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "hosted")]
+    fn publication_generation(&self) -> Option<u64> {
+        // The hosted resident view and copy policy are immutable. A private
+        // fault publishes a replacement VMA, covered by the VM generation.
+        Some(0)
+    }
+    fn stable_physical_extent(&self, page_index: usize, pages: usize) -> Option<u64> {
+        let offset = page_index
+            .checked_sub(self.base_page_idx)?
+            .checked_add(self.allocation_page_offset)?;
+        (offset.checked_add(pages)? <= self.pages.len())
+            .then(|| self.pages.as_paddr() + (offset * PAGE_SIZE) as u64)
+    }
+
     fn supports_shared_permission_changes(&self) -> bool {
         self.shared
     }

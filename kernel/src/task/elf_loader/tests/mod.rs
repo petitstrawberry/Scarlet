@@ -207,9 +207,25 @@ fn relocated_elf_preserves_header_addresses_and_main_program_break() {
         let interpreter_task = new_user_task("linker-metadata".into(), 0);
         interpreter_task.brk.store(0x6000, Ordering::Relaxed);
         assert!(
-            load_elf_segments_with_base(&header, file, &interpreter_task, 0x20001, false).is_err()
+            load_elf_segments_with_base(
+                &header,
+                file,
+                &interpreter_task,
+                0x20001,
+                ImageRole::Interpreter,
+                PAGE_SIZE
+            )
+            .is_err()
         );
-        load_elf_segments_with_base(&header, file, &interpreter_task, 0x20000, false).unwrap();
+        load_elf_segments_with_base(
+            &header,
+            file,
+            &interpreter_task,
+            0x20000,
+            ImageRole::Interpreter,
+            PAGE_SIZE,
+        )
+        .unwrap();
         assert_eq!(interpreter_task.brk.load(Ordering::Relaxed), 0x6000);
         assert_eq!(
             executable_entry(&header, file, &interpreter_task, 0x20000).unwrap(),

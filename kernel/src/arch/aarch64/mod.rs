@@ -19,6 +19,12 @@ pub const fn is_hv_available() -> bool {
 pub const fn is_vhe_enabled() -> bool {
     false
 }
+#[cfg_attr(feature = "hosted", path = "../../hosted/cache.rs")]
+mod cache;
+#[cfg(not(feature = "hosted"))]
+pub mod context;
+#[cfg(feature = "hosted")]
+#[path = "../../hosted/context.rs"]
 pub mod context;
 pub mod cpu_features;
 pub mod earlycon;
@@ -33,16 +39,34 @@ pub mod lsm;
 pub mod mmio;
 mod psci;
 pub mod registers;
+#[cfg(not(feature = "hosted"))]
 pub mod switch;
+#[cfg(feature = "hosted")]
+pub mod switch {
+    pub use super::context::switch_to;
+}
+#[cfg(not(feature = "hosted"))]
+pub mod timer;
+#[cfg(feature = "hosted")]
+#[path = "../../hosted/timer.rs"]
 pub mod timer;
 pub mod trap;
 pub mod vcpu;
+#[cfg(not(feature = "hosted"))]
+pub mod vm;
+#[cfg(feature = "hosted")]
+#[path = "../../hosted/page_table.rs"]
 pub mod vm;
 
+pub use cache::{
+    clean_dcache_to_poc_range, clean_dcache_to_pou_range, clean_invalidate_dcache_to_poc_range,
+    invalidate_dcache_to_poc_range, sync_icache_for_execution,
+};
 pub use context::KernelContext;
 pub use earlycon::*;
 pub use registers::IntRegisters;
 
+#[cfg(not(feature = "hosted"))]
 use crate::arch::vm::get_root_pagetable;
 use crate::vm::vmem::MemoryArea;
 
@@ -142,7 +166,7 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
     ]
 }
 
-#[unsafe(link_section = ".trampoline.data")]
+#[cfg_attr(not(feature = "hosted"), unsafe(link_section = ".trampoline.data"))]
 static mut CPUS: [Aarch64; MAX_NUM_CPUS] = [const { Aarch64::new(0) }; MAX_NUM_CPUS];
 
 /// Return the per-CPU architecture state during that CPU's one-time boot.
@@ -168,6 +192,7 @@ unsafe fn cpu_state_for_init(cpu_id: usize) -> &'static mut Aarch64 {
 /// # Arguments
 ///
 /// * `cpu_id` - Logical CPU ID assigned to the current CPU.
+#[cfg(not(feature = "hosted"))]
 pub fn init_arch(cpu_id: usize) {
     // SAFETY: The bootstrap CPU initializes its uniquely assigned slot once,
     // before the slot is exposed through TPIDR_EL1.
@@ -183,6 +208,7 @@ pub fn init_arch(cpu_id: usize) {
 /// # Arguments
 ///
 /// * `cpu_id` - Logical CPU ID assigned by the boot protocol.
+#[cfg(not(feature = "hosted"))]
 pub fn init_ap_cpu(cpu_id: usize) {
     // SAFETY: Each released secondary CPU initializes only its boot-protocol
     // assigned slot, exactly once, before entering the scheduler.
@@ -212,6 +238,12 @@ pub fn init_ap_cpu(cpu_id: usize) {
 /// - Chooses the task-provided kernel stack (SP_EL1) for the upcoming EL0->EL1 traps.
 /// - Programs per-CPU trampoline-visible state (kernel stack top, trap handler, TTBR0).
 /// - Performs a direct transition via the trampoline exit path.
+#[cfg(feature = "hosted")]
+pub fn first_switch_to_user(task: &Task) -> ! {
+    crate::sched::scheduler::first_switch_to_kernel_task(task.get_id())
+}
+
+#[cfg(not(feature = "hosted"))]
 pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
@@ -345,6 +377,12 @@ impl Aarch64 {
         self.trap_kind
     }
 
+    #[cfg(feature = "hosted")]
+    pub fn set_next_address_space(&mut self, _asid: u16) {
+        // Kernel continuations share the native process address space.
+    }
+
+    #[cfg(not(feature = "hosted"))]
     pub fn set_next_address_space(&mut self, asid: u16) {
         crate::breadcrumb::drop_cpu(
             self.cpuid as usize,
@@ -526,6 +564,7 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
+#[cfg(not(feature = "hosted"))]
 fn trap_init(aarch64: &mut Aarch64) {
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
@@ -663,6 +702,7 @@ pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
         .is_ok()
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn get_cpu() -> &'static mut Aarch64 {
     // Prefer the EL1 thread pointer (kept at the kernel-mapped Arch address).
     let tpidr_el1: usize;
@@ -689,6 +729,7 @@ pub fn get_cpu() -> &'static mut Aarch64 {
 /// `Some(cpu_id)` when `TPIDR_EL1` is non-zero (initialized), otherwise
 /// `None`.
 #[inline]
+#[cfg(not(feature = "hosted"))]
 pub fn try_get_cpuid() -> Option<usize> {
     let tpidr_el1: usize;
     unsafe {
@@ -708,6 +749,23 @@ pub fn try_get_cpuid() -> Option<usize> {
     Some(aarch64.cpuid as usize)
 }
 
+#[cfg(feature = "hosted")]
+pub use crate::hosted::cpu::try_get_cpuid;
+
+#[cfg(feature = "hosted")]
+pub fn get_cpu() -> &'static mut Aarch64 {
+    let cpu_id = try_get_cpuid().expect("Scarlet CPU is not bound to the host thread");
+    // SAFETY: The thread's CpuBinding owns its slot until it stops running kernel code.
+    unsafe { &mut *(&raw mut CPUS).cast::<Aarch64>().add(cpu_id) }
+}
+
+#[cfg(feature = "hosted")]
+pub(crate) fn init_host_cpu(cpu_id: usize) {
+    // SAFETY: The CPU ID has been reserved exclusively by this thread's binding.
+    unsafe { cpu_state_for_init(cpu_id) }.cpuid = cpu_id as u64;
+}
+
+#[cfg(not(feature = "hosted"))]
 pub fn set_next_mode(mode: crate::arch::Mode) {
     let spsr = target_spsr_for_mode(mode);
     // SAFETY: writing SPSR_EL1 only affects the exception-return EL.
@@ -715,6 +773,9 @@ pub fn set_next_mode(mode: crate::arch::Mode) {
         core::arch::asm!("msr spsr_el1, {0}", in(reg) spsr);
     }
 }
+
+#[cfg(feature = "hosted")]
+pub fn set_next_mode(_: crate::arch::Mode) {}
 
 pub fn is_privileged_return_mode(spsr: u64) -> bool {
     matches!(spsr & 0xF, 0x5 | 0x9)
@@ -787,144 +848,6 @@ pub fn wmb() {
     unsafe {
         // DMB ST - Data Memory Barrier for stores
         asm!("dmb st", options(nostack));
-    }
-}
-
-#[inline(always)]
-fn cache_line_bytes_dcache() -> usize {
-    // CTR_EL0.DminLine is log2(number of 32-bit words in the smallest D-cache line).
-    // LineBytes = 4 << DminLine.
-    let ctr: u64;
-    unsafe {
-        asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nostack));
-    }
-    let dminline = ((ctr >> 16) & 0xf) as usize;
-    4usize << dminline
-}
-
-/// Clean D-cache to Point of Coherency (PoC) for the given virtual address range.
-///
-/// This is useful for ensuring page-table updates and CPU-written DMA buffers
-/// become visible to hardware.
-///
-/// # Arguments
-///
-/// * `start_vaddr` - Kernel virtual address at the start of the range.
-/// * `len` - Number of bytes to clean.
-#[inline(always)]
-pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
-    if len == 0 {
-        return;
-    }
-
-    let line = cache_line_bytes_dcache();
-    let mut addr = start_vaddr & !(line - 1);
-    let end = start_vaddr.saturating_add(len);
-
-    unsafe {
-        while addr < end {
-            asm!("dc cvac, {0}", in(reg) addr, options(nostack));
-            addr = addr.saturating_add(line);
-        }
-        // Ensure the clean completes before subsequent operations (e.g. TLBI).
-        asm!("dsb sy", options(nostack));
-    }
-}
-
-/// Clean and invalidate D-cache to Point of Coherency (PoC) for a virtual range.
-///
-/// Use this before reading memory that may have been modified through another
-/// virtual alias, such as a userspace mapping of a kernel-owned shared page.
-#[inline(always)]
-pub fn clean_invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
-    if len == 0 {
-        return;
-    }
-
-    let line = cache_line_bytes_dcache();
-    let mut addr = start_vaddr & !(line - 1);
-    let end = start_vaddr.saturating_add(len);
-
-    unsafe {
-        while addr < end {
-            asm!("dc civac, {0}", in(reg) addr, options(nostack));
-            addr = addr.saturating_add(line);
-        }
-        asm!("dsb sy", options(nostack));
-    }
-}
-
-/// Invalidate D-cache to Point of Coherency (PoC) for a virtual range.
-///
-/// Use this after device-written DMA has completed and before the CPU reads the
-/// target memory. Dirty CPU lines for the range must already have been cleaned
-/// before device ownership was granted.
-///
-/// # Arguments
-///
-/// * `start_vaddr` - Kernel virtual address at the start of the range.
-/// * `len` - Number of bytes to invalidate.
-#[inline(always)]
-pub fn invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
-    if len == 0 {
-        return;
-    }
-
-    let line = cache_line_bytes_dcache();
-    let mut addr = start_vaddr & !(line - 1);
-    let end = start_vaddr.saturating_add(len);
-
-    unsafe {
-        while addr < end {
-            asm!("dc ivac, {0}", in(reg) addr, options(nostack));
-            addr = addr.saturating_add(line);
-        }
-        asm!("dsb sy", options(nostack));
-    }
-}
-
-/// Clean D-cache to Point of Unification (PoU) for the given virtual address range.
-///
-/// Required when code is written via the data cache and will later be executed
-/// (self-modifying code / JIT / loading user text). The canonical sequence is:
-/// - clean D-cache to PoU over the modified range
-/// - `dsb ishst`
-/// - invalidate I-cache (`ic ivau` per-line or `ic iallu`)
-/// - `dsb ish; isb`
-#[inline(always)]
-pub fn clean_dcache_to_pou_range(start_vaddr: usize, len: usize) {
-    if len == 0 {
-        return;
-    }
-
-    let line = cache_line_bytes_dcache();
-    let mut addr = start_vaddr & !(line - 1);
-    let end = start_vaddr.saturating_add(len);
-
-    unsafe {
-        while addr < end {
-            asm!("dc cvau, {0}", in(reg) addr, options(nostack));
-            addr = addr.saturating_add(line);
-        }
-        // Ensure the clean completes before subsequent I-cache invalidation.
-        asm!("dsb ishst", options(nostack));
-    }
-}
-
-/// Synchronize instruction fetch after writing executable memory.
-///
-/// # Arguments
-///
-/// * `start_vaddr` - Kernel virtual address used to write the executable bytes.
-/// * `len` - Number of bytes written.
-pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
-    if len == 0 {
-        return;
-    }
-
-    clean_dcache_to_pou_range(start_vaddr, len);
-    unsafe {
-        asm!("ic ialluis", "dsb ish", "isb", options(nostack));
     }
 }
 

@@ -22,6 +22,10 @@ impl Instruction {
     }
 }
 
+#[cfg(feature = "hosted")]
+pub use crate::hosted::interrupts::idle;
+
+#[cfg(not(feature = "hosted"))]
 pub fn idle() -> ! {
     loop {
         crate::arch::interrupt::enable_interrupts();

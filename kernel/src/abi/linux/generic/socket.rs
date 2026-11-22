@@ -226,73 +226,43 @@ fn write_socket_address_to_user(
         return Ok(());
     }
 
-    let addr_paddr = task
-        .vm_manager
-        .translate_to_kva(addr_ptr)
-        .ok_or(errno::EFAULT)?;
-    let addrlen_paddr = task
-        .vm_manager
-        .translate_to_kva(addrlen_ptr)
-        .ok_or(errno::EFAULT)?;
-
-    unsafe {
-        let addrlen = *(addrlen_paddr as *const u32);
-
-        match socket_addr {
-            crate::network::SocketAddress::Local(addr) => {
-                if addrlen < 2 {
-                    return Err(errno::EINVAL);
-                }
-
-                let sockaddr = addr_paddr as *mut u16;
-                *sockaddr = AF_UNIX_U16;
-
-                let available_path_len = (addrlen - 2) as usize;
-                let path_start = (addr_paddr + 2) as *mut u8;
-                let path_len = if addr.is_abstract() {
-                    if available_path_len == 0 {
-                        return Err(errno::EINVAL);
-                    }
-                    *path_start = 0;
-                    let path = addr.path().as_bytes();
-                    let copied = path.len().min(available_path_len - 1);
-                    if copied > 0 {
-                        core::ptr::copy_nonoverlapping(path.as_ptr(), path_start.add(1), copied);
-                    }
-                    copied + 1
-                } else {
-                    let path = addr.path().as_bytes();
-                    let copied = path.len().min(available_path_len);
-                    if copied > 0 {
-                        core::ptr::copy_nonoverlapping(path.as_ptr(), path_start, copied);
-                    }
-                    if copied < available_path_len {
-                        *(path_start.add(copied)) = 0;
-                    }
-                    copied
-                };
-
-                if path_len < available_path_len && addr.is_abstract() {
-                    *(path_start.add(path_len)) = 0;
-                }
-
-                *(addrlen_paddr as *mut u32) = 2 + path_len as u32;
-                Ok(())
+    let mut length_bytes = [0; 4];
+    copy_from_user(task, addrlen_ptr, &mut length_bytes).map_err(|_| errno::EFAULT)?;
+    let capacity = u32::from_ne_bytes(length_bytes) as usize;
+    let length = match socket_addr {
+        crate::network::SocketAddress::Local(addr) => {
+            let prefix = if addr.is_abstract() { &b"\0"[..] } else { &[] };
+            if capacity < 2 + prefix.len() {
+                return Err(errno::EINVAL);
             }
-            crate::network::SocketAddress::Inet(inet) => {
-                if addrlen < size_of::<SockaddrIn>() as u32 {
-                    return Err(errno::EINVAL);
-                }
-
-                let sockaddr = addr_paddr as *mut SockaddrIn;
-                core::ptr::write_unaligned(sockaddr, SockaddrIn::from_inet(&inet));
-
-                *(addrlen_paddr as *mut u32) = size_of::<SockaddrIn>() as u32;
-                Ok(())
+            let path = addr.path().as_bytes();
+            let copied = path.len().min(capacity - 2 - prefix.len());
+            let length = 2 + prefix.len() + copied;
+            let mut bytes = Vec::with_capacity(length + usize::from(length < capacity));
+            bytes.extend_from_slice(&AF_UNIX_U16.to_ne_bytes());
+            bytes.extend_from_slice(prefix);
+            bytes.extend_from_slice(&path[..copied]);
+            if length < capacity {
+                bytes.push(0);
             }
-            _ => Err(errno::EAFNOSUPPORT),
+            copy_to_user(task, addr_ptr, &bytes).map_err(|_| errno::EFAULT)?;
+            length
         }
-    }
+        crate::network::SocketAddress::Inet(inet) => {
+            if capacity < size_of::<SockaddrIn>() {
+                return Err(errno::EINVAL);
+            }
+            let sockaddr = SockaddrIn::from_inet(&inet);
+            let mut bytes = [0; size_of::<SockaddrIn>()];
+            bytes[..2].copy_from_slice(&sockaddr.sin_family.to_ne_bytes());
+            bytes[2..4].copy_from_slice(&sockaddr.sin_port.to_ne_bytes());
+            bytes[4..8].copy_from_slice(&sockaddr.sin_addr.to_ne_bytes());
+            copy_to_user(task, addr_ptr, &bytes).map_err(|_| errno::EFAULT)?;
+            bytes.len()
+        }
+        _ => return Err(errno::EAFNOSUPPORT),
+    };
+    copy_to_user(task, addrlen_ptr, &(length as u32).to_ne_bytes()).map_err(|_| errno::EFAULT)
 }
 
 fn linux_local_sockaddr_from_user(
@@ -1197,13 +1167,7 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    if !matches!(
-        (
-            task.vm_manager.translate_to_kva(addr_ptr),
-            task.vm_manager.translate_to_kva(addrlen_ptr),
-        ),
-        (Some(_), Some(_))
-    ) {
+    if addr_ptr == 0 || addrlen_ptr == 0 {
         crate::println!("[linux socket] getsockname invalid pointers");
         return usize::MAX;
     }
@@ -1267,13 +1231,7 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    if !matches!(
-        (
-            task.vm_manager.translate_to_kva(addr_ptr),
-            task.vm_manager.translate_to_kva(addrlen_ptr),
-        ),
-        (Some(_), Some(_))
-    ) {
+    if addr_ptr == 0 || addrlen_ptr == 0 {
         crate::println!("[linux socket] getpeername invalid pointers");
         return usize::MAX;
     }
@@ -2804,12 +2762,6 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         _ => return errno::to_result(errno::ESOCKTNOSUPPORT),
     };
 
-    // Translate sv pointer (needs to write 2 i32 values)
-    let sv_paddr = match task.vm_manager.translate_to_kva(sv_ptr) {
-        Some(addr) => addr as *mut i32,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
     // Create connected socket pair
     let (socket1, socket2) = match LocalSocket::try_create_connected_pair_with_type(
         local_type,
@@ -2874,10 +2826,15 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let _ = abi.set_fd_flags(fd2, FD_CLOEXEC);
     }
 
-    // Write file descriptors to user space
-    unsafe {
-        *sv_paddr = fd1 as i32;
-        *sv_paddr.add(1) = fd2 as i32;
+    let mut descriptors = [0; 8];
+    descriptors[..4].copy_from_slice(&(fd1 as i32).to_ne_bytes());
+    descriptors[4..].copy_from_slice(&(fd2 as i32).to_ne_bytes());
+    if copy_to_user(&task, sv_ptr, &descriptors).is_err() {
+        let _ = abi.remove_fd(fd2);
+        let _ = abi.remove_fd(fd1);
+        let _ = task.handle_table.remove(handle2);
+        let _ = task.handle_table.remove(handle1);
+        return errno::to_result(errno::EFAULT);
     }
 
     0

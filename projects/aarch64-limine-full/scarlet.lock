@@ -1477,42 +1477,16 @@ url = "https://github.com/petitstrawberry/carmine"
 rev = "f8e58a22e9ba14f43f443b7372199241adf50d97"
 
 [[sections.rootfs.layers]]
-kind = "cargo"
-package = "myrica"
-bin = "myrica"
-features = ["backend-webkit-vulkan"]
-default-features = false
-to = "/bin/myrica"
-hash = "sha256:b91e34c7c754a4ce77e9e0a87caeb7017e399453afc78805481932c7cd8c1b5e"
+kind = "archive"
+to = "/"
+format = "tar-gz"
+strip_components = 0
+hash = "sha256:47cc499e21c976b3b4f851e92be5be371ec3c294f4da760f8b505695fc7a9c46"
 
 [sections.rootfs.layers.source]
-type = "path"
-path = ".scarlet/cache/git/d51a83490b0670c9"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-package = "myrica"
-bin = "webkit-vulkan-probe"
-features = [
-    "webkit-vulkan-probe",
-    "backend-webkit-vulkan",
-]
-default-features = false
-to = "/bin/myrica-vulkan-probe"
-hash = "sha256:cf8a62f2ee880531548e951555aeb50687de207e92819edb33048d042c418f00"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = ".scarlet/cache/git/d51a83490b0670c9"
-
-[[sections.rootfs.layers]]
-kind = "script"
-to = "/systems/linux-aarch64/usr/libexec/myrica/widevine-host"
-hash = "sha256:fbf8d3c8633c4a23e625de7ea38131964f144d0bcb5185f34e4c51baede61f2b"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = ".scarlet/cache/git/d51a83490b0670c9/tools/widevine-host/build-host.sh"
+type = "archive"
+url = "https://github.com/petitstrawberry/myrica/releases/download/scarlet-24e16498941c1622bbabd179ec1c0fc62d94519b/myrica-aarch64-unknown-scarlet.tar.gz"
+sha256 = "sha256:47cc499e21c976b3b4f851e92be5be371ec3c294f4da760f8b505695fc7a9c46"
 
 [[sections.rootfs.layers]]
 kind = "cargo"

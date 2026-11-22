@@ -1,0 +1,74 @@
+schema_version = 2
+
+[project]
+name = "scarlet-aarch64-user-macos-full"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = { hosted = true, network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = false, sync-debug = false }
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+
+[userspace]
+cargo-config = "userspace.toml"
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/cli-utils/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "userprogram"
+bin = "init"
+default-features = false
+features = ["hosted-init-layout"]
+replace = true
+to = "/init"
+
+[images.rootfs]
+console-root = true
+format = "ext2"
+output = ".scarlet/images/rootfs-aarch64-full.ext2"
+min-size-mib = 8192
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/full/bundle.toml"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs"
+to = "/"
+
+[[images.rootfs.layers]]
+kind = "cargo"
+source = "bsp/sgfx-driver"
+package = "sgfx-hosted"
+lib = "sgfx_hosted"
+to = "/lib/sgfx/libsgfx_hosted.so"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "bsp/sgfx-driver/hosted-wgpu.sgfx-driver"
+to = "/lib/sgfx/hosted-wgpu.sgfx-driver"
+
+[runner]
+command = "tools/run_macos.sh"

@@ -159,6 +159,7 @@ impl super::manager::VirtualMemoryManager {
         &self,
         access: AccessKind,
     ) -> Result<(), UserFaultResolutionError> {
+        let mapping = self.mapping_transaction();
         let violation = || {
             self.search_memory_map(access.vaddr).and_then(|map| {
                 let required = 8 | match access.op {
@@ -175,7 +176,7 @@ impl super::manager::VirtualMemoryManager {
         if let Some(fault) = violation() {
             return Err(UserFaultResolutionError::User(fault));
         }
-        match self.lazy_map_page_with(access) {
+        match mapping.fault(access) {
             Ok(()) => Ok(()),
             Err(reason) => {
                 if let Some(fault) = violation() {

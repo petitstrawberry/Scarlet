@@ -146,6 +146,26 @@ pub struct ContiguousPages {
 }
 
 impl ContiguousPages {
+    /// Back a guest range at the same offset within a native execution page.
+    /// The allocation owns exactly the requested pages, including after fork.
+    pub(crate) fn new_for_user_range(count: usize, vaddr: usize) -> Option<Self> {
+        let granule = crate::vm::execution_page_size();
+        if granule == PAGE_SIZE {
+            return Self::new(count);
+        }
+        if count == 0 || !vaddr.is_multiple_of(PAGE_SIZE) {
+            return None;
+        }
+        let address = crate::mem::pmm::alloc_user_pages(count, granule, vaddr)?;
+        let ptr = phys_to_virt(address) as *mut Page;
+        unsafe { core::ptr::write_bytes(ptr, 0, count) };
+        Some(Self {
+            ptr,
+            count,
+            memory_attribute: MemoryAttribute::Normal,
+        })
+    }
+
     /// Allocate zeroed, physically contiguous pages with the `Normal` attribute.
     ///
     /// # Arguments

@@ -71,22 +71,14 @@ impl HidKeyboardDevice {
     }
 
     pub fn handle_report(&mut self, report: KeyboardBootReport) {
-        for modifier in [
-            (0x01, key_codes::KEY_LEFTCTRL),
-            (0x02, key_codes::KEY_LEFTSHIFT),
-            (0x04, key_codes::KEY_LEFTALT),
-            (0x08, key_codes::KEY_LEFTMETA),
-            (0x10, key_codes::KEY_RIGHTCTRL),
-            (0x20, key_codes::KEY_RIGHTSHIFT),
-            (0x40, key_codes::KEY_RIGHTALT),
-            (0x80, key_codes::KEY_RIGHTMETA),
-        ] {
-            let was_pressed = (self.last_report.modifiers & modifier.0) != 0;
-            let is_pressed = (report.modifiers & modifier.0) != 0;
+        for (bit, &code) in MODIFIER_KEYS.iter().enumerate() {
+            let mask = 1 << bit;
+            let was_pressed = self.last_report.modifiers & mask != 0;
+            let is_pressed = report.modifiers & mask != 0;
             if was_pressed != is_pressed {
                 self.event_device.push_event(
                     EV_KEY,
-                    modifier.1,
+                    code,
                     if is_pressed { KEY_PRESS } else { KEY_RELEASE },
                 );
             }
@@ -176,8 +168,21 @@ impl Default for HidMouseDevice {
     }
 }
 
-fn translate_boot_key(boot_code: u8) -> Option<u16> {
+const MODIFIER_KEYS: [u16; 8] = [
+    key_codes::KEY_LEFTCTRL,
+    key_codes::KEY_LEFTSHIFT,
+    key_codes::KEY_LEFTALT,
+    key_codes::KEY_LEFTMETA,
+    key_codes::KEY_RIGHTCTRL,
+    key_codes::KEY_RIGHTSHIFT,
+    key_codes::KEY_RIGHTALT,
+    key_codes::KEY_RIGHTMETA,
+];
+
+/// Translate a USB keyboard/keypad usage, including left and right modifiers.
+pub fn translate_boot_key(boot_code: u8) -> Option<u16> {
     match boot_code {
+        0xe0..=0xe7 => Some(MODIFIER_KEYS[usize::from(boot_code - 0xe0)]),
         0x04 => Some(key_codes::KEY_A),
         0x05 => Some(key_codes::KEY_B),
         0x06 => Some(key_codes::KEY_C),

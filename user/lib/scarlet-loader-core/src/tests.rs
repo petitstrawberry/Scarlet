@@ -207,6 +207,8 @@ fn ph(
 #[derive(Default)]
 struct Fake {
     files: BTreeMap<String, Vec<u8>>,
+    page_size: Option<usize>,
+    independent_dsos: bool,
     mappings: BTreeMap<usize, Vec<u8>>,
     protections: Vec<(usize, usize, Permissions)>,
     unmaps: usize,
@@ -233,6 +235,20 @@ impl Fake {
     }
 }
 impl Platform for Fake {
+    fn object_page_size(&self, adopted: bool) -> usize {
+        if self.independent_dsos && !adopted {
+            PAGE_SIZE
+        } else {
+            self.page_size()
+        }
+    }
+    fn preferred_dso_page_size(&self) -> usize {
+        self.page_size()
+    }
+    fn page_size(&self) -> usize {
+        self.page_size.unwrap_or(PAGE_SIZE)
+    }
+
     fn initialize_static_tls(&mut self) -> Result<(), Error> {
         self.tls_initializations += 1;
         self.tls_relocated_value = self.word(0x201700);
@@ -741,6 +757,57 @@ fn partial_trailing_relro_page_preserves_writable_data() {
     );
 }
 
+#[test]
+fn larger_protection_page_seals_relro_without_freezing_other_data() {
+    for (memory_size, can_seal) in [(0x1000, true), (0x1800, false)] {
+        let mut bytes = Fixture::default().bytes();
+        ph(
+            &mut bytes,
+            120,
+            1,
+            6,
+            0x1000,
+            0x5000,
+            0x800,
+            memory_size,
+            0x1000,
+        );
+        ph(
+            &mut bytes, 176, 0x6474e552, 4, 0x1000, 0x5000, 0x800, 0x1000, 1,
+        );
+        let platform = Fake {
+            page_size: Some(0x4000),
+            ..Fake::with(&[("main", bytes)])
+        };
+        let mut loader = LoaderContext::new(platform, Machine::Aarch64);
+        let result = loader.load("main");
+        if can_seal {
+            result.unwrap();
+            assert!(
+                loader
+                    .platform()
+                    .protections
+                    .iter()
+                    .any(|&(addr, size, flags)| {
+                        addr == 0x104000
+                            && size == 0x4000
+                            && flags.read
+                            && !flags.write
+                            && !flags.execute
+                    })
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::Unsupported(
+                    "RELRO shares a protection page with writable data"
+                ))
+            ));
+            assert!(loader.platform().mappings.is_empty());
+        }
+    }
+}
+
 fn tls_fixture() -> Vec<u8> {
     let mut symbol = Definition::export("thread_counter", 0);
     symbol.kind = 6;
@@ -772,7 +839,10 @@ fn main_tls_is_initialized_after_relocations_and_lookup_uses_thread_pointer() {
         Some(0x800010)
     );
     loader.platform_mut().tls_base = 0x900000;
-    assert_eq!(loader.lookup_global("thread_counter").unwrap(), Some(0x900010));
+    assert_eq!(
+        loader.lookup_global("thread_counter").unwrap(),
+        Some(0x900010)
+    );
     loader.load("later").unwrap();
     assert_eq!(loader.platform().tls_initializations, 1);
 }
@@ -825,4 +895,101 @@ fn ordinary_relocation_cannot_use_a_thread_local_address() {
     assert!(unsafe { loader.load_existing("main", 0x200000) }.is_err());
     assert_eq!(loader.platform().mappings[&0x200000], vec![42; 0x2000]);
     assert_eq!(loader.platform().tls_initializations, 0);
+}
+
+#[test]
+fn dso_relro_uses_logical_pages_with_a_large_main_granule() {
+    let bytes = Fixture {
+        relro: true,
+        ..Fixture::default()
+    }.bytes();
+    let platform = Fake {
+        page_size: Some(0x4000),
+        independent_dsos: true,
+        ..Fake::with(&[("dso", bytes)])
+    };
+    assert_eq!(platform.object_page_size(true), 0x4000);
+    let mut loader = LoaderContext::new(platform, Machine::Aarch64);
+    let id = loader.load("dso").unwrap();
+    assert_eq!(loader.object(id).unwrap().page_size, PAGE_SIZE);
+    assert!(loader.platform().protections.iter().any(|&(a, n, p)|
+        a == 0x101000 && n == PAGE_SIZE && p.read && !p.write && !p.execute));
+}
+
+/// The RX and RW file offsets have different, nonzero residues in a native page.
+fn aligned_scarlet_dso() -> Vec<u8> {
+    let mut bytes = Fixture::default().bytes();
+    bytes[7] = b'S';
+    ph(&mut bytes, 64, 1, 5, 0x400, 0x400, 0x200, 0x1000, 0x4000);
+    ph(&mut bytes, 120, 1, 6, 0x1000, 0x9000, 0x800, 0x4000, 0x4000);
+    // Seal the leading 0x3000 bytes of the RW segment up to a native boundary.
+    ph(&mut bytes, 176, 0x6474e552, 4, 0x1000, 0x9000, 0x800, 0x3000, 1);
+    bytes
+}
+
+#[test]
+fn scarlet_dsos_choose_independent_pages_and_preserve_relro_and_holes() {
+    let large = aligned_scarlet_dso();
+    let mut small = large.clone();
+    // One writable 4 KiB quarter follows RELRO within the same native page.
+    put64(&mut small, 176 + 40, 0x2000);
+    let platform = Fake {
+        page_size: Some(0x4000),
+        independent_dsos: true,
+        ..Fake::with(&[("large", large), ("small", small)])
+    };
+    let mut loader = LoaderContext::new(platform, Machine::Aarch64);
+    for (name, size, last_ro, first_rw) in [
+        ("large", 0x4000, 0xbfff, 0xc000),
+        ("small", 0x1000, 0xafff, 0xb000),
+    ] {
+        let id = loader.load(name).unwrap();
+        let obj = loader.object(id).unwrap();
+        assert_eq!(obj.page_size, size);
+        let flags = |offset| {
+            let addr = obj.bias + offset;
+            loader.platform().protections.iter()
+                .find(|&&(base, n, _)| (base..base + n).contains(&addr)).unwrap().2
+        };
+        assert!(flags(0x400).execute);
+        assert_eq!(flags(0x3fff).execute, size == 0x4000);
+        assert_eq!(flags(0x4000), Permissions::default());
+        assert!(flags(last_ro).read && !flags(last_ro).write && !flags(last_ro).execute);
+        assert!(flags(first_rw).write && !flags(first_rw).execute);
+    }
+}
+
+#[test]
+fn scarlet_dso_native_pages_require_an_eligible_abi_and_each_load() {
+    let original = aligned_scarlet_dso();
+    let mut foreign = original.clone();
+    foreign[7] = 0;
+    let mut rv = original.clone();
+    put16(&mut rv, 18, 243);
+    let mut weak = original.clone();
+    put64(&mut weak, 120 + 48, 0x1000);
+    let mut touching = original.clone();
+    put64(&mut touching, 64 + 40, 0x8000 - 0x400);
+    let mut crossing = touching.clone();
+    put64(&mut crossing, 64 + 40, 0x8001 - 0x400);
+    let mut writable_before_relro = original.clone();
+    ph(&mut writable_before_relro, 176, 0x6474e552, 4, 0, 0xa000, 0, 0x2000, 1);
+    for (bytes, machine, process_page, expected) in [
+        (foreign, Machine::Aarch64, 0x4000, PAGE_SIZE),
+        (rv, Machine::Riscv64, 0x4000, PAGE_SIZE),
+        (original, Machine::Aarch64, PAGE_SIZE, PAGE_SIZE),
+        (weak, Machine::Aarch64, 0x4000, PAGE_SIZE),
+        (touching, Machine::Aarch64, 0x4000, 0x4000),
+        (crossing, Machine::Aarch64, 0x4000, PAGE_SIZE),
+        (writable_before_relro, Machine::Aarch64, 0x4000, PAGE_SIZE),
+    ] {
+        let platform = Fake {
+            page_size: Some(process_page),
+            independent_dsos: true,
+            ..Fake::with(&[("obj", bytes)])
+        };
+        let mut loader = LoaderContext::new(platform, machine);
+        let id = loader.load("obj").unwrap();
+        assert_eq!(loader.object(id).unwrap().page_size, expected);
+    }
 }

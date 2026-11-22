@@ -413,6 +413,26 @@ impl MemoryMappingOps for MemfdMapping {
         true
     }
 
+    #[cfg(feature = "hosted")]
+    fn visit_resident_extents(
+        &self,
+        start: usize,
+        count: usize,
+        visit: &mut dyn FnMut(usize, usize, u64),
+    ) {
+        let state = self.backing.state.read();
+        let file_page = self.offset / PAGE_SIZE;
+        let available = self
+            .length
+            .div_ceil(PAGE_SIZE)
+            .min(state.pages.len().saturating_sub(file_page));
+        for page in start..start.saturating_add(count).min(available) {
+            if let Some(pa) = state.pages[file_page + page] {
+                visit(page, 1, pa);
+            }
+        }
+    }
+
     fn resolve_fault(
         &self,
         _access: &crate::object::capability::memory_mapping::AccessKind,

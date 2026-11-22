@@ -23,6 +23,7 @@ use super::mount_tree::MountPoint;
 use crate::fs::{
     FileMetadata, FileObject, FileSystemError, FileSystemErrorKind, FileType, SeekFrom,
 };
+use crate::object::capability::memory_mapping::{MappingError, MappingRequest, PreparedMapping};
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
@@ -708,6 +709,22 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        let ceiling =
+            self.maximum_mapping_permissions() & self.grant.mapping_ceiling(request.is_shared);
+        if request.permissions & !ceiling != 0 {
+            return Err(MappingError::PermissionDenied);
+        }
+        if !self.readable() {
+            return Err(MappingError::Unsupported);
+        }
+        let mut prepared = self.inner.prepare_mapping(request)?;
+        prepared.maximum_permissions &= ceiling;
+        #[cfg(feature = "hosted")]
+        crate::hosted::file_mapping::prepare(&self.inner, request, &mut prepared)?;
+        Ok(prepared)
+    }
+
     fn mapping_owner_for_range(
         &self,
         offset: usize,

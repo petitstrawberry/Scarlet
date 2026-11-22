@@ -39,6 +39,7 @@ use core::{
 };
 
 use crate::device::{Device, DeviceType, manager::DeviceManager};
+use crate::object::capability::memory_mapping::{MappingError, MappingRequest, PreparedMapping};
 use crate::object::capability::{ControlOps, StreamError, StreamOps};
 use crate::{
     driver_initcall,
@@ -877,6 +878,13 @@ impl ControlOps for DevFileObject {
 }
 
 impl MemoryMappingOps for DevFileObject {
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        self.device_open
+            .as_ref()
+            .ok_or(MappingError::Unsupported)?
+            .prepare_mapping(request)
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,
@@ -974,6 +982,12 @@ impl FileObject for DevFileObject {
 }
 
 impl crate::object::capability::selectable::Selectable for DevFileObject {
+    fn is_hung_up(&self) -> bool {
+        self.device_open
+            .as_ref()
+            .is_some_and(|device| device.as_ref().is_hung_up())
+    }
+
     fn current_ready(
         &self,
         interest: crate::object::capability::selectable::ReadyInterest,

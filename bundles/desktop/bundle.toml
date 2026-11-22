@@ -312,19 +312,8 @@ bin = "carmine"
 to = "/bin/carmine"
 
 [[layers]]
-kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "09b9414b5e2c9f8e645133cf7251e5e670a27eaf" }
-package = "myrica"
-bin = "myrica"
-architectures = ["riscv32", "riscv64"]
-to = "/bin/myrica"
-
-# Myrica owns the WebKit browser and its Linux-view Widevine host recipe.
-[[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "09b9414b5e2c9f8e645133cf7251e5e670a27eaf" }
-subdir = "platforms/scarlet"
-architectures = ["aarch64"]
+path = "../myrica/{arch}.toml"
 
 [[layers]]
 kind = "cargo"

@@ -35,7 +35,8 @@ use crate::device::{
 };
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{
-    AccessKind, AccessOp, ResolveFaultError, ResolveFaultResult,
+    AccessKind, AccessOp, MappingError, MappingRequest, PreparedMapping, ResolveFaultError,
+    ResolveFaultResult,
 };
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
@@ -246,6 +247,7 @@ struct FramebufferMapping {
     length: usize,
     offset: usize,
     write_protect: bool,
+    paddr: u64,
 }
 
 #[derive(Debug)]
@@ -349,10 +351,64 @@ pub struct FramebufferCharDevice {
     device_manager_addr: Option<usize>,
 }
 
-struct CurrentFramebufferInfo {
-    config: FramebufferConfig,
-    physical_addr: u64,
-    size: usize,
+type CurrentFramebufferInfo = super::manager::FramebufferSnapshot;
+
+/// A VMA owns its admitted allocation, independently of later display modes.
+struct FramebufferMappingOwner {
+    backing: CurrentFramebufferInfo,
+    offset: usize,
+    length: usize,
+    endpoint: FramebufferCharDevice,
+}
+
+impl MemoryMappingOps for FramebufferMappingOwner {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.length)
+        {
+            return Err("Framebuffer mapping range exceeded");
+        }
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            self.backing.physical_addr + (self.offset + offset) as u64,
+            3,
+            true,
+        )
+        .with_memory_attribute(self.backing.memory_attribute))
+    }
+    fn resolve_fault(
+        &self,
+        access: &AccessKind,
+        page: usize,
+        _: usize,
+    ) -> Result<ResolveFaultResult, ResolveFaultError> {
+        let offset = page
+            .checked_mul(PAGE_SIZE)
+            .ok_or(ResolveFaultError::Invalid)?;
+        let info = self
+            .get_mapping_info(offset, PAGE_SIZE)
+            .map_err(|_| ResolveFaultError::Unmapped)?;
+        if matches!(access.op, AccessOp::Store) {
+            self.endpoint.mark_legacy_dirty();
+        }
+        Ok(ResolveFaultResult {
+            paddr_page_base: info.paddr,
+            is_tail: false,
+        })
+    }
+    fn fault_page_permissions(&self, access: &AccessKind, permissions: usize) -> usize {
+        self.endpoint.fault_page_permissions(access, permissions)
+    }
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, _: usize) {
+        self.endpoint.on_mapped(vaddr, paddr, length, self.offset);
+    }
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        self.endpoint.on_unmapped(vaddr, length);
+    }
 }
 
 impl FramebufferCharDevice {
@@ -445,27 +501,7 @@ impl FramebufferCharDevice {
     }
 
     fn current_framebuffer_info(&self) -> Result<CurrentFramebufferInfo, &'static str> {
-        if let Some(device) = self
-            .device_manager()
-            .get_device(self.fb_resource.source_device_id)
-        {
-            if let Some(graphics_device) = device.as_graphics_device() {
-                let config = graphics_device.get_framebuffer_config()?;
-                let physical_addr = graphics_device.get_framebuffer_address()?;
-                let size = Self::page_aligned_size(config.size());
-                return Ok(CurrentFramebufferInfo {
-                    config,
-                    physical_addr,
-                    size,
-                });
-            }
-        }
-
-        Ok(CurrentFramebufferInfo {
-            config: self.fb_resource.config.clone(),
-            physical_addr: self.fb_resource.physical_addr,
-            size: self.fb_resource.size,
-        })
+        self.fb_resource.snapshot(self.device_manager())
     }
 
     fn current_task_id() -> usize {
@@ -477,7 +513,7 @@ impl FramebufferCharDevice {
         vaddr: usize,
         length: usize,
         offset: usize,
-        write_protect: bool,
+        paddr: u64,
     ) {
         let task_id = Self::current_task_id();
         let mapping = FramebufferMapping {
@@ -485,7 +521,8 @@ impl FramebufferCharDevice {
             vaddr,
             length,
             offset,
-            write_protect,
+            write_protect: paddr != 0,
+            paddr,
         };
         self.mappings.write().insert((task_id, vaddr), mapping);
     }
@@ -551,6 +588,7 @@ impl FramebufferCharDevice {
                 .saturating_add(1),
             offset: base_offset,
             write_protect: memory_map.is_shared,
+            paddr: memory_map.pmarea.start.saturating_sub(map_vm_offset as u64),
         };
         self.mappings
             .write()
@@ -560,7 +598,7 @@ impl FramebufferCharDevice {
 
     fn write_protect_mappings(
         mappings: &IrqRwSpinLock<BTreeMap<(usize, usize), FramebufferMapping>>,
-        info: &CurrentFramebufferInfo,
+        _info: &CurrentFramebufferInfo,
     ) {
         let snapshot: Vec<FramebufferMapping> = mappings.read().values().cloned().collect();
         for mapping in snapshot {
@@ -570,6 +608,7 @@ impl FramebufferCharDevice {
             let Some(task) = get_task_by_id(mapping.task_id) else {
                 continue;
             };
+            let _transaction = task.vm_manager.mapping_transaction();
             let Some(mut root_pagetable) = task.vm_manager.get_root_page_table() else {
                 continue;
             };
@@ -581,25 +620,18 @@ impl FramebufferCharDevice {
 
             let mut page_offset = 0usize;
             while page_offset < mapping.length {
-                let object_offset = mapping.offset.saturating_add(page_offset);
-                if object_offset >= info.size {
-                    break;
-                }
-
                 let page_vaddr = mapping.vaddr.saturating_add(page_offset);
-                if root_pagetable.translate(page_vaddr).is_none() {
+                let Some(paddr) = root_pagetable.translate(page_vaddr) else {
+                    page_offset = page_offset.saturating_add(PAGE_SIZE);
+                    continue;
+                };
+
+                // Do not protect a different allocation that reused this virtual address.
+                if mapping.paddr.checked_add(page_offset as u64) != Some(paddr) {
                     page_offset = page_offset.saturating_add(PAGE_SIZE);
                     continue;
                 }
-
-                root_pagetable.map(
-                    page_vaddr,
-                    info.physical_addr.saturating_add(object_offset as u64),
-                    0x1 | 0x08,
-                    memory_attribute,
-                    true,
-                    false,
-                );
+                root_pagetable.map(page_vaddr, paddr, 0x1 | 0x08, memory_attribute, true, false);
                 page_offset = page_offset.saturating_add(PAGE_SIZE);
             }
         }
@@ -621,27 +653,7 @@ impl FbCompatFlushHandler {
     }
 
     fn current_framebuffer_info(&self) -> Result<CurrentFramebufferInfo, &'static str> {
-        if let Some(device) = self
-            .device_manager()
-            .get_device(self.fb_resource.source_device_id)
-        {
-            if let Some(graphics_device) = device.as_graphics_device() {
-                let config = graphics_device.get_framebuffer_config()?;
-                let physical_addr = graphics_device.get_framebuffer_address()?;
-                let size = FramebufferCharDevice::page_aligned_size(config.size());
-                return Ok(CurrentFramebufferInfo {
-                    config,
-                    physical_addr,
-                    size,
-                });
-            }
-        }
-
-        Ok(CurrentFramebufferInfo {
-            config: self.fb_resource.config.clone(),
-            physical_addr: self.fb_resource.physical_addr,
-            size: self.fb_resource.size,
-        })
+        self.fb_resource.snapshot(self.device_manager())
     }
 
     fn trigger_display_update(&self, region: DisplayRegion) -> Result<(), &'static str> {
@@ -912,6 +924,69 @@ impl ControlOps for FramebufferCharDevice {
 }
 
 impl MemoryMappingOps for FramebufferCharDevice {
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        let maximum_permissions = self.new_mapping_permissions(request.is_shared);
+        if request.permissions & !maximum_permissions != 0 {
+            return Err(MappingError::PermissionDenied);
+        }
+        let backing = self
+            .current_framebuffer_info()
+            .map_err(MappingError::InvalidRange)?;
+        let available =
+            backing
+                .size
+                .checked_sub(request.offset)
+                .ok_or(MappingError::InvalidRange(
+                    "Framebuffer offset exceeds backing",
+                ))?;
+        let length = if request.allow_shorter {
+            request.length.min(available)
+        } else {
+            request.length
+        };
+        if length == 0
+            || length > available
+            || !request.offset.is_multiple_of(PAGE_SIZE)
+            || !length.is_multiple_of(PAGE_SIZE)
+            || backing.physical_addr == 0
+            || !backing.physical_addr.is_multiple_of(PAGE_SIZE as u64)
+        {
+            return Err(MappingError::InvalidRange(
+                "Invalid framebuffer mapping range",
+            ));
+        }
+        let endpoint = Self {
+            fb_resource: self.fb_resource.clone(),
+            mappings: self.mappings.clone(),
+            dirty_state: self.dirty_state.clone(),
+            flush_handler: self.flush_handler.clone(),
+            #[cfg(test)]
+            device_manager_addr: self.device_manager_addr,
+        };
+        let owner = Arc::new(FramebufferMappingOwner {
+            backing,
+            offset: request.offset,
+            length,
+            endpoint,
+        });
+        let info = if request.private_demand {
+            None
+        } else {
+            Some(
+                owner
+                    .get_mapping_info(0, length)
+                    .map_err(MappingError::InvalidRange)?,
+            )
+        };
+        Ok(PreparedMapping {
+            length,
+            info,
+            owner: Some(owner.clone()),
+            notification: Some(owner),
+            maximum_permissions,
+        })
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,
@@ -919,14 +994,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let info = self.current_framebuffer_info()?;
 
-        let source = self
-            .device_manager()
-            .get_device(self.fb_resource.source_device_id)
-            .ok_or("Framebuffer source device not found")?;
-        let memory_attribute = source
-            .as_graphics_device()
-            .ok_or("Framebuffer source device is not graphics-capable")?
-            .framebuffer_memory_attribute();
+        let memory_attribute = info.memory_attribute;
 
         // VMM requires page-aligned physical mappings.
         if offset % crate::environment::PAGE_SIZE != 0 {
@@ -966,7 +1034,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
     }
 
     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
-        self.record_mapping_for_current_task(vaddr, length, offset, paddr != 0);
+        self.record_mapping_for_current_task(vaddr, length, offset, paddr);
     }
 
     fn on_unmapped(&self, vaddr: usize, length: usize) {
@@ -1049,14 +1117,11 @@ impl Selectable for FramebufferCharDevice {
 impl FramebufferCharDevice {
     /// Build a FbVarScreenInfo reflecting the current framebuffer configuration
     fn current_var_info(&self) -> FbVarScreenInfo {
-        let info = self
-            .current_framebuffer_info()
-            .unwrap_or_else(|_| CurrentFramebufferInfo {
-                config: self.fb_resource.config.clone(),
-                physical_addr: self.fb_resource.physical_addr,
-                size: self.fb_resource.size,
-            });
-        let config = &info.config;
+        let info = self.current_framebuffer_info().ok();
+        let config = info
+            .as_ref()
+            .map(|info| &info.config)
+            .unwrap_or(&self.fb_resource.config);
 
         let mut var_info = FbVarScreenInfo::default();
         var_info.xres = config.width;
@@ -2116,5 +2181,201 @@ mod tests {
             info.memory_attribute,
             crate::vm::vmem::MemoryAttribute::DeviceBurstable
         );
+    }
+}
+
+// Shared regression body also runnable by a hosted, non-guest harness.
+#[cfg(test)]
+mod resize_lifetime_tests {
+    extern crate alloc;
+    use super::FramebufferCharDevice;
+    use crate::device::{
+        Device, DeviceType,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, GraphicsDevice, PixelFormat,
+            manager::GraphicsManager, output::DisplayRegion,
+        },
+        manager::DeviceManager,
+    };
+    use crate::environment::PAGE_SIZE;
+    use crate::mem::page::ContiguousPages;
+    use crate::object::capability::memory_mapping::{AccessKind, AccessOp, MappingRequest};
+    use crate::object::capability::{
+        ControlOps, MemoryMappingInfo, MemoryMappingOps,
+        selectable::{ReadyInterest, SelectWaitOutcome, Selectable},
+    };
+    use crate::sync::IrqRwSpinLock;
+    use alloc::sync::Arc;
+
+    struct Resizable(IrqRwSpinLock<Arc<GenericGraphicsDevice>>);
+    impl Device for Resizable {
+        fn device_type(&self) -> DeviceType {
+            DeviceType::Graphics
+        }
+        fn name(&self) -> &'static str {
+            "resize-lifetime-test"
+        }
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+        fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
+            Some(self)
+        }
+    }
+    impl ControlOps for Resizable {}
+    impl MemoryMappingOps for Resizable {
+        fn get_mapping_info(&self, _: usize, _: usize) -> Result<MemoryMappingInfo, &'static str> {
+            Err("Use fb endpoint")
+        }
+    }
+    impl Selectable for Resizable {
+        fn wait_until_ready(
+            &self,
+            _: ReadyInterest,
+            _: &mut crate::arch::Trapframe,
+            _: Option<u64>,
+            _: u64,
+        ) -> SelectWaitOutcome {
+            SelectWaitOutcome::Ready
+        }
+    }
+    impl GraphicsDevice for Resizable {
+        fn get_display_name(&self) -> &'static str {
+            "resize-lifetime-test"
+        }
+        fn init_graphics(&self) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn connector_mapping_device(
+            &self,
+            _: u32,
+        ) -> Result<Option<Arc<dyn Device>>, &'static str> {
+            Ok(Some(self.0.read().clone()))
+        }
+        // Consumers must obtain the exact allocation first, not sample these independently.
+        fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
+            Err("Unpinned config")
+        }
+        fn get_framebuffer_address(&self) -> Result<u64, &'static str> {
+            Err("Unpinned address")
+        }
+        fn present_framebuffer_region(
+            &self,
+            _: &FramebufferConfig,
+            _: u64,
+            _: DisplayRegion,
+        ) -> Result<(), &'static str> {
+            Ok(())
+        }
+    }
+    fn backing(pages: &ContiguousPages, width: u32) -> Arc<GenericGraphicsDevice> {
+        let mut device = GenericGraphicsDevice::new("resize-backing");
+        device.set_framebuffer_config(FramebufferConfig::new(width, 1, PixelFormat::BGRA8888));
+        device.set_framebuffer_address(pages.as_paddr());
+        Arc::new(device)
+    }
+    #[test_case]
+    fn resize_retains_old_vma_and_manager_accesses_current_backing() {
+        let old_pages = ContiguousPages::new(2).unwrap();
+        let new_pages = ContiguousPages::new(2).unwrap();
+        let old = backing(&old_pages, (2 * PAGE_SIZE / 4) as u32);
+        let old_weak = Arc::downgrade(&old);
+        let output = Arc::new(Resizable(IrqRwSpinLock::new(old)));
+        let devices = DeviceManager::get_manager();
+        let id = devices.register_device(output.clone());
+        let graphics = GraphicsManager::new();
+        graphics
+            .register_framebuffer_from_device(id, output.clone())
+            .unwrap();
+        let resource = graphics.get_framebuffer("fb0").unwrap();
+        let endpoint = FramebufferCharDevice::new(resource.clone());
+        let request = MappingRequest {
+            offset: PAGE_SIZE,
+            length: PAGE_SIZE,
+            permissions: 3,
+            is_shared: true,
+            private_demand: false,
+            allow_shorter: false,
+        };
+        let old_mapping = endpoint.prepare_mapping(request).unwrap();
+        assert_eq!(
+            old_mapping.info.unwrap().paddr,
+            old_pages.as_paddr() + PAGE_SIZE as u64
+        );
+        let private_mapping = endpoint
+            .prepare_mapping(MappingRequest {
+                private_demand: true,
+                is_shared: false,
+                ..request
+            })
+            .unwrap();
+        assert!(private_mapping.info.is_none());
+        *output.0.write() = backing(&new_pages, (PAGE_SIZE / 4) as u32);
+        assert!(old_weak.upgrade().is_some());
+        assert!(endpoint.prepare_mapping(request).is_err());
+        let new_mapping = endpoint
+            .prepare_mapping(MappingRequest {
+                offset: 0,
+                ..request
+            })
+            .unwrap();
+        assert_eq!(new_mapping.info.unwrap().paddr, new_pages.as_paddr());
+        let owner = old_mapping.owner.as_ref().unwrap();
+        let fault = AccessKind {
+            op: AccessOp::Load,
+            vaddr: 0x10000,
+            size: Some(1),
+        };
+        assert_eq!(
+            owner
+                .resolve_fault(&fault, 0, 0x10000)
+                .unwrap()
+                .paddr_page_base,
+            old_pages.as_paddr() + PAGE_SIZE as u64
+        );
+        // An inherited owner and an old open handle must not pin all future mappings.
+        let inherited = owner.clone();
+        drop(old_mapping);
+        assert!(old_weak.upgrade().is_some());
+        drop(inherited);
+        assert!(old_weak.upgrade().is_some());
+        assert_eq!(
+            private_mapping
+                .owner
+                .as_ref()
+                .unwrap()
+                .resolve_fault(&fault, 0, 0x10000)
+                .unwrap()
+                .paddr_page_base,
+            old_pages.as_paddr() + PAGE_SIZE as u64
+        );
+        drop(private_mapping);
+        assert!(old_weak.upgrade().is_none());
+        graphics.write_byte_to_framebuffer("fb0", 0, 0x42).unwrap();
+        assert_eq!(graphics.read_byte_from_framebuffer("fb0", 0), Some(0x42));
+        graphics.write_framebuffer("fb0", 1, &[0x43, 0x44]).unwrap();
+        let mut bytes = [0; 3];
+        assert_eq!(graphics.read_framebuffer("fb0", 0, &mut bytes), 3);
+        assert_eq!(bytes, [0x42, 0x43, 0x44]);
+        assert!(
+            graphics
+                .write_byte_to_framebuffer("fb0", PAGE_SIZE, 1)
+                .is_err()
+        );
+        assert_eq!(graphics.read_byte_from_framebuffer("fb0", PAGE_SIZE), None);
+        unsafe {
+            assert_eq!(*(old_pages.as_ptr() as *const u8), 0);
+            assert_eq!(*(new_pages.as_ptr() as *const u8), 0x42);
+        }
+        if let Some(id) = *resource.created_char_device_id.read() {
+            devices.unregister_device(id);
+        }
+        if let Some(id) = *resource.created_display_device_id.read() {
+            devices.unregister_device(id);
+        }
+        devices.unregister_device(id);
     }
 }

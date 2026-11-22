@@ -1,0 +1,4 @@
+abi=2
+name=scarlet-hosted
+gpu_backend=scarlet-hosted
+library=libsgfx_hosted.so

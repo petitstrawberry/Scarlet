@@ -41,6 +41,8 @@ use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
 use self::time::PosixTimer;
 use crate::arch::Trapframe;
+#[cfg(target_arch = "aarch64")]
+use crate::sync::Mutex;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 
 const MAX_FDS: usize = 1024;
@@ -161,7 +163,7 @@ pub struct LinuxAbi {
     pub(crate) keep_caps: bool,
     pub(crate) keep_caps_locked: bool,
     #[cfg(target_arch = "aarch64")]
-    pub(crate) signal_restorer: Arc<IrqSpinLock<Option<usize>>>,
+    pub(crate) signal_restorer: Arc<Mutex<Option<usize>>>,
 }
 
 impl Default for LinuxAbi {
@@ -181,7 +183,7 @@ impl Default for LinuxAbi {
             keep_caps: false,
             keep_caps_locked: false,
             #[cfg(target_arch = "aarch64")]
-            signal_restorer: Arc::new(IrqSpinLock::new(None)),
+            signal_restorer: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -225,7 +227,7 @@ impl LinuxAbi {
         #[cfg(target_arch = "aarch64")]
         {
             let restorer = *self.signal_restorer.lock();
-            self.signal_restorer = Arc::new(IrqSpinLock::new(restorer));
+            self.signal_restorer = Arc::new(Mutex::new(restorer));
         }
     }
 

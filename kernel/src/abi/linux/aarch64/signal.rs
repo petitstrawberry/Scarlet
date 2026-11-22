@@ -9,10 +9,10 @@ use crate::abi::linux::generic::{
     signal::{LinuxSignal, SignalAction, SignalInfo},
 };
 use crate::arch::{Trapframe, fpu::FpuContext};
-use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
+use crate::environment::USER_LOWER_CANONICAL_END;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::task::{Task, mytask};
-use alloc::{sync::Arc, vec};
+use alloc::vec;
 
 const UCONTEXT: usize = 128;
 const MASK: usize = UCONTEXT + 40;
@@ -118,37 +118,10 @@ fn return_stub(abi: &LinuxAbi, task: &Task) -> Result<usize, &'static str> {
     if let Some(address) = *cached {
         return Ok(address);
     }
-    use crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner;
-    use crate::vm::vmem::{MemoryArea, PhysicalMemoryArea, VirtualMemoryMap};
-    let map = VirtualMemoryMap::new(
-        PhysicalMemoryArea::new(0, 0),
-        MemoryArea::new(0, PAGE_SIZE - 1),
-        0x0d,
-        false,
-        Some(Arc::new(AnonymousPageOwner::new())),
-    );
-    let address = task.vm_manager.add_memory_map_anywhere(map)?;
-    let initialize = || -> Result<(), &'static str> {
-        task.vm_manager.lazy_map_page(address)?;
-        let kva = task
-            .vm_manager
-            .translate_to_kva(address)
-            .ok_or("signal restorer mapping failed")?;
-        // mov x8, #139; svc #0. Only the kernel writes this read/execute page.
-        let code = [0xd280_1168u32, 0xd400_0001u32];
-        unsafe {
-            core::ptr::copy_nonoverlapping(code.as_ptr(), kva as *mut u32, code.len());
-        }
-        crate::arch::sync_icache_for_execution(kva, 8);
-        Ok(())
-    };
-    if let Err(error) = initialize() {
-        let removed = task.vm_manager.remove_memory_map_range(address, PAGE_SIZE);
-        crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mappings(
-            task, &removed,
-        );
-        return Err(error);
-    }
+    // mov x8, #139; svc #0 (rt_sigreturn).
+    let address = task
+        .vm_manager
+        .map_user_instructions(&[0xd280_1168, 0xd400_0001])?;
     *cached = Some(address);
     Ok(address)
 }
@@ -406,6 +379,8 @@ pub fn dispatch_arch_syscall(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::PAGE_SIZE;
+    use alloc::sync::Arc;
 
     #[test_case]
     fn signal_frame_preserves_signal_info_sender_and_payload() {

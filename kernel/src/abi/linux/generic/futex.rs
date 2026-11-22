@@ -2,12 +2,13 @@ use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::Trapframe;
 use crate::sync::{IrqSpinLock, Once};
 use crate::timer::{TimerHandle, TimerHandler, add_timer, get_time_ns};
+use crate::vm::addr::phys_to_virt;
 use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 // Minimal FUTEX op codes (match Linux)
 const FUTEX_WAIT: u32 = 0;
@@ -150,16 +151,19 @@ fn init_futex_queues() -> IrqSpinLock<BTreeMap<FutexKey, Arc<FutexQueue>>> {
     IrqSpinLock::new(BTreeMap::new())
 }
 
-fn futex_key(task: &crate::task::Task, uaddr: usize, private: bool) -> Option<FutexKey> {
+fn futex_key(
+    task: &crate::task::Task,
+    uaddr: usize,
+    private: bool,
+    physical: impl FnOnce() -> Option<u64>,
+) -> Option<FutexKey> {
     if private {
         Some(FutexKey::Private {
             thread_group_id: task.get_thread_group_id(),
             address: uaddr,
         })
     } else {
-        task.vm_manager
-            .translate_to_phys(uaddr)
-            .map(|physical_address| FutexKey::Shared { physical_address })
+        physical().map(|physical_address| FutexKey::Shared { physical_address })
     }
 }
 
@@ -402,11 +406,13 @@ pub fn wake_task_address(task: &crate::task::Task, uaddr: usize, max: usize) -> 
     }
 
     let mut woken = 0;
-    if let Some(private_key) = futex_key(task, uaddr, true) {
+    if let Some(private_key) = futex_key(task, uaddr, true, || None) {
         woken += wake_key(private_key, max, FUTEX_BITSET_MATCH_ANY);
     }
     if woken < max
-        && let Some(shared_key) = futex_key(task, uaddr, false)
+        && let Some(shared_key) = futex_key(task, uaddr, false, || {
+            task.vm_manager.translate_to_phys(uaddr)
+        })
     {
         woken += wake_key(shared_key, max - woken, FUTEX_BITSET_MATCH_ANY);
     }
@@ -464,10 +470,6 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let cmd = op_raw & FUTEX_CMD_MASK; // strip PRIVATE/CLOCK_REALTIME flags
     let private = op_raw & FUTEX_PRIVATE_FLAG != 0;
-    let key = match futex_key(&task, uaddr, private) {
-        Some(key) => key,
-        None => return super::errno::to_result(super::errno::EFAULT),
-    };
     match cmd {
         FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             let wait_bitset = if cmd == FUTEX_WAIT_BITSET {
@@ -482,6 +484,11 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Ok(deadline) => deadline,
                 Err(error) => return super::errno::to_result(error),
             };
+            let mapping = task.vm_manager.mapping_transaction();
+            let Some(physical) = mapping.raw_physical(uaddr) else {
+                return super::errno::to_result(super::errno::EFAULT);
+            };
+            let key = futex_key(&task, uaddr, private, || Some(physical)).unwrap();
             let tid = task.get_id();
             let queue = get_futex_queue(key);
             let outcome = Arc::new(FutexWaitOutcome::new(key));
@@ -493,16 +500,8 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 // preserves futex semantics without remembering wakeups: a wake
                 // racing after the compare either sees this waiter or the waiter
                 // observes the changed value and returns EAGAIN.
-                let paddr = match task.vm_manager.translate_to_kva(uaddr) {
-                    Some(pa) => pa,
-                    None => {
-                        drop(waiters);
-                        drop(queue);
-                        remove_unused_queue(key);
-                        return super::errno::to_result(super::errno::EFAULT);
-                    }
-                };
-                let cur_val = unsafe { core::ptr::read_volatile(paddr as *const i32) };
+                let word = unsafe { &*(phys_to_virt(physical) as *const AtomicU32) };
+                let cur_val = word.load(Ordering::SeqCst) as i32;
                 if cur_val != val {
                     Some(super::errno::EAGAIN)
                 } else {
@@ -526,6 +525,7 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             };
+            drop(mapping);
             if let Some(error) = wait_error {
                 drop(queue);
                 remove_unused_queue(key);
@@ -579,6 +579,10 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             } else {
                 FUTEX_BITSET_MATCH_ANY
             };
+            let mapping = task.vm_manager.mapping_transaction();
+            let Some(key) = futex_key(&task, uaddr, private, || mapping.raw_physical(uaddr)) else {
+                return super::errno::to_result(super::errno::EFAULT);
+            };
             let woken = wake_key(key, val as usize, wake_bitset);
             // Return number of woken tasks
             woken
@@ -593,21 +597,32 @@ pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if op_raw & FUTEX_CLOCK_REALTIME != 0 {
                 return super::errno::to_result(super::errno::ENOSYS);
             }
-            if uaddr2 == 0 || task.vm_manager.translate_to_kva(uaddr2).is_none() {
+            if uaddr2 == 0 {
                 return super::errno::to_result(super::errno::EFAULT);
             }
-            let Some(destination) = futex_key(&task, uaddr2, private) else {
+            let mapping = task.vm_manager.mapping_transaction();
+            let Some(destination_physical) = mapping.raw_physical(uaddr2) else {
+                return super::errno::to_result(super::errno::EFAULT);
+            };
+            let destination =
+                futex_key(&task, uaddr2, private, || Some(destination_physical)).unwrap();
+            let source_physical = if cmd == FUTEX_CMP_REQUEUE || !private {
+                let Some(physical) = mapping.raw_physical(uaddr) else {
+                    return super::errno::to_result(super::errno::EFAULT);
+                };
+                Some(physical)
+            } else {
+                None
+            };
+            let Some(key) = futex_key(&task, uaddr, private, || source_physical) else {
                 return super::errno::to_result(super::errno::EFAULT);
             };
             requeue_key(key, destination, val as usize, move_count as usize, || {
                 if cmd == FUTEX_CMP_REQUEUE {
-                    let address = task
-                        .vm_manager
-                        .translate_to_kva(uaddr)
-                        .ok_or(super::errno::EFAULT)?;
+                    let address = phys_to_virt(source_physical.unwrap());
                     // The aligned atomic compare and queue transfer are ordered
                     // against WAIT/WAKE by the same queue locks.
-                    let word = unsafe { &*(address as *const core::sync::atomic::AtomicU32) };
+                    let word = unsafe { &*(address as *const AtomicU32) };
                     if word.load(Ordering::SeqCst) != val3 {
                         return Err(super::errno::EAGAIN);
                     }

@@ -1,4 +1,5 @@
 use crate::environment::PAGE_SIZE;
+use crate::vm::manager::VirtualMemoryManager;
 use scarlet_abi::data_model::AbiDataModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,14 +48,14 @@ fn copy_from_user_inner<const DISJOINT: bool>(
     }
     check_range(user_addr, dst.len())?;
 
+    let mapping = task.vm_manager.mapping_transaction();
     let mut copied = 0usize;
     while copied < dst.len() {
         let current_vaddr = user_addr + copied;
         let page_off = current_vaddr & (PAGE_SIZE - 1);
         let chunk_len = core::cmp::min(dst.len() - copied, PAGE_SIZE - page_off);
-        let kaddr = task
-            .vm_manager
-            .translate_user_to_kva_for_read(current_vaddr)
+        let kaddr = mapping
+            .read_alias(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         if DISJOINT {
@@ -91,38 +92,57 @@ pub fn copy_to_user(
     user_addr: usize,
     src: &[u8],
 ) -> Result<(), UserCopyError> {
+    copy_to_user_inner(&task.vm_manager, user_addr, src)
+        .map(|_| ())
+        .map_err(|(_, error)| error)
+}
+
+/// Copy the accessible prefix and report its length.
+pub(crate) fn copy_to_user_prefix(
+    vm: &VirtualMemoryManager,
+    user_addr: usize,
+    src: &[u8],
+) -> usize {
+    match copy_to_user_inner(vm, user_addr, src) {
+        Ok(count) | Err((count, _)) => count,
+    }
+}
+
+fn copy_to_user_inner(
+    vm: &VirtualMemoryManager,
+    user_addr: usize,
+    src: &[u8],
+) -> Result<usize, (usize, UserCopyError)> {
     if src.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     if user_addr == 0 {
-        return Err(UserCopyError::NullPointer);
+        return Err((0, UserCopyError::NullPointer));
     }
-    check_range(user_addr, src.len())?;
+    check_range(user_addr, src.len()).map_err(|error| (0, error))?;
 
-    task.vm_manager.with_mapping_write(|| {
-        let mut copied = 0usize;
-        while copied < src.len() {
-            let current_vaddr = user_addr + copied;
-            let page_off = current_vaddr & (PAGE_SIZE - 1);
-            let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
-            let kaddr = task
-                .vm_manager
-                .translate_to_kva_for_write(current_vaddr)
-                .ok_or(UserCopyError::TranslationError)?;
+    let mapping = vm.mapping_transaction();
+    let mut copied = 0usize;
+    while copied < src.len() {
+        let current_vaddr = user_addr + copied;
+        let page_off = current_vaddr & (PAGE_SIZE - 1);
+        let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
+        let kaddr = mapping
+            .write_alias(current_vaddr)
+            .ok_or((copied, UserCopyError::TranslationError))?;
 
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    src[copied..copied + chunk_len].as_ptr(),
-                    kaddr as *mut u8,
-                    chunk_len,
-                );
-            }
-
-            copied += chunk_len;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src[copied..copied + chunk_len].as_ptr(),
+                kaddr as *mut u8,
+                chunk_len,
+            );
         }
 
-        Ok(())
-    })
+        copied += chunk_len;
+    }
+
+    Ok(copied)
 }
 
 // Reject arithmetic wrap before any page is translated or copied. This checks

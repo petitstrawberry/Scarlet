@@ -665,6 +665,15 @@ impl PmmInner {
     }
 
     fn alloc_aligned(&mut self, pages: usize, align_pages: usize) -> Option<u64> {
+        self.alloc_congruent(pages, align_pages, 0)
+    }
+
+    fn alloc_congruent(
+        &mut self,
+        pages: usize,
+        align_pages: usize,
+        virtual_base: u64,
+    ) -> Option<u64> {
         if align_pages == 0 || align_pages == 1 {
             return self.alloc(pages);
         }
@@ -682,10 +691,8 @@ impl PmmInner {
         let backing_bytes = backing_pages.checked_mul(PAGE_SIZE)?;
         let requested_buddy_pages = pages.checked_next_power_of_two()?;
         let base_paddr = self.alloc_from_order(backing_order)?;
-        let returned_paddr = match base_paddr
-            .checked_add(align_bytes as u64 - 1)
-            .map(|addr| addr & !(align_bytes as u64 - 1))
-        {
+        let prefix = virtual_base.wrapping_sub(base_paddr) & (align_bytes as u64 - 1);
+        let returned_paddr = match base_paddr.checked_add(prefix) {
             Some(paddr) => paddr,
             None => {
                 self.free(base_paddr, backing_pages);
@@ -891,6 +898,25 @@ pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Optio
             None
         }
     }
+}
+
+pub(super) fn alloc_user_pages(pages: usize, granule: usize, virtual_base: usize) -> Option<u64> {
+    let mut pmm = PMM.lock();
+    let mask = granule - 1;
+    // The ordinary buddy block often already has the requested residue.
+    // In that case it needs neither padding nor an allocation tracking slot.
+    if let Some(base) = pmm.alloc(pages) {
+        if (base as usize ^ virtual_base) & mask == 0 {
+            return Some(base);
+        }
+        pmm.free(base, pages);
+    }
+    let allocation = pmm.alloc_congruent(pages, granule / PAGE_SIZE, virtual_base as u64);
+    drop(pmm);
+    if allocation.is_none() {
+        note_allocation_failure(pages);
+    }
+    allocation
 }
 
 fn aligned_allocation_backing_order(pages: usize, align_pages: usize) -> Option<usize> {

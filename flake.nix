@@ -12,7 +12,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix/3c23906c35053e28d56f3aa9b1d29142535ffab7";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/3e4af540e403130ad0d3750ac08d497a3e06660c";
+      url = "github:petitstrawberry/scarlet-sdk/d3364d1983d00c06daa6d7c26f298b9d7b9f317a";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.scarlet-rust-toolchain.follows = "scarlet-rust-toolchain";
     };
@@ -446,6 +446,8 @@
             SCARLET_RUST_TARGET_TRIPLES = "riscv32gc-unknown-scarlet riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
             SCARLET_CACHED_RUST_TOOLCHAIN = "${rustToolchain}";
             SCARLET_RUST_TOOLCHAIN = "${rustToolchain}";
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+            SCARLET_HOSTED_SLIRP = "${pkgs.libslirp}/lib/libslirp.0.dylib";
           };
 
           dockerEntrypoint = pkgs.writeShellScriptBin "scarlet-dev-entrypoint" ''

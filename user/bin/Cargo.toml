@@ -12,6 +12,7 @@ workspace = "../../.cargo"
 default = ["ui", "wayland-decoration"]
 ui = ["dep:scarlet-ui", "dep:scarlet-ui-macros", "dep:sgfx"]
 wayland-decoration = ["dep:scarlet-ui-core"]
+hosted-init-layout = []
 
 [[bin]]
 name = "init"

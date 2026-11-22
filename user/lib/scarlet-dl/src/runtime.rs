@@ -83,8 +83,14 @@ pub unsafe fn initialize(initial_stack: usize) -> Result<usize, Error> {
     #[cfg(target_arch = "riscv64")]
     let machine = Machine::Riscv64;
     // SAFETY: These ranges describe the kernel-mapped, not-yet-running main.
-    let platform =
-        unsafe { NativePlatform::new(&process.segments, process.path.clone(), process.bytes) };
+    let platform = unsafe {
+        NativePlatform::new(
+            &process.segments,
+            process.path.clone(),
+            process.bytes,
+            process.page_size,
+        )
+    };
     let mut loader = LoaderContext::new(platform, machine);
     for (name, address) in [
         ("environ", std::ptr::addr_of_mut!(ENVIRON) as usize),

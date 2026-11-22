@@ -66,10 +66,22 @@ impl Controls {
         };
 
         let terminal = Terminal::from_file(&tty);
+        // This is a separate open description, so nonblocking controls do not
+        // change the shell's stdin. ReadPolicy timeouts are not a cancellation
+        // mechanism: a reader already asleep in the kernel may never see them.
+        if terminal.set_nonblocking(true).is_err() {
+            return Self {
+                commands: Arc::new(Mutex::new(Vec::new())),
+                running: Arc::new(AtomicBool::new(false)),
+                restore_tty: None,
+                saved_settings: None,
+                input_thread: None,
+            };
+        }
         let saved_settings = terminal.settings().ok();
         let _ = terminal.set_canonical(false);
         let _ = terminal.set_echo(false);
-        let _ = terminal.set_read_policy(ReadPolicy::new(1, 100));
+        let _ = terminal.set_read_policy(ReadPolicy::new(1, 0));
         let _ = terminal.flush_input();
         let restore_tty = tty
             .clone_handle()
@@ -84,10 +96,11 @@ impl Controls {
             let mut buf = [0u8; 8];
             while thread_running.load(Ordering::Acquire) {
                 match tty.read(&mut buf) {
-                    Ok(0) => {}
-                    Err(_) => {
+                    Ok(0) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         sleep(Duration::from_millis(10));
                     }
+                    Err(_) => break,
                     Ok(n) => {
                         let mut pending = thread_commands.lock();
                         for byte in &buf[..n] {
@@ -126,10 +139,6 @@ impl Controls {
 impl Drop for Controls {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
-        if let Some(tty) = self.restore_tty.as_mut() {
-            let terminal = Terminal::from_file(tty);
-            let _ = terminal.set_read_policy(ReadPolicy::new(1, 1));
-        }
         if let Some(input_thread) = self.input_thread.take() {
             let _ = input_thread.join();
         }
@@ -552,7 +561,8 @@ fn run_sas(
             pos_frame += written;
         }
 
-        client.drain().map_err(|_| "SAS drain failed")?;
+        // Keep processing controls while SAS consumes the final partial period.
+        stream.begin_drain();
         loop {
             let read_frames = stream.read_frames();
             let current_ms = segment_start_ms + frames_to_ms(read_frames, wav.sample_rate);
@@ -585,6 +595,9 @@ fn run_sas(
             maybe_print_progress(current_ms, total_ms, &mut next_progress_ms);
             if stream.is_empty() {
                 break;
+            }
+            if stream.is_closed() {
+                return Err("SAS stream closed before playback finished");
             }
             sleep(Duration::from_millis(10));
         }

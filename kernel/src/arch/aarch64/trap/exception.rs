@@ -52,13 +52,6 @@ fn get_daif() -> u64 {
     val
 }
 
-/// Get ESR_EL1 value
-fn get_esr_el1() -> u64 {
-    let val: u64;
-    unsafe { asm!("mrs {}, esr_el1", out(reg) val) };
-    val
-}
-
 /// Exception Class (`ESR_EL1[31:26]`)
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -440,7 +433,7 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
         Err(e) => {
             terminate_current_user_fault(
                 trapframe,
-                get_esr_el1(),
+                trapframe.esr_el1,
                 "instruction",
                 vaddr,
                 false,
@@ -478,7 +471,15 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
             crate::breadcrumb::drop(crate::breadcrumb::DATA_FAULT_DONE, vaddr as u64, 0);
         }
         Err(e) => {
-            terminate_current_user_fault(trapframe, get_esr_el1(), "data", vaddr, is_write, pc, e);
+            terminate_current_user_fault(
+                trapframe,
+                trapframe.esr_el1,
+                "data",
+                vaddr,
+                is_write,
+                pc,
+                e,
+            );
         }
     }
 }

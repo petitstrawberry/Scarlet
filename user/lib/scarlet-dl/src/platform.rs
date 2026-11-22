@@ -1,4 +1,4 @@
-use crate::process::PAGE_SIZE;
+use scarlet_loader_core::PAGE_SIZE;
 #[cfg(target_os = "scarlet")]
 use scarlet_loader_core::Platform;
 use scarlet_loader_core::{Error, File, Permissions};
@@ -11,7 +11,17 @@ struct Mapping {
     start: usize,
     size: usize,
     allocation: Option<(usize, usize)>,
-    pages: Vec<Permissions>,
+    pages: Vec<u8>,
+}
+
+const READ: u8 = 1;
+const WRITE: u8 = 2;
+const EXECUTE: u8 = 4;
+
+fn protection_flags(permissions: Permissions) -> u8 {
+    (u8::from(permissions.read) * READ)
+        | (u8::from(permissions.write) * WRITE)
+        | (u8::from(permissions.execute) * EXECUTE)
 }
 
 /// All pointer access is constrained to allocations owned by this platform or
@@ -19,6 +29,7 @@ struct Mapping {
 pub(crate) struct NativePlatform {
     mappings: Vec<Mapping>,
     main_file: Option<(String, File)>,
+    page_size: usize,
 }
 
 impl NativePlatform {
@@ -29,8 +40,10 @@ impl NativePlatform {
         main_segments: &[(usize, usize, Permissions)],
         path: String,
         bytes: Vec<u8>,
+        page_size: usize,
     ) -> Self {
         Self {
+            page_size,
             main_file: Some((
                 path.clone(),
                 File {
@@ -44,7 +57,7 @@ impl NativePlatform {
                     start,
                     size,
                     allocation: None,
-                    pages: vec![permissions; size / PAGE_SIZE],
+                    pages: vec![protection_flags(permissions); size / PAGE_SIZE],
                 })
                 .collect(),
         }
@@ -69,26 +82,24 @@ impl NativePlatform {
     fn check_access(&self, address: usize, size: usize, write: bool) -> Result<(), Error> {
         self.checked_range(address, size)?;
         let end = address.checked_add(size).ok_or(Error::Overflow)?;
-        let mut page = address & !(PAGE_SIZE - 1);
+        let page_size = PAGE_SIZE;
+        let mut page = address & !(page_size - 1);
         while page < end {
             let allowed = self
                 .mappings
                 .iter()
                 .filter(|m| page >= m.start && page < m.start + m.size)
                 .any(|m| {
-                    let permissions = m.pages[(page - m.start) / PAGE_SIZE];
-                    if write {
-                        permissions.write
-                    } else {
-                        permissions.read
-                    }
+                    let permissions = m.pages[(page - m.start) / page_size];
+                    let required = if write { WRITE } else { READ };
+                    permissions & required != 0
                 });
             if !allowed {
                 return Err(Error::Platform(
                     "image access violates page permissions".into(),
                 ));
             }
-            page = page.checked_add(PAGE_SIZE).ok_or(Error::Overflow)?;
+            page = page.checked_add(page_size).ok_or(Error::Overflow)?;
         }
         Ok(())
     }
@@ -96,6 +107,22 @@ impl NativePlatform {
 
 #[cfg(target_os = "scarlet")]
 impl Platform for NativePlatform {
+    fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    fn object_page_size(&self, adopted: bool) -> usize {
+        if adopted {
+            self.page_size
+        } else {
+            PAGE_SIZE
+        }
+    }
+
+    fn preferred_dso_page_size(&self) -> usize {
+        self.page_size
+    }
+
     fn initialize_static_tls(&mut self) -> Result<(), Error> {
         // Refresh only during initial executable loading, before constructors.
         let base = unsafe { scarlet_sys::syscall0(Syscall::GetTls) };
@@ -157,13 +184,19 @@ impl Platform for NativePlatform {
     }
 
     fn map(&mut self, size: usize, align: usize) -> Result<usize, Error> {
-        let align = align.max(PAGE_SIZE);
-        if size == 0 || size % PAGE_SIZE != 0 || !align.is_power_of_two() {
+        let page_size = PAGE_SIZE;
+        let align = align.max(self.page_size);
+        if size == 0 || size % page_size != 0 || !align.is_power_of_two() {
             return Err(Error::Platform(
                 "invalid image mapping size or alignment".into(),
             ));
         }
-        let reserve = size.checked_add(align - PAGE_SIZE).ok_or(Error::Overflow)?;
+        // Keep logical DSO permissions at 4 KiB. Round the complete reservation
+        // to the main's allocation granule so unmap also releases its tail.
+        let reserve = size
+            .checked_add(align - PAGE_SIZE)
+            .and_then(|size| size.checked_next_multiple_of(self.page_size))
+            .ok_or(Error::Overflow)?;
         // SAFETY: Request a fresh private anonymous RW, non-executable region.
         let raw = unsafe { syscall6(Syscall::MemoryMap, 0, 0, reserve, 3, 0x22, 0) };
         if raw == usize::MAX || raw == 0 {
@@ -176,18 +209,15 @@ impl Platform for NativePlatform {
             }
             return Err(Error::Overflow);
         };
+        if !raw.is_multiple_of(scarlet_loader_core::PAGE_SIZE) {
+            unsafe { syscall2(Syscall::MemoryUnmap, raw, reserve) };
+            return Err(Error::Platform("unaligned image allocation".into()));
+        }
         self.mappings.push(Mapping {
             start: aligned,
             size,
             allocation: Some((raw, reserve)),
-            pages: vec![
-                Permissions {
-                    read: true,
-                    write: true,
-                    execute: false
-                };
-                size / PAGE_SIZE
-            ],
+            pages: vec![READ | WRITE; size / PAGE_SIZE],
         });
         Ok(aligned)
     }
@@ -218,21 +248,20 @@ impl Platform for NativePlatform {
         permissions: Permissions,
     ) -> Result<(), Error> {
         self.checked_range(address, size)?;
-        if address % PAGE_SIZE != 0
+        let page_size = PAGE_SIZE;
+        if address % page_size != 0
             || size == 0
-            || size % PAGE_SIZE != 0
+            || size % page_size != 0
             || (permissions.write && permissions.execute)
         {
             return Err(Error::Platform(
                 "invalid protection range or writable executable page".into(),
             ));
         }
-        let flags = usize::from(permissions.read)
-            | (usize::from(permissions.write) << 1)
-            | (usize::from(permissions.execute) << 2);
+        let flags = protection_flags(permissions);
         // SAFETY: The context owns these mapped pages. Native MemoryProtect
         // also performs the executable-page instruction-cache synchronization.
-        let result = unsafe { syscall3(Syscall::MemoryProtect, address, size, flags) };
+        let result = unsafe { syscall3(Syscall::MemoryProtect, address, size, flags.into()) };
         if result == usize::MAX {
             Err(Error::Platform(format!(
                 "MemoryProtect failed at {address:#x} ({size:#x}, flags {flags})"
@@ -243,11 +272,9 @@ impl Platform for NativePlatform {
                 let begin = address.max(mapping.start);
                 let limit = end.min(mapping.start + mapping.size);
                 if begin < limit {
-                    for page in &mut mapping.pages
-                        [(begin - mapping.start) / PAGE_SIZE..(limit - mapping.start) / PAGE_SIZE]
-                    {
-                        *page = permissions;
-                    }
+                    mapping.pages
+                        [(begin - mapping.start) / page_size..(limit - mapping.start) / page_size]
+                        .fill(flags);
                 }
             }
             Ok(())
@@ -280,14 +307,7 @@ mod tests {
             start,
             size: pages * PAGE_SIZE,
             allocation: None,
-            pages: vec![
-                Permissions {
-                    read: true,
-                    write,
-                    execute: false
-                };
-                pages
-            ],
+            pages: vec![READ | (u8::from(write) * WRITE); pages],
         }
     }
 
@@ -295,6 +315,7 @@ mod tests {
     fn range_can_span_adjacent_or_overlapping_main_segments() {
         let platform = NativePlatform {
             main_file: None,
+            page_size: PAGE_SIZE,
             mappings: vec![
                 mapping(0x1000, 2, true),
                 mapping(0x2000, 2, true),
@@ -310,6 +331,7 @@ mod tests {
     fn gaps_and_read_only_pages_are_rejected() {
         let platform = NativePlatform {
             main_file: None,
+            page_size: PAGE_SIZE,
             mappings: vec![
                 mapping(0x1000, 1, true),
                 mapping(0x2000, 1, false),

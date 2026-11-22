@@ -41,6 +41,11 @@ impl Default for UserEntryOptions {
 }
 
 pub mod cpu_features;
+#[cfg(not(feature = "hosted"))]
+pub(crate) mod task_context;
+#[cfg(feature = "hosted")]
+#[path = "../hosted/task_context.rs"]
+pub(crate) mod task_context;
 pub mod user_context;
 
 /// Report the BSP's features after the user register-context policy is set.

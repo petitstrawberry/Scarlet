@@ -9,10 +9,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// Identity of one logical mapping, retained when its descriptors are split.
 /// Virtual addresses may be reused while fragments of an old mapping survive,
 /// so `vm_start` alone cannot identify the allocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MappingOrigin {
     identity: usize,
     anonymous: bool,
+    padded_request: Option<core::num::NonZeroUsize>,
 }
 
 impl MappingOrigin {
@@ -25,6 +26,7 @@ impl MappingOrigin {
                 })
                 .expect("Virtual mapping origin identities exhausted"),
             anonymous: false,
+            padded_request: None,
         }
     }
 
@@ -35,6 +37,19 @@ impl MappingOrigin {
             anonymous: true,
             ..Self::new()
         }
+    }
+
+    /// Record the original request when a free native mapping needs tail
+    /// padding. Its owner may later unmap it using that original length.
+    pub(crate) fn with_tail_padding(mut self, requested: usize, allocated: usize) -> Self {
+        if requested < allocated {
+            self.padded_request = core::num::NonZeroUsize::new(requested);
+        }
+        self
+    }
+
+    pub(crate) fn padded_request(self) -> Option<usize> {
+        self.padded_request.map(core::num::NonZeroUsize::get)
     }
 
     pub(crate) fn is_anonymous(self) -> bool {
@@ -370,6 +385,14 @@ impl From<usize> for VirtualMemoryPermission {
 }
 
 impl VirtualMemoryPermission {
+    /// The hosted worker can publish writable data or executable code.
+    /// Reject an unrepresentable request before changing an existing mapping.
+    pub(crate) fn supports_user_protection(permissions: usize) -> bool {
+        !(cfg!(feature = "hosted")
+            && Self::Write.contained_in(permissions)
+            && Self::Execute.contained_in(permissions))
+    }
+
     pub fn contained_in(&self, permissions: usize) -> bool {
         permissions & (*self as usize) != 0
     }

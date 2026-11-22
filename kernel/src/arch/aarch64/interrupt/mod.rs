@@ -72,6 +72,7 @@ pub fn interrupt_init() {
 ///
 /// Note: This is gated during early scheduler bring-up; see
 /// `crate::arch::aarch64::mark_interrupts_allowed`.
+#[cfg(not(feature = "hosted"))]
 pub fn enable_interrupts() {
     // Keep interrupts masked until the timer has started at least once.
     // See `crate::arch::aarch64::mark_interrupts_allowed`.
@@ -87,6 +88,7 @@ pub fn enable_interrupts() {
 }
 
 /// Disable interrupts globally (IRQ/FIQ/SError/Debug) at CPU level.
+#[cfg(not(feature = "hosted"))]
 pub fn disable_interrupts() {
     unsafe {
         asm!("msr daifset, #0xf", options(nostack));
@@ -98,6 +100,7 @@ pub fn disable_interrupts() {
 /// # Returns
 ///
 /// The complete DAIF value to pass to [`restore_interrupts`].
+#[cfg(not(feature = "hosted"))]
 pub fn save_and_disable_interrupts() -> usize {
     let saved: usize;
     unsafe {
@@ -112,6 +115,7 @@ pub fn save_and_disable_interrupts() -> usize {
 /// # Arguments
 ///
 /// * `saved` - Complete DAIF value to restore.
+#[cfg(not(feature = "hosted"))]
 pub fn restore_interrupts(saved: usize) {
     unsafe {
         asm!("msr daif, {0}", in(reg) saved, options(nostack));
@@ -130,7 +134,16 @@ pub fn enable_external_interrupts() {}
 /// AArch64 scheduler IPIs are delivered as GIC SGIs, which share the IRQ CPU
 /// mask with other external interrupts. The per-SGI source enable is handled by
 /// the GIC driver, so there is no separate architectural CPU bit to set here.
+#[cfg(not(feature = "hosted"))]
 pub fn enable_software_interrupts() {}
+
+#[cfg(feature = "hosted")]
+pub fn enable_software_interrupts() {
+    let cpu = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .enable_local_interrupt(cpu, LocalInterruptType::Software)
+        .expect("Hosted vCPU must have a software interrupt controller");
+}
 
 /// Disable external interrupt reception sources without changing DAIF.
 ///
@@ -297,6 +310,7 @@ where
     ret
 }
 
+#[cfg(not(feature = "hosted"))]
 pub fn are_interrupts_enabled() -> bool {
     let daif: u64;
     unsafe {
@@ -305,3 +319,9 @@ pub fn are_interrupts_enabled() -> bool {
     // DAIF.I (IRQ mask) bit is set when IRQs are disabled.
     (daif & (1 << 7)) == 0
 }
+
+#[cfg(feature = "hosted")]
+pub use crate::hosted::cpu::{
+    are_interrupts_enabled, disable_interrupts, enable_interrupts, restore_interrupts,
+    save_and_disable_interrupts,
+};

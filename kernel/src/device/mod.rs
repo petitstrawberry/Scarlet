@@ -46,7 +46,9 @@ use alloc::{sync::Arc, vec::Vec};
 use core::any::Any;
 
 use crate::device::events::EventCapableDevice;
-use crate::object::capability::memory_mapping::{ResolveFaultError, ResolveFaultResult};
+use crate::object::capability::memory_mapping::{
+    MappingError, MappingRequest, PreparedMapping, ResolveFaultError, ResolveFaultResult,
+};
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps};
 
@@ -411,6 +413,10 @@ impl<T: Device + ?Sized> ControlOps for DefaultDeviceOpen<T> {
 }
 
 impl<T: Device + ?Sized> MemoryMappingOps for DefaultDeviceOpen<T> {
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        self.device.prepare_mapping(request)
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,

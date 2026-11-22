@@ -34,12 +34,12 @@ use crate::sync::Once;
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
-        Trapframe, context::KernelContext, get_cpu, trap::user::arch_switch_to_user, vcpu::Vcpu,
-        vm::alloc_virtual_address_space,
+        Trapframe, context::KernelContext, get_cpu, task_context, trap::user::arch_switch_to_user,
+        vcpu::Vcpu, vm::alloc_virtual_address_space,
     },
     environment::{
         DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE,
-        DEFAULT_TIME_SLICE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END,
+        DEFAULT_TIME_SLICE, PAGE_SIZE, USER_STACK_END,
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
@@ -933,6 +933,8 @@ pub struct Task {
 
     // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
+    #[cfg(feature = "hosted")]
+    pub(crate) hosted_thread: crate::hosted::execution::TaskThread,
     pub vcpu: IrqSpinLock<Vcpu>,
     /// Kernel context for context switching
     pub kernel_context: KernelContextIrqSpinLock,
@@ -1112,7 +1114,10 @@ impl Task {
         task_type: TaskType,
         ns: Arc<namespace::TaskNamespace>,
     ) -> Self {
-        let vm_manager = VirtualMemoryManager::new();
+        let vm_manager = match task_type {
+            TaskType::Kernel => VirtualMemoryManager::new_kernel(),
+            TaskType::User => VirtualMemoryManager::new(),
+        };
         Task {
             // Read-only fields
             id: 0,
@@ -1198,6 +1203,8 @@ impl Task {
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
             fixed_priority: fixed_priority::FixedPriorityState::new(),
             // IRQ spin lock fields
+            #[cfg(feature = "hosted")]
+            hosted_thread: Default::default(),
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
                 TaskType::User => crate::arch::Mode::User,
@@ -1230,7 +1237,8 @@ impl Task {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
                 /* Set sp to the top of the kernel stack */
-                self.vcpu.lock().set_sp(KERNEL_VM_STACK_END + 1);
+                let kernel_sp = task_context::initial_kernel_sp(self);
+                self.vcpu.lock().set_sp(kernel_sp);
                 /* Set pc to the task's entry point */
                 self.vcpu.lock().set_pc(self.entry as u64);
             }
@@ -2082,55 +2090,26 @@ impl Task {
 
     fn set_brk_locked(&self, brk: usize) -> Result<(), &'static str> {
         let prev_brk = self.get_brk();
-        if brk < prev_brk {
-            /* Free pages */
-            /* Round address to the page boundary */
-            let prev_addr = prev_brk
-                .checked_add(PAGE_SIZE - 1)
-                .ok_or("Program break page alignment overflows")?
-                & !(PAGE_SIZE - 1);
-            let addr = brk
-                .checked_add(PAGE_SIZE - 1)
-                .ok_or("Program break page alignment overflows")?
-                & !(PAGE_SIZE - 1);
-            let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
-            self.free_data_pages(addr, num_of_pages);
-        } else if brk > prev_brk {
-            /* Allocate pages */
-            /* Round address to the page boundary */
-            let prev_addr = prev_brk
-                .checked_add(PAGE_SIZE - 1)
-                .ok_or("Program break page alignment overflows")?
-                & !(PAGE_SIZE - 1);
-            let addr = brk
-                .checked_add(PAGE_SIZE - 1)
-                .ok_or("Program break page alignment overflows")?
-                & !(PAGE_SIZE - 1);
-            let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
-
-            // crate::println!("[set_brk] Expanding: prev_brk={:#x} -> brk={:#x}", prev_brk, brk);
-            // crate::println!("[set_brk] Page allocation: prev_addr={:#x}, addr={:#x}, num_pages={}",
-            //     prev_addr, addr, num_of_pages);
-
-            if num_of_pages > 0 {
-                match self.vm_manager.search_memory_map(prev_addr) {
-                    Some(_existing_map) => {
-                        // crate::println!("[set_brk] Existing mapping found: VA {:#x}-{:#x}, skipping allocation",
-                        //     existing_map.vmarea.start, existing_map.vmarea.end);
-                    }
-                    None => {
-                        // crate::println!("[set_brk] No existing mapping, allocating {} pages at {:#x}",
-                        //     num_of_pages, prev_addr);
-                        self.allocate_brk_pages(prev_addr, num_of_pages)?;
-                    }
-                }
-            }
+        // The byte-granular program break is independent of the granule at
+        // which the execution platform can install and retire heap backing.
+        let granule = crate::vm::execution_page_size();
+        let prev_addr = prev_brk
+            .checked_next_multiple_of(granule)
+            .ok_or("Program break alignment overflows")?;
+        let addr = brk
+            .checked_next_multiple_of(granule)
+            .ok_or("Program break alignment overflows")?;
+        if addr < prev_addr {
+            self.free_data_pages(addr, (prev_addr - addr) / PAGE_SIZE);
+        } else if addr > prev_addr && self.vm_manager.search_memory_map(prev_addr).is_none() {
+            self.allocate_brk_pages(prev_addr, (addr - prev_addr) / PAGE_SIZE)?;
         }
         self.brk.store(brk, Ordering::SeqCst);
         Ok(())
     }
 
     fn allocate_brk_pages(&self, vaddr: usize, num_of_pages: usize) -> Result<(), &'static str> {
+        let group = crate::vm::execution_page_size() / PAGE_SIZE;
         let mut allocated_pages = 0usize;
 
         while allocated_pages < num_of_pages {
@@ -2150,8 +2129,8 @@ impl Task {
                         allocated_pages += chunk_pages;
                         break;
                     }
-                    Err(_) if chunk_pages > 1 => {
-                        chunk_pages /= 2;
+                    Err(_) if chunk_pages > group => {
+                        chunk_pages = ((chunk_pages / group) / 2).max(1) * group;
                     }
                     Err(error) => {
                         if allocated_pages > 0 {
@@ -2193,7 +2172,8 @@ impl Task {
             return Err("Address is not page aligned");
         }
 
-        let page_alloc = ContiguousPages::new(num_of_pages).ok_or("Failed to allocate pages")?;
+        let page_alloc = ContiguousPages::new_for_user_range(num_of_pages, vaddr)
+            .ok_or("Failed to allocate pages")?;
         let size = num_of_pages * PAGE_SIZE;
         let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
         let mmap = VirtualMemoryMap {
@@ -3008,7 +2988,7 @@ impl Task {
                         } else {
                             // Eager: copy physical pages
                             let permissions = mmap.permissions;
-                            let page_alloc = ContiguousPages::new(num_pages)
+                            let page_alloc = ContiguousPages::new_for_user_range(num_pages, vaddr)
                                 .ok_or("Failed to allocate pages for clone")?;
                             let size = num_pages * PAGE_SIZE;
                             let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
@@ -3049,7 +3029,7 @@ impl Task {
                 } else if mmap.pmarea.start != 0 {
                     // Private memory regions: allocate new pages and copy contents
                     let permissions = mmap.permissions;
-                    let page_alloc = ContiguousPages::new(num_pages)
+                    let page_alloc = ContiguousPages::new_for_user_range(num_pages, vaddr)
                         .ok_or("Failed to allocate pages for clone")?;
                     let size = num_pages * PAGE_SIZE;
                     let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
@@ -4076,6 +4056,7 @@ impl Task {
     /// # Returns
     /// The kernel stack memory area as a MemoryArea
     ///
+    #[cfg(not(feature = "hosted"))]
     pub fn get_kernel_stack_memory_area_paddr(&self) -> crate::vm::vmem::PhysicalMemoryArea {
         self.kernel_context
             .lock()
@@ -4084,29 +4065,10 @@ impl Task {
 
     /// Get a mutable reference to the trapframe for this task
     ///
-    /// The trapframe contains the user-space register state and is located
-    /// at the top of the kernel stack. This provides access to modify the
-    /// user context during system calls, interrupts, and context switches.
-    ///
-    /// If a kernel stack window is mapped (high-VA), this returns a reference
-    /// via the mapped virtual address. Otherwise, it returns a reference via
-    /// the physical address directly.
-    ///
-    /// # Returns
-    /// A mutable reference to the Trapframe
+    /// The trapframe contains user register state during system calls,
+    /// interrupts, and context switches. The platform owns its storage.
     pub fn get_trapframe(&self) -> &mut Trapframe {
-        // If we have a kernel stack window mapped, use the high-VA address
-        if let Some((_slot, base)) = *self.kernel_stack_window_base.lock() {
-            let trapframe_offset = crate::environment::PAGE_SIZE
-                + crate::environment::TASK_KERNEL_STACK_SIZE
-                - core::mem::size_of::<Trapframe>();
-            let trapframe_vaddr = base + trapframe_offset;
-            unsafe { &mut *(trapframe_vaddr as *mut Trapframe) }
-        } else {
-            // Fallback to physical address (should not happen for user tasks after init)
-            // self.kernel_context.lock().get_trapframe()
-            panic!("get_trapframe: No kernel stack window mapped");
-        }
+        task_context::trapframe(self)
     }
 
     /// Internal: set kernel stack window base (slot index and base vaddr)

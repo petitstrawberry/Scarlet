@@ -2731,7 +2731,7 @@ impl GpuCompositor {
         cursor: &Cursor,
         windows: &[Window],
     ) -> Result<bool, &'static str> {
-        let cursor_layout_changed = self.cursor_images.len() != cursor.image_count()
+        let cursor_layout_changed = self.cursor_images.len() > cursor.image_count()
             || self.cursor_images.iter().enumerate().any(|(index, image)| {
                 cursor.image_extent(index) != Some((image.width, image.height))
                     || cursor.image_frame_count(index) != Some(image.frames.len())
@@ -2754,6 +2754,13 @@ impl GpuCompositor {
             && !texture_extent_changed
             && !self.target.retired_imports_need_rebuild()
         {
+            if self.cursor_images.len() < cursor.image_count() {
+                if self.has_pending_frame() {
+                    self.drain_for_rebuild = true;
+                    return Ok(false);
+                }
+                append_cursor_images(&mut self.target, cursor, &mut self.cursor_images)?;
+            }
             self.drain_for_rebuild = false;
             return Ok(false);
         }
@@ -2970,16 +2977,24 @@ fn create_cursor_images(
     target: &mut MappedTarget,
     cursor: &Cursor,
 ) -> Result<Vec<CursorTextureSet>, &'static str> {
-    let image_count = cursor.image_count();
-    if image_count == 0 {
+    let mut images = Vec::new();
+    append_cursor_images(target, cursor, &mut images)?;
+    Ok(images)
+}
+
+fn append_cursor_images(
+    target: &mut MappedTarget,
+    cursor: &Cursor,
+    images: &mut Vec<CursorTextureSet>,
+) -> Result<(), &'static str> {
+    let count = cursor.image_count();
+    if count == 0 {
         return Err("Cursor theme has no GPU-uploadable images");
     }
-
-    let mut images = Vec::new();
     images
-        .try_reserve_exact(image_count)
+        .try_reserve_exact(count - images.len())
         .map_err(|_| "Failed to reserve GPU cursor images")?;
-    for image_index in 0..image_count {
+    for image_index in images.len()..count {
         let (width, height) = cursor
             .image_extent(image_index)
             .ok_or("Cursor image extent is missing")?;
@@ -3011,7 +3026,7 @@ fn create_cursor_images(
             frames,
         });
     }
-    Ok(images)
+    Ok(())
 }
 
 fn bgra_color(color: [u8; 4]) -> Color {

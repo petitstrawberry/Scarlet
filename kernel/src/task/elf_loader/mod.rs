@@ -6,13 +6,17 @@
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
 use crate::task::Task;
-use crate::vm::addr::virt_to_phys;
+use crate::vm::execution_page_size as image_page_size;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::{format, vec};
 use core::sync::atomic::Ordering;
 
 use super::TaskType;
+
+#[cfg(feature = "hosted")]
+pub(crate) mod hosted;
 
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -30,6 +34,24 @@ pub const ET_DYN: u16 = 3; // Shared object file / Position Independent Executab
 // Program Header Type
 const PT_LOAD: u32 = 1; // Loadable segment
 const PT_INTERP: u32 = 3; // Interpreter path
+const SCARLET_INTERPRETER: &str = "/bin/scarlet-ld";
+
+#[derive(Clone, Copy)]
+enum ImageRole {
+    Main,
+    DeferredMain,
+    Interpreter,
+}
+
+#[cfg(feature = "hosted")]
+fn executable_load_bias(requested: u64) -> u64 {
+    requested.max(crate::environment::HOSTED_PIE_BASE)
+}
+
+#[cfg(not(feature = "hosted"))]
+fn executable_load_bias(requested: u64) -> u64 {
+    requested
+}
 
 /// Target type for ELF loading (determines base address strategy)
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +100,8 @@ pub enum ExecutionMode {
 pub struct LoadElfResult {
     /// Execution mode (static or dynamic)
     pub mode: ExecutionMode,
+    /// Protection granule used by the executable and its dynamic linker.
+    pub page_size: usize,
     /// Entry point (either main program or interpreter)
     pub entry_point: u64,
     /// Original program entry point (for AT_ENTRY in dynamic linking)
@@ -158,6 +182,8 @@ const EI_MAG2: usize = 2;
 const EI_MAG3: usize = 3;
 const EI_CLASS: usize = 4;
 const EI_DATA: usize = 5;
+const EI_OSABI: usize = 7;
+const ELFOSABI_SCARLET: u8 = 83;
 // const EI_VERSION: usize = 6;
 
 // Endian-aware data reading functions
@@ -190,6 +216,7 @@ fn read_u64(buffer: &[u8], offset: usize, is_little_endian: bool) -> u64 {
 
 #[derive(Debug)]
 pub struct ElfHeader {
+    pub ei_osabi: u8,
     pub ei_class: u8,     // 32-bit or 64-bit (EI_CLASS)
     pub ei_data: u8,      // Endianness (EI_DATA)
     pub e_type: u16,      // File type
@@ -303,6 +330,7 @@ impl ElfHeader {
             _ => unreachable!(),
         };
         let header = Self {
+            ei_osabi: buffer[EI_OSABI],
             ei_class,
             ei_data,
             e_type: read_u16(buffer, 16, le),
@@ -594,11 +622,40 @@ pub fn analyze_and_load_elf_with_strategy(
     };
     let needs_relocation = header.e_type == ET_DYN;
     let base = if needs_relocation {
-        (strategy.choose_base_address)(LoadTarget::MainProgram, true)
+        executable_load_bias((strategy.choose_base_address)(
+            LoadTarget::MainProgram,
+            true,
+        ))
     } else {
         0
     };
-    load_elf_segments_with_base(&header, file_obj, task, base, true)?;
+    // scarlet-ld verifies the mapped bytes against AT_EXECFD and grants
+    // execute permission after relocation. Up to that transition a hosted
+    // worker must see the original text as readable data.
+    let role = if cfg!(feature = "hosted") && interpreter.as_deref() == Some(SCARLET_INTERPRETER) {
+        ImageRole::DeferredMain
+    } else {
+        ImageRole::Main
+    };
+    let self_contained = interpreter.is_none() && header.e_type == ET_EXEC;
+    let page_size = if self_contained {
+        fixed_image_page_size(&header, file_obj)?
+    } else {
+        PAGE_SIZE
+    };
+    #[cfg(feature = "hosted")]
+    let page_size = if matches!(role, ImageRole::DeferredMain)
+        && hosted::use_native_load_pages(&header, file_obj, base)?
+    {
+        image_page_size()
+    } else {
+        page_size
+    };
+    #[cfg(feature = "hosted")]
+    task.vm_manager
+        .hosted_image()
+        .set_guest_page_size(page_size);
+    load_elf_segments_with_base(&header, file_obj, task, base, role, page_size)?;
     let entry = executable_entry(&header, file_obj, task, base)?;
     let phdr_info = ProgramHeadersInfo {
         phdr_addr: program_headers_address(&header, file_obj, task, base)?,
@@ -651,6 +708,7 @@ pub fn analyze_and_load_elf_with_strategy(
     if let Some(path) = interpreter {
         let (interpreter_entry, interpreter_base) = load_interpreter(&path, task)?;
         Ok(LoadElfResult {
+            page_size,
             mode: ExecutionMode::Dynamic {
                 interpreter_path: path,
             },
@@ -663,6 +721,7 @@ pub fn analyze_and_load_elf_with_strategy(
         })
     } else {
         Ok(LoadElfResult {
+            page_size,
             mode: ExecutionMode::Static,
             entry_point: entry,
             original_entry_point: None,
@@ -772,7 +831,7 @@ fn load_interpreter(interpreter_path: &str, task: &Task) -> Result<(u64, u64), E
     // Determine total span of PT_LOAD segments to avoid overlap
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_end: u64 = 0;
-    let mut align = PAGE_SIZE;
+    let mut align = image_page_size();
     for_each_program_header(&interp_header, file_object, |_i, ph| {
         if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
             align = align.max(
@@ -828,21 +887,50 @@ fn load_interpreter(interpreter_path: &str, task: &Task) -> Result<(u64, u64), E
         file_object,
         task,
         interpreter_base_add,
-        false,
+        ImageRole::Interpreter,
+        if interp_header.e_type == ET_EXEC {
+            fixed_image_page_size(&interp_header, file_object)?
+        } else {
+            PAGE_SIZE
+        },
     )?;
     let entry = executable_entry(&interp_header, file_object, task, interpreter_base_add)?;
     Ok((entry, interpreter_base_add))
 }
 
-/// Load ELF segments for interpreter with specified base address
+/// A fixed image explicitly linked at native page boundaries retains its
+/// native PT_LOAD layout. PIEs and unaligned images use guest-page boundaries.
+/// In particular, the installed bootstrap and fixed interpreter have separate
+/// native text/data pages, including the last page of each segment.
+fn fixed_image_page_size(
+    header: &ElfHeader,
+    file: &dyn FileObject,
+) -> Result<usize, ElfLoaderError> {
+    let native = image_page_size();
+    if header.ei_osabi != ELFOSABI_SCARLET || native == PAGE_SIZE {
+        return Ok(PAGE_SIZE);
+    }
+    let mut aligned = true;
+    for_each_program_header(header, file, |_, ph| {
+        if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
+            aligned = ph.p_align >= native as u64 && ph.p_vaddr.is_multiple_of(native as u64);
+        }
+        Ok(aligned)
+    })?;
+    Ok(if aligned { native } else { PAGE_SIZE })
+}
+
+/// Load all the program's segments at the selected bias.
 fn load_elf_segments_with_base(
     header: &ElfHeader,
     file_obj: &dyn FileObject,
     task: &Task,
     base_address: u64,
-    main_program: bool,
+    role: ImageRole,
+    page_size: usize,
 ) -> Result<(), ElfLoaderError> {
-    // Load PT_LOAD segments with provided base address
+    // Adjacent guest VMAs can occupy different quarters of the same backing.
+    let mut edge_pages = BTreeMap::new();
     for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_LOAD && ph.p_memsz != 0 {
             if ph.p_align > 1 && base_address % ph.p_align != 0 {
@@ -851,11 +939,24 @@ fn load_elf_segments_with_base(
             let segment_addr = base_address
                 .checked_add(ph.p_vaddr)
                 .ok_or_else(|| elf_error("ELF relocation overflows"))?;
-            load_elf_segment_at_address(ph, file_obj, task, segment_addr, main_program)?;
+            load_elf_segment_at_address(
+                ph,
+                file_obj,
+                task,
+                segment_addr,
+                role,
+                page_size,
+                &mut edge_pages,
+            )?;
         }
         Ok(true) // Continue iteration
     })?;
 
+    #[cfg(feature = "hosted")]
+    {
+        hosted::record_instructions(header, file_obj, task, base_address)?;
+        hosted::seal_static_relro(header, file_obj, task)?;
+    }
     Ok(())
 }
 
@@ -937,13 +1038,13 @@ fn load_program_headers_into_memory(
 
     let table_size = usize::try_from(phdr_table_size)
         .map_err(|_| elf_error("Program-header size exceeds pointer width"))?;
+    let page_size = image_page_size();
     let page_aligned_size = table_size
-        .checked_add(PAGE_SIZE - 1)
-        .ok_or_else(|| elf_error("Program-header mapping overflows"))?
-        & !(PAGE_SIZE - 1);
+        .checked_next_multiple_of(page_size)
+        .ok_or_else(|| elf_error("Program-header mapping overflows"))?;
     let phdr_vaddr =
         task.vm_manager
-            .find_unmapped_area(page_aligned_size, PAGE_SIZE)
+            .find_unmapped_area(page_aligned_size, page_size)
             .ok_or_else(|| elf_error("No unmapped area for program headers"))? as u64;
 
     // Map memory for program headers (read-only for security)
@@ -951,8 +1052,9 @@ fn load_program_headers_into_memory(
         task,
         phdr_vaddr as usize,
         page_aligned_size,
-        PAGE_SIZE,
+        page_size,
         PF_R,
+        &mut BTreeMap::new(),
     )
     .map_err(|e| ElfLoaderError {
         message: format!("Failed to map memory for program headers: {}", e),
@@ -1007,6 +1109,7 @@ fn map_elf_segment(
     size: usize,
     align: usize,
     flags: u32,
+    edge_pages: &mut BTreeMap<usize, u64>,
 ) -> Result<(), &'static str> {
     // Ensure alignment is greater than zero
     if align == 0 {
@@ -1023,9 +1126,9 @@ fn map_elf_segment(
         return Err("Invalid size: must be non-zero and page-aligned");
     }
 
-    // Check if the address is page-aligned (required for memory mapping)
-    if vaddr % PAGE_SIZE != 0 {
-        return Err("Address is not aligned to PAGE_SIZE");
+    let page_size = image_page_size();
+    if !vaddr.is_multiple_of(PAGE_SIZE) {
+        return Err("Unaligned ELF guest page");
     }
 
     // Convert flags to VirtualMemoryPermission
@@ -1061,22 +1164,48 @@ fn map_elf_segment(
     // Re-executing Chromium can leave plenty of free memory but no single
     // contiguous extent large enough for its text segment.
     let mapping_origin = crate::vm::vmem::MappingOrigin::new();
-    let mut remaining_pages = size / PAGE_SIZE;
     let mut next_vaddr = vaddr;
-    let mut chunk_pages = remaining_pages.min(4096);
-    while remaining_pages != 0 {
-        chunk_pages = chunk_pages.min(remaining_pages);
-        let page_alloc = loop {
-            if let Some(alloc) = crate::mem::page::ContiguousPages::new(chunk_pages) {
-                break alloc;
-            }
-            if chunk_pages == 1 {
-                return Err("Failed to allocate memory");
-            }
-            chunk_pages = (chunk_pages / 2).max(1);
+    let mut max_pages = 4096;
+    while next_vaddr <= end {
+        use crate::mem::page::ContiguousPages;
+        let host_base = next_vaddr & !(page_size - 1);
+        let offset = next_vaddr - host_base;
+        let remaining = end - next_vaddr + 1;
+        let (pm_start, chunk_size) = if offset != 0 || remaining < page_size {
+            let base = match edge_pages.entry(host_base) {
+                alloc::collections::btree_map::Entry::Occupied(page) => *page.get(),
+                alloc::collections::btree_map::Entry::Vacant(slot) => {
+                    let page = ContiguousPages::new_aligned(page_size / PAGE_SIZE, page_size)
+                        .ok_or("Failed to allocate ELF boundary page")?;
+                    let base = page.as_paddr();
+                    task.page_allocations.write().push(page);
+                    *slot.insert(base)
+                }
+            };
+            (base + offset as u64, remaining.min(page_size - offset))
+        } else {
+            let granules = (remaining / page_size).min(max_pages / (page_size / PAGE_SIZE));
+            let mut count = granules;
+            let pages = loop {
+                let pages = count * (page_size / PAGE_SIZE);
+                let allocation = if page_size == PAGE_SIZE {
+                    ContiguousPages::new(pages)
+                } else {
+                    ContiguousPages::new_aligned(pages, page_size)
+                };
+                if let Some(allocation) = allocation {
+                    break allocation;
+                }
+                if count == 1 {
+                    return Err("Failed to allocate memory");
+                }
+                count /= 2;
+                max_pages = count * (page_size / PAGE_SIZE);
+            };
+            let base = pages.as_paddr();
+            task.page_allocations.write().push(pages);
+            (base, count * page_size)
         };
-        let chunk_size = chunk_pages * PAGE_SIZE;
-        let pm_start = virt_to_phys(page_alloc.as_ptr() as usize);
         let map = VirtualMemoryMap {
             vmarea: MemoryArea::new(next_vaddr, next_vaddr + chunk_size - 1),
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(
@@ -1092,9 +1221,7 @@ fn map_elf_segment(
             owner: None,
         };
         task.vm_manager.add_memory_map(map)?;
-        task.page_allocations.write().push(page_alloc);
         next_vaddr += chunk_size;
-        remaining_pages -= chunk_pages;
     }
 
     Ok(())
@@ -1102,8 +1229,6 @@ fn map_elf_segment(
 
 /// Build auxiliary vector for dynamic linking
 pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<AuxVec> {
-    use crate::environment::PAGE_SIZE;
-
     let mut auxv = alloc::vec::Vec::new();
 
     // Program headers information
@@ -1115,7 +1240,7 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     ));
 
     // System information
-    auxv.push(AuxVec::new(AT_PAGESZ, PAGE_SIZE as u64));
+    auxv.push(AuxVec::new(AT_PAGESZ, load_result.page_size as u64));
     if let Some(capabilities) = crate::arch::user_cpu_capabilities() {
         auxv.push(AuxVec::new(AT_HWCAP, capabilities.hwcap));
         auxv.push(AuxVec::new(AT_HWCAP2, capabilities.hwcap2));
@@ -1352,7 +1477,9 @@ fn load_elf_segment_at_address(
     file_obj: &dyn FileObject,
     task: &Task,
     segment_addr: u64,
-    main_program: bool,
+    role: ImageRole,
+    page_size: usize,
+    edge_pages: &mut BTreeMap<usize, u64>,
 ) -> Result<(), ElfLoaderError> {
     if ph.p_memsz == 0 {
         return Ok(());
@@ -1368,13 +1495,12 @@ fn load_elf_segment_at_address(
     }
     let align = usize::try_from(ph.p_align)
         .map_err(|_| elf_error("ELF alignment exceeds pointer width"))?
-        .max(PAGE_SIZE);
-    let page_offset = segment % PAGE_SIZE;
+        .max(page_size);
+    let page_offset = segment % page_size;
     let mapping_start = segment - page_offset;
     let aligned_size = size
         .checked_add(page_offset)
-        .and_then(|size| size.checked_add(PAGE_SIZE - 1))
-        .map(|size| size & !(PAGE_SIZE - 1))
+        .and_then(|size| size.checked_next_multiple_of(page_size))
         .ok_or_else(|| elf_error("ELF page extent overflows"))?;
     let mapping_end = mapping_start
         .checked_add(aligned_size)
@@ -1384,7 +1510,11 @@ fn load_elf_segment_at_address(
     }
 
     // Map segment with proper page alignment
-    map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| {
+    let flags = match role {
+        ImageRole::DeferredMain => ph.p_flags & !PF_X,
+        _ => ph.p_flags,
+    };
+    map_elf_segment(task, mapping_start, aligned_size, align, flags, edge_pages).map_err(|e| {
         ElfLoaderError {
             message: format!("Failed to map ELF segment at {:#x}: {:?}", mapping_start, e),
         }
@@ -1402,37 +1532,23 @@ fn load_elf_segment_at_address(
         while copied < file_size {
             let chunk = (file_size - copied).min(buffer.len());
             read_exact(file_obj, &mut buffer[..chunk])?;
-            copy_to_elf_mapping(
-                task,
-                segment + copied,
-                &buffer[..chunk],
-                ph.p_flags & PF_X != 0,
-            )?;
+            copy_to_elf_mapping(task, segment + copied, &buffer[..chunk], flags & PF_X != 0)?;
             copied += chunk;
         }
     }
 
     let old_brk = task.brk.load(Ordering::Relaxed);
-    if main_program && (old_brk == usize::MAX || old_brk < mapping_end) {
-        task.brk.store(mapping_end, Ordering::Relaxed);
+    if !matches!(role, ImageRole::Interpreter) && (old_brk == usize::MAX || old_brk < mapping_end) {
+        task.brk.store(
+            mapping_end.next_multiple_of(image_page_size()),
+            Ordering::Relaxed,
+        );
     }
 
-    // Update task size information for proper memory management
-    let segment_type = if ph.p_flags & PF_X != 0 {
+    if ph.p_flags & PF_X != 0 {
         task.text_size.fetch_add(aligned_size, Ordering::SeqCst);
-        "text"
     } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
         task.data_size.fetch_add(aligned_size, Ordering::SeqCst);
-        "data"
-    } else {
-        "unknown"
-    };
-
-    crate::println!(
-        "Loaded {} segment at {:#x} (size: {:#x})",
-        segment_type,
-        segment_addr,
-        aligned_size
-    );
+    }
     Ok(())
 }

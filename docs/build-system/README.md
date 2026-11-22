@@ -37,7 +37,9 @@ The tracked reference projects are
 [AArch64 full](../../projects/aarch64-limine-full/scarlet.toml),
 [RISC-V full](../../projects/riscv64-limine-full/scarlet.toml),
 [AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml), and
-[RV32GC SBI desktop](../../projects/riscv32-sbi-desktop/README.md).
+[RV32GC SBI desktop](../../projects/riscv32-sbi-desktop/README.md). The
+[AArch64 Linux hosted minimum project](../../projects/aarch64-user-linux-minimum/README.md)
+builds a Linux host executable and its Scarlet userspace images.
 Their layout is:
 
 ```text
@@ -115,9 +117,9 @@ features = { network = true, user-fpu = true, user-vector = true, limine = true,
 ```
 
 `[bsp].path` is relative to the project. The BSP's `.cargo/config.toml`
-must define `[build].target`; the reference BSPs point to JSON files in
-`kernel/targets/`. Kernel source paths remain relative to the project
-manifest, not to `bsp/`. Kernel features can be a list of enabled names or
+must define `[build].target`. Bare-metal BSPs point to JSON files in
+`kernel/targets/`. Hosted BSPs use host target triples. Kernel source paths are relative
+to the project manifest. Kernel features can be a list of enabled names or
 a table of boolean states. Explicit false states are checked against Cargo
 feature unification.
 

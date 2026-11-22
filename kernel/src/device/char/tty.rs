@@ -6,7 +6,7 @@
 extern crate alloc;
 use crate::arch::Trapframe;
 use crate::device::char::{CharDevice, TtyControl};
-use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent};
+use crate::device::events::{DeviceEvent, DeviceEventListener, HangupEvent, InputEvent};
 use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceCapability, DeviceType};
 use crate::late_initcall;
@@ -250,7 +250,8 @@ pub struct TtyDevice {
     input_buffer: Arc<IrqSpinLock<VecDeque<u8>>>,
 
     // Waker for blocking reads
-    input_waker: Waker,
+    input_waker: Arc<Waker>,
+    input_closed: AtomicBool,
 
     // Line discipline flags (OS/ABI-neutral)
     canonical_mode: AtomicBool,
@@ -325,7 +326,8 @@ impl TtyDevice {
             backend,
             self_ref: IrqRwSpinLock::new(Weak::new()),
             input_buffer: Arc::new(IrqSpinLock::new(VecDeque::new())),
-            input_waker: Waker::new_interruptible("tty_input"),
+            input_waker: Arc::new(Waker::new_interruptible("tty_input")),
+            input_closed: AtomicBool::new(false),
             canonical_mode: AtomicBool::new(true),
             echo_enabled: AtomicBool::new(true),
             signal_chars_enabled: AtomicBool::new(true),
@@ -525,8 +527,7 @@ impl TtyDevice {
                 return;
             }
             if let Some(task) = mytask() {
-                if self.input_waker.wait_result(task.get_id(), trapframe) == WaitResult::Interrupted
-                {
+                if self.wait_for_input(task.get_id(), trapframe) == WaitResult::Interrupted {
                     return;
                 }
             } else {
@@ -540,6 +541,14 @@ impl TtyDevice {
     /// This is used by timeout handlers to preempt a blocking wait.
     pub fn wake_input(&self) {
         self.input_waker.wake_all();
+    }
+
+    fn wait_for_input(&self, task_id: usize, trapframe: &mut Trapframe) -> WaitResult {
+        self.input_waker
+            .clone()
+            .wait_result_until_owned(task_id, trapframe, || {
+                self.input_closed.load(Ordering::Acquire)
+            })
     }
 
     /// Wait until readable with a timeout (in ticks).
@@ -576,7 +585,7 @@ impl TtyDevice {
         let timer_id = add_timer(deadline, crate::timer::TimerPrecision::Normal, &handler, 0);
 
         if let Some(task) = mytask() {
-            let _ = self.input_waker.wait_result(task.get_id(), trapframe);
+            let _ = self.wait_for_input(task.get_id(), trapframe);
         }
 
         // After wake: cancel timer if still queued and decide reason
@@ -682,6 +691,9 @@ impl TtyDevice {
     /// - Canonical mode: ready only when a full line (ending with '\n') exists.
     /// - Non-canonical: honor read_min_ready_bytes; in RAW mode head 0xE0 requires a pair.
     pub fn is_read_ready_for_select(&self) -> bool {
+        if self.input_closed.load(Ordering::Acquire) {
+            return true;
+        }
         if self.canonical_mode.load(Ordering::Relaxed) {
             let g = self.input_buffer.lock();
             return self.canonical_eof_ready.load(Ordering::Relaxed)
@@ -1282,6 +1294,10 @@ impl TtyDevice {
 }
 
 impl Selectable for TtyDevice {
+    fn is_hung_up(&self) -> bool {
+        self.input_closed.load(Ordering::Acquire)
+    }
+
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
         if interest.read {
@@ -1374,11 +1390,14 @@ impl DeviceEventListener for TtyDevice {
     fn on_device_event(&self, event: &dyn DeviceEvent) {
         if let Some(input_event) = event.as_any().downcast_ref::<InputEvent>() {
             self.handle_input_byte(input_event.data);
+        } else if event.as_any().is::<HangupEvent>() {
+            self.input_closed.store(true, Ordering::Release);
+            self.wake_input();
         }
     }
 
     fn interested_in(&self, event_type: &str) -> bool {
-        event_type == "input"
+        matches!(event_type, "input" | "hangup")
     }
 }
 
@@ -1510,28 +1529,16 @@ impl TtyDevice {
                     // A competing reader consumed the record after the check.
                     continue;
                 }
-                if has_eof {
+                if has_eof || self.input_closed.load(Ordering::Acquire) {
                     self.canonical_eof_ready.store(false, Ordering::Relaxed);
-                    let mut bytes = 0;
-                    let mut guard = self.input_buffer.lock();
-                    while bytes < buffer.len() {
-                        if let Some(b) = guard.pop_front() {
-                            buffer[bytes] = b;
-                            bytes += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    return Ok(bytes);
+                    return Ok(copy_out(buffer, false));
                 }
                 // Wait for more input
                 if nonblocking {
                     return Err(StreamError::WouldBlock);
                 }
                 if let Some(task) = mytask() {
-                    if self
-                        .input_waker
-                        .wait_result(task.get_id(), task.get_trapframe())
+                    if self.wait_for_input(task.get_id(), task.get_trapframe())
                         == WaitResult::Interrupted
                     {
                         return Err(StreamError::Interrupted);
@@ -1567,6 +1574,9 @@ impl TtyDevice {
         }
 
         loop {
+            if self.input_closed.load(Ordering::Acquire) {
+                return Ok(copy_out(buffer, false));
+            }
             let kb_mode = self.kb_mode.load(Ordering::Relaxed);
             if kb_mode == 2 {
                 // RAW: if head is E0 and caller expects 2 bytes, wait for pair.
@@ -1581,9 +1591,7 @@ impl TtyDevice {
                         return Err(StreamError::WouldBlock);
                     }
                     if let Some(task) = mytask() {
-                        if self
-                            .input_waker
-                            .wait_result(task.get_id(), task.get_trapframe())
+                        if self.wait_for_input(task.get_id(), task.get_trapframe())
                             == WaitResult::Interrupted
                         {
                             return Err(StreamError::Interrupted);
@@ -1624,9 +1632,7 @@ impl TtyDevice {
                 return Err(StreamError::WouldBlock);
             }
             if let Some(task) = mytask() {
-                if self
-                    .input_waker
-                    .wait_result(task.get_id(), task.get_trapframe())
+                if self.wait_for_input(task.get_id(), task.get_trapframe())
                     == WaitResult::Interrupted
                 {
                     return Err(StreamError::Interrupted);
@@ -1668,12 +1674,13 @@ impl CharDevice for TtyDevice {
             drop(input_buffer);
 
             // No data available, block the current task
+            if self.input_closed.load(Ordering::Acquire) {
+                return None;
+            }
             if let Some(task) = mytask() {
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                if self
-                    .input_waker
-                    .wait_result(task.get_id(), task.get_trapframe())
+                if self.wait_for_input(task.get_id(), task.get_trapframe())
                     == WaitResult::Interrupted
                 {
                     return None;
@@ -1746,11 +1753,11 @@ impl CharDevice for TtyDevice {
 
     fn can_read(&self) -> bool {
         let input_buffer = self.input_buffer.lock();
-        !input_buffer.is_empty()
+        !input_buffer.is_empty() || self.input_closed.load(Ordering::Acquire)
     }
 
     fn can_write(&self) -> bool {
-        self.backend.can_write()
+        !self.input_closed.load(Ordering::Acquire) && self.backend.can_write()
     }
 }
 

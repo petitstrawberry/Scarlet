@@ -7,6 +7,7 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
+use crate::object::capability::memory_mapping::MappingRequest;
 use crate::object::capability::memory_mapping::anon_owner::{
     AnonymousPageOwner, AnonymousZeroPageOwner,
 };
@@ -75,7 +76,7 @@ const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 
-fn physical_area_for_mapping(
+pub(crate) fn physical_area_for_mapping(
     paddr: u64,
     length: usize,
 ) -> Option<crate::vm::vmem::PhysicalMemoryArea> {
@@ -124,17 +125,25 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     // Input validation
-    if length == 0 {
+    if length == 0 || !crate::vm::vmem::VirtualMemoryPermission::supports_user_protection(prot) {
         return usize::MAX;
     }
 
     // Round up length to page boundary
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let num_pages = aligned_length / PAGE_SIZE;
+    let Some(aligned_length) = length.checked_next_multiple_of(PAGE_SIZE) else {
+        return usize::MAX;
+    };
 
     // Handle ANONYMOUS mappings specially - these are handled entirely in the syscall
     if (flags & MAP_ANONYMOUS) != 0 {
-        return handle_anonymous_mapping(&task, vaddr, aligned_length, num_pages, prot, flags);
+        return handle_anonymous_mapping(
+            &task,
+            vaddr,
+            aligned_length,
+            aligned_length / PAGE_SIZE,
+            prot,
+            flags,
+        );
     }
 
     // All other mappings are handled through the new MemoryMappingOps design
@@ -149,211 +158,159 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support memory mapping operations
     };
 
-    let maximum_permissions = memory_mappable.new_mapping_permissions(flags & MAP_SHARED != 0);
-    if prot & !maximum_permissions != 0 {
-        return usize::MAX;
-    }
-    // Check if the object supports mmap
-    if !memory_mappable.supports_mmap() {
-        return usize::MAX;
-    }
-
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
-    let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
-    if is_map_private_flag && !is_shared && !memory_mappable.supports_private_mmap() {
-        return usize::MAX;
-    }
+    let private_demand = (flags & MAP_PRIVATE) != 0 && !is_shared;
 
-    // Determine final address
+    let placement_alignment = crate::vm::execution_page_size();
     let final_vaddr = if vaddr == 0 {
         match task
             .vm_manager
-            .find_unmapped_area(aligned_length, PAGE_SIZE)
+            .find_unmapped_area(aligned_length, placement_alignment)
         {
             Some(addr) => addr,
             None => return usize::MAX,
         }
+    } else if !vaddr.is_multiple_of(PAGE_SIZE) {
+        return usize::MAX;
     } else {
-        if vaddr % PAGE_SIZE != 0 {
-            return usize::MAX;
-        }
         vaddr
     };
-
-    let mut prot_perm = 0;
-    if (prot & PROT_READ) != 0 {
-        prot_perm |= 0x1;
-    }
-    if (prot & PROT_WRITE) != 0 {
-        prot_perm |= 0x2;
-    }
-    if (prot & PROT_EXEC) != 0 {
-        prot_perm |= 0x4;
-    }
-    prot_perm |= 0x08;
-
-    if is_map_private_flag && !is_shared {
-        let owner = match memory_mappable
-            .mapping_owner_for_range(offset, aligned_length)
-            .or_else(|| {
-                task.handle_table
-                    .get_arc_clone(handle)
-                    .and_then(|obj| obj.as_memory_mappable_arc())
-            }) {
-            Some(owner) => owner,
-            None => return usize::MAX,
-        };
-        let vm_map = VirtualMemoryMap {
-            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
-            vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
-            vm_start: final_vaddr,
-            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
-            maximum_permissions,
-            permissions: prot_perm,
-            is_shared: false,
-            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-            owner: Some(owner),
-        };
-
-        let removed_mappings = if is_map_fixed {
-            task.vm_manager.add_memory_map_fixed(vm_map)
-        } else {
-            task.vm_manager.add_memory_map(vm_map).map(|_| Vec::new())
-        };
-
-        let removed_mappings = match removed_mappings {
-            Ok(rm) => rm,
-            Err(_) => return usize::MAX,
-        };
-
-        for removed_map in &removed_mappings {
-            if let Some(owner) = &removed_map.owner {
-                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
-            }
-        }
-        reclaim_private_removed_mappings(&task, &removed_mappings);
-
-        memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
-        return final_vaddr;
-    }
-
-    // Shared path: need get_mapping_info_with for pmarea, permissions, and memory attribute.
-    let mapping_info =
-        match memory_mappable.get_mapping_info_with(offset, aligned_length, is_shared) {
-            Ok(info) => info,
-            Err(_) => return usize::MAX,
-        };
-
-    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
-    let pmarea = match physical_area_for_mapping(mapping_info.paddr, aligned_length) {
-        Some(area) => area,
-        None => return usize::MAX,
+    let Some(end) = final_vaddr.checked_add(aligned_length - 1) else {
+        return usize::MAX;
     };
 
-    let final_permissions = mapping_info.permissions & {
-        let mut perm = 0;
-        if (prot & PROT_READ) != 0 {
-            perm |= 0x1;
-        }
-        if (prot & PROT_WRITE) != 0 {
-            perm |= 0x2;
-        }
-        if (prot & PROT_EXEC) != 0 {
-            perm |= 0x4;
-        }
-        perm
-    } | 0x08;
+    let prepared = match memory_mappable.prepare_mapping(MappingRequest {
+        offset,
+        length: aligned_length,
+        is_shared,
+        permissions: prot,
+        private_demand,
+        allow_shorter: false,
+    }) {
+        Ok(prepared) => prepared,
+        Err(_) => return usize::MAX,
+    };
 
-    let owner = memory_mappable
-        .mapping_owner_for_range(offset, aligned_length)
-        .or_else(|| {
-            task.handle_table
-                .get_arc_clone(handle)
-                .and_then(|obj| obj.as_memory_mappable_arc())
-        });
-    let mut vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
-        .with_memory_attribute(mapping_info.memory_attribute);
-    vm_map.maximum_permissions = maximum_permissions;
+    let prot_mask = prot & (PROT_READ | PROT_WRITE | PROT_EXEC);
+    let (paddr, permissions, memory_attribute) = match prepared.info {
+        Some(info) => (
+            info.paddr,
+            info.permissions & prot_mask,
+            info.memory_attribute,
+        ),
+        None => (0, prot_mask, crate::vm::vmem::MemoryAttribute::Normal),
+    };
+    let Some(pmarea) = physical_area_for_mapping(paddr, aligned_length) else {
+        return usize::MAX;
+    };
+    let owner = prepared
+        .owner
+        .or_else(|| kernel_obj.as_memory_mappable_arc());
+    let vmarea = MemoryArea::new(final_vaddr, end);
+    let vm_map = VirtualMemoryMap {
+        pmarea,
+        vmarea,
+        vm_start: final_vaddr,
+        mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: prepared.maximum_permissions,
+        permissions: permissions | 0x08,
+        is_shared,
+        memory_attribute,
+        owner,
+    };
 
-    if !is_map_fixed {
-        if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
-            let chosen_vaddr = match task
-                .vm_manager
-                .find_unmapped_area(aligned_length, PAGE_SIZE)
-            {
-                Some(addr) => addr,
-                None => return usize::MAX,
-            };
-            let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
-            let pmarea = match physical_area_for_mapping(mapping_info.paddr, aligned_length) {
-                Some(area) => area,
-                None => return usize::MAX,
-            };
-            let owner = memory_mappable
-                .mapping_owner_for_range(offset, aligned_length)
-                .or_else(|| {
-                    task.handle_table
-                        .get_arc_clone(handle)
-                        .and_then(|obj| obj.as_memory_mappable_arc())
-                });
-            let mut retry_map =
-                VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
-                    .with_memory_attribute(mapping_info.memory_attribute);
-            retry_map.maximum_permissions = maximum_permissions;
-            if task.vm_manager.add_memory_map(retry_map).is_err() {
-                return usize::MAX;
-            }
-
-            memory_mappable.on_mapped(chosen_vaddr, mapping_info.paddr, aligned_length, offset);
-            return chosen_vaddr;
+    let (mapped_vaddr, removed_mappings) = if is_map_fixed {
+        match task.vm_manager.add_memory_map_fixed(vm_map) {
+            Ok(removed) => (final_vaddr, removed),
+            Err(_) => return usize::MAX,
         }
+    } else if task.vm_manager.add_memory_map(vm_map.clone()).is_ok() {
+        (final_vaddr, Vec::new())
+    } else if private_demand {
+        return usize::MAX;
+    } else {
+        match task
+            .vm_manager
+            .add_memory_map_at_offset(vm_map, placement_alignment, 0)
+        {
+            Ok(addr) => (addr, Vec::new()),
+            Err(_) => return usize::MAX,
+        }
+    };
 
-        memory_mappable.on_mapped(final_vaddr, mapping_info.paddr, aligned_length, offset);
-        return final_vaddr;
+    let notify = || {
+        prepared
+            .notification
+            .as_deref()
+            .unwrap_or(memory_mappable)
+            .on_mapped(mapped_vaddr, paddr, aligned_length, offset);
+    };
+    if !private_demand {
+        notify();
     }
-
-    match task.vm_manager.add_memory_map_fixed(vm_map) {
-        Ok(removed_mappings) => {
-            memory_mappable.on_mapped(final_vaddr, mapping_info.paddr, aligned_length, offset);
-
-            for removed_map in &removed_mappings {
-                if removed_map.is_shared {
-                    if let Some(owner) = &removed_map.owner {
-                        owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
-                    }
-                }
-            }
-
-            reclaim_private_removed_mappings(&task, &removed_mappings);
-
-            final_vaddr
+    for removed in &removed_mappings {
+        if (private_demand || removed.is_shared)
+            && let Some(owner) = &removed.owner
+        {
+            owner.on_unmapped(removed.vmarea.start, removed.vmarea.size());
         }
-        Err(_) => usize::MAX,
     }
+    reclaim_private_removed_mappings(&task, &removed_mappings);
+    if private_demand {
+        notify();
+    }
+    mapped_vaddr
 }
 
 fn handle_anonymous_mapping(
     task: &crate::task::Task,
     vaddr: usize,
     aligned_length: usize,
-    num_pages: usize,
+    _num_pages: usize,
     prot: usize,
     flags: usize,
 ) -> usize {
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
 
+    // The kernel selects the address of an unhinted reservation. Allocate it
+    // in the granule advertised to native userspace through AT_PAGESZ.
+    let alignment = if vaddr == 0 {
+        crate::vm::execution_page_size()
+    } else {
+        PAGE_SIZE
+    };
+    let requested = aligned_length;
+    let Some(search_length) = aligned_length.checked_next_multiple_of(alignment) else {
+        return usize::MAX;
+    };
+
+    // Place the end of an inaccessible reservation on a native boundary.
+    // Applications can then retain a 4 KiB prefix guard and install a native
+    // page-aligned payload with MAP_FIXED inside the reservation.
+    let prefix = if prot == 0 {
+        search_length - aligned_length
+    } else {
+        0
+    };
+    // Placement may require a wider host page, but the accessible extent
+    // follows the page size the loader supplied to this image through AT_PAGESZ.
+    #[cfg(feature = "hosted")]
+    let length_alignment = alignment.min(task.vm_manager.hosted_image().guest_page_size());
+    #[cfg(not(feature = "hosted"))]
+    let length_alignment = alignment;
+    let aligned_length = if prot == 0 {
+        requested
+    } else {
+        requested.next_multiple_of(length_alignment)
+    };
+
     // Determine the final virtual address for the mapping.
     // If vaddr is 0, find an unmapped area; otherwise use the hint or fixed address.
     let final_vaddr = if vaddr == 0 {
-        match task
-            .vm_manager
-            .find_unmapped_area(aligned_length, PAGE_SIZE)
-        {
-            Some(addr) => addr,
-            None => return usize::MAX,
-        }
+        // Relocated atomically at insertion.
+        0
     } else if vaddr % PAGE_SIZE != 0 {
         return usize::MAX;
     } else if !is_map_fixed {
@@ -366,7 +323,7 @@ fn handle_anonymous_mapping(
         if has_overlap {
             match task
                 .vm_manager
-                .find_unmapped_area(aligned_length, PAGE_SIZE)
+                .find_unmapped_area(aligned_length, alignment)
             {
                 Some(addr) => addr,
                 None => return usize::MAX,
@@ -400,7 +357,8 @@ fn handle_anonymous_mapping(
         pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
-        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous(),
+        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous()
+            .with_tail_padding(requested, aligned_length),
         maximum_permissions: usize::MAX,
         permissions,
         is_shared,
@@ -408,6 +366,12 @@ fn handle_anonymous_mapping(
         owner: Some(owner),
     };
 
+    if vaddr == 0 {
+        return task
+            .vm_manager
+            .add_memory_map_at_offset(vm_map, alignment, prefix)
+            .unwrap_or(usize::MAX);
+    }
     install_anonymous_mapping(task, vm_map, is_map_fixed)
 }
 

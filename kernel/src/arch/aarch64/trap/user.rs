@@ -32,7 +32,7 @@ pub unsafe extern "C" fn aarch64_first_switch_to_user_naked(
     );
 }
 
-#[unsafe(link_section = ".trampoline.text.0")]
+#[cfg_attr(not(feature = "hosted"), unsafe(link_section = ".trampoline.text.0"))]
 #[unsafe(export_name = "_user_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
@@ -176,7 +176,7 @@ pub extern "C" fn _user_trap_entry() {
     );
 }
 
-#[unsafe(link_section = ".trampoline.text.1")]
+#[cfg_attr(not(feature = "hosted"), unsafe(link_section = ".trampoline.text.1"))]
 #[unsafe(export_name = "_switch_to_user")]
 #[unsafe(naked)]
 pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
@@ -257,6 +257,10 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
     );
 }
 
+#[cfg(feature = "hosted")]
+pub use crate::hosted::execution::enter as arch_switch_to_user;
+
+#[cfg(not(feature = "hosted"))]
 #[unsafe(export_name = "arch_switch_to_user")]
 pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
     // This is the actual EL0 return boundary. `schedule()` can resume in the
@@ -363,22 +367,7 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         );
     }
 
-    // trap_kind is now passed in x1 (argument 2), so no need to read from memory!
-    if trap_kind == 1 || trap_kind == 2 {
-        crate::breadcrumb::drop(
-            crate::breadcrumb::USER_IRQ_DISPATCH,
-            trap_kind as u64,
-            trapframe.elr,
-        );
-        arch_irq_handler(trapframe, trap_kind);
-        crate::breadcrumb::drop(
-            crate::breadcrumb::IRQ_DISPATCH_DONE,
-            trap_kind as u64,
-            trapframe.elr,
-        );
-    } else {
-        arch_exception_handler(trapframe, trap_kind);
-    }
+    dispatch_user_trap(trapframe, trap_kind);
 
     if let Some(task_id) = first_traced_user_trap {
         crate::println!(
@@ -398,4 +387,23 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     }
 
     arch_switch_to_user(trapframe);
+}
+
+/// Dispatch a captured user trap on the current Task's kernel stack.
+pub(crate) fn dispatch_user_trap(trapframe: &mut Trapframe, trap_kind: usize) {
+    if trap_kind == 1 || trap_kind == 2 {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::USER_IRQ_DISPATCH,
+            trap_kind as u64,
+            trapframe.elr,
+        );
+        arch_irq_handler(trapframe, trap_kind);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IRQ_DISPATCH_DONE,
+            trap_kind as u64,
+            trapframe.elr,
+        );
+    } else {
+        arch_exception_handler(trapframe, trap_kind);
+    }
 }
