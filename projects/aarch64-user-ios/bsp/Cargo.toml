@@ -1,0 +1,13 @@
+[package]
+name = "scarlet-aarch64-user-ios-bsp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+scarlet = { path = "../../../kernel", default-features = false, features = ["hosted", "network", "user-fpu", "user-vector"] }
+scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
+scarlet-hosted-runtime = { path = "../../../kernel/hosted/runtime" }

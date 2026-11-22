@@ -1,6 +1,10 @@
-#import "probe.h"
-
 #import <UIKit/UIKit.h>
+
+#ifdef SCARLET_EXECUTION_PROBE
+#import "probe.h"
+#else
+extern void scarlet_ios_run(void (*log)(const char *));
+#endif
 
 static UITextView *output;
 
@@ -34,12 +38,18 @@ static void show_line(const char *line) {
 
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+#ifdef SCARLET_EXECUTION_PROBE
         NSString *path = [NSBundle.mainBundle.privateFrameworksPath
             stringByAppendingPathComponent:@"ScarletFixture.framework/ScarletFixture"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             bool passed = probe_run(path.fileSystemRepresentation, show_line);
             show_line(passed ? "SCARLET_P0_PASS" : "SCARLET_P0_FAIL");
         });
+#else
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            scarlet_ios_run(show_line);
+        });
+#endif
     });
 }
 @end
