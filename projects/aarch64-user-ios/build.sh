@@ -104,6 +104,9 @@ else
         printf '%s\n' bin bin/boot-check dev init mnt mnt/newroot |
             /usr/bin/cpio -o -H newc -R 0:0 > "$app/initramfs.cpio"
     )
+    seed="$out/rootfs"
+    mkdir -p "$seed"/{dev,root,var/lib/scarlet}
+    mke2fs -q -t ext2 -F -d "$seed" "$app/root.ext2" 16M >&2
     SDKROOT="$sdkroot" IPHONEOS_DEPLOYMENT_TARGET=16.0 \
         cargo build --locked --release -Zbuild-std=std,panic_abort \
         --manifest-path "$project/bsp/Cargo.toml" --target "$rust_target" \

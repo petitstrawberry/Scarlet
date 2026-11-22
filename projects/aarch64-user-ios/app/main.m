@@ -3,7 +3,7 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
-extern void scarlet_ios_boot(const char *bundle, void (*log)(const char *));
+extern void scarlet_ios_boot(const char *bundle, const char *root, void (*log)(const char *));
 extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
 #endif
 
@@ -16,6 +16,29 @@ static void show_line(const char *line) {
         output.text = [output.text stringByAppendingFormat:@"%@\n", message];
     });
 }
+
+#ifndef SCARLET_EXECUTION_PROBE
+static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSURL *directory = [manager URLForDirectory:NSApplicationSupportDirectory
+        inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:error];
+    if (!directory) {
+        return nil;
+    }
+    NSURL *root = [directory URLByAppendingPathComponent:@"scarlet-root.ext2" isDirectory:NO];
+    if ([manager fileExistsAtPath:root.path]) {
+        return root;
+    }
+    NSURL *seed = [bundle.bundleURL URLByAppendingPathComponent:@"root.ext2" isDirectory:NO];
+    NSURL *stage = [directory URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:NO];
+    if (![manager copyItemAtURL:seed toURL:stage error:error] ||
+        ![manager moveItemAtURL:stage toURL:root error:error]) {
+        [manager removeItemAtURL:stage error:nil];
+        return nil;
+    }
+    return root;
+}
+#endif
 
 @interface ProbeScene : UIResponder <UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow *window;
@@ -55,7 +78,14 @@ static void show_line(const char *line) {
                 NSString *elf = [bundle.resourcePath stringByAppendingPathComponent:@"scheduler.elf"];
                 scarlet_ios_run(path.fileSystemRepresentation, elf.fileSystemRepresentation, show_line);
             } else {
-                scarlet_ios_boot(bundle.bundlePath.fileSystemRepresentation, show_line);
+                NSError *error = nil;
+                NSURL *root = prepare_root(bundle, &error);
+                if (!root) {
+                    NSString *message = [NSString stringWithFormat:@"SCARLET_BOOT_FAIL: %@", error];
+                    show_line(message.UTF8String);
+                    return;
+                }
+                scarlet_ios_boot(bundle.bundlePath.fileSystemRepresentation, root.fileSystemRepresentation, show_line);
             }
         });
 #endif

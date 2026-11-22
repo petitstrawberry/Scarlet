@@ -1,4 +1,14 @@
 .section .rodata
+.Lroot_path:
+    .asciz "/var/lib/scarlet/boot-check"
+.Lroot_byte:
+    .byte 0x53
+.Lroot_written:
+    .ascii "SCARLET_ROOT_WRITTEN\n"
+.set .Lwritten_size, . - .Lroot_written
+.Lroot_reopened:
+    .ascii "SCARLET_ROOT_REOPENED\n"
+.set .Lreopened_size, . - .Lroot_reopened
 .Lpass_message:
     .ascii "SCARLET_BOOT_PASS\n"
 .set .Lpass_size, . - .Lpass_message
@@ -19,6 +29,53 @@ _scarlet_boot_start:
     mov x8, #1304 // EnvironmentCurrent
     svc #0
     tbnz x0, #63, .Lfail
+
+    // The boot fixture lives in the current signed bundle's initramfs.
+    // The absolute path below resolves in the writable root after pivot_root.
+    mov x0, #-1 // CURRENT_DIRECTORY
+    adr x1, .Lroot_path
+    mov x2, #0x42 // O_RDWR | O_CREAT
+    mov x3, #0600
+    mov x8, #417 // VfsOpenAt
+    svc #0
+    tbnz x0, #63, .Lfail
+    mov x20, x0
+    sub sp, sp, #16
+    mov x1, sp
+    mov x2, #1
+    mov x8, #200 // StreamRead
+    svc #0
+    cbz x0, .Lwrite_root
+    cmp x0, #1
+    b.ne .Lfail
+    ldrb w9, [sp]
+    cmp w9, #0x53
+    b.ne .Lfail
+    adr x1, .Lroot_reopened
+    mov x2, #.Lreopened_size
+    b .Lroot_result
+.Lwrite_root:
+    mov x0, x20
+    adr x1, .Lroot_byte
+    mov x2, #1
+    mov x8, #201 // StreamWrite
+    svc #0
+    cmp x0, #1
+    b.ne .Lfail
+    mov x0, x20
+    mov x8, #304 // FileSync
+    svc #0
+    cbnz x0, .Lfail
+    adr x1, .Lroot_written
+    mov x2, #.Lwritten_size
+.Lroot_result:
+    add sp, sp, #16
+    mov x0, #1
+    mov x8, #201 // StreamWrite
+    svc #0
+    mov x0, x20
+    mov x8, #102 // HandleClose
+    svc #0
 
     mov x0, #1
     adr x1, .Lpass_message

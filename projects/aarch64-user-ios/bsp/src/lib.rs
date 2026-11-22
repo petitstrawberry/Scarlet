@@ -1,6 +1,12 @@
 //! Hosted Scarlet on the iOS application's CPU0 thread.
 
+#[allow(dead_code)]
+#[path = "../../../shared/hosted/block.rs"]
+mod block;
 mod boot;
+#[allow(dead_code)]
+#[path = "../../../shared/hosted/root_image.rs"]
+mod root_image;
 #[allow(dead_code)]
 #[path = "../../../shared/hosted/terminal.rs"]
 mod terminal;

@@ -13,7 +13,9 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
   --terminate-running-process --console booted org.scarletos.ios
 ```
 
-通常起動では Scarlet の共通ブート処理が同梱 initramfs をマウントします。Rust 製の `/init` が PID 1 で起動し、`/dev/tty0` と書込み可能なルートビューを初期化して `EnvironmentExec` で `/bin/boot-check` に切り替わります。検証プログラム自身が引き継いだ標準出力に `SCARLET_BOOT_PASS` を書き、UIKit の画面とホストのコンソールに表示されます。
+初回起動時にアプリは同梱の ext2 イメージを Application Support の `scarlet-root.ext2` にコピーします。以降の起動では同じファイルを `/dev/hostroot` として使います。
+
+通常起動では Scarlet の共通ブート処理が同梱 initramfs をマウントします。Rust 製の `/init` が PID 1 で起動し、`/dev/tty0` を初期化してルートを ext2 に切り替えます。その後、`EnvironmentExec` で現在のアプリと一緒に署名された `/old_root/bin/boot-check` に切り替わります。検証プログラムはルート内のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。結果は `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` と `SCARLET_BOOT_PASS` で、UIKit の画面とホストのコンソールに表示されます。
 
 ビルドでは `/init` と検証用 AArch64 PIE の ELF を `tools/ios-aot` で Mach-O フレームワークに変換して署名します。Scarlet は署名済みの RX を異なるアドレスへファイルマップし、インスタンスごとに DATA、BSS、GOT、静的 TLS、スタックを初期化します。同じ枠を再利用するときは RX を保持し、可変ページを作り直します。
 

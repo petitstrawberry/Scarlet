@@ -1,6 +1,9 @@
 use scarlet::{
     DeviceSource,
-    device::manager::{DeviceManager, DriverPriority},
+    device::{
+        Device,
+        manager::{DeviceManager, DriverPriority},
+    },
     hosted,
 };
 use scarlet_hosted_runtime::signed_image::Image;
@@ -14,14 +17,15 @@ use std::{
     thread,
 };
 
-use crate::{Log, log, terminal::HostTerminal};
+use crate::{Log, block::RootBlock, log, root_image::RootImage, terminal::HostTerminal};
 
 thread_local! {
     static CONSOLE: RefCell<Option<(UnixStream, Log)>> = const { RefCell::new(None) };
+    static ROOT: RefCell<Option<RootImage>> = const { RefCell::new(None) };
     static TERMINAL: RefCell<Option<HostTerminal>> = const { RefCell::new(None) };
 }
 
-fn populate(_: &DeviceManager, priority: DriverPriority) {
+fn populate(manager: &DeviceManager, priority: DriverPriority) {
     if priority != DriverPriority::Core {
         return;
     }
@@ -35,6 +39,17 @@ fn populate(_: &DeviceManager, priority: DriverPriority) {
     }) {
         Ok(terminal) => TERMINAL.set(Some(terminal)),
         Err(error) => log(callback, &format!("Cannot attach Scarlet console: {error}")),
+    }
+    if let Some(image) = ROOT.take() {
+        match RootBlock::attach(image, 0, 16) {
+            Ok(block) => {
+                manager.register_device_with_name(block.name().into(), Arc::new(block));
+            }
+            Err(error) => log(
+                callback,
+                &format!("SCARLET_BOOT_FAIL: Cannot attach root: {error}"),
+            ),
+        }
     }
 }
 
@@ -51,7 +66,7 @@ fn forward_console(stream: UnixStream, callback: Log) -> io::Result<()> {
     Ok(())
 }
 
-fn boot(bundle: &Path, callback: Log) -> io::Result<()> {
+fn boot(bundle: &Path, root: &Path, callback: Log) -> io::Result<()> {
     for name in ["ScarletInit", "ScarletBootCheck"] {
         let path = bundle
             .join("Frameworks")
@@ -65,6 +80,7 @@ fn boot(bundle: &Path, callback: Log) -> io::Result<()> {
     if initramfs.is_empty() {
         return Err(io::Error::other("Empty Scarlet initramfs"));
     }
+    let root = RootImage::open(root)?;
     let platform =
         hosted::prepare(hosted::DEFAULT_VCPUS, 64 * 1024 * 1024).map_err(io::Error::other)?;
     let (guest, host) = UnixStream::pair()?;
@@ -76,23 +92,32 @@ fn boot(bundle: &Path, callback: Log) -> io::Result<()> {
             }
         })?;
     CONSOLE.set(Some((guest, callback)));
+    ROOT.set(Some(root));
     platform.boot(
         &initramfs,
-        "init.exec=/bin/boot-check",
+        "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/boot-check",
         DeviceSource::Hosted(populate),
     )
 }
 
 /// # Safety
 ///
-/// `bundle` is a NUL-terminated path to the running app bundle. The callback
-/// remains callable from any host thread for the lifetime of the app.
+/// `bundle` and `root` are NUL-terminated paths to the running app bundle and
+/// its writable root image. The callback remains callable from any host thread
+/// for the lifetime of the app.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn scarlet_ios_boot(bundle: *const c_char, callback: Log) {
+pub unsafe extern "C" fn scarlet_ios_boot(
+    bundle: *const c_char,
+    root: *const c_char,
+    callback: Log,
+) {
     let bundle = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(bundle) }.to_bytes(),
     ));
-    if let Err(error) = boot(bundle, callback) {
+    let root = Path::new(OsStr::from_bytes(
+        unsafe { CStr::from_ptr(root) }.to_bytes(),
+    ));
+    if let Err(error) = boot(bundle, root, callback) {
         log(callback, &format!("SCARLET_BOOT_FAIL: {error}"));
     }
 }
