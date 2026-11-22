@@ -17,6 +17,7 @@ use alloc::{
 use core::fmt;
 
 mod elf;
+pub mod aot;
 use elf::{Parsed, Symbol};
 
 pub const PAGE_SIZE: usize = 4096;

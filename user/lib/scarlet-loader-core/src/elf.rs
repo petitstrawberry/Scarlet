@@ -7,7 +7,7 @@ use alloc::{
 
 const MAX_ENTRIES: usize = 1024 * 1024;
 
-pub(crate) struct Segment {
+pub struct Segment {
     pub offset: usize,
     pub vaddr: usize,
     pub file_size: usize,
@@ -39,6 +39,7 @@ pub(crate) struct Relocation {
 }
 pub(crate) struct Parsed {
     pub executable: bool,
+    pub has_interpreter: bool,
     pub tls: Option<Segment>,
     pub tls_alignment: usize,
     pub entry: usize,
@@ -133,6 +134,7 @@ impl Parsed {
         range(bytes, phoff, phnum.checked_mul(56).ok_or(Error::Overflow)?)?;
         let mut parsed = Self {
             executable,
+            has_interpreter: false,
             tls: None,
             tls_alignment: 1,
             entry: address(bytes, 24)?,
@@ -160,6 +162,9 @@ impl Parsed {
             let file_size = address(bytes, ph + 32)?;
             let memory_size = address(bytes, ph + 40)?;
             let alignment = address(bytes, ph + 48)?;
+            if kind == 3 {
+                parsed.has_interpreter = true;
+            }
             if kind == 7 {
                 if parsed.tls.is_some()
                     || file_size > memory_size
