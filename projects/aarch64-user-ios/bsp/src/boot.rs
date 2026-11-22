@@ -10,14 +10,17 @@ use scarlet_hosted_runtime::signed_image::Image;
 use std::{
     cell::RefCell,
     ffi::{CStr, OsStr, c_char},
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Write},
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::Path,
-    sync::Arc,
+    sync::{Arc, OnceLock, mpsc},
     thread,
 };
 
 use crate::{Log, block::RootBlock, log, root_image::RootImage, terminal::HostTerminal};
+
+const CONSOLE_INPUT_LIMIT: usize = 4096;
+static CONSOLE_INPUT: OnceLock<mpsc::SyncSender<Vec<u8>>> = OnceLock::new();
 
 thread_local! {
     static CONSOLE: RefCell<Option<(UnixStream, Log)>> = const { RefCell::new(None) };
@@ -84,6 +87,18 @@ fn boot(bundle: &Path, root: &Path, callback: Log) -> io::Result<()> {
     let platform =
         hosted::prepare(hosted::DEFAULT_VCPUS, 64 * 1024 * 1024).map_err(io::Error::other)?;
     let (guest, host) = UnixStream::pair()?;
+    let mut writer = host.try_clone()?;
+    let (send, receive) = mpsc::sync_channel::<Vec<u8>>(16);
+    thread::Builder::new()
+        .name("scarlet-console-input".into())
+        .spawn(move || {
+            for bytes in receive {
+                if let Err(error) = writer.write_all(&bytes) {
+                    log(callback, &format!("Cannot write Scarlet console: {error}"));
+                    break;
+                }
+            }
+        })?;
     thread::Builder::new()
         .name("scarlet-console-output".into())
         .spawn(move || {
@@ -91,6 +106,9 @@ fn boot(bundle: &Path, root: &Path, callback: Log) -> io::Result<()> {
                 log(callback, &format!("Cannot read Scarlet console: {error}"));
             }
         })?;
+    CONSOLE_INPUT
+        .set(send)
+        .map_err(|_| io::Error::other("Scarlet console input is already running"))?;
     CONSOLE.set(Some((guest, callback)));
     ROOT.set(Some(root));
     platform.boot(
@@ -98,6 +116,23 @@ fn boot(bundle: &Path, root: &Path, callback: Log) -> io::Result<()> {
         "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/boot-check",
         DeviceSource::Hosted(populate),
     )
+}
+
+/// Queue bytes for the host I/O thread without blocking UIKit.
+///
+/// # Safety
+///
+/// `bytes` must be readable for `length` bytes for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scarlet_ios_console_send(bytes: *const u8, length: usize) -> bool {
+    let Some(input) = CONSOLE_INPUT.get() else {
+        return false;
+    };
+    if bytes.is_null() || length == 0 || length > CONSOLE_INPUT_LIMIT {
+        return false;
+    }
+    let data = unsafe { std::slice::from_raw_parts(bytes, length) };
+    input.try_send(data.to_vec()).is_ok()
 }
 
 /// # Safety

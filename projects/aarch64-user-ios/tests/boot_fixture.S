@@ -12,6 +12,9 @@
 .Lpass_message:
     .ascii "SCARLET_BOOT_PASS\n"
 .set .Lpass_size, . - .Lpass_message
+.Ltty_message:
+    .ascii "guest: "
+.set .Ltty_size, . - .Ltty_message
 .Lfail_message:
     .ascii "SCARLET_BOOT_FAIL\n"
 .set .Lfail_size, . - .Lfail_message
@@ -85,6 +88,27 @@ _scarlet_boot_start:
     svc #0
     cmp x0, x19
     b.ne .Lfail
+    sub sp, sp, #256
+.Lread:
+    mov x0, #0
+    mov x1, sp
+    mov x2, #256
+    mov x8, #200 // StreamRead from the inherited TTY
+    svc #0
+    cmp x0, #0
+    b.le .Lidle
+    mov x19, x0
+    mov x0, #1
+    adr x1, .Ltty_message
+    mov x2, #.Ltty_size
+    mov x8, #201 // StreamWrite
+    svc #0
+    mov x0, #1
+    mov x1, sp
+    mov x2, x19
+    mov x8, #201 // StreamWrite
+    svc #0
+    b .Lread
 .Lidle:
     movz x0, #0xca00
     movk x0, #0x3b9a, lsl #16 // 1 second in nanoseconds

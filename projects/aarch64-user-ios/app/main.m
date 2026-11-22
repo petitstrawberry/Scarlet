@@ -4,6 +4,7 @@
 #import "probe.h"
 #else
 extern void scarlet_ios_boot(const char *bundle, const char *root, void (*log)(const char *));
+extern bool scarlet_ios_console_send(const void *bytes, size_t length);
 extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
 #endif
 
@@ -14,6 +15,7 @@ static void show_line(const char *line) {
     NSString *message = [NSString stringWithUTF8String:line];
     dispatch_async(dispatch_get_main_queue(), ^{
         output.text = [output.text stringByAppendingFormat:@"%@\n", message];
+        [output scrollRangeToVisible:NSMakeRange(output.text.length, 0)];
     });
 }
 
@@ -40,7 +42,7 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
 }
 #endif
 
-@interface ProbeScene : UIResponder <UIWindowSceneDelegate>
+@interface ProbeScene : UIResponder <UIWindowSceneDelegate, UITextFieldDelegate>
 @property(nonatomic, strong) UIWindow *window;
 @end
 
@@ -57,6 +59,35 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
     output.textContainerInset = UIEdgeInsetsMake(20, 16, 20, 16);
     output.text = @"";
     controller.view = output;
+#ifndef SCARLET_EXECUTION_PROBE
+    bool schedulerCheck = [NSProcessInfo.processInfo.arguments containsObject:@"--scheduler-check"];
+    if (!schedulerCheck) {
+        controller.view = [UIView new];
+        controller.view.backgroundColor = UIColor.systemBackgroundColor;
+        UITextField *input = [UITextField new];
+        input.borderStyle = UITextBorderStyleRoundedRect;
+        input.placeholder = @"TTY input";
+        input.accessibilityIdentifier = @"scarlet-console-input";
+        input.autocorrectionType = UITextAutocorrectionTypeNo;
+        input.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        input.spellCheckingType = UITextSpellCheckingTypeNo;
+        input.returnKeyType = UIReturnKeySend;
+        input.delegate = self;
+
+        UIStackView *console = [[UIStackView alloc] initWithArrangedSubviews:@[output, input]];
+        console.axis = UILayoutConstraintAxisVertical;
+        console.spacing = 8;
+        console.translatesAutoresizingMaskIntoConstraints = NO;
+        [controller.view addSubview:console];
+        UILayoutGuide *safe = controller.view.safeAreaLayoutGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [console.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+            [console.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+            [console.topAnchor constraintEqualToAnchor:safe.topAnchor],
+            [console.bottomAnchor constraintEqualToAnchor:controller.view.keyboardLayoutGuide.topAnchor constant:-8],
+        ]];
+    }
+#endif
     self.window.rootViewController = controller;
     [self.window makeKeyAndVisible];
 
@@ -72,7 +103,7 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
 #else
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSBundle *bundle = NSBundle.mainBundle;
-            if ([NSProcessInfo.processInfo.arguments containsObject:@"--scheduler-check"]) {
+            if (schedulerCheck) {
                 NSString *path = [bundle.privateFrameworksPath
                     stringByAppendingPathComponent:@"ScarletGuest.framework/ScarletGuest"];
                 NSString *elf = [bundle.resourcePath stringByAppendingPathComponent:@"scheduler.elf"];
@@ -91,6 +122,17 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
 #endif
     });
 }
+
+#ifndef SCARLET_EXECUTION_PROBE
+- (BOOL)textFieldShouldReturn:(UITextField *)input {
+    NSString *line = [(input.text ?: @"") stringByAppendingString:@"\n"];
+    NSData *bytes = [line dataUsingEncoding:NSUTF8StringEncoding];
+    if (scarlet_ios_console_send(bytes.bytes, bytes.length)) {
+        input.text = @"";
+    }
+    return NO;
+}
+#endif
 @end
 
 @interface ProbeApp : UIResponder <UIApplicationDelegate>
