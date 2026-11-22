@@ -98,7 +98,7 @@ fn prepare_secondary(cpu_id: usize) -> Result<usize, &'static str> {
 
 /// Initialize the host allocator boundary, vCPU identity, PMM, and initcalls.
 pub fn prepare(cpu_count: usize, ram_bytes: usize) -> Result<Platform, &'static str> {
-    if !(2..=MAX_NUM_CPUS).contains(&cpu_count) {
+    if !(1..=MAX_NUM_CPUS).contains(&cpu_count) {
         return Err("Hosted vCPU count is outside Scarlet's supported range");
     }
     #[cfg(target_os = "linux")]
