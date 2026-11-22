@@ -33,6 +33,11 @@ const _: () = {
     assert!(Syscall::Exit as usize == 1);
     assert!(Syscall::ExecveABI as usize == 4);
     assert!(Syscall::GetKernelInfo as usize == 51);
+    assert!(Syscall::Clone as usize == 2);
+    assert!(Syscall::Waitpid as usize == 5);
+    assert!(Syscall::EnvironmentCurrent as usize == 1304);
+    assert!(Syscall::EnvironmentSpawn as usize == 1306);
+    assert!(size_of::<scarlet_abi::RawEnvironmentExec>() == 48);
 };
 
 #[repr(C)]
@@ -76,6 +81,10 @@ fn watch(callback: Log) {
             log(
                 callback,
                 "Signed ELF images used the exec stack, rejected an unsigned executable and kept running.",
+            );
+            log(
+                callback,
+                "EnvironmentSpawn started a signed child and Waitpid returned its exit status.",
             );
             log(callback, "SCARLET_AOT_PASS");
             return;
@@ -200,8 +209,13 @@ fn boot(path: &Path, elf: &Path, callback: Log) -> io::Result<()> {
                 ));
             }
         }
+        let file_handle = task
+            .handle_table
+            .insert(executable.clone())
+            .map_err(io::Error::other)?;
         {
             let mut vcpu = task.vcpu.lock();
+            vcpu.iregs.reg[3] = file_handle as usize;
             vcpu.iregs.reg[4] = 0x731a + role;
             vcpu.iregs.reg[5] = std::ptr::from_ref(progress).addr();
             vcpu.iregs.reg[6] = std::ptr::from_ref(&PROGRESS[1 - role]).addr();

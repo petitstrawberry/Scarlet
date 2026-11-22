@@ -1287,6 +1287,11 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let flags = trapframe.get_arg(0);
+    #[cfg(all(feature = "hosted", target_os = "ios"))]
+    if flags & CLONE_VM == 0 || flags & CLONE_VFORK != 0 {
+        trapframe.increment_pc_next(&parent_task);
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
     if !matches!(flags & 0xff, 0 | 17) {
         trapframe.increment_pc_next(&parent_task);
         return errno::to_result(errno::EOPNOTSUPP);

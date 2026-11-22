@@ -19,6 +19,8 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
 
 Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージを選びます。既存の exec トランザクションで新しいアドレス空間と引数スタックを準備し、`AT_PAGESZ` に 16 KiB を設定します。検証では準備失敗後も元のゲストが実行でき、ゲスト所有のスタックへの書込みが通り、アプリ側アドレスへの書込みが拒否されることを確認します。
 
+ゲストからの `EnvironmentSpawn` と `Waitpid` も検証します。子は同じ ELF の別インスタンスで起動し、親は子の終了コードを受け取ります。iOS でのプロセス生成には `EnvironmentSpawn` を使います。
+
 現在の AOT 入力は 16 KiB ページで分離された 1 個の RX セグメントを持つ自己完結の PIE です。再配置は `R_AARCH64_RELATIVE` に対応します。動的インタープリタ、依存ライブラリ、初期化関数テーブルには追加のローダー処理が必要です。
 
 ## 署名済みコードの再配置を検証

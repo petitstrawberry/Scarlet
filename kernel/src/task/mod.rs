@@ -2854,6 +2854,10 @@ impl Task {
         flags: CloneFlags,
         after_snapshot: impl FnOnce(),
     ) -> Result<Task, &'static str> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if self.task_type == TaskType::User && !flags.is_set(CloneFlagsDef::Vm) {
+            return Err("iOS process creation requires EnvironmentSpawn");
+        }
         crate::breadcrumb::drop(
             crate::breadcrumb::CLONE_ENTER,
             self.registered_id().unwrap_or(0) as u64,

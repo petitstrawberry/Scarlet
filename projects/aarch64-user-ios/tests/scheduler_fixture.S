@@ -18,9 +18,12 @@ _scarlet_scheduler_start:
     cmp x13, x0
     b.ne Lscarlet_scheduler_fail
     ldr x13, [x1]
-    ldrb w13, [x13]
-    cmp w13, #'/'
+    ldrb w14, [x13]
+    cmp w14, #'/'
     b.ne Lscarlet_scheduler_fail
+    ldrb w14, [x13, #1]
+    cmp w14, #'c'
+    b.eq Lscarlet_scheduler_child
     mov x29, x1
     add x12, sp, #32
 Lscarlet_scheduler_aux:
@@ -30,6 +33,8 @@ Lscarlet_scheduler_aux:
     b.ne Lscarlet_scheduler_aux
     cmp x14, #4, lsl #12
     b.ne Lscarlet_scheduler_fail
+    sub sp, sp, #16
+    str x3, [sp]
 
     mrs x23, tpidr_el0
     msr tpidr_el0, x27
@@ -174,6 +179,50 @@ Lscarlet_scheduler_check:
     add x12, x21, #41
     cmp x13, x12
     b.ne Lscarlet_scheduler_fail
+
+    cbnz x21, Lscarlet_scheduler_ok
+    // A VM-copying clone fails before allocating or publishing a child.
+    mov x0, #0
+    mov x8, #2
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+
+    mov x8, #1304
+    svc #0
+    cmn x0, #1
+    b.eq Lscarlet_scheduler_fail
+    ldr x1, [sp]
+    sub sp, sp, #80
+    mov x12, #48
+    add x13, sp, #48
+    stp x12, x13, [sp]
+    stp xzr, xzr, [sp, #16]
+    stp xzr, xzr, [sp, #32]
+    adrp x12, child_path
+    add x12, x12, :lo12:child_path
+    stp x12, xzr, [sp, #48]
+    mov x2, sp
+    adrp x3, abi_name
+    add x3, x3, :lo12:abi_name
+    mov x8, #1306
+    svc #0
+    cmn x0, #1
+    b.eq Lscarlet_scheduler_fail
+    cbz x0, Lscarlet_scheduler_fail
+    mov x25, x0
+    add x1, sp, #64
+    mov x2, #0
+    mov x8, #5
+    svc #0
+    cmp x0, x25
+    b.ne Lscarlet_scheduler_fail
+    ldr w12, [sp, #64]
+    add sp, sp, #80
+    cmp w12, #42
+    b.ne Lscarlet_scheduler_fail
+
+Lscarlet_scheduler_ok:
     mov x0, #0
     mov x13, #1
     b Lscarlet_scheduler_publish
@@ -183,6 +232,12 @@ Lscarlet_scheduler_fail:
 Lscarlet_scheduler_publish:
     add x12, x19, #8
     stlr x13, [x12]
+    mov x8, #1
+    svc #0
+    brk #0x5101
+
+Lscarlet_scheduler_child:
+    mov x0, #42
     mov x8, #1
     svc #0
     brk #0x5101
@@ -197,6 +252,8 @@ Lscarlet_scheduler_constant:
 .section .rodata,"a",@progbits
 unsigned_path:
     .asciz "/unsigned"
+child_path:
+    .asciz "/child"
 abi_name:
     .asciz "scarlet"
 
