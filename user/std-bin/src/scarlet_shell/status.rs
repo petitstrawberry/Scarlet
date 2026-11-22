@@ -7,11 +7,11 @@
 
 #[path = "clock.rs"]
 mod clock;
-pub use clock::{format_clock, local_seconds_of_day};
 use super::network_status::NetworkStatus;
 use super::power::PowerStatus;
 use alloc::string::String;
 use alloc::vec::Vec;
+pub use clock::{format_clock, local_seconds_of_day};
 use core::fmt::Write;
 use sas_protocol::{CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16};
 use scarlet_desktop_config::{StatusItemId, StatusPreferences};

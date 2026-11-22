@@ -896,9 +896,12 @@ fn control_backlight(percent: Option<u8>) -> Result<u8, u32> {
     if cached.is_none() {
         *cached = framebuffer::DisplayControl::open_primary().ok();
     }
-    let display = cached.as_ref().ok_or(protocol::error_codes::BACKLIGHT_UNAVAILABLE)?;
+    let display = cached
+        .as_ref()
+        .ok_or(protocol::error_codes::BACKLIGHT_UNAVAILABLE)?;
     if let Some(percent) = percent {
-        display.set_brightness_percent(percent)
+        display
+            .set_brightness_percent(percent)
             .map_err(|_| protocol::error_codes::BACKLIGHT_UNAVAILABLE)?;
     }
     display.get_brightness_percent().map_err(|_| {
@@ -908,20 +911,51 @@ fn control_backlight(percent: Option<u8>) -> Result<u8, u32> {
 }
 
 static OUTPUT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
-static OUTPUT_CONTEXTS: Mutex<BTreeMap<usize, protocol::outputs::OutputContext>> = Mutex::new(BTreeMap::new());
-pub(super) fn client_output_context(client: usize) -> Option<protocol::outputs::OutputContext> { OUTPUT_CONTEXTS.lock().expect("output contexts").get(&client).copied() }
-pub(super) fn set_client_output_context(client: usize, context: protocol::outputs::OutputContext) { OUTPUT_CONTEXTS.lock().expect("output contexts").insert(client, context); }
+static OUTPUT_CONTEXTS: Mutex<BTreeMap<usize, protocol::outputs::OutputContext>> =
+    Mutex::new(BTreeMap::new());
+pub(super) fn client_output_context(client: usize) -> Option<protocol::outputs::OutputContext> {
+    OUTPUT_CONTEXTS
+        .lock()
+        .expect("output contexts")
+        .get(&client)
+        .copied()
+}
+pub(super) fn set_client_output_context(client: usize, context: protocol::outputs::OutputContext) {
+    OUTPUT_CONTEXTS
+        .lock()
+        .expect("output contexts")
+        .insert(client, context);
+}
 pub(super) fn refresh_output_contexts(contexts: &[protocol::outputs::OutputContext]) {
-    for context in OUTPUT_CONTEXTS.lock().expect("output contexts").values_mut() {
-        if let Some(updated) = contexts.iter().find(|updated| updated.id == context.id).or_else(|| contexts.first()) {
+    for context in OUTPUT_CONTEXTS
+        .lock()
+        .expect("output contexts")
+        .values_mut()
+    {
+        if let Some(updated) = contexts
+            .iter()
+            .find(|updated| updated.id == context.id)
+            .or_else(|| contexts.first())
+        {
             *context = *updated;
         }
     }
 }
 pub(super) fn publish_output_event(event: protocol::outputs::OutputEvent) {
-    let clients: Vec<_> = OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").iter().copied().collect();
+    let clients: Vec<_> = OUTPUT_SUBSCRIBERS
+        .lock()
+        .expect("output subscribers")
+        .iter()
+        .copied()
+        .collect();
     let payload = protocol::outputs::encode_event(&event);
-    for client in clients { send_message_to_client(client, protocol::server_msg::OUTPUT_CONTROL, payload.clone()); }
+    for client in clients {
+        send_message_to_client(
+            client,
+            protocol::server_msg::OUTPUT_CONTROL,
+            payload.clone(),
+        );
+    }
 }
 static SYSTEM_SHELL_CLIENT: Mutex<Option<SystemShellClient>> = Mutex::new(None);
 
@@ -978,8 +1012,14 @@ fn subscribe_input_environment(client_id: usize) {
 }
 
 fn unsubscribe_input_environment(client_id: usize) {
-    OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").remove(&client_id);
-    OUTPUT_CONTEXTS.lock().expect("output contexts").remove(&client_id);
+    OUTPUT_SUBSCRIBERS
+        .lock()
+        .expect("output subscribers")
+        .remove(&client_id);
+    OUTPUT_CONTEXTS
+        .lock()
+        .expect("output contexts")
+        .remove(&client_id);
     INPUT_ENVIRONMENT_SUBSCRIBERS
         .lock()
         .expect("SWS input-environment subscriber mutex poisoned")
@@ -2465,7 +2505,11 @@ impl IpcServer {
         })
     }
 
-    pub fn start_login_clients(&mut self, editor: Socket, panel: Socket) -> Result<(), &'static str> {
+    pub fn start_login_clients(
+        &mut self,
+        editor: Socket,
+        panel: Socket,
+    ) -> Result<(), &'static str> {
         start_client(0, editor, Some(LoginPeer::Editor))?;
         start_client(1, panel, Some(LoginPeer::Panel))?;
         self.accept_thread_started = true;
@@ -2690,7 +2734,12 @@ fn start_client(
 }
 
 /// Client thread main function
-fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Handle>, login: Option<LoginPeer>) {
+fn client_thread_main(
+    client_id: usize,
+    mut socket: Socket,
+    wake_read: Option<Handle>,
+    login: Option<LoginPeer>,
+) {
     if is_sws_debug_enabled() {
         println!(
             "[ClientThread {}] Started (socket handle: {})",
@@ -3040,7 +3089,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
 
         let message = protocol::parse_client_message(header.msg_type_u32(), &payload);
         if let Some(peer) = login
-            && !message.as_ref().is_ok_and(|m| login_request_allowed(peer, m, &managed_windows))
+            && !message
+                .as_ref()
+                .is_ok_and(|m| login_request_allowed(peer, m, &managed_windows))
         {
             let _ = write_protocol_error(
                 &mut stream_writer,
@@ -3084,14 +3135,26 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     activation_token: activation_token.map(|token| token.to_vec()),
                     reply,
                 });
-                let Ok(creation) = target.recv() else { break; };
+                let Ok(creation) = target.recv() else {
+                    break;
+                };
                 let (width, height) = if let Some(configuration) = initial_configuration {
-                    let pixels = |scene: u32| ((u64::from(scene) * u64::from(creation.client_scale_milli)).div_ceil(2000)).max(1).min(u64::from(u32::MAX)) as u32;
+                    let pixels = |scene: u32| {
+                        ((u64::from(scene) * u64::from(creation.client_scale_milli)).div_ceil(2000))
+                            .max(1)
+                            .min(u64::from(u32::MAX)) as u32
+                    };
                     let environment = WindowCreationEnvironment {
                         screen_width: pixels(creation.context.rect.width.saturating_mul(2)),
                         screen_height: pixels(creation.context.rect.height.saturating_mul(2)),
-                        workarea: creation.workarea.map(|(_, _, width, height)| (0, 0, pixels(width), pixels(height))),
-                        windowing_mode: if creation.focused { protocol::WindowingMode::Focused } else { protocol::WindowingMode::Freeform },
+                        workarea: creation
+                            .workarea
+                            .map(|(_, _, width, height)| (0, 0, pixels(width), pixels(height))),
+                        windowing_mode: if creation.focused {
+                            protocol::WindowingMode::Focused
+                        } else {
+                            protocol::WindowingMode::Freeform
+                        },
                     };
                     let Some(extent) = configured_initial_surface_extent(
                         width,
@@ -4232,7 +4295,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 let payload = protocol::payload_capabilities(
                     protocol::SWS_PROTOCOL_VERSION,
                     sws_capabilities()
-                        | if login.is_none() { protocol::capabilities::BACKLIGHT_CONTROL } else { 0 },
+                        | if login.is_none() {
+                            protocol::capabilities::BACKLIGHT_CONTROL
+                        } else {
+                            0
+                        },
                     compositor_epoch(),
                     compositor_backend_id(),
                 );
@@ -4343,8 +4410,15 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     Ok(OutputRequest::GetBacklight) => None,
                     Ok(OutputRequest::SetBacklight(percent)) => Some(percent),
                     Ok(command) => {
-                        OUTPUT_SUBSCRIBERS.lock().expect("output subscribers").insert(client_id);
-                        push_ipc_event(IpcEvent::OutputControl { client_id, request_id, command });
+                        OUTPUT_SUBSCRIBERS
+                            .lock()
+                            .expect("output subscribers")
+                            .insert(client_id);
+                        push_ipc_event(IpcEvent::OutputControl {
+                            client_id,
+                            request_id,
+                            command,
+                        });
                         continue;
                     }
                     Err(_) => {
@@ -5407,7 +5481,11 @@ pub enum IpcEvent {
     },
 
     /// A client requested the authoritative workspace snapshot.
-    OutputControl { client_id: usize, request_id: u8, command: protocol::outputs::OutputRequest },
+    OutputControl {
+        client_id: usize,
+        request_id: u8,
+        command: protocol::outputs::OutputRequest,
+    },
     GetWorkspaceState {
         client_id: usize,
         request_id: u8,

@@ -233,12 +233,27 @@ pub enum OutputRequest {
     Get,
     Apply(OutputTransaction),
     Workspace(OutputId),
-    ApplyWorkspace { output: OutputId, transaction: crate::workspace::WorkspaceTransaction },
+    ApplyWorkspace {
+        output: OutputId,
+        transaction: crate::workspace::WorkspaceTransaction,
+    },
     Context(OutputId),
-    Workarea { output: OutputId, x: i32, y: i32, width: u32, height: u32 },
-    Bind { window: u32, output: OutputId },
+    Workarea {
+        output: OutputId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    Bind {
+        window: u32,
+        output: OutputId,
+    },
     Modes(OutputId),
-    SetMode { output: OutputId, mode: OutputMode },
+    SetMode {
+        output: OutputId,
+        mode: OutputMode,
+    },
     GetBacklight,
     SetBacklight(u8),
 }
@@ -249,20 +264,46 @@ pub enum OutputEvent {
     Context(OutputContext),
     /// Native buffer extent plus authoritative logical surface extent. Sending
     /// both avoids fractional-scale round trips growing a window by a pixel.
-    Window { window: u32, output: OutputId, scale_milli: u32, width: u32, height: u32,
-        logical_width: u32, logical_height: u32, output_x: i32, output_y: i32 },
-    Workspace { output: OutputId, state: crate::workspace::WorkspaceState },
+    Window {
+        window: u32,
+        output: OutputId,
+        scale_milli: u32,
+        width: u32,
+        height: u32,
+        logical_width: u32,
+        logical_height: u32,
+        output_x: i32,
+        output_y: i32,
+    },
+    Workspace {
+        output: OutputId,
+        state: crate::workspace::WorkspaceState,
+    },
     Applied,
-    Modes { output: OutputId, modes: Vec<OutputMode> },
+    Modes {
+        output: OutputId,
+        modes: Vec<OutputMode>,
+    },
     Backlight(u8),
 }
 
 pub fn encode_request(request: &OutputRequest) -> Vec<u8> {
     let mut out = Vec::new();
     match request {
-        OutputRequest::Modes(output) => { put(&mut out, 7); put(&mut out, *output); }
+        OutputRequest::Modes(output) => {
+            put(&mut out, 7);
+            put(&mut out, *output);
+        }
         OutputRequest::SetMode { output, mode } => {
-            for word in [8, *output, mode.pixel_width, mode.pixel_height, mode.refresh_millihz] { put(&mut out, word); }
+            for word in [
+                8,
+                *output,
+                mode.pixel_width,
+                mode.pixel_height,
+                mode.refresh_millihz,
+            ] {
+                put(&mut out, word);
+            }
         }
         OutputRequest::Get => put(&mut out, 0),
         OutputRequest::GetBacklight => put(&mut out, 9),
@@ -270,14 +311,42 @@ pub fn encode_request(request: &OutputRequest) -> Vec<u8> {
             put(&mut out, 10);
             put(&mut out, u32::from(*percent));
         }
-        OutputRequest::Apply(transaction) => { put(&mut out, 1); out.extend(encode_transaction(transaction)); }
-        OutputRequest::Workspace(id) => { put(&mut out, 2); put(&mut out, *id); }
-        OutputRequest::ApplyWorkspace { output, transaction } => { put(&mut out, 3); put(&mut out, *output); out.extend(crate::workspace::encode_transaction(transaction)); }
-        OutputRequest::Context(id) => { put(&mut out, 4); put(&mut out, *id); }
-        OutputRequest::Workarea { output, x, y, width, height } => {
-            for word in [5, *output, *x as u32, *y as u32, *width, *height] { put(&mut out, word); }
+        OutputRequest::Apply(transaction) => {
+            put(&mut out, 1);
+            out.extend(encode_transaction(transaction));
         }
-        OutputRequest::Bind { window, output } => { for word in [6, *window, *output] { put(&mut out, word); } }
+        OutputRequest::Workspace(id) => {
+            put(&mut out, 2);
+            put(&mut out, *id);
+        }
+        OutputRequest::ApplyWorkspace {
+            output,
+            transaction,
+        } => {
+            put(&mut out, 3);
+            put(&mut out, *output);
+            out.extend(crate::workspace::encode_transaction(transaction));
+        }
+        OutputRequest::Context(id) => {
+            put(&mut out, 4);
+            put(&mut out, *id);
+        }
+        OutputRequest::Workarea {
+            output,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            for word in [5, *output, *x as u32, *y as u32, *width, *height] {
+                put(&mut out, word);
+            }
+        }
+        OutputRequest::Bind { window, output } => {
+            for word in [6, *window, *output] {
+                put(&mut out, word);
+            }
+        }
     }
     out
 }
@@ -286,38 +355,119 @@ pub fn decode_request(bytes: &[u8]) -> Result<OutputRequest, crate::ProtocolErro
     let mut r = Reader { bytes, offset: 0 };
     let request = match r.word()? {
         0 => OutputRequest::Get,
-        1 => { let value = decode_transaction(&bytes[r.offset..])?; r.offset = bytes.len(); OutputRequest::Apply(value) }
+        1 => {
+            let value = decode_transaction(&bytes[r.offset..])?;
+            r.offset = bytes.len();
+            OutputRequest::Apply(value)
+        }
         2 => OutputRequest::Workspace(r.word()?),
-        3 => { let output = r.word()?; let transaction = crate::workspace::decode_transaction(&bytes[r.offset..])?; r.offset = bytes.len(); OutputRequest::ApplyWorkspace { output, transaction } }
+        3 => {
+            let output = r.word()?;
+            let transaction = crate::workspace::decode_transaction(&bytes[r.offset..])?;
+            r.offset = bytes.len();
+            OutputRequest::ApplyWorkspace {
+                output,
+                transaction,
+            }
+        }
         4 => OutputRequest::Context(r.word()?),
-        5 => OutputRequest::Workarea { output: r.word()?, x: r.word()? as i32, y: r.word()? as i32, width: r.word()?, height: r.word()? },
-        6 => OutputRequest::Bind { window: r.word()?, output: r.word()? },
+        5 => OutputRequest::Workarea {
+            output: r.word()?,
+            x: r.word()? as i32,
+            y: r.word()? as i32,
+            width: r.word()?,
+            height: r.word()?,
+        },
+        6 => OutputRequest::Bind {
+            window: r.word()?,
+            output: r.word()?,
+        },
         7 => OutputRequest::Modes(r.word()?),
-        8 => OutputRequest::SetMode { output: r.word()?, mode: OutputMode { pixel_width: r.word()?, pixel_height: r.word()?, refresh_millihz: r.word()? } },
+        8 => OutputRequest::SetMode {
+            output: r.word()?,
+            mode: OutputMode {
+                pixel_width: r.word()?,
+                pixel_height: r.word()?,
+                refresh_millihz: r.word()?,
+            },
+        },
         9 => OutputRequest::GetBacklight,
         10 => OutputRequest::SetBacklight(r.percent()?),
         _ => return Err(crate::ProtocolError::MalformedPayload),
     };
-    r.finish()?; Ok(request)
+    r.finish()?;
+    Ok(request)
 }
 
 pub fn encode_event(event: &OutputEvent) -> Vec<u8> {
     let mut out = Vec::new();
     match event {
-        OutputEvent::Snapshot(snapshot) => { put(&mut out, 0); out.extend(encode_snapshot(snapshot)); }
-        OutputEvent::Context(c) => { for word in [1, c.id, c.scale_milli, c.mode.pixel_width, c.mode.pixel_height, c.mode.refresh_millihz, c.rect.x as u32, c.rect.y as u32, c.rect.width, c.rect.height, u32::from(c.tablet)] { put(&mut out, word); } }
-        OutputEvent::Window { window, output, scale_milli, width, height, logical_width, logical_height, output_x, output_y } => {
-            for word in [2, *window, *output, *scale_milli, *width, *height, *logical_width, *logical_height, *output_x as u32, *output_y as u32] { put(&mut out, word); }
+        OutputEvent::Snapshot(snapshot) => {
+            put(&mut out, 0);
+            out.extend(encode_snapshot(snapshot));
         }
-        OutputEvent::Workspace { output, state } => { put(&mut out, 3); put(&mut out, *output); out.extend(crate::workspace::encode_state(state)); }
+        OutputEvent::Context(c) => {
+            for word in [
+                1,
+                c.id,
+                c.scale_milli,
+                c.mode.pixel_width,
+                c.mode.pixel_height,
+                c.mode.refresh_millihz,
+                c.rect.x as u32,
+                c.rect.y as u32,
+                c.rect.width,
+                c.rect.height,
+                u32::from(c.tablet),
+            ] {
+                put(&mut out, word);
+            }
+        }
+        OutputEvent::Window {
+            window,
+            output,
+            scale_milli,
+            width,
+            height,
+            logical_width,
+            logical_height,
+            output_x,
+            output_y,
+        } => {
+            for word in [
+                2,
+                *window,
+                *output,
+                *scale_milli,
+                *width,
+                *height,
+                *logical_width,
+                *logical_height,
+                *output_x as u32,
+                *output_y as u32,
+            ] {
+                put(&mut out, word);
+            }
+        }
+        OutputEvent::Workspace { output, state } => {
+            put(&mut out, 3);
+            put(&mut out, *output);
+            out.extend(crate::workspace::encode_state(state));
+        }
         OutputEvent::Applied => put(&mut out, 4),
         OutputEvent::Backlight(percent) => {
             put(&mut out, 6);
             put(&mut out, u32::from(*percent));
         }
         OutputEvent::Modes { output, modes } => {
-            for word in [5, *output, modes.len() as u32] { put(&mut out, word); }
-            for mode in modes { for word in [mode.pixel_width, mode.pixel_height, mode.refresh_millihz] { put(&mut out, word); } }
+            for word in [5, *output, modes.len() as u32] {
+                put(&mut out, word);
+            }
+            for mode in modes {
+                for word in [mode.pixel_width, mode.pixel_height, mode.refresh_millihz] {
+                    put(&mut out, word);
+                }
+            }
         }
     }
     out
@@ -326,30 +476,93 @@ pub fn encode_event(event: &OutputEvent) -> Vec<u8> {
 pub fn decode_event(bytes: &[u8]) -> Result<OutputEvent, crate::ProtocolError> {
     let mut r = Reader { bytes, offset: 0 };
     let event = match r.word()? {
-        0 => { let snapshot = decode_snapshot(&bytes[r.offset..])?; r.offset = bytes.len(); OutputEvent::Snapshot(snapshot) }
+        0 => {
+            let snapshot = decode_snapshot(&bytes[r.offset..])?;
+            r.offset = bytes.len();
+            OutputEvent::Snapshot(snapshot)
+        }
         1 => {
-            let id = r.word()?; let scale_milli = r.word()?;
-            let mode = OutputMode { pixel_width: r.word()?, pixel_height: r.word()?, refresh_millihz: r.word()? };
-            let rect = LogicalRect { x: r.word()? as i32, y: r.word()? as i32, width: r.word()?, height: r.word()? };
-            let tablet = match r.word()? { 0 => false, 1 => true, _ => return Err(crate::ProtocolError::MalformedPayload) };
-            if mode.logical_size(scale_milli).ok() != Some((rect.width, rect.height)) { return Err(crate::ProtocolError::MalformedPayload); }
-            OutputEvent::Context(OutputContext { id, scale_milli, mode, rect, tablet })
+            let id = r.word()?;
+            let scale_milli = r.word()?;
+            let mode = OutputMode {
+                pixel_width: r.word()?,
+                pixel_height: r.word()?,
+                refresh_millihz: r.word()?,
+            };
+            let rect = LogicalRect {
+                x: r.word()? as i32,
+                y: r.word()? as i32,
+                width: r.word()?,
+                height: r.word()?,
+            };
+            let tablet = match r.word()? {
+                0 => false,
+                1 => true,
+                _ => return Err(crate::ProtocolError::MalformedPayload),
+            };
+            if mode.logical_size(scale_milli).ok() != Some((rect.width, rect.height)) {
+                return Err(crate::ProtocolError::MalformedPayload);
+            }
+            OutputEvent::Context(OutputContext {
+                id,
+                scale_milli,
+                mode,
+                rect,
+                tablet,
+            })
         }
         2 => {
-            let window = r.word()?; let output = r.word()?; let scale_milli = r.word()?; let width = r.word()?; let height = r.word()?;
-            let logical_width = r.word()?; let logical_height = r.word()?; let output_x = r.word()? as i32; let output_y = r.word()? as i32;
-            if !(MIN_SCALE_MILLI..=MAX_SCALE_MILLI).contains(&scale_milli) || width == 0 || height == 0 || logical_width == 0 || logical_height == 0 { return Err(crate::ProtocolError::MalformedPayload); }
-            OutputEvent::Window { window, output, scale_milli, width, height, logical_width, logical_height, output_x, output_y }
+            let window = r.word()?;
+            let output = r.word()?;
+            let scale_milli = r.word()?;
+            let width = r.word()?;
+            let height = r.word()?;
+            let logical_width = r.word()?;
+            let logical_height = r.word()?;
+            let output_x = r.word()? as i32;
+            let output_y = r.word()? as i32;
+            if !(MIN_SCALE_MILLI..=MAX_SCALE_MILLI).contains(&scale_milli)
+                || width == 0
+                || height == 0
+                || logical_width == 0
+                || logical_height == 0
+            {
+                return Err(crate::ProtocolError::MalformedPayload);
+            }
+            OutputEvent::Window {
+                window,
+                output,
+                scale_milli,
+                width,
+                height,
+                logical_width,
+                logical_height,
+                output_x,
+                output_y,
+            }
         }
-        3 => { let output = r.word()?; let state = crate::workspace::decode_state(&bytes[r.offset..])?; r.offset = bytes.len(); OutputEvent::Workspace { output, state } }
+        3 => {
+            let output = r.word()?;
+            let state = crate::workspace::decode_state(&bytes[r.offset..])?;
+            r.offset = bytes.len();
+            OutputEvent::Workspace { output, state }
+        }
         4 => OutputEvent::Applied,
         5 => {
-            let output = r.word()?; let count = r.word()?;
-            if count > 256 { return Err(crate::ProtocolError::MalformedPayload); }
+            let output = r.word()?;
+            let count = r.word()?;
+            if count > 256 {
+                return Err(crate::ProtocolError::MalformedPayload);
+            }
             let mut modes = Vec::new();
             for _ in 0..count {
-                let mode = OutputMode { pixel_width: r.word()?, pixel_height: r.word()?, refresh_millihz: r.word()? };
-                mode.logical_size(1000).map_err(|_| crate::ProtocolError::MalformedPayload)?;
+                let mode = OutputMode {
+                    pixel_width: r.word()?,
+                    pixel_height: r.word()?,
+                    refresh_millihz: r.word()?,
+                };
+                mode.logical_size(1000)
+                    .map_err(|_| crate::ProtocolError::MalformedPayload)?;
                 modes.push(mode);
             }
             OutputEvent::Modes { output, modes }
@@ -357,12 +570,18 @@ pub fn decode_event(bytes: &[u8]) -> Result<OutputEvent, crate::ProtocolError> {
         6 => OutputEvent::Backlight(r.percent()?),
         _ => return Err(crate::ProtocolError::MalformedPayload),
     };
-    r.finish()?; Ok(event)
+    r.finish()?;
+    Ok(event)
 }
 
-fn put(out: &mut Vec<u8>, value: u32) { out.extend_from_slice(&value.to_le_bytes()); }
+fn put(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
 
-struct Reader<'a> { bytes: &'a [u8], offset: usize }
+struct Reader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
 impl<'a> Reader<'a> {
     fn percent(&mut self) -> Result<u8, crate::ProtocolError> {
         let percent = self.word()?;
@@ -373,27 +592,45 @@ impl<'a> Reader<'a> {
     }
 
     fn word(&mut self) -> Result<u32, crate::ProtocolError> {
-        let bytes = self.bytes.get(self.offset..self.offset + 4).ok_or(crate::ProtocolError::MalformedPayload)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..self.offset + 4)
+            .ok_or(crate::ProtocolError::MalformedPayload)?;
         self.offset += 4;
         Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
     }
     fn string(&mut self) -> Result<String, crate::ProtocolError> {
         let count = self.word()? as usize;
-        if count > MAX_CONNECTOR_KEY_BYTES { return Err(crate::ProtocolError::MalformedPayload); }
-        let bytes = self.bytes.get(self.offset..self.offset + count).ok_or(crate::ProtocolError::MalformedPayload)?;
+        if count > MAX_CONNECTOR_KEY_BYTES {
+            return Err(crate::ProtocolError::MalformedPayload);
+        }
+        let bytes = self
+            .bytes
+            .get(self.offset..self.offset + count)
+            .ok_or(crate::ProtocolError::MalformedPayload)?;
         self.offset += count;
-        let text = core::str::from_utf8(bytes).map_err(|_| crate::ProtocolError::MalformedPayload)?;
-        if text.chars().any(char::is_control) { return Err(crate::ProtocolError::MalformedPayload); }
+        let text =
+            core::str::from_utf8(bytes).map_err(|_| crate::ProtocolError::MalformedPayload)?;
+        if text.chars().any(char::is_control) {
+            return Err(crate::ProtocolError::MalformedPayload);
+        }
         Ok(String::from(text))
     }
     fn configs(&mut self, count: usize) -> Result<Vec<OutputConfiguration>, crate::ProtocolError> {
-        if count == 0 || count > MAX_OUTPUTS { return Err(crate::ProtocolError::MalformedPayload); }
+        if count == 0 || count > MAX_OUTPUTS {
+            return Err(crate::ProtocolError::MalformedPayload);
+        }
         let mut configs = Vec::with_capacity(count);
         for _ in 0..count {
             configs.push(OutputConfiguration {
-                id: self.word()?, x: self.word()? as i32, y: self.word()? as i32,
-                scale_milli: self.word()?, experience: match self.word()? {
-                    0 => OutputExperience::Auto, 1 => OutputExperience::Desktop, 2 => OutputExperience::Tablet,
+                id: self.word()?,
+                x: self.word()? as i32,
+                y: self.word()? as i32,
+                scale_milli: self.word()?,
+                experience: match self.word()? {
+                    0 => OutputExperience::Auto,
+                    1 => OutputExperience::Desktop,
+                    2 => OutputExperience::Tablet,
                     _ => return Err(crate::ProtocolError::MalformedPayload),
                 },
             });
@@ -401,51 +638,119 @@ impl<'a> Reader<'a> {
         Ok(configs)
     }
     fn finish(&self) -> Result<(), crate::ProtocolError> {
-        if self.offset == self.bytes.len() { Ok(()) } else { Err(crate::ProtocolError::MalformedPayload) }
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(crate::ProtocolError::MalformedPayload)
+        }
     }
 }
 
 fn encode_configs(out: &mut Vec<u8>, configs: &[OutputConfiguration]) {
-    for c in configs { for word in [c.id, c.x as u32, c.y as u32, c.scale_milli, c.experience as u32] { put(out, word); } }
+    for c in configs {
+        for word in [
+            c.id,
+            c.x as u32,
+            c.y as u32,
+            c.scale_milli,
+            c.experience as u32,
+        ] {
+            put(out, word);
+        }
+    }
 }
 
 pub fn encode_transaction(transaction: &OutputTransaction) -> Vec<u8> {
     let mut out = Vec::new();
-    put(&mut out, transaction.base_generation); put(&mut out, transaction.configuration.len() as u32);
-    encode_configs(&mut out, &transaction.configuration); out
+    put(&mut out, transaction.base_generation);
+    put(&mut out, transaction.configuration.len() as u32);
+    encode_configs(&mut out, &transaction.configuration);
+    out
 }
 pub fn decode_transaction(bytes: &[u8]) -> Result<OutputTransaction, crate::ProtocolError> {
     let mut reader = Reader { bytes, offset: 0 };
-    let base_generation = reader.word()?; let count = reader.word()? as usize;
-    let configuration = reader.configs(count)?; reader.finish()?;
-    Ok(OutputTransaction { base_generation, configuration })
+    let base_generation = reader.word()?;
+    let count = reader.word()? as usize;
+    let configuration = reader.configs(count)?;
+    reader.finish()?;
+    Ok(OutputTransaction {
+        base_generation,
+        configuration,
+    })
 }
 
 pub fn encode_snapshot(snapshot: &OutputSnapshot) -> Vec<u8> {
-    let mut out = Vec::new(); put(&mut out, snapshot.generation); put(&mut out, snapshot.outputs.len() as u32);
+    let mut out = Vec::new();
+    put(&mut out, snapshot.generation);
+    put(&mut out, snapshot.outputs.len() as u32);
     for d in &snapshot.outputs {
-        for word in [d.id, u32::from(d.primary) | (u32::from(d.internal) << 1) | (u32::from(d.identity_is_unique) << 2), d.mode.pixel_width, d.mode.pixel_height,
-            d.mode.refresh_millihz, d.physical_width_mm, d.physical_height_mm] { put(&mut out, word); }
-        for text in [&d.connector_key, &d.monitor_key, &d.name] { put(&mut out, text.len() as u32); out.extend_from_slice(text.as_bytes()); }
+        for word in [
+            d.id,
+            u32::from(d.primary)
+                | (u32::from(d.internal) << 1)
+                | (u32::from(d.identity_is_unique) << 2),
+            d.mode.pixel_width,
+            d.mode.pixel_height,
+            d.mode.refresh_millihz,
+            d.physical_width_mm,
+            d.physical_height_mm,
+        ] {
+            put(&mut out, word);
+        }
+        for text in [&d.connector_key, &d.monitor_key, &d.name] {
+            put(&mut out, text.len() as u32);
+            out.extend_from_slice(text.as_bytes());
+        }
     }
-    encode_configs(&mut out, &snapshot.configuration); out
+    encode_configs(&mut out, &snapshot.configuration);
+    out
 }
 pub fn decode_snapshot(bytes: &[u8]) -> Result<OutputSnapshot, crate::ProtocolError> {
     let mut reader = Reader { bytes, offset: 0 };
-    let generation = reader.word()?; let count = reader.word()? as usize;
-    if count == 0 || count > MAX_OUTPUTS { return Err(crate::ProtocolError::MalformedPayload); }
+    let generation = reader.word()?;
+    let count = reader.word()? as usize;
+    if count == 0 || count > MAX_OUTPUTS {
+        return Err(crate::ProtocolError::MalformedPayload);
+    }
     let mut outputs = Vec::with_capacity(count);
     for _ in 0..count {
-        let id = reader.word()?; let flags = reader.word()?;
-        if flags & !7 != 0 { return Err(crate::ProtocolError::MalformedPayload); }
-        let mode = OutputMode { pixel_width: reader.word()?, pixel_height: reader.word()?, refresh_millihz: reader.word()? };
-        let physical_width_mm = reader.word()?; let physical_height_mm = reader.word()?;
-        let connector_key = reader.string()?; let monitor_key = reader.string()?; let name = reader.string()?;
-        outputs.push(OutputDescriptor { id, connector_key, monitor_key, identity_is_unique: flags & 4 != 0, name, mode, primary: flags & 1 != 0, internal: flags & 2 != 0, physical_width_mm, physical_height_mm });
+        let id = reader.word()?;
+        let flags = reader.word()?;
+        if flags & !7 != 0 {
+            return Err(crate::ProtocolError::MalformedPayload);
+        }
+        let mode = OutputMode {
+            pixel_width: reader.word()?,
+            pixel_height: reader.word()?,
+            refresh_millihz: reader.word()?,
+        };
+        let physical_width_mm = reader.word()?;
+        let physical_height_mm = reader.word()?;
+        let connector_key = reader.string()?;
+        let monitor_key = reader.string()?;
+        let name = reader.string()?;
+        outputs.push(OutputDescriptor {
+            id,
+            connector_key,
+            monitor_key,
+            identity_is_unique: flags & 4 != 0,
+            name,
+            mode,
+            primary: flags & 1 != 0,
+            internal: flags & 2 != 0,
+            physical_width_mm,
+            physical_height_mm,
+        });
     }
-    let configuration = reader.configs(count)?; reader.finish()?;
-    validate_layout(&outputs, &configuration).map_err(|_| crate::ProtocolError::MalformedPayload)?;
-    Ok(OutputSnapshot { generation, outputs, configuration })
+    let configuration = reader.configs(count)?;
+    reader.finish()?;
+    validate_layout(&outputs, &configuration)
+        .map_err(|_| crate::ProtocolError::MalformedPayload)?;
+    Ok(OutputSnapshot {
+        generation,
+        outputs,
+        configuration,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,11 +866,23 @@ pub fn validate_layout(
 /// enumeration order and ports. Unknown or duplicated identities are ambiguous
 /// and must not cause a saved arrangement to be silently restored.
 pub fn topology_key(outputs: &[OutputDescriptor]) -> Option<Vec<String>> {
-    if outputs.is_empty() || outputs.len() > MAX_OUTPUTS { return None; }
-    if outputs.iter().any(|output| !output.identity_is_unique || output.monitor_key.is_empty()) { return None; }
-    let mut keys = outputs.iter().map(|output| output.monitor_key.clone()).collect::<Vec<_>>();
+    if outputs.is_empty() || outputs.len() > MAX_OUTPUTS {
+        return None;
+    }
+    if outputs
+        .iter()
+        .any(|output| !output.identity_is_unique || output.monitor_key.is_empty())
+    {
+        return None;
+    }
+    let mut keys = outputs
+        .iter()
+        .map(|output| output.monitor_key.clone())
+        .collect::<Vec<_>>();
     keys.sort();
-    if keys.windows(2).any(|pair| pair[0] == pair[1]) { return None; }
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
     Some(keys)
 }
 
@@ -679,9 +996,17 @@ mod tests {
     fn fractional_window_configure_keeps_logical_extent_and_negative_origin() {
         // ceil(321 * 1.25) = 402; deriving the logical size by rounding up
         // again would incorrectly configure 322 pixels on each round trip.
-        let event = OutputEvent::Window { window: 7, output: 2, scale_milli: 1250,
-            width: 402, height: 250, logical_width: 321, logical_height: 200,
-            output_x: -1536, output_y: -240 };
+        let event = OutputEvent::Window {
+            window: 7,
+            output: 2,
+            scale_milli: 1250,
+            width: 402,
+            height: 250,
+            logical_width: 321,
+            logical_height: 200,
+            output_x: -1536,
+            output_y: -240,
+        };
         let encoded = encode_event(&event);
         assert_eq!(decode_event(&encoded).unwrap(), event);
         assert!(decode_event(&encoded[..encoded.len() - 1]).is_err());

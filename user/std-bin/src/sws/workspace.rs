@@ -1551,10 +1551,13 @@ impl WorkspaceManager {
                 return false;
             }
             if self.partitions[group].state.workspaces.is_empty() {
-                if self.namespace.workspace_count >= MAX_WORKSPACES { return false; }
+                if self.namespace.workspace_count >= MAX_WORKSPACES {
+                    return false;
+                }
                 let id = self.namespace.allocate(group);
                 self.namespace.workspace_count += 1;
-                self.partitions[group].state = OutputWorkspaces::initial(id, self.auto_remove_empty);
+                self.partitions[group].state =
+                    OutputWorkspaces::initial(id, self.auto_remove_empty);
             }
             self.partitions[group].output = Some(output);
             return true;
@@ -1606,7 +1609,9 @@ impl WorkspaceManager {
             primary.state.workspaces.extend(recovered);
             primary.bump_generation();
         }
-        if tablet { self.primary_mut().enter_tablet_experience(None); }
+        if tablet {
+            self.primary_mut().enter_tablet_experience(None);
+        }
         true
     }
 
@@ -1716,7 +1721,8 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         allow_freeform_merge: bool,
     ) -> bool {
-        self.output_for_workspace(workspace_id).and_then(|output| self.output(output))
+        self.output_for_workspace(workspace_id)
+            .and_then(|output| self.output(output))
             .is_some_and(|state| state.can_remove_workspace(workspace_id, allow_freeform_merge))
     }
 
@@ -1725,8 +1731,11 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         allow_freeform_merge: bool,
     ) -> bool {
-        let Some(output) = self.output_for_workspace(workspace_id) else { return false; };
-        self.output_mut(output).is_some_and(|mut state| state.remove_workspace(workspace_id, allow_freeform_merge))
+        let Some(output) = self.output_for_workspace(workspace_id) else {
+            return false;
+        };
+        self.output_mut(output)
+            .is_some_and(|mut state| state.remove_workspace(workspace_id, allow_freeform_merge))
     }
 
     pub(super) fn presentation(&self) -> ShellPresentation {
@@ -1801,8 +1810,11 @@ impl WorkspaceManager {
     }
 
     pub(super) fn select_workspace_from_overview(&mut self, workspace_id: WorkspaceId) -> bool {
-        let Some(output) = self.output_for_workspace(workspace_id) else { return false; };
-        self.output_mut(output).is_some_and(|mut state| state.select_workspace_from_overview(workspace_id))
+        let Some(output) = self.output_for_workspace(workspace_id) else {
+            return false;
+        };
+        self.output_mut(output)
+            .is_some_and(|mut state| state.select_workspace_from_overview(workspace_id))
     }
 
     pub(super) fn cycle_workspace(&mut self, direction: i32) -> bool {
@@ -1814,8 +1826,11 @@ impl WorkspaceManager {
         window_id: u32,
         direction: i32,
     ) -> bool {
-        let Some(&(group, _)) = self.namespace.window_owners.get(&window_id) else { return false; };
-        self.scope_at(group).move_window_to_adjacent_workspace(window_id, direction)
+        let Some(&(group, _)) = self.namespace.window_owners.get(&window_id) else {
+            return false;
+        };
+        self.scope_at(group)
+            .move_window_to_adjacent_workspace(window_id, direction)
     }
 
     pub(super) fn move_window_to_workspace(
@@ -1826,17 +1841,45 @@ impl WorkspaceManager {
         self.transfer_window(window_id, target_workspace_id)
     }
 
-    pub(super) fn move_window_to_workspace_as_split(&mut self, window: u32, target: WorkspaceId) -> bool {
-        let Some(&(source, _)) = self.namespace.window_owners.get(&window) else { return false; };
-        let Some(destination) = self.partitions.iter().position(|part| part.state.workspaces.iter().any(|workspace| workspace.id == target)) else { return false; };
-        if source == destination { return self.scope_at(source).move_window_to_workspace_as_split(window, target); }
-        let TabletLayout::Single { window_id: first } = self.tablet_layout(target) else { return false; };
-        if !self.transfer_window(window, target) { return false; }
+    pub(super) fn move_window_to_workspace_as_split(
+        &mut self,
+        window: u32,
+        target: WorkspaceId,
+    ) -> bool {
+        let Some(&(source, _)) = self.namespace.window_owners.get(&window) else {
+            return false;
+        };
+        let Some(destination) = self.partitions.iter().position(|part| {
+            part.state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == target)
+        }) else {
+            return false;
+        };
+        if source == destination {
+            return self
+                .scope_at(source)
+                .move_window_to_workspace_as_split(window, target);
+        }
+        let TabletLayout::Single { window_id: first } = self.tablet_layout(target) else {
+            return false;
+        };
+        if !self.transfer_window(window, target) {
+            return false;
+        }
         let mut scope = self.scope_at(destination);
-        let workspace = scope.state.workspaces.iter_mut().find(|workspace| workspace.id == target).unwrap();
+        let workspace = scope
+            .state
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == target)
+            .unwrap();
         workspace.tablet_layout = TabletLayout::Split {
-            axis: sws_protocol::workspace::SplitAxis::Horizontal, first_window_id: first,
-            second_window_id: window, ratio_milli: 500,
+            axis: sws_protocol::workspace::SplitAxis::Horizontal,
+            first_window_id: first,
+            second_window_id: window,
+            ratio_milli: 500,
         };
         scope.bump_generation();
         true
@@ -2104,10 +2147,15 @@ mod tests {
             manager
                 .session_snapshot()
                 .iter()
-                .any(|p| p.output_id == Some(0) && p.state.workspaces.contains(&before.workspaces[0]))
+                .any(|p| p.output_id == Some(0)
+                    && p.state.workspaces.contains(&before.workspaces[0]))
         );
         assert!(manager.attach_output(9, "platform:mdss/DP-1"));
-        assert!(manager.output(9).unwrap().snapshot().workspaces[0].window_ids.is_empty());
+        assert!(
+            manager.output(9).unwrap().snapshot().workspaces[0]
+                .window_ids
+                .is_empty()
+        );
         assert_eq!(
             manager.output_for_workspace(before.active_workspace),
             Some(0)
@@ -2121,13 +2169,26 @@ mod tests {
         manager.add_scene_root(10, false, false);
         manager.enter_tablet_experience(Some(10));
         assert!(manager.attach_output(2, "external"));
-        manager.output_mut(2).unwrap().add_scene_root(20, false, false);
-        manager.output_mut(2).unwrap().add_scene_root(21, false, false);
+        manager
+            .output_mut(2)
+            .unwrap()
+            .add_scene_root(20, false, false);
+        manager
+            .output_mut(2)
+            .unwrap()
+            .add_scene_root(21, false, false);
         assert!(manager.detach_output(2));
         assert!(manager.output(0).unwrap().tablet_experience());
         manager.leave_tablet_experience();
-        for id in [10, 20, 21] { assert_eq!(manager.output_for_window(id), Some(0)); }
-        let members = manager.snapshot().workspaces.into_iter().flat_map(|w| w.window_ids).collect::<Vec<_>>();
+        for id in [10, 20, 21] {
+            assert_eq!(manager.output_for_window(id), Some(0));
+        }
+        let members = manager
+            .snapshot()
+            .workspaces
+            .into_iter()
+            .flat_map(|w| w.window_ids)
+            .collect::<Vec<_>>();
         assert_eq!(members.len(), 3);
     }
 

@@ -51,7 +51,7 @@ pub fn launcher_icon(
 }
 
 #[cfg(target_os = "scarlet")]
-#[path="fonts.rs"]
+#[path = "fonts.rs"]
 mod fonts;
 #[cfg(target_os = "scarlet")]
 pub fn initialize_fonts() {

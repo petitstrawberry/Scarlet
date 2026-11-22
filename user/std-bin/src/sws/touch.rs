@@ -821,18 +821,28 @@ mod tests {
             recognizer.process(frame(1, std::vec![contact(1, 4000, 4000)]));
             let mut movement = (0, 0);
             for step in 1..=100 {
-                for event in pointers(&recognizer.process(frame(step as u64 + 1,
-                    std::vec![contact(1, 4000 + step * direction, 4000 + step * direction)]))) {
+                for event in pointers(&recognizer.process(frame(
+                    step as u64 + 1,
+                    std::vec![contact(1, 4000 + step * direction, 4000 + step * direction)],
+                ))) {
                     if let CompositorInputEvent::MouseMove { dx, dy } = event {
-                        movement.0 += dx; movement.1 += dy;
+                        movement.0 += dx;
+                        movement.1 += dy;
                     }
                 }
             }
             let mut once = GestureRecognizer::new(2160, 1440);
             once.process(frame(1, std::vec![contact(1, 4000, 4000)]));
-            assert_eq!(pointers(&once.process(frame(2, std::vec![contact(1,
-                4000 + 100 * direction, 4000 + 100 * direction)]))),
-                std::vec![CompositorInputEvent::MouseMove { dx: movement.0, dy: movement.1 }]);
+            assert_eq!(
+                pointers(&once.process(frame(
+                    2,
+                    std::vec![contact(1, 4000 + 100 * direction, 4000 + 100 * direction)]
+                ))),
+                std::vec![CompositorInputEvent::MouseMove {
+                    dx: movement.0,
+                    dy: movement.1
+                }]
+            );
             assert_eq!(movement, (21 * direction, 14 * direction));
         }
     }
@@ -841,7 +851,9 @@ mod tests {
     fn replacement_finger_does_not_jump_or_click() {
         let mut recognizer = GestureRecognizer::new(2160, 1440);
         recognizer.process(frame(1, std::vec![contact(1, 1000, 1000)]));
-        assert!(pointers(&recognizer.process(frame(2, std::vec![contact(2, 8000, 8000)]))).is_empty());
+        assert!(
+            pointers(&recognizer.process(frame(2, std::vec![contact(2, 8000, 8000)]))).is_empty()
+        );
         assert!(pointers(&recognizer.process(frame(3, std::vec![]))).is_empty());
     }
 

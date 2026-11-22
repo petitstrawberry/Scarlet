@@ -12,10 +12,16 @@
 //! This module is generic over the per-output display target so its geometry
 //! and bookkeeping can be tested on the host without a display device.
 
-use sws_protocol::outputs::{self as protocol, OutputConfiguration, OutputDescriptor, OutputExperience, OutputMode, OutputSnapshot, OutputTransaction};
+use sws_protocol::outputs::{
+    self as protocol, OutputConfiguration, OutputDescriptor, OutputExperience, OutputMode,
+    OutputSnapshot, OutputTransaction,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConfigurationError { Stale, Invalid }
+pub(super) enum ConfigurationError {
+    Stale,
+    Invalid,
+}
 
 /// Compositor-assigned output identifier, stable while the output exists.
 pub(super) type OutputId = u32;
@@ -134,24 +140,48 @@ pub(super) struct OutputProjection {
 }
 impl OutputProjection {
     pub fn rect(self, rect: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {
-        if self.scene == self.native { return (rect.0.saturating_sub(self.origin.0), rect.1.saturating_sub(self.origin.1), rect.2, rect.3); }
+        if self.scene == self.native {
+            return (
+                rect.0.saturating_sub(self.origin.0),
+                rect.1.saturating_sub(self.origin.1),
+                rect.2,
+                rect.3,
+            );
+        }
         let axis = |start: i32, length: u32, origin: i32, scene: u32, native: u32| {
             let denominator = i64::from(scene.max(1));
             let left = (i64::from(start) - i64::from(origin)) * i64::from(native);
             let right = left + i64::from(length) * i64::from(native);
             let left = left.div_euclid(denominator);
             let right = (right + denominator - 1).div_euclid(denominator);
-            (left.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32, (right - left).clamp(0, i64::from(u32::MAX)) as u32)
+            (
+                left.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                (right - left).clamp(0, i64::from(u32::MAX)) as u32,
+            )
         };
         let (x, width) = axis(rect.0, rect.2, self.origin.0, self.scene.0, self.native.0);
         let (y, height) = axis(rect.1, rect.3, self.origin.1, self.scene.1, self.native.1);
         (x, y, width, height)
     }
-    pub fn radius(self, radius: u32) -> u32 { (u64::from(radius) * u64::from(self.native.0)).div_ceil(u64::from(self.scene.0.max(1))).min(u64::from(u32::MAX)) as u32 }
+    pub fn radius(self, radius: u32) -> u32 {
+        (u64::from(radius) * u64::from(self.native.0))
+            .div_ceil(u64::from(self.scene.0.max(1)))
+            .min(u64::from(u32::MAX)) as u32
+    }
     pub fn clipped(self, rect: (i32, i32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
         let (x, y, width, height) = self.rect(rect);
-        let clipped = OutputRect::new(x, y, width, height).intersect(OutputRect::new(0, 0, self.native.0, self.native.1))?;
-        Some((clipped.x as u32, clipped.y as u32, clipped.width, clipped.height))
+        let clipped = OutputRect::new(x, y, width, height).intersect(OutputRect::new(
+            0,
+            0,
+            self.native.0,
+            self.native.1,
+        ))?;
+        Some((
+            clipped.x as u32,
+            clipped.y as u32,
+            clipped.width,
+            clipped.height,
+        ))
     }
 }
 
@@ -196,17 +226,40 @@ impl<T> Output<T> {
     pub(super) fn new(id: OutputId, rect: OutputRect, scale_milli: u32, target: T) -> Self {
         Self {
             id,
-            metadata: OutputDescriptor { id, connector_key: format!("session:output{}", id), monitor_key: String::new(), identity_is_unique: false, name: format!("Display {}", id),
-                mode: OutputMode { pixel_width: rect.width, pixel_height: rect.height, refresh_millihz: 0 }, primary: id == 0, internal: id == 0,
-                physical_width_mm: 0, physical_height_mm: 0 },
-            logical_rect: protocol::LogicalRect { x: rect.x / 2, y: rect.y / 2,
-                width: (u64::from(rect.width) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32,
-                height: (u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32 },
+            metadata: OutputDescriptor {
+                id,
+                connector_key: format!("session:output{}", id),
+                monitor_key: String::new(),
+                identity_is_unique: false,
+                name: format!("Display {}", id),
+                mode: OutputMode {
+                    pixel_width: rect.width,
+                    pixel_height: rect.height,
+                    refresh_millihz: 0,
+                },
+                primary: id == 0,
+                internal: id == 0,
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+            },
+            logical_rect: protocol::LogicalRect {
+                x: rect.x / 2,
+                y: rect.y / 2,
+                width: (u64::from(rect.width) * 1000).div_ceil(u64::from(scale_milli.max(1)))
+                    as u32,
+                height: (u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1)))
+                    as u32,
+            },
             experience: OutputExperience::Auto,
             workarea: None,
-            rect: OutputRect::new(rect.x, rect.y,
-                ((u64::from(rect.width) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32).saturating_mul(2),
-                ((u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32).saturating_mul(2)),
+            rect: OutputRect::new(
+                rect.x,
+                rect.y,
+                ((u64::from(rect.width) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32)
+                    .saturating_mul(2),
+                ((u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1))) as u32)
+                    .saturating_mul(2),
+            ),
             scale_milli,
             present_counter: 0,
             restore_focus: None,
@@ -227,10 +280,25 @@ impl<T> Output<T> {
         self
     }
 
-    pub(super) fn projection(&self) -> OutputProjection { OutputProjection { origin: (self.rect.x, self.rect.y), scene: (self.rect.width, self.rect.height), native: (self.metadata.mode.pixel_width, self.metadata.mode.pixel_height) } }
+    pub(super) fn projection(&self) -> OutputProjection {
+        OutputProjection {
+            origin: (self.rect.x, self.rect.y),
+            scene: (self.rect.width, self.rect.height),
+            native: (
+                self.metadata.mode.pixel_width,
+                self.metadata.mode.pixel_height,
+            ),
+        }
+    }
 
     pub(super) fn configuration(&self) -> OutputConfiguration {
-        OutputConfiguration { id: self.id, x: self.logical_rect.x, y: self.logical_rect.y, scale_milli: self.scale_milli, experience: self.experience }
+        OutputConfiguration {
+            id: self.id,
+            x: self.logical_rect.x,
+            y: self.logical_rect.y,
+            scale_milli: self.scale_milli,
+            experience: self.experience,
+        }
     }
 
     /// Output width in pixels.
@@ -272,13 +340,29 @@ impl<T> OutputSet<T> {
     }
 
     pub(super) fn snapshot(&self) -> OutputSnapshot {
-        OutputSnapshot { generation: self.generation,
-            outputs: self.outputs.iter().map(|output| { let mut metadata = output.metadata.clone(); metadata.primary = output.id == self.primary; metadata }).collect(),
-            configuration: self.outputs.iter().map(Output::configuration).collect() }
+        OutputSnapshot {
+            generation: self.generation,
+            outputs: self
+                .outputs
+                .iter()
+                .map(|output| {
+                    let mut metadata = output.metadata.clone();
+                    metadata.primary = output.id == self.primary;
+                    metadata
+                })
+                .collect(),
+            configuration: self.outputs.iter().map(Output::configuration).collect(),
+        }
     }
-    pub(super) fn validated_configuration(&self, transaction: &OutputTransaction) -> Result<Vec<OutputConfiguration>, ConfigurationError> {
-        if transaction.base_generation != self.generation { return Err(ConfigurationError::Stale); }
-        protocol::canonical_layout(&self.snapshot().outputs, &transaction.configuration).map_err(|_| ConfigurationError::Invalid)
+    pub(super) fn validated_configuration(
+        &self,
+        transaction: &OutputTransaction,
+    ) -> Result<Vec<OutputConfiguration>, ConfigurationError> {
+        if transaction.base_generation != self.generation {
+            return Err(ConfigurationError::Stale);
+        }
+        protocol::canonical_layout(&self.snapshot().outputs, &transaction.configuration)
+            .map_err(|_| ConfigurationError::Invalid)
     }
     /// Recompute a connected layout for a hardware mode change. Keep the
     /// placement where possible, then try snapping the resized output.
@@ -288,18 +372,28 @@ impl<T> OutputSet<T> {
         mode: OutputMode,
     ) -> Result<Vec<OutputConfiguration>, protocol::LayoutError> {
         let mut snapshot = self.snapshot();
-        let descriptor = snapshot.outputs.iter_mut().find(|output| output.id == id)
+        let descriptor = snapshot
+            .outputs
+            .iter_mut()
+            .find(|output| output.id == id)
             .ok_or(protocol::LayoutError::MissingOutput)?;
         descriptor.mode = mode;
         let mut configuration = snapshot.configuration;
         if protocol::validate_layout(&snapshot.outputs, &configuration).is_ok() {
             return Ok(configuration);
         }
-        let entry = configuration.iter_mut().find(|entry| entry.id == id)
+        let entry = configuration
+            .iter_mut()
+            .find(|entry| entry.id == id)
             .ok_or(protocol::LayoutError::MissingOutput)?;
         let desired = (entry.x, entry.y);
-        if let Ok((x, y)) = protocol::snapped_position(&snapshot.outputs, &configuration, id, desired) {
-            let entry = configuration.iter_mut().find(|entry| entry.id == id).unwrap();
+        if let Ok((x, y)) =
+            protocol::snapped_position(&snapshot.outputs, &configuration, id, desired)
+        {
+            let entry = configuration
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .unwrap();
             entry.x = x;
             entry.y = y;
             if let Ok(layout) = protocol::canonical_layout(&snapshot.outputs, &configuration) {
@@ -309,42 +403,80 @@ impl<T> OutputSet<T> {
         // Reconnect a layout that can no longer fit by putting the primary at
         // the origin and arranging the remaining outputs to its right.
         let mut x = 0i32;
-        for output in snapshot.outputs.iter().filter(|o| o.primary)
+        for output in snapshot
+            .outputs
+            .iter()
+            .filter(|o| o.primary)
             .chain(snapshot.outputs.iter().filter(|o| !o.primary))
         {
-            let entry = configuration.iter_mut().find(|entry| entry.id == output.id).unwrap();
+            let entry = configuration
+                .iter_mut()
+                .find(|entry| entry.id == output.id)
+                .unwrap();
             entry.x = x;
             entry.y = 0;
             let (width, _) = output.mode.logical_size(entry.scale_milli)?;
-            let width = i32::try_from(width).map_err(|_| protocol::LayoutError::CoordinatesOverflow)?;
-            x = x.checked_add(width).ok_or(protocol::LayoutError::CoordinatesOverflow)?;
+            let width =
+                i32::try_from(width).map_err(|_| protocol::LayoutError::CoordinatesOverflow)?;
+            x = x
+                .checked_add(width)
+                .ok_or(protocol::LayoutError::CoordinatesOverflow)?;
         }
         protocol::canonical_layout(&snapshot.outputs, &configuration)
     }
 
     pub(super) fn apply_configuration(&mut self, configuration: &[OutputConfiguration]) {
         for entry in configuration {
-            let output = self.get_mut(entry.id).expect("validated complete output configuration");
-            let (width, height) = output.metadata.mode.logical_size(entry.scale_milli).expect("validated scale");
+            let output = self
+                .get_mut(entry.id)
+                .expect("validated complete output configuration");
+            let (width, height) = output
+                .metadata
+                .mode
+                .logical_size(entry.scale_milli)
+                .expect("validated scale");
             let previous = output.rect;
             if let Some(area) = output.workarea {
                 let left = area.0.saturating_sub(previous.x).max(0) as u32;
                 let top = area.1.saturating_sub(previous.y).max(0) as u32;
                 let right = previous.width.saturating_sub(left.saturating_add(area.2));
                 let bottom = previous.height.saturating_sub(top.saturating_add(area.3));
-                output.workarea = Some((entry.x.saturating_mul(2).saturating_add(left as i32),
-                    entry.y.saturating_mul(2).saturating_add(top as i32), width.saturating_mul(2).saturating_sub(left.saturating_add(right)).max(1),
-                    height.saturating_mul(2).saturating_sub(top.saturating_add(bottom)).max(1)));
+                output.workarea = Some((
+                    entry.x.saturating_mul(2).saturating_add(left as i32),
+                    entry.y.saturating_mul(2).saturating_add(top as i32),
+                    width
+                        .saturating_mul(2)
+                        .saturating_sub(left.saturating_add(right))
+                        .max(1),
+                    height
+                        .saturating_mul(2)
+                        .saturating_sub(top.saturating_add(bottom))
+                        .max(1),
+                ));
             }
-            output.logical_rect = protocol::LogicalRect { x: entry.x, y: entry.y, width, height };
-            output.rect = OutputRect::new(entry.x.saturating_mul(2), entry.y.saturating_mul(2), width.saturating_mul(2), height.saturating_mul(2));
+            output.logical_rect = protocol::LogicalRect {
+                x: entry.x,
+                y: entry.y,
+                width,
+                height,
+            };
+            output.rect = OutputRect::new(
+                entry.x.saturating_mul(2),
+                entry.y.saturating_mul(2),
+                width.saturating_mul(2),
+                height.saturating_mul(2),
+            );
             output.scale_milli = entry.scale_milli;
             output.experience = entry.experience;
         }
         self.bump_generation();
     }
-    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Output<T>> { self.outputs.iter_mut() }
-    fn bump_generation(&mut self) { self.generation = self.generation.wrapping_add(1).max(1); }
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Output<T>> {
+        self.outputs.iter_mut()
+    }
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+    }
 
     fn primary_index(&self) -> usize {
         self.outputs

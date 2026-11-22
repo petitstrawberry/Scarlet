@@ -751,14 +751,30 @@ pub fn set_thermal_max_frequency(name: &str, max_khz: u64) -> Result<(), &'stati
 
 #[cfg(test)]
 mod activity_tests {
-    extern crate std;
     use super::*;
-    use core::sync::atomic::{AtomicU32, AtomicU64};
+    use core::sync::atomic::AtomicU32;
 
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Scarlet's kernel test runner runs cases serially. Remove only the test
+    // fixture from the registry so discovered devices remain untouched.
+    struct RegisteredPolicy;
+
+    impl Drop for RegisteredPolicy {
+        fn drop(&mut self) {
+            POLICIES
+                .lock()
+                .retain(|policy| policy.name != "activity-test");
+        }
+    }
+
+    fn snapshot() -> DeviceFrequencySnapshot {
+        snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.name == "activity-test")
+            .unwrap()
+    }
 
     struct Driver {
-        frequency: AtomicU64,
+        frequency: AtomicU32,
         busy: AtomicU32,
         reject: AtomicBool,
         check_policy_unlocked: AtomicBool,
@@ -772,13 +788,14 @@ mod activity_tests {
                     "telemetry holds policy lock during driver query"
                 );
             }
-            Ok(self.frequency.load(Ordering::Relaxed))
+            Ok(u64::from(self.frequency.load(Ordering::Relaxed)))
         }
         fn set_frequency_khz(&self, frequency: u64) -> Result<(), &'static str> {
             if self.reject.load(Ordering::Relaxed) {
                 return Err("test: rejected vote");
             }
-            self.frequency.store(frequency, Ordering::Relaxed);
+            self.frequency
+                .store(u32::try_from(frequency).unwrap(), Ordering::Relaxed);
             Ok(())
         }
         fn sample_utilization(&self) -> Result<DeviceFrequencyUtilization, &'static str> {
@@ -795,9 +812,9 @@ mod activity_tests {
         }
     }
 
-    fn setup() -> (Arc<Policy>, Arc<Driver>) {
+    fn setup() -> (RegisteredPolicy, Arc<Policy>, Arc<Driver>) {
         let driver = Arc::new(Driver {
-            frequency: AtomicU64::new(180_000),
+            frequency: AtomicU32::new(180_000),
             busy: AtomicU32::new(45),
             reject: AtomicBool::new(false),
             check_policy_unlocked: AtomicBool::new(false),
@@ -835,15 +852,14 @@ mod activity_tests {
             worker_started: AtomicBool::new(true),
         });
         let mut policies = POLICIES.lock();
-        policies.clear();
+        assert!(!policies.iter().any(|policy| policy.name == "activity-test"));
         policies.push(policy.clone());
-        (policy, driver)
+        (RegisteredPolicy, policy, driver)
     }
 
-    #[test]
+    #[test_case]
     fn cold_work_boosts_before_sampling_without_faking_busy() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         poll(&policy);
         assert_eq!(
             driver.frequency.load(Ordering::Relaxed),
@@ -857,16 +873,17 @@ mod activity_tests {
         drop(guard);
     }
 
-    #[test]
+    #[test_case]
     fn retirement_grace_then_normal_four_low_samples_restore_idle_clock() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         let guard = acquire_activity("activity-test").unwrap();
         driver.busy.store(0, Ordering::Relaxed);
+        let before = crate::time::current_time_ns();
         drop(guard);
         let deadline = policy.state.lock().activity_idle_until_ns;
-        assert!(deadline > crate::time::current_time_ns());
-        assert!(deadline <= crate::time::current_time_ns() + ACTIVITY_IDLE_GRACE_NS);
+        let after = crate::time::current_time_ns();
+        assert!(deadline >= before.saturating_add(ACTIVITY_IDLE_GRACE_NS));
+        assert!(deadline <= after.saturating_add(ACTIVITY_IDLE_GRACE_NS));
         for _ in 0..4 {
             poll(&policy);
         }
@@ -885,10 +902,9 @@ mod activity_tests {
         assert_eq!(policy.state.lock().utilization_pct, Some(0));
     }
 
-    #[test]
+    #[test_case]
     fn explicit_governors_and_thermal_cap_override_activity() {
-        let _serial = SERIAL.lock().unwrap();
-        let (_policy, driver) = setup();
+        let (_registration, _policy, driver) = setup();
         let guard = acquire_activity("activity-test").unwrap();
         set_thermal_max_frequency("activity-test", 430_000).unwrap();
         assert_eq!(driver.frequency.load(Ordering::Relaxed), 430_000);
@@ -903,10 +919,9 @@ mod activity_tests {
         drop(guard);
     }
 
-    #[test]
+    #[test_case]
     fn nested_jobs_start_grace_only_after_last_retirement() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, _driver) = setup();
+        let (_registration, policy, _driver) = setup();
         let first = acquire_activity("activity-test").unwrap();
         let second = acquire_activity("activity-test").unwrap();
         drop(first);
@@ -917,15 +932,14 @@ mod activity_tests {
         assert!(policy.state.lock().activity_idle_until_ns > 0);
     }
 
-    #[test]
+    #[test_case]
     fn rejected_boost_does_not_leak_activity_or_publish_a_rate() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         driver.reject.store(true, Ordering::Relaxed);
         assert!(acquire_activity("activity-test").is_err());
         assert_eq!(policy.state.lock().active_jobs, 0);
         assert_eq!(policy.state.lock().target_khz, 180_000);
-        let failed = snapshots()[0].transitions;
+        let failed = snapshot().transitions;
         assert_eq!((failed.attempts, failed.failures), (1, 1));
         assert_eq!(
             (failed.last_from_khz, failed.last_to_khz),
@@ -947,10 +961,9 @@ mod activity_tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_light_frames_learn_supported_lower_opps() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, _) = setup();
+        let (_registration, policy, _) = setup();
         let mut work = WorkDemand::default();
         let mut final_rate = 0;
         for frame in 0..60 {
@@ -977,10 +990,9 @@ mod activity_tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_adds_all_frame_passes_and_responds_to_backlog() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, _) = setup();
+        let (_registration, policy, _) = setup();
         let mut work = WorkDemand {
             valid: true,
             floor_khz: 180_000,
@@ -1027,10 +1039,9 @@ mod activity_tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_work_is_opp_normalized_and_cpu_delay_is_not_gpu_cost() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, _) = setup();
+        let (_registration, policy, _) = setup();
         let mut fast = WorkDemand::default();
         let mut slow = WorkDemand::default();
         fast.record(
@@ -1070,10 +1081,9 @@ mod activity_tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_heavy_work_raises_immediately_but_down_requires_sustained_windows() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, _) = setup();
+        let (_registration, policy, _) = setup();
         let mut work = WorkDemand {
             valid: true,
             floor_khz: 180_000,
@@ -1104,10 +1114,9 @@ mod activity_tests {
         );
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_guard_preserves_manual_thermal_and_true_sampler_semantics() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         policy.state.lock().work = WorkDemand {
             valid: true,
             floor_khz: 430_000,
@@ -1131,10 +1140,9 @@ mod activity_tests {
         assert_eq!(driver.frequency.load(Ordering::Relaxed), 180_000);
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_missing_or_invalid_work_preserves_the_cold_guard_fallback() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         let mut guard = acquire_adaptive_activity("activity-test", 0).unwrap();
         guard.record_work(DeviceFrequencyWork {
             busy_ns: 1_000_000,
@@ -1147,10 +1155,9 @@ mod activity_tests {
         assert_eq!(driver.frequency.load(Ordering::Relaxed), 800_000);
     }
 
-    #[test]
+    #[test_case]
     fn adaptive_counter_loss_after_learning_restores_cold_start_protection() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         policy.state.lock().work = WorkDemand {
             valid: true,
             floor_khz: 180_000,
@@ -1166,17 +1173,16 @@ mod activity_tests {
         assert_eq!(driver.frequency.load(Ordering::Relaxed), 800_000);
     }
 
-    #[test]
+    #[test_case]
     fn telemetry_and_sampling_release_policy_before_driver_queries() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         {
             let mut state = policy.state.lock();
             state.requested_khz = 800_000;
             state.thermal_max_khz = 180_000;
         }
         driver.check_policy_unlocked.store(true, Ordering::Relaxed);
-        let snapshot = snapshots()[0];
+        let snapshot = snapshot();
         assert_eq!(snapshot.requested_khz, 800_000);
         assert_eq!(snapshot.thermal_max_khz, 180_000);
         assert_eq!(
@@ -1190,10 +1196,9 @@ mod activity_tests {
         assert_eq!(policy.state.lock().utilization_pct, Some(45));
     }
 
-    #[test]
+    #[test_case]
     fn stable_adaptive_floor_does_not_oscillate_with_legacy_high_busy_request() {
-        let _serial = SERIAL.lock().unwrap();
-        let (policy, driver) = setup();
+        let (_registration, policy, driver) = setup();
         policy.state.lock().work = WorkDemand {
             valid: true,
             floor_khz: 430_000,

@@ -353,20 +353,32 @@ impl DisplayCharDevice {
     }
 
     fn mapped_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
-        if self.fb_resource.connector_index == 0 { return self.current_backing_info(); }
+        if self.fb_resource.connector_index == 0 {
+            return self.current_backing_info();
+        }
         let backing = {
             let mut pinned = self.mapping_device.write();
             if pinned.is_none() {
                 let source = self.source_graphics_device()?;
-                *pinned = source.as_graphics_device().unwrap()
+                *pinned = source
+                    .as_graphics_device()
+                    .unwrap()
                     .connector_mapping_device(self.fb_resource.connector_index)?;
             }
             pinned.clone()
         };
-        let Some(device) = backing else { return self.current_backing_info(); };
-        let (config, physical_addr) = device.as_graphics_device()
-            .ok_or("Invalid display backing device")?.get_framebuffer_info()?;
-        Ok(DisplayBackingInfo { size: Self::page_aligned_size(config.size())?, config, physical_addr })
+        let Some(device) = backing else {
+            return self.current_backing_info();
+        };
+        let (config, physical_addr) = device
+            .as_graphics_device()
+            .ok_or("Invalid display backing device")?
+            .get_framebuffer_info()?;
+        Ok(DisplayBackingInfo {
+            size: Self::page_aligned_size(config.size())?,
+            config,
+            physical_addr,
+        })
     }
 
     fn current_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
@@ -537,13 +549,20 @@ impl DisplayCharDevice {
                 info.device_key[..key.len()].copy_from_slice(key.as_bytes());
             }
         }
-        if let Some(identity) = device.as_graphics_device().and_then(|graphics| graphics.connector_monitor_identity(connector_index)) {
+        if let Some(identity) = device
+            .as_graphics_device()
+            .and_then(|graphics| graphics.connector_monitor_identity(connector_index))
+        {
             if !identity.key.is_empty() && identity.key.len() < DISPLAY_MONITOR_KEY_LEN {
                 info.monitor_key[..identity.key.len()].copy_from_slice(identity.key.as_bytes());
-                if identity.has_serial { info.flags |= DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL; }
+                if identity.has_serial {
+                    info.flags |= DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL;
+                }
             }
             let mut len = identity.name.len().min(DISPLAY_MONITOR_NAME_LEN - 1);
-            while !identity.name.is_char_boundary(len) { len -= 1; }
+            while !identity.name.is_char_boundary(len) {
+                len -= 1;
+            }
             info.monitor_name[..len].copy_from_slice(&identity.name.as_bytes()[..len]);
         }
         if self.fb_resource.logical_name == "fb0" {
@@ -926,7 +945,9 @@ impl Device for DisplayCharDevice {
     }
 
     fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
-        if self.fb_resource.connector_index == 0 { return Ok(self); }
+        if self.fb_resource.connector_index == 0 {
+            return Ok(self);
+        }
         #[cfg(not(test))]
         let opened = Self::new(self.fb_resource.clone());
         #[cfg(test)]
@@ -1047,23 +1068,40 @@ impl ControlOps for DisplayCharDevice {
         }
         match command {
             DISPLAY_GET_MODE | DISPLAY_REQUEST_MODE => {
-                let device = self.device_manager().get_device(self.fb_resource.source_device_id)
+                let device = self
+                    .device_manager()
+                    .get_device(self.fb_resource.source_device_id)
                     .ok_or("Display source device not found")?;
                 let graphics = device.as_graphics_device().ok_or("Not a graphics device")?;
                 if command == DISPLAY_GET_MODE {
                     let mut query = DisplayModeQuery::default();
                     // SAFETY: repr(C) structure contains only initialized u32 fields.
-                    Self::read_argument(arg, unsafe { core::slice::from_raw_parts_mut(&mut query as *mut _ as *mut u8, core::mem::size_of::<DisplayModeQuery>()) })?;
+                    Self::read_argument(arg, unsafe {
+                        core::slice::from_raw_parts_mut(
+                            &mut query as *mut _ as *mut u8,
+                            core::mem::size_of::<DisplayModeQuery>(),
+                        )
+                    })?;
                     let modes = graphics.connector_modes(self.fb_resource.connector_index);
                     query.count = modes.len() as u32;
                     query.mode = modes.get(query.index as usize).copied().unwrap_or_default();
                     // SAFETY: all fields have been initialized; this type has no padding.
-                    Self::write_argument(arg, unsafe { core::slice::from_raw_parts(&query as *const _ as *const u8, core::mem::size_of::<DisplayModeQuery>()) })?;
+                    Self::write_argument(arg, unsafe {
+                        core::slice::from_raw_parts(
+                            &query as *const _ as *const u8,
+                            core::mem::size_of::<DisplayModeQuery>(),
+                        )
+                    })?;
                     Ok(0)
                 } else {
                     let mut mode = super::output::DisplayMode::default();
                     // SAFETY: mode is a repr(C) triple of initialized u32 fields.
-                    Self::read_argument(arg, unsafe { core::slice::from_raw_parts_mut(&mut mode as *mut _ as *mut u8, core::mem::size_of::<super::output::DisplayMode>()) })?;
+                    Self::read_argument(arg, unsafe {
+                        core::slice::from_raw_parts_mut(
+                            &mut mode as *mut _ as *mut u8,
+                            core::mem::size_of::<super::output::DisplayMode>(),
+                        )
+                    })?;
                     graphics.request_connector_mode(self.fb_resource.connector_index, mode)?;
                     Ok(0)
                 }
@@ -1131,7 +1169,9 @@ impl MemoryMappingOps for DisplayCharDevice {
         if info.physical_addr % crate::environment::PAGE_SIZE as u64 != 0 {
             return Err("Display backing physical address must be page-aligned");
         }
-        if self.fb_resource.connector_index != 0 && offset >= info.size { return Err("Secondary display mmap exceeds framebuffer"); }
+        if self.fb_resource.connector_index != 0 && offset >= info.size {
+            return Err("Secondary display mmap exceeds framebuffer");
+        }
         if offset >= info.size {
             let device = self
                 .device_manager()
@@ -1454,7 +1494,7 @@ mod tests {
         let manager = DeviceManager::new_for_test();
         let graphics = Arc::new(TestBrightnessGraphicsDevice::new(42));
         let display = display_for_test(&manager, graphics);
-        let record_len = core::mem::size_of::<DisplayOutputInfo>();
+        const RECORD_LEN: usize = core::mem::size_of::<DisplayOutputInfo>();
 
         let mut short = output_info_request(super::DISPLAY_OUTPUT_INFO_V1_SIZE as u32 - 1);
         assert_eq!(
@@ -1483,7 +1523,7 @@ mod tests {
 
         // A newer caller may pass a larger record; the kernel writes only the
         // fields it knows and leaves the tail untouched.
-        let mut buffer = [0xa5u8; 256];
+        let mut buffer = [0xa5u8; RECORD_LEN + 16];
         let buffer_len = buffer.len() as u32;
         buffer[..4].copy_from_slice(&buffer_len.to_ne_bytes());
         display
@@ -1494,13 +1534,13 @@ mod tests {
             .expect("larger request should succeed");
         assert_eq!(
             u32::from_ne_bytes(buffer[..4].try_into().unwrap()) as usize,
-            record_len
+            RECORD_LEN
         );
         assert_eq!(
             u32::from_ne_bytes(buffer[4..8].try_into().unwrap()),
             DISPLAY_OUTPUT_INFO_VERSION
         );
-        assert!(buffer[record_len..].iter().all(|byte| *byte == 0xa5));
+        assert!(buffer[RECORD_LEN..].iter().all(|byte| *byte == 0xa5));
 
         assert_eq!(
             display

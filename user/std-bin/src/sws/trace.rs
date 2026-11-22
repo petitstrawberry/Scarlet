@@ -287,7 +287,11 @@ impl FrameProfile {
         for value in damage.values(timings) {
             write!(self.file, "\t{value}")?;
         }
-        writeln!(self.file, "\t{}\t{}", output, other_outputs_pending_at_admission)?;
+        writeln!(
+            self.file,
+            "\t{}\t{}",
+            output, other_outputs_pending_at_admission
+        )?;
         if self.frame % 60 == 0 {
             self.file.flush()?;
         }

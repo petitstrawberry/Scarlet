@@ -5,9 +5,14 @@ pub(super) fn can_admit<'a>(
     readers: &[u32],
     flights: impl IntoIterator<Item = (usize, &'a [u32])>,
 ) -> bool {
-    !flights.into_iter().any(|(pending_output, pending_readers)| {
-        output == pending_output || readers.iter().any(|window| pending_readers.contains(window))
-    })
+    !flights
+        .into_iter()
+        .any(|(pending_output, pending_readers)| {
+            output == pending_output
+                || readers
+                    .iter()
+                    .any(|window| pending_readers.contains(window))
+        })
 }
 
 #[cfg(test)]
@@ -25,7 +30,11 @@ mod tests {
     fn spanning_image_waits_for_its_last_reader() {
         let first = [10, 99];
         let second = [20, 99];
-        assert!(!can_admit(2, &[99], [(0, first.as_slice()), (1, second.as_slice())]));
+        assert!(!can_admit(
+            2,
+            &[99],
+            [(0, first.as_slice()), (1, second.as_slice())]
+        ));
         // Output 0 has retired, but output 1 still samples image 99.
         assert!(!can_admit(0, &[99], [(1, second.as_slice())]));
         assert!(can_admit(0, &[10], [(1, second.as_slice())]));
@@ -38,7 +47,11 @@ mod tests {
         for _ in 0..8 {
             assert!(can_admit(0, &[10], [(1, slow.as_slice())]));
             let fast = [10];
-            assert!(!can_admit(0, &[10], [(1, slow.as_slice()), (0, fast.as_slice())]));
+            assert!(!can_admit(
+                0,
+                &[10],
+                [(1, slow.as_slice()), (0, fast.as_slice())]
+            ));
             // Retiring only the fast fence permits its next frame.
         }
     }
