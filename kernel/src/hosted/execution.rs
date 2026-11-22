@@ -1,14 +1,23 @@
-//! Native guest execution for a scheduled Task in its address-space worker.
+//! Native guest execution and trap dispatch for a scheduled Task.
+#[cfg(not(target_os = "ios"))]
 mod admission_cache;
+#[cfg(not(target_os = "ios"))]
 mod boundary;
+#[cfg(not(target_os = "ios"))]
 mod data_access;
 mod stop_profile;
+#[cfg(target_os = "ios")]
+pub(super) mod in_process;
+#[cfg(target_os = "ios")]
+pub(super) use in_process::InterruptTarget;
 
+#[cfg(not(target_os = "ios"))]
+use crate::vm::vmem::VirtualMemoryPermission as Perm;
 use crate::{
     arch::Trapframe,
     sched::scheduler,
     task::Task,
-    vm::vmem::{MappingOrigin, VirtualMemoryPermission as Perm},
+    vm::vmem::MappingOrigin,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
@@ -16,13 +25,16 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use scarlet_hosted_runtime::worker_context::{GuestStop, Registers};
+#[cfg(not(target_os = "ios"))]
 use scarlet_hosted_runtime::{
     run_gate::{MappingOutcome, RunGate, RunPermit, TaskId, WorkerId},
     worker::{Worker, WorkerControl, WorkerProcess, WorkerThread, identity},
-    worker_context::Registers,
     worker_memory::Protection,
 };
-use std::{io, os::fd::AsFd, sync::Mutex};
+use std::sync::Mutex;
+#[cfg(not(target_os = "ios"))]
+use std::{io, os::fd::AsFd};
 
 #[derive(Default)]
 pub(crate) struct Image {
@@ -30,7 +42,10 @@ pub(crate) struct Image {
     guest_page_size: AtomicUsize,
     code: Mutex<Vec<(MappingOrigin, Range<usize>)>>,
     file_code: Mutex<BTreeMap<MappingOrigin, Arc<[Range<usize>]>>>,
+    #[cfg(not(target_os = "ios"))]
     session: Mutex<Option<Session>>,
+    #[cfg(target_os = "ios")]
+    local: Mutex<Option<Arc<in_process::LocalImage>>>,
 }
 
 impl fmt::Debug for Image {
@@ -39,6 +54,7 @@ impl fmt::Debug for Image {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 #[derive(Clone, PartialEq, Eq)]
 struct Extent {
     origin: MappingOrigin,
@@ -50,6 +66,7 @@ struct Extent {
     parts: Vec<boundary::Part>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl admission_cache::Snapshot for crate::vm::vmem::VirtualMemoryMap {
     fn key(&self) -> usize {
         self.vmarea.start
@@ -80,6 +97,7 @@ impl admission_cache::Snapshot for crate::vm::vmem::VirtualMemoryMap {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 struct Session {
     interrupts: Arc<InterruptTarget>,
     worker: Worker,
@@ -93,21 +111,25 @@ struct Session {
 
 /// Follows the Scarlet Task across vCPU migration. Exec selects a new endpoint
 /// by image identity; dropping the Task closes its worker thread.
+#[cfg(not(target_os = "ios"))]
 #[derive(Default, Debug)]
 pub(crate) struct TaskThread(Mutex<Option<(WorkerId, WorkerThread)>>);
 
+#[cfg(not(target_os = "ios"))]
 struct Running {
     permit: RunPermit,
     interrupts: Arc<InterruptTarget>,
 }
 
 /// Remains valid for exactly one worker lifetime, even across an exec.
+#[cfg(not(target_os = "ios"))]
 pub(super) struct InterruptTarget {
     control: Arc<WorkerControl>,
     gate: Arc<RunGate>,
     process: Arc<WorkerProcess>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl InterruptTarget {
     pub(super) fn request(&self, permit: RunPermit) {
         if self.control.interrupt(permit).is_err() {
@@ -119,6 +141,7 @@ impl InterruptTarget {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Running {
     fn receive(
         self,
@@ -168,6 +191,7 @@ impl Image {
         self.invalidate_publication();
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn append_instruction_ranges(
         &self,
         origin: MappingOrigin,
@@ -220,6 +244,9 @@ impl Image {
     /// Force a fresh snapshot even when address, frame and final flags match.
     pub(crate) fn invalidate_code(&self, start: usize, end_inclusive: usize) {
         self.invalidate_publication();
+        #[cfg(target_os = "ios")]
+        let _ = (start, end_inclusive);
+        #[cfg(not(target_os = "ios"))]
         if let Some(session) = self.session.lock().unwrap().as_mut() {
             let first = session
                 .installed
@@ -237,6 +264,7 @@ impl Image {
 
     /// The VM transaction excludes new admissions even for a nonblocking
     /// legacy translation. Never wait for a worker under an IRQ guard.
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn try_parked(&self) -> bool {
         self.session.try_lock().is_ok_and(|session| {
             session
@@ -247,6 +275,7 @@ impl Image {
 
     /// The caller owns the VM transaction, so new guest entries cannot race
     /// this snapshot. An acknowledgement never needs that transaction.
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn quiesce(&self) {
         let mut session = self.session.lock().unwrap();
         if let Some(session) = session.as_mut() {
@@ -272,6 +301,7 @@ impl Image {
         }
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn run(self: &Arc<Self>, task: &Task, tf: &mut Trapframe) -> io::Result<bool> {
         let mut endpoint = task.hosted_thread.0.lock().unwrap().take();
         let running = {
@@ -312,21 +342,7 @@ impl Image {
         let stop = stop?;
         *task.hosted_thread.0.lock().unwrap() = endpoint;
         let guest = stop.guest;
-        let regs = guest.registers;
-        tf.elr = regs.pc;
-        tf.sp = regs.sp;
-        tf.regs.reg = regs.x.map(|r| r as usize);
-        tf.spsr = u64::from(regs.nzcv);
-        tf.tpidr_el0 = guest.tls;
-        tf.esr_el1 = guest.esr;
-        tf.far_el1 = guest.far;
-        stop_profile::record(task, tf, guest.interrupted);
-        let mut vcpu = task.vcpu.lock();
-        vcpu.fpu_used = true;
-        vcpu.fpu.v = regs.q.map(|q| [q as u64, (q >> 64) as u64]);
-        vcpu.fpu.fpcr = u64::from(regs.fpcr);
-        vcpu.fpu.fpsr = u64::from(regs.fpsr);
-        drop(vcpu);
+        store_stop(task, tf, &guest);
         if !guest.interrupted && tf.esr_el1 >> 26 == 0x24 {
             let address = data_access::data_address(tf.far_el1);
             let tx = task.vm_manager.mapping_transaction();
@@ -376,6 +392,7 @@ impl Image {
 }
 
 /// Scan two address-ordered snapshots, advancing each cursor at most once.
+#[cfg(not(target_os = "ios"))]
 fn changed_extents<'a>(
     snapshot: &'a [(usize, Extent)],
     mut previous: &'a [(usize, Extent)],
@@ -391,6 +408,7 @@ fn changed_extents<'a>(
     })
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Session {
     fn retire(&mut self) {
         self.worker
@@ -557,18 +575,7 @@ impl Session {
         let generation = scheduler::get_task_pool()
             .task_generation(id)
             .expect("Running Task") as u64;
-        let regs = {
-            let vcpu = task.vcpu.lock();
-            Registers {
-                x: tf.regs.reg.map(|r| r as u64),
-                pc: tf.elr,
-                sp: tf.sp,
-                nzcv: tf.spsr as u32,
-                q: vcpu.fpu.v.map(|[lo, hi]| lo as u128 | ((hi as u128) << 64)),
-                fpcr: vcpu.fpu.fpcr as u32,
-                fpsr: vcpu.fpu.fpsr as u32,
-            }
-        };
+        let regs = load_registers(task, tf);
         let task_id = TaskId { id, generation };
         if endpoint.as_ref().is_none_or(|(id, _)| *id != self.id) {
             *endpoint = Some((self.id, self.worker.open_thread(task_id)?));
@@ -587,6 +594,36 @@ impl Session {
             interrupts: self.interrupts.clone(),
         })
     }
+}
+
+fn load_registers(task: &Task, tf: &Trapframe) -> Registers {
+    let vcpu = task.vcpu.lock();
+    Registers {
+        x: tf.regs.reg.map(|r| r as u64),
+        pc: tf.elr,
+        sp: tf.sp,
+        nzcv: tf.spsr as u32,
+        q: vcpu.fpu.v.map(|[lo, hi]| lo as u128 | ((hi as u128) << 64)),
+        fpcr: vcpu.fpu.fpcr as u32,
+        fpsr: vcpu.fpu.fpsr as u32,
+    }
+}
+
+fn store_stop(task: &Task, tf: &mut Trapframe, guest: &GuestStop) {
+    let regs = guest.registers;
+    tf.elr = regs.pc;
+    tf.sp = regs.sp;
+    tf.regs.reg = regs.x.map(|r| r as usize);
+    tf.spsr = u64::from(regs.nzcv);
+    tf.tpidr_el0 = guest.tls;
+    tf.esr_el1 = guest.esr;
+    tf.far_el1 = guest.far;
+    stop_profile::record(task, tf, guest.interrupted);
+    let mut vcpu = task.vcpu.lock();
+    vcpu.fpu_used = true;
+    vcpu.fpu.v = regs.q.map(|q| [q as u64, (q >> 64) as u64]);
+    vcpu.fpu.fpcr = u64::from(regs.fpcr);
+    vcpu.fpu.fpsr = u64::from(regs.fpsr);
 }
 
 pub fn enter(tf: &mut Trapframe) -> ! {

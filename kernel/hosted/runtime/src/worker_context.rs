@@ -1,14 +1,25 @@
 //! Register state and trap normalization for AArch64 signals.
 
-use crate::worker_memory::{Mapping, PatchedInstruction, SYSCALL_BREAKPOINT};
+#[cfg(not(target_os = "ios"))]
+use crate::worker_memory::{Mapping, PatchedInstruction};
 
 #[cfg(target_os = "linux")]
 pub(super) mod linux;
 
+#[cfg(target_vendor = "apple")]
 const NZCV: u32 = 0xf000_0000;
 const BREAKPOINT_CLASS: u32 = 0x3c;
 const SVC_CLASS: u64 = 0x15;
 const ESR_IL: u64 = 1 << 25;
+pub(crate) const SYSCALL_BRK: u16 = 0x5300;
+
+pub struct GuestStop {
+    pub registers: Registers,
+    pub esr: u64,
+    pub far: u64,
+    pub tls: u64,
+    pub interrupted: bool,
+}
 
 pub struct Exception {
     pub registers: Registers,
@@ -22,7 +33,7 @@ pub struct SyscallTrap {
 }
 
 impl Exception {
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     pub fn capture(context: &libc::__darwin_mcontext64) -> Self {
         Self {
             registers: Registers::capture(context),
@@ -33,6 +44,7 @@ impl Exception {
 
     /// Normalize a stop using the mapping from its admitted generation.
     /// Scarlet records ELR after an AArch64 SVC.
+    #[cfg(not(target_os = "ios"))]
     pub fn syscall(&self, mapping: &Mapping, word: u32) -> Option<SyscallTrap> {
         let PatchedInstruction::Syscall { immediate } =
             mapping.patched_instruction(self.registers.pc as usize, word)?
@@ -42,9 +54,12 @@ impl Exception {
         self.translated_syscall(self.registers.pc, immediate)
     }
 
+    pub(super) fn is_breakpoint(&self, immediate: u16) -> bool {
+        self.esr >> 26 == BREAKPOINT_CLASS && self.esr & 0xffff == u32::from(immediate)
+    }
+
     pub(super) fn translated_syscall(&self, guest_pc: u64, immediate: u16) -> Option<SyscallTrap> {
-        let breakpoint_immediate = (SYSCALL_BREAKPOINT >> 5) & 0xffff;
-        if self.esr >> 26 != BREAKPOINT_CLASS || self.esr & 0xffff != breakpoint_immediate {
+        if !self.is_breakpoint(SYSCALL_BRK) {
             return None;
         }
         Some(SyscallTrap {
@@ -68,7 +83,7 @@ pub struct Registers {
 impl Registers {
     /// Capture the saved registers before changing the host's resume context.
     /// This does not read the signal handler's live registers or use TLS.
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     pub fn capture(context: &libc::__darwin_mcontext64) -> Self {
         let state = &context.__ss;
         let mut x = [0; 31];
@@ -87,7 +102,7 @@ impl Registers {
     }
 
     /// Preserve host-controlled status bits in the kernel-provided context.
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     pub fn restore(self, context: &mut libc::__darwin_mcontext64) {
         let state = &mut context.__ss;
         state.__x.copy_from_slice(&self.x[..29]);
@@ -102,12 +117,12 @@ impl Registers {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "ios")))]
 mod tests {
     use super::*;
     use crate::{
         ram::{RamArena, host_page_size},
-        worker_memory::Protection,
+        worker_memory::{Protection, SYSCALL_BREAKPOINT},
     };
     use std::{
         ffi::c_void,

@@ -5,10 +5,10 @@ use crate::println;
 #[macro_export]
 macro_rules! early_initcall {
     ($func:ident) => {
-        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__sc_init_early"))]
+        #[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__sc_init_early"))]
         #[cfg_attr(target_os = "linux", unsafe(link_section = "sc_init_early"))]
         #[cfg_attr(
-            not(any(target_os = "linux", target_os = "macos")),
+            not(any(target_os = "linux", target_vendor = "apple")),
             unsafe(link_section = ".initcall.early")
         )]
         #[used]

@@ -933,7 +933,7 @@ pub struct Task {
 
     // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
-    #[cfg(feature = "hosted")]
+    #[cfg(all(feature = "hosted", not(target_os = "ios")))]
     pub(crate) hosted_thread: crate::hosted::execution::TaskThread,
     pub vcpu: IrqSpinLock<Vcpu>,
     /// Kernel context for context switching
@@ -1203,7 +1203,7 @@ impl Task {
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
             fixed_priority: fixed_priority::FixedPriorityState::new(),
             // IRQ spin lock fields
-            #[cfg(feature = "hosted")]
+            #[cfg(all(feature = "hosted", not(target_os = "ios")))]
             hosted_thread: Default::default(),
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,

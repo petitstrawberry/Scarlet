@@ -2,7 +2,7 @@
 
 use crate::{
     fetched_instruction::{self, Fetch, Slots},
-    worker_context::{Exception, Registers},
+    worker_context::{Exception, GuestStop, Registers},
     worker_memory::{Mapping, PatchedInstruction},
 };
 use std::{
@@ -26,14 +26,6 @@ use linux::handle_signal;
 use crate::platform_register::Action;
 
 const STACK_SIZE: usize = 128 * 1024;
-
-pub struct GuestStop {
-    pub registers: Registers,
-    pub esr: u64,
-    pub far: u64,
-    pub tls: u64,
-    pub interrupted: bool,
-}
 
 /// The coordinator can request an epoch before its RUN stream has been read.
 #[derive(Default)]

@@ -261,7 +261,7 @@ fn create_backing(len: libc::off_t) -> io::Result<File> {
     Ok(backing)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn create_backing(len: libc::off_t) -> io::Result<File> {
     use std::{ffi::CString, sync::atomic::AtomicU64};
 

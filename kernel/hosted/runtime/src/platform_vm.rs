@@ -1,6 +1,8 @@
 //! Host VM operations used by executable publication.
 
-use std::{ffi::c_void, io, ptr};
+use std::ffi::c_void;
+#[cfg(not(target_os = "ios"))]
+use std::{io, ptr};
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -81,12 +83,12 @@ pub(super) fn limit_permissions(_: *mut c_void, _: usize, _: i32) -> io::Result<
 /// The range must belong to an accessible mapping.
 pub unsafe fn synchronize_instructions(start: *const c_void, len: usize) {
     unsafe extern "C" {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         fn sys_icache_invalidate(start: *const c_void, len: usize);
         #[cfg(target_os = "linux")]
         fn __clear_cache(start: *const c_void, end: *const c_void);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     unsafe {
         sys_icache_invalidate(start, len)
     };
