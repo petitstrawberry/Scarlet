@@ -389,7 +389,9 @@ pub trait MemoryMappingOps: Send + Sync {
     /// True only when this owner's publication view is fixed for its entire
     /// lifetime. Changes that replace the VMA still invalidate the VM snapshot.
     #[cfg(feature = "hosted")]
-    fn has_fixed_publication(&self) -> bool { false }
+    fn has_fixed_publication(&self) -> bool {
+        false
+    }
 
     /// Version of the complete hosted publication view: resident extents,
     /// per-access permissions, private-copy policy and instruction intervals.
@@ -398,12 +400,19 @@ pub trait MemoryMappingOps: Send + Sync {
     /// releasing that lock. Versions must never be reused during owner life.
     /// This is a cache key, not a replacement for revocation/quiescence.
     #[cfg(feature = "hosted")]
-    fn publication_generation(&self) -> Option<u64> { None }
+    fn publication_generation(&self) -> Option<u64> {
+        None
+    }
 
     /// Visit nonoverlapping resident spans in ascending owner-relative page order.
     /// Sparse owners leave unpopulated spans to the ordinary fault path.
     #[cfg(feature = "hosted")]
-    fn visit_resident_extents(&self, start: usize, count: usize, visit: &mut dyn FnMut(usize, usize, u64)) {
+    fn visit_resident_extents(
+        &self,
+        start: usize,
+        count: usize,
+        visit: &mut dyn FnMut(usize, usize, u64),
+    ) {
         if let Some(pa) = self.stable_physical_extent(start, count) {
             visit(start, count, pa);
         }
@@ -411,7 +420,9 @@ pub trait MemoryMappingOps: Send + Sync {
 
     /// ELF instruction intervals relative to this mapping's original start.
     #[cfg(feature = "hosted")]
-    fn instruction_ranges(&self) -> Option<Arc<[core::ops::Range<usize>]>> { None }
+    fn instruction_ranges(&self) -> Option<Arc<[core::ops::Range<usize>]>> {
+        None
+    }
 
     /// All pages of this owner resolve to immutable zero-filled normal memory.
     fn has_immutable_zero_backing(&self) -> bool {

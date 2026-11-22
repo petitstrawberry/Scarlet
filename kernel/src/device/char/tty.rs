@@ -527,8 +527,7 @@ impl TtyDevice {
                 return;
             }
             if let Some(task) = mytask() {
-                if self.wait_for_input(task.get_id(), trapframe) == WaitResult::Interrupted
-                {
+                if self.wait_for_input(task.get_id(), trapframe) == WaitResult::Interrupted {
                     return;
                 }
             } else {
@@ -545,9 +544,11 @@ impl TtyDevice {
     }
 
     fn wait_for_input(&self, task_id: usize, trapframe: &mut Trapframe) -> WaitResult {
-        self.input_waker.clone().wait_result_until_owned(task_id, trapframe, || {
-            self.input_closed.load(Ordering::Acquire)
-        })
+        self.input_waker
+            .clone()
+            .wait_result_until_owned(task_id, trapframe, || {
+                self.input_closed.load(Ordering::Acquire)
+            })
     }
 
     /// Wait until readable with a timeout (in ticks).

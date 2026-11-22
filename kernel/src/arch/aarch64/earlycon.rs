@@ -274,7 +274,6 @@ mod tests {
     }
 }
 
-
 #[cfg(feature = "hosted")]
 pub fn early_putc(c: u8) {
     use std::io::Write;

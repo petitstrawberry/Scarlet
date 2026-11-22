@@ -316,6 +316,7 @@ pub trait PhyProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::IrqSpinLock;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     struct TestPhy {

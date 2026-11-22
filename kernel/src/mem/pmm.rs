@@ -340,7 +340,12 @@ impl BuddyRegion {
     }
 
     // Split toward the lower address, leaving the unused right halves free.
-    unsafe fn take_block(&mut self, page_idx: usize, mut current_order: usize, order: usize) -> u64 {
+    unsafe fn take_block(
+        &mut self,
+        page_idx: usize,
+        mut current_order: usize,
+        order: usize,
+    ) -> u64 {
         let page = self.pfn_to_page(page_idx);
         unsafe {
             self.del_from_free_list(page, current_order);
@@ -663,7 +668,12 @@ impl PmmInner {
         self.alloc_congruent(pages, align_pages, 0)
     }
 
-    fn alloc_congruent(&mut self, pages: usize, align_pages: usize, virtual_base: u64) -> Option<u64> {
+    fn alloc_congruent(
+        &mut self,
+        pages: usize,
+        align_pages: usize,
+        virtual_base: u64,
+    ) -> Option<u64> {
         if align_pages == 0 || align_pages == 1 {
             return self.alloc(pages);
         }
@@ -856,7 +866,11 @@ pub fn alloc_contiguous_pages_below(pages: usize, max_address: u64) -> Option<u6
     let bytes = pages.checked_mul(PAGE_SIZE)?;
     let last_base = max_address.checked_sub(u64::try_from(bytes.checked_sub(1)?).ok()?)?;
     let order = pages.checked_next_power_of_two()?.trailing_zeros() as usize;
-    let allocation = PMM.lock().regions.iter_mut().find_map(|region| region.alloc_below(order, last_base));
+    let allocation = PMM
+        .lock()
+        .regions
+        .iter_mut()
+        .find_map(|region| region.alloc_below(order, last_base));
     if allocation.is_none() {
         note_allocation_failure(pages);
     }

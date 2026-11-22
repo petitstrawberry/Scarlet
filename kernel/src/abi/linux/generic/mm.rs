@@ -315,7 +315,9 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
             }
             if let Some(removed_mappings) = removed_mappings_opt {
                 for removed in &removed_mappings {
-                    if (private_demand || removed.is_shared) && let Some(owner) = &removed.owner {
+                    if (private_demand || removed.is_shared)
+                        && let Some(owner) = &removed.owner
+                    {
                         owner.on_unmapped(removed.vmarea.start, removed.vmarea.size());
                     }
                 }
@@ -466,7 +468,10 @@ fn handle_anonymous_mapping(
             Err(_) => {
                 // First-fit search and insertion can race another thread.
                 // Retry the selection and insertion atomically.
-                match task.vm_manager.add_memory_map_at_offset(vm_map, alignment, 0) {
+                match task
+                    .vm_manager
+                    .add_memory_map_at_offset(vm_map, alignment, 0)
+                {
                     Ok(addr) => (addr, Vec::new()),
                     Err(_) => return to_result(errno::ENOMEM),
                 }

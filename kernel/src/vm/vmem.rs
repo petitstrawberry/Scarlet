@@ -42,7 +42,9 @@ impl MappingOrigin {
     /// Record the original request when a free native mapping needs tail
     /// padding. Its owner may later unmap it using that original length.
     pub(crate) fn with_tail_padding(mut self, requested: usize, allocated: usize) -> Self {
-        if requested < allocated { self.padded_request = core::num::NonZeroUsize::new(requested); }
+        if requested < allocated {
+            self.padded_request = core::num::NonZeroUsize::new(requested);
+        }
         self
     }
 

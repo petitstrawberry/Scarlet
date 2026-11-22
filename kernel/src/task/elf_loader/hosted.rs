@@ -1,8 +1,8 @@
 //! Final image protections for the hosted executable mappings.
 
 use super::{
-    ET_EXEC, ElfHeader, ElfLoaderError, FileObject, PAGE_SIZE, PF_R, PF_X, PT_INTERP,
-    PT_LOAD, Task, VirtualMemoryPermission, elf_error, for_each_program_header,
+    ET_EXEC, ElfHeader, ElfLoaderError, FileObject, PAGE_SIZE, PF_R, PF_X, PT_INTERP, PT_LOAD,
+    Task, VirtualMemoryPermission, elf_error, for_each_program_header,
 };
 use crate::vm::vmem::MemoryArea;
 
@@ -28,7 +28,9 @@ pub(super) fn use_native_load_pages(
         if ph.p_memsz == 0 || !matches!(ph.p_type, PT_LOAD | PT_GNU_RELRO) {
             return Ok(true);
         }
-        let end = ph.p_vaddr.checked_add(ph.p_memsz)
+        let end = ph
+            .p_vaddr
+            .checked_add(ph.p_memsz)
             .ok_or_else(|| elf_error("ELF segment end overflow"))?;
         let span = ph.p_vaddr..end;
         if ph.p_type == PT_GNU_RELRO {
@@ -40,20 +42,25 @@ pub(super) fn use_native_load_pages(
         Ok(eligible)
     })?;
     loads.sort_unstable_by_key(|(span, _)| span.start);
-    if !eligible || loads.is_empty() || loads.windows(2).any(|pair| {
-        floor(pair[0].0.end - 1) >= floor(pair[1].0.start)
-    }) {
+    if !eligible
+        || loads.is_empty()
+        || loads
+            .windows(2)
+            .any(|pair| floor(pair[0].0.end - 1) >= floor(pair[1].0.start))
+    {
         return Ok(false);
     }
     if let Some(relro) = relro {
         for (span, flags) in &loads {
-            if flags & super::PF_W == 0 { continue; }
+            if flags & super::PF_W == 0 {
+                continue;
+            }
             let intersects = floor(span.start) <= floor(relro.end - 1)
                 && floor(relro.start) <= floor(span.end - 1);
-            if intersects && (
-                (span.start < relro.start && !relro.start.is_multiple_of(page))
-                || (span.end > relro.end && !relro.end.is_multiple_of(page))
-            ) {
+            if intersects
+                && ((span.start < relro.start && !relro.start.is_multiple_of(page))
+                    || (span.end > relro.end && !relro.end.is_multiple_of(page)))
+            {
                 return Ok(false);
             }
         }

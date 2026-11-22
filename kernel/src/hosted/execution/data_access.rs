@@ -62,7 +62,12 @@ fn decode(word: u32, tf: &Trapframe) -> Option<Transfer> {
         }
         let rm = ((word >> 16) & 31) as usize;
         if word & (1 << 23) != 0 {
-            let step = tf.regs.reg.get(rm).copied().unwrap_or(t.width * t.register_count);
+            let step = tf
+                .regs
+                .reg
+                .get(rm)
+                .copied()
+                .unwrap_or(t.width * t.register_count);
             t.writeback = Some((rn, base.wrapping_add(step as u64)));
         } else if rm != 0 {
             return None;
@@ -221,7 +226,11 @@ fn alias(
         return None;
     }
     let pa = if let Some(owner) = &map.owner {
-        let access = AccessKind { op, vaddr: va, size: Some(size) };
+        let access = AccessKind {
+            op,
+            vaddr: va,
+            size: Some(size),
+        };
         // An instruction already ran on this permit. For stable private text,
         // revalidate its current backing and execute grant under the transaction
         // without parking peers to reinstall an identical resident PTE.
@@ -234,19 +243,25 @@ fn alias(
             let offset = va % PAGE_SIZE;
             if let Some(base) = owner.stable_physical_extent(page, 1)
                 && let Some(pa) = base.checked_add(offset as u64)
-                && let Some(pte) = vm.get_root_page_table().and_then(|mut table| table.resident_page(va))
+                && let Some(pte) = vm
+                    .get_root_page_table()
+                    .and_then(|mut table| table.resident_page(va))
                 && pte.paddr == base
                 && pte.memory_attribute == map.memory_attribute
                 && Perm::User.contained_in(pte.permissions)
                 && Perm::Execute.contained_in(pte.permissions)
                 && let Ok(resolved) = owner.resolve_fault(
-                    &AccessKind { op: AccessOp::Load, ..access },
+                    &AccessKind {
+                        op: AccessOp::Load,
+                        ..access
+                    },
                     page,
                     map.vm_start,
                 )
                 && !resolved.is_tail
                 && resolved.paddr_page_base == base
-                && Perm::Execute.contained_in(owner.fault_page_permissions(&access, map.permissions))
+                && Perm::Execute
+                    .contained_in(owner.fault_page_permissions(&access, map.permissions))
             {
                 return crate::hosted::alias_for(pa);
             }
@@ -276,7 +291,9 @@ pub(super) fn data_address(address: u64) -> usize {
 // Perform its cache-block zero on the same coherent physical RAM.
 fn zero_block(word: u32, task: &Task, tf: &mut Trapframe, tx: &MappingTransaction<'_>) -> Result {
     let dczid: usize;
-    unsafe { core::arch::asm!("mrs {}, dczid_el0", out(reg) dczid, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("mrs {}, dczid_el0", out(reg) dczid, options(nomem, nostack, preserves_flags))
+    };
     let size = 4 << (dczid & 15);
     if dczid & 16 != 0 || size > PAGE_SIZE {
         return Result::Unsupported(word);
@@ -287,8 +304,10 @@ fn zero_block(word: u32, task: &Task, tf: &mut Trapframe, tx: &MappingTransactio
     if data_address(tf.far_el1) & !(size - 1) != base {
         return Result::Unsupported(word);
     }
-    if !task.vm_manager.search_memory_map(base).is_some_and(|map|
-        map.memory_attribute == crate::vm::vmem::MemoryAttribute::Normal)
+    if !task
+        .vm_manager
+        .search_memory_map(base)
+        .is_some_and(|map| map.memory_attribute == crate::vm::vmem::MemoryAttribute::Normal)
     {
         return Result::Fault(address);
     }
@@ -325,7 +344,11 @@ fn atomic(
     let rt = (word & 31) as usize;
     let rn = ((word >> 5) & 31) as usize;
     let va = data_address(tf.regs.reg.get(rn).map_or(tf.sp, |&r| r as u64));
-    let width = if pair { 8 << (word >> 30) } else { 1 << (word >> 30) };
+    let width = if pair {
+        8 << (word >> 30)
+    } else {
+        1 << (word >> 30)
+    };
     if va != data_address(tf.far_el1) || va % width != 0 {
         return Some(Result::Unsupported(word));
     }

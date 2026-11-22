@@ -51,19 +51,27 @@ struct Extent {
 }
 
 impl admission_cache::Snapshot for crate::vm::vmem::VirtualMemoryMap {
-    fn key(&self) -> usize { self.vmarea.start }
+    fn key(&self) -> usize {
+        self.vmarea.start
+    }
 
     fn needs_owner_check(&self) -> bool {
-        self.owner.as_ref().is_some_and(|owner| !owner.has_fixed_publication())
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| !owner.has_fixed_publication())
     }
 
     fn same(&self, other: &Self) -> bool {
-        self.vmarea.start == other.vmarea.start && self.vmarea.end == other.vmarea.end
-            && self.pmarea.start == other.pmarea.start && self.pmarea.end == other.pmarea.end
-            && self.vm_start == other.vm_start && self.mapping_origin == other.mapping_origin
+        self.vmarea.start == other.vmarea.start
+            && self.vmarea.end == other.vmarea.end
+            && self.pmarea.start == other.pmarea.start
+            && self.pmarea.end == other.pmarea.end
+            && self.vm_start == other.vm_start
+            && self.mapping_origin == other.mapping_origin
             && self.permissions == other.permissions
             && self.maximum_permissions == other.maximum_permissions
-            && self.is_shared == other.is_shared && self.memory_attribute == other.memory_attribute
+            && self.is_shared == other.is_shared
+            && self.memory_attribute == other.memory_attribute
             && match (&self.owner, &other.owner) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -103,7 +111,9 @@ pub(super) struct InterruptTarget {
 impl InterruptTarget {
     pub(super) fn request(&self, permit: RunPermit) {
         if self.control.interrupt(permit).is_err() {
-            self.process.terminate().expect("Cannot confirm worker death");
+            self.process
+                .terminate()
+                .expect("Cannot confirm worker death");
             self.gate.confirm_worker_death();
         }
     }
@@ -135,7 +145,9 @@ impl Running {
 impl Image {
     pub(crate) fn invalidate_publication(&self) {
         self.publication_generation
-            .fetch_update(Ordering::Release, Ordering::Relaxed, |value| value.checked_add(1))
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
             .expect("Hosted publication generation exhausted");
     }
 
@@ -171,7 +183,13 @@ impl Image {
                 output.push(lo - base..hi - base);
             }
         };
-        for (_, range) in self.code.lock().unwrap().iter().filter(|(id, _)| *id == origin) {
+        for (_, range) in self
+            .code
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == origin)
+        {
             append(range.start, range.end);
         }
         if let Some(file) = self.file_code.lock().unwrap().get(&origin) {
@@ -203,9 +221,9 @@ impl Image {
     pub(crate) fn invalidate_code(&self, start: usize, end_inclusive: usize) {
         self.invalidate_publication();
         if let Some(session) = self.session.lock().unwrap().as_mut() {
-            let first = session.installed.partition_point(|(base, extent)| {
-                base.saturating_add(extent.len - 1) < start
-            });
+            let first = session
+                .installed
+                .partition_point(|(base, extent)| base.saturating_add(extent.len - 1) < start);
             for (base, extent) in &mut session.installed[first..] {
                 if *base > end_inclusive {
                     break;
@@ -312,25 +330,42 @@ impl Image {
         if !guest.interrupted && tf.esr_el1 >> 26 == 0x24 {
             let address = data_access::data_address(tf.far_el1);
             let tx = task.vm_manager.mapping_transaction();
-            let boundary = self.session.lock().unwrap().as_ref().is_some_and(|session| {
-                let end = session.installed.partition_point(|(va, _)| *va <= address);
-                session.installed[..end].last().is_some_and(|(base, extent)| {
-                    address - *base < extent.len && !extent.parts.is_empty()
-                })
-            });
+            let boundary = self
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|session| {
+                    let end = session.installed.partition_point(|(va, _)| *va <= address);
+                    session.installed[..end]
+                        .last()
+                        .is_some_and(|(base, extent)| {
+                            address - *base < extent.len && !extent.parts.is_empty()
+                        })
+                });
             if boundary {
-                let required = if tf.esr_el1 & (1 << 6) != 0 { Perm::Write } else { Perm::Read };
-                if task.vm_manager.search_memory_map(address).is_some_and(|m|
-                    Perm::User.contained_in(m.permissions) && required.contained_in(m.permissions))
-                {
+                let required = if tf.esr_el1 & (1 << 6) != 0 {
+                    Perm::Write
+                } else {
+                    Perm::Read
+                };
+                if task.vm_manager.search_memory_map(address).is_some_and(|m| {
+                    Perm::User.contained_in(m.permissions) && required.contained_in(m.permissions)
+                }) {
                     match data_access::complete(
-                        task, tf, &tx, stop.exclusive.as_ref(), stop.fault_instruction,
+                        task,
+                        tf,
+                        &tx,
+                        stop.exclusive.as_ref(),
+                        stop.fault_instruction,
                     ) {
                         data_access::Result::Done => return Ok(true),
                         data_access::Result::Fault(denied) => tf.far_el1 = denied as u64,
                         data_access::Result::Unsupported(word) => {
                             return Err(io::Error::other(alloc::format!(
-                                "Unsupported AArch64 boundary access {word:#010x} at {:#x} to {address:#x}", tf.elr)));
+                                "Unsupported AArch64 boundary access {word:#010x} at {:#x} to {address:#x}",
+                                tf.elr
+                            )));
                         }
                     }
                 }
@@ -377,11 +412,15 @@ impl Session {
         let desired = &mut self.desired;
         let changed = self.admission.update(
             image.publication_generation.load(Ordering::Acquire),
-            || vm.memmaps_iter_with(|maps| {
-                maps.filter(|m| Perm::User.contained_in(m.permissions) && m.permissions & 7 != 0)
+            || {
+                vm.memmaps_iter_with(|maps| {
+                    maps.filter(|m| {
+                        Perm::User.contained_in(m.permissions) && m.permissions & 7 != 0
+                    })
                     .cloned()
                     .collect()
-            }),
+                })
+            },
             |m| match &m.owner {
                 Some(owner) => owner.publication_generation(),
                 None => Some(0),
@@ -392,15 +431,18 @@ impl Session {
                 let mut extents = Vec::new();
                 image.retain_file_code(m);
                 let mut insert = |addr, pa, len, perms| {
-                    extents.push((addr, Extent {
-                        origin: m.mapping_origin,
-                        vm_start: m.vm_start,
-                        pa,
-                        len,
-                        perms,
-                        parts: Vec::new(),
-                        republish: false,
-                    }));
+                    extents.push((
+                        addr,
+                        Extent {
+                            origin: m.mapping_origin,
+                            vm_start: m.vm_start,
+                            pa,
+                            len,
+                            perms,
+                            parts: Vec::new(),
+                            republish: false,
+                        },
+                    ));
                 };
                 if let Some(owner) = &m.owner {
                     let first = (m.vmarea.start - m.vm_start) / PAGE_SIZE;
@@ -422,7 +464,10 @@ impl Session {
                             }
                             let mut perms = owner.fault_page_permissions(&access, m.permissions)
                                 & m.maximum_permissions;
-                            let store = AccessKind { op: AccessOp::Store, ..access };
+                            let store = AccessKind {
+                                op: AccessOp::Store,
+                                ..access
+                            };
                             if !m.is_shared && owner.private_fault_requires_copy(&store) {
                                 perms &= !(Perm::Write as usize);
                             }
@@ -474,7 +519,11 @@ impl Session {
                         return Err(io::Error::other("Writable executable mapping"));
                     }
                     image.append_instruction_ranges(
-                        extent.origin, extent.vm_start, address..address + extent.len, address, &mut ranges,
+                        extent.origin,
+                        extent.vm_start,
+                        address..address + extent.len,
+                        address,
+                        &mut ranges,
                     );
                     if ranges.is_empty() {
                         // ELF section tables are optional at run time. Preserve original

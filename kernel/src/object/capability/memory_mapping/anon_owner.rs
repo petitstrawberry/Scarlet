@@ -31,7 +31,9 @@ impl AnonymousZeroPageOwner {
 
 impl MemoryMappingOps for AnonymousZeroPageOwner {
     #[cfg(feature = "hosted")]
-    fn has_fixed_publication(&self) -> bool { true }
+    fn has_fixed_publication(&self) -> bool {
+        true
+    }
 
     #[cfg(feature = "hosted")]
     fn publication_generation(&self) -> Option<u64> {
@@ -282,7 +284,9 @@ impl ForkCowPageOwner {
 
 impl MemoryMappingOps for ForkCowPageOwner {
     #[cfg(feature = "hosted")]
-    fn has_fixed_publication(&self) -> bool { true }
+    fn has_fixed_publication(&self) -> bool {
+        true
+    }
 
     #[cfg(feature = "hosted")]
     fn publication_generation(&self) -> Option<u64> {

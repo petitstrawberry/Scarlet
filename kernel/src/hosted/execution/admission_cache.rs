@@ -8,7 +8,9 @@ pub(super) trait Snapshot {
     fn key(&self) -> usize;
     fn same(&self, other: &Self) -> bool;
     /// Can the published extents change without replacing the descriptor?
-    fn needs_owner_check(&self) -> bool { true }
+    fn needs_owner_check(&self) -> bool {
+        true
+    }
 }
 
 pub(super) struct Cache<M, V> {

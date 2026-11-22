@@ -320,7 +320,6 @@ pub fn are_interrupts_enabled() -> bool {
     (daif & (1 << 7)) == 0
 }
 
-
 #[cfg(feature = "hosted")]
 pub use crate::hosted::cpu::{
     are_interrupts_enabled, disable_interrupts, enable_interrupts, restore_interrupts,

@@ -324,15 +324,15 @@ pub fn get_current_direct_map_phys_range() -> (u64, u64) {
     }
     #[cfg(not(feature = "hosted"))]
     {
-    let area = match layout().current_runtime() {
-        Some(runtime) => runtime
-            .regions
-            .lock()
-            .bounding_area()
-            .expect("runtime direct map is empty"),
-        None => layout().boot().direct_map.physical_area(),
-    };
-    (area.start, area.end)
+        let area = match layout().current_runtime() {
+            Some(runtime) => runtime
+                .regions
+                .lock()
+                .bounding_area()
+                .expect("runtime direct map is empty"),
+            None => layout().boot().direct_map.physical_area(),
+        };
+        (area.start, area.end)
     }
 }
 
@@ -350,7 +350,8 @@ pub fn runtime_direct_map_regions() -> Option<DirectMapRegions> {
     #[cfg(feature = "hosted")]
     {
         let mut regions = DirectMapRegions::new();
-        regions.insert(crate::hosted::ram_area()?, MemoryAttribute::Normal)
+        regions
+            .insert(crate::hosted::ram_area()?, MemoryAttribute::Normal)
             .expect("invalid hosted RAM range");
         return Some(regions);
     }

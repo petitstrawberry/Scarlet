@@ -235,7 +235,11 @@ impl View for DisplayPage {
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
-        vec![&self.0.display_editor, &self.0.display_brightness_percent, &self.0.display_brightness_status]
+        vec![
+            &self.0.display_editor,
+            &self.0.display_brightness_percent,
+            &self.0.display_brightness_status,
+        ]
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
@@ -247,12 +251,22 @@ fn display_page(app: SettingsApp) -> impl View + Clone {
     let brightness_app = app.clone();
     let editor = app.display_editor.get();
     let modes = editor.selected_modes();
-    let selected_output = editor.snapshot.as_ref()
+    let selected_output = editor
+        .snapshot
+        .as_ref()
         .and_then(|snapshot| snapshot.outputs.get(editor.selected))
         .map(|output| output.id);
-    let mode_labels = modes.iter().map(|mode| {
-        format!("{} × {} · {:.2} Hz", mode.pixel_width, mode.pixel_height, mode.refresh_millihz as f32 / 1000.0)
-    }).collect();
+    let mode_labels = modes
+        .iter()
+        .map(|mode| {
+            format!(
+                "{} × {} · {:.2} Hz",
+                mode.pixel_width,
+                mode.pixel_height,
+                mode.refresh_millihz as f32 / 1000.0
+            )
+        })
+        .collect();
     let resolution_editor = app.display_editor.clone();
     let apply_editor = app.display_editor.clone();
     settings_page(vstack! {
@@ -325,10 +339,23 @@ pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
 pub(super) fn input_page(app: SettingsApp) -> impl View + Clone {
     let methods = app.input_methods.get();
     let select_app = app.clone();
-    settings_page(settings_section(with_feedback(
-        settings_row(Select::new(input_method_labels(&methods),app.selected_ime_index.clone()).width(330.0).placeholder("No input methods registered").on_change(move |index|select_app.select_input_method(index)), "Input method"),
-        app.input_status.get(),
-    ), "Typing", 14.0))
+    settings_page(settings_section(
+        with_feedback(
+            settings_row(
+                Select::new(
+                    input_method_labels(&methods),
+                    app.selected_ime_index.clone(),
+                )
+                .width(330.0)
+                .placeholder("No input methods registered")
+                .on_change(move |index| select_app.select_input_method(index)),
+                "Input method",
+            ),
+            app.input_status.get(),
+        ),
+        "Typing",
+        14.0,
+    ))
 }
 fn status_item_label(item: StatusItemId) -> &'static str {
     match item {

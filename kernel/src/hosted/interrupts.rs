@@ -187,7 +187,11 @@ pub(super) fn guest_entered(permit: RunPermit, target: Weak<InterruptTarget>) {
 
 pub(super) fn guest_stopped(permit: RunPermit) {
     let mut state = cpu(permit.vcpu as CpuId).unwrap().state.lock().unwrap();
-    if state.guest.as_ref().is_some_and(|(active, _)| *active == permit) {
+    if state
+        .guest
+        .as_ref()
+        .is_some_and(|(active, _)| *active == permit)
+    {
         state.guest = None;
     }
 }

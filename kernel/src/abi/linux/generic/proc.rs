@@ -1409,8 +1409,8 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // A remote CPU may run the child immediately after enqueue via IPI.
             // A concurrent group exit may retire a thread after publication
             // and before we read its namespace-local TID.
-            let registered = crate::sched::scheduler::try_register_task(child_task)
-                .and_then(|child_id| {
+            let registered =
+                crate::sched::scheduler::try_register_task(child_task).and_then(|child_id| {
                     get_task_by_id(child_id)
                         .and_then(|child| child.try_get_namespace_id())
                         .map(|tid| (child_id, tid))
@@ -2259,7 +2259,10 @@ mod tests {
         let replacement = image.vm_manager.process_entry_stack();
         assert_eq!(parent.vm_manager.process_entry_stack(), Some(initial));
         drop(sibling);
-        parent.vm_manager.mapping_transaction().exchange_exec_image(&image.vm_manager);
+        parent
+            .vm_manager
+            .mapping_transaction()
+            .exchange_exec_image(&image.vm_manager);
         assert_eq!(parent.vm_manager.process_entry_stack(), replacement);
         assert_eq!(fork.vm_manager.process_entry_stack(), Some(initial));
         assert_eq!(image.vm_manager.process_entry_stack(), Some(initial));

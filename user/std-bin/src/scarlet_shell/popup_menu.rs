@@ -215,11 +215,7 @@ impl MenuDisplay {
 
     fn renderer(self, items: Vec<MenuItemContent>, model: &MenuModel<'_>) -> PopupMenuRenderer {
         let available = (self.size.width - 16.0).max(1.0);
-        let preferred = if model.overview() {
-            420.0
-        } else {
-            220.0
-        };
+        let preferred = if model.overview() { 420.0 } else { 220.0 };
         PopupMenuRenderer::new(
             items,
             OverviewGeometry::for_layout(model.endpoint.layout.get()).row_height,

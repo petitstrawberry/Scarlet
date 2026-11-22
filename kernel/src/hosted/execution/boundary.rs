@@ -44,7 +44,13 @@ pub(super) fn insert(
         let len = extent.len.min(page - offset);
         let base = address - offset;
         if desired.last().is_none_or(|(previous, _)| *previous != base) {
-            desired.push((base, Extent { len: page, ..extent.clone() }));
+            desired.push((
+                base,
+                Extent {
+                    len: page,
+                    ..extent.clone()
+                },
+            ));
         }
         let (_, group) = desired.last_mut().unwrap();
         group.perms |= extent.perms;
@@ -62,7 +68,12 @@ pub(super) fn insert(
     }
 }
 
-pub(super) fn publish(worker: &mut Worker, image: &Image, address: usize, extent: &Extent) -> io::Result<()> {
+pub(super) fn publish(
+    worker: &mut Worker,
+    image: &Image,
+    address: usize,
+    extent: &Extent,
+) -> io::Result<()> {
     let page = extent.len;
     let parts = &extent.parts;
     let mut end = 0;
@@ -99,7 +110,8 @@ pub(super) fn publish(worker: &mut Worker, image: &Image, address: usize, extent
     let mut instructions = Vec::new();
     let mut covered = 0;
     for part in parts {
-        if part.offset != covered || !Perm::Read.contained_in(part.perms)
+        if part.offset != covered
+            || !Perm::Read.contained_in(part.perms)
             || !Perm::Execute.contained_in(part.perms)
         {
             break;
@@ -107,7 +119,11 @@ pub(super) fn publish(worker: &mut Worker, image: &Image, address: usize, extent
         let first = instructions.len();
         let start = address + part.offset;
         image.append_instruction_ranges(
-            part.origin, part.vm_start, start..start + part.len, address, &mut instructions,
+            part.origin,
+            part.vm_start,
+            start..start + part.len,
+            address,
+            &mut instructions,
         );
         if instructions.len() == first {
             break;
@@ -118,7 +134,9 @@ pub(super) fn publish(worker: &mut Worker, image: &Image, address: usize, extent
     if native_text {
         instructions.sort_by_key(|range| range.start);
     }
-    if continuous && end == page && readable
+    if continuous
+        && end == page
+        && readable
         && let Ok((file, offset)) = super::super::memory::worker_backing(parts[0].pa, page)
         && offset.is_multiple_of(page)
     {
@@ -147,7 +165,9 @@ pub(super) fn publish(worker: &mut Worker, image: &Image, address: usize, extent
             .ok_or_else(|| io::Error::other("Missing executable fragment backing"))?;
         let last = part.len - 1;
         if crate::hosted::alias_for(part.pa + last as u64) != source.checked_add(last) {
-            return Err(io::Error::other("Discontiguous executable fragment backing"));
+            return Err(io::Error::other(
+                "Discontiguous executable fragment backing",
+            ));
         }
         unsafe {
             core::ptr::copy_nonoverlapping(

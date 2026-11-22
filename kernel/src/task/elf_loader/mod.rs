@@ -652,7 +652,9 @@ pub fn analyze_and_load_elf_with_strategy(
         page_size
     };
     #[cfg(feature = "hosted")]
-    task.vm_manager.hosted_image().set_guest_page_size(page_size);
+    task.vm_manager
+        .hosted_image()
+        .set_guest_page_size(page_size);
     load_elf_segments_with_base(&header, file_obj, task, base, role, page_size)?;
     let entry = executable_entry(&header, file_obj, task, base)?;
     let phdr_info = ProgramHeadersInfo {
@@ -900,7 +902,10 @@ fn load_interpreter(interpreter_path: &str, task: &Task) -> Result<(u64, u64), E
 /// native PT_LOAD layout. PIEs and unaligned images use guest-page boundaries.
 /// In particular, the installed bootstrap and fixed interpreter have separate
 /// native text/data pages, including the last page of each segment.
-fn fixed_image_page_size(header: &ElfHeader, file: &dyn FileObject) -> Result<usize, ElfLoaderError> {
+fn fixed_image_page_size(
+    header: &ElfHeader,
+    file: &dyn FileObject,
+) -> Result<usize, ElfLoaderError> {
     let native = image_page_size();
     if header.ei_osabi != ELFOSABI_SCARLET || native == PAGE_SIZE {
         return Ok(PAGE_SIZE);
@@ -934,7 +939,15 @@ fn load_elf_segments_with_base(
             let segment_addr = base_address
                 .checked_add(ph.p_vaddr)
                 .ok_or_else(|| elf_error("ELF relocation overflows"))?;
-            load_elf_segment_at_address(ph, file_obj, task, segment_addr, role, page_size, &mut edge_pages)?;
+            load_elf_segment_at_address(
+                ph,
+                file_obj,
+                task,
+                segment_addr,
+                role,
+                page_size,
+                &mut edge_pages,
+            )?;
         }
         Ok(true) // Continue iteration
     })?;
@@ -1526,7 +1539,10 @@ fn load_elf_segment_at_address(
 
     let old_brk = task.brk.load(Ordering::Relaxed);
     if !matches!(role, ImageRole::Interpreter) && (old_brk == usize::MAX || old_brk < mapping_end) {
-        task.brk.store(mapping_end.next_multiple_of(image_page_size()), Ordering::Relaxed);
+        task.brk.store(
+            mapping_end.next_multiple_of(image_page_size()),
+            Ordering::Relaxed,
+        );
     }
 
     if ph.p_flags & PF_X != 0 {

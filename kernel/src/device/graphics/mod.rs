@@ -347,12 +347,7 @@ impl GpuDisplayResource {
     /// # Returns
     ///
     /// A GPU display resource descriptor.
-    pub const fn new(
-        resource_id: u32,
-        width: u32,
-        height: u32,
-        backend_cookie: u64,
-    ) -> Self {
+    pub const fn new(resource_id: u32, width: u32, height: u32, backend_cookie: u64) -> Self {
         Self {
             resource_id,
             width,
@@ -589,12 +584,23 @@ pub trait GraphicsDevice: Device {
     /// This is a display unit identity, not a bus location or connector index.
     /// Supported modes, filtered to the connector's hardware limits.
     fn connector_modes(&self, connector: u32) -> Vec<output::DisplayMode> {
-        self.connectors().into_iter().filter(|c| c.index == connector && c.connected)
-            .map(|c| output::DisplayMode { width: c.width, height: c.height, refresh_millihz: c.refresh_mhz }).collect()
+        self.connectors()
+            .into_iter()
+            .filter(|c| c.index == connector && c.connected)
+            .map(|c| output::DisplayMode {
+                width: c.width,
+                height: c.height,
+                refresh_millihz: c.refresh_mhz,
+            })
+            .collect()
     }
 
     /// Queue a modeset without blocking the compositor on link training.
-    fn request_connector_mode(&self, _connector: u32, _mode: output::DisplayMode) -> Result<(), &'static str> {
+    fn request_connector_mode(
+        &self,
+        _connector: u32,
+        _mode: output::DisplayMode,
+    ) -> Result<(), &'static str> {
         Err("Display mode switching is not supported")
     }
 
@@ -602,11 +608,19 @@ pub trait GraphicsDevice: Device {
     /// attribute describe one retained allocation. Replaceable framebuffers
     /// supply a snapshot for every connector they expose, including zero.
     /// Static framebuffers can use the default.
-    fn connector_mapping_device(&self, _connector: u32) -> Result<Option<alloc::sync::Arc<dyn Device>>, &'static str> {
+    fn connector_mapping_device(
+        &self,
+        _connector: u32,
+    ) -> Result<Option<alloc::sync::Arc<dyn Device>>, &'static str> {
         Ok(None)
     }
 
-    fn connector_monitor_identity(&self, _connector_index: u32) -> Option<monitor::MonitorIdentity> { None }
+    fn connector_monitor_identity(
+        &self,
+        _connector_index: u32,
+    ) -> Option<monitor::MonitorIdentity> {
+        None
+    }
 
     /// Return the current display backlight level as a percentage.
     ///
@@ -651,7 +665,9 @@ pub trait GraphicsDevice: Device {
 
     /// Size of the CPU-mappable allocation including the driver-owned last page.
     fn framebuffer_mapping_size(&self, config: &FramebufferConfig) -> Result<usize, &'static str> {
-        config.size().checked_next_multiple_of(crate::environment::PAGE_SIZE)
+        config
+            .size()
+            .checked_next_multiple_of(crate::environment::PAGE_SIZE)
             .ok_or("Display backing size overflow")
     }
 

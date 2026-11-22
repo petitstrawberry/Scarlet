@@ -478,7 +478,8 @@ impl VirtualMemoryManager {
             }
             #[cfg(feature = "hosted")]
             let pages = ContiguousPages::new_for_user_range(
-                map.vmarea.size() / PAGE_SIZE, map.vmarea.start,
+                map.vmarea.size() / PAGE_SIZE,
+                map.vmarea.start,
             );
             #[cfg(not(feature = "hosted"))]
             let pages = ContiguousPages::new(map.vmarea.size() / PAGE_SIZE);
@@ -883,7 +884,8 @@ impl VirtualMemoryManager {
         // This is a permission change, not an unmap: owners and physical pages
         // remain alive, so do not send on_unmapped or reclaim backing storage.
         #[cfg(feature = "hosted")]
-        self.hosted_image().invalidate_code(vmarea.start, vmarea.end);
+        self.hosted_image()
+            .invalidate_code(vmarea.start, vmarea.end);
         self.unmap_range_from_mmu(vmarea.start, vmarea.end);
         Ok(())
     }
@@ -1083,10 +1085,16 @@ impl VirtualMemoryManager {
         // Retire the padded tail on a whole native allocation release. A
         // replacement or separately protected tail has a different descriptor
         // and is never consumed here.
-        let remove_end = g.memmap.range(..=remove_end).next_back()
+        let remove_end = g
+            .memmap
+            .range(..=remove_end)
+            .next_back()
             .map(|(_, last)| last)
-            .filter(|last| last.vm_start == remove_start && last.vmarea.end >= remove_end
-                && last.mapping_origin.padded_request() == Some(remove_end - remove_start + 1))
+            .filter(|last| {
+                last.vm_start == remove_start
+                    && last.vmarea.end >= remove_end
+                    && last.mapping_origin.padded_request() == Some(remove_end - remove_start + 1)
+            })
             .map_or(remove_end, |last| {
                 let granule = crate::vm::execution_page_size();
                 last.vmarea.end.min(remove_end | (granule - 1))
@@ -1898,7 +1906,11 @@ impl VirtualMemoryManager {
         }
         let available = map.vmarea.size() / granule;
         let previous_granules = previous.vmarea.size() / granule;
-        previous_granules.saturating_mul(2).clamp(1, 8).min(available) * granule
+        previous_granules
+            .saturating_mul(2)
+            .clamp(1, 8)
+            .min(available)
+            * granule
     }
 
     fn lazy_map_page_with_reclaim(
@@ -2414,7 +2426,9 @@ impl VirtualMemoryManager {
 
     pub fn translate_to_phys_with_access(&self, vaddr: usize, op: AccessOp) -> Option<u64> {
         let transaction = self.legacy_mapping_transaction()?;
-        transaction.vm.translate_with_access(&transaction, vaddr, op, false)
+        transaction
+            .vm
+            .translate_with_access(&transaction, vaddr, op, false)
     }
 
     fn translate_with_access(
@@ -2611,7 +2625,10 @@ impl VirtualMemoryManager {
     }
 
     pub(crate) fn add_memory_map_at_offset(
-        &self, map: VirtualMemoryMap, alignment: usize, prefix: usize,
+        &self,
+        map: VirtualMemoryMap,
+        alignment: usize,
+        prefix: usize,
     ) -> Result<usize, &'static str> {
         let _transaction = self.mapping_update();
         self.place_memory_map(map, alignment, prefix)
@@ -2623,16 +2640,21 @@ impl VirtualMemoryManager {
         use crate::object::capability::memory_mapping::anon_owner::ForkCowPageOwner;
         let bytes = core::mem::size_of_val(words);
         let alignment = crate::vm::execution_page_size();
-        let size = bytes.checked_next_multiple_of(alignment).filter(|&n| n != 0)
+        let size = bytes
+            .checked_next_multiple_of(alignment)
+            .filter(|&n| n != 0)
             .ok_or("Invalid instruction buffer size")?;
         let pages = ContiguousPages::new_aligned(size / PAGE_SIZE, alignment)
             .ok_or("Cannot allocate user instructions")?;
         let alias = pages.as_ptr().cast::<u32>();
         // The allocation is private to this call until the VM transaction commits.
-        unsafe { core::ptr::copy_nonoverlapping(words.as_ptr(), alias, words.len()); }
+        unsafe {
+            core::ptr::copy_nonoverlapping(words.as_ptr(), alias, words.len());
+        }
         crate::arch::sync_icache_for_execution(alias as usize, bytes);
         let mut map = VirtualMemoryMap::new(
-            PhysicalMemoryArea::new(0, 0), MemoryArea::new(0, size - 1),
+            PhysicalMemoryArea::new(0, 0),
+            MemoryArea::new(0, size - 1),
             VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Execute as usize
                 | VirtualMemoryPermission::User as usize,
@@ -2645,7 +2667,8 @@ impl VirtualMemoryManager {
         let _transaction = self.mapping_update();
         let address = self.place_memory_map(map, alignment, 0)?;
         #[cfg(feature = "hosted")]
-        self.hosted_image().add_code(origin, address..address + bytes);
+        self.hosted_image()
+            .add_code(origin, address..address + bytes);
         Ok(address)
     }
 

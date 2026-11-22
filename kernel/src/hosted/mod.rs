@@ -1,8 +1,8 @@
 //! Host-specific kernel platform setup.
 
 pub(crate) mod cpu;
-pub(crate) mod file_mapping;
 pub(crate) mod execution;
+pub(crate) mod file_mapping;
 pub(crate) mod interrupts;
 mod memory;
 

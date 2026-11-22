@@ -83,7 +83,9 @@ impl SharedMemory {
 
     pub fn invalidate(&self) {
         let mut state = self.inner.state.write();
-        state.publication_generation = state.publication_generation.checked_add(1)
+        state.publication_generation = state
+            .publication_generation
+            .checked_add(1)
             .expect("Shared publication generation exhausted");
         state.valid = false;
     }
@@ -209,7 +211,9 @@ impl SharedMemoryObject for SharedMemory {
             // New host capacity can exist without admitting new guest bytes.
             return Err("Shared memory was invalidated or pinned during resize");
         }
-        state.publication_generation = state.publication_generation.checked_add(1)
+        state.publication_generation = state
+            .publication_generation
+            .checked_add(1)
             .expect("Shared publication generation exhausted");
         state.size = size;
         Ok(())

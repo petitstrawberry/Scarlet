@@ -1,9 +1,11 @@
 //! Local display-layout editor. Dragging never sends live layout transactions.
 use super::*;
-use std::rc::Rc;
+use scarlet_ui::event::{Event, MouseButton, MouseEvent, TouchDragAxis, TouchGesture, TouchPhase};
 use std::cell::Cell;
-use sws_protocol::outputs::{self as outputs, OutputConfiguration, OutputExperience, OutputSnapshot};
-use scarlet_ui::event::{Event, MouseButton, MouseEvent, TouchPhase, TouchDragAxis, TouchGesture};
+use std::rc::Rc;
+use sws_protocol::outputs::{
+    self as outputs, OutputConfiguration, OutputExperience, OutputSnapshot,
+};
 
 pub(super) const SCALES: &[u32] = &[1000, 1250, 1500, 1750, 2000, 2500, 3000];
 const WIDTH: f32 = 544.0;
@@ -13,24 +15,50 @@ const HEIGHT: f32 = 220.0;
 const SNAP_DISTANCE: f32 = 7.0;
 const SNAP_RELEASE: f32 = 11.0;
 #[derive(Clone, Copy)]
-struct AxisSnap { position: i32, guide: i32 }
+struct AxisSnap {
+    position: i32,
+    guide: i32,
+}
 
-fn snap_axis(value: i32, extent: u32, neighbours: impl Iterator<Item = (i32, u32)>, zoom: f32, held: Option<AxisSnap>) -> Option<AxisSnap> {
+fn snap_axis(
+    value: i32,
+    extent: u32,
+    neighbours: impl Iterator<Item = (i32, u32)>,
+    zoom: f32,
+    held: Option<AxisSnap>,
+) -> Option<AxisSnap> {
     let mut best: Option<(bool, f32, AxisSnap)> = None;
     for (origin, length) in neighbours {
         let start = i64::from(origin);
         let end = start + i64::from(length);
         for (position, guide) in [
-            (start - i64::from(extent), start), (end, end),
-            (start, start), (end - i64::from(extent), end),
-            (start + (i64::from(length) - i64::from(extent)) / 2, start + i64::from(length) / 2),
+            (start - i64::from(extent), start),
+            (end, end),
+            (start, start),
+            (end - i64::from(extent), end),
+            (
+                start + (i64::from(length) - i64::from(extent)) / 2,
+                start + i64::from(length) / 2,
+            ),
         ] {
-            let (Ok(position), Ok(guide)) = (i32::try_from(position), i32::try_from(guide)) else { continue; };
-            let retained = held.is_some_and(|snap| snap.position == position && snap.guide == guide);
+            let (Ok(position), Ok(guide)) = (i32::try_from(position), i32::try_from(guide)) else {
+                continue;
+            };
+            let retained =
+                held.is_some_and(|snap| snap.position == position && snap.guide == guide);
             let distance = ((i64::from(value) - i64::from(position)).abs() as f32) * zoom;
-            if distance > if retained { SNAP_RELEASE } else { SNAP_DISTANCE } { continue; }
-            if best.as_ref().is_none_or(|(old_retained, old_distance, _)|
-                (retained && !old_retained) || retained == *old_retained && distance < *old_distance) {
+            if distance
+                > if retained {
+                    SNAP_RELEASE
+                } else {
+                    SNAP_DISTANCE
+                }
+            {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(old_retained, old_distance, _)| {
+                (retained && !old_retained) || retained == *old_retained && distance < *old_distance
+            }) {
                 best = Some((retained, distance, AxisSnap { position, guide }));
             }
         }
@@ -54,126 +82,301 @@ pub(super) struct Editor {
     drag_before: Option<Vec<OutputConfiguration>>,
     drag: Option<(u32, i32, i32, i32, i32, (f32, f32, f32))>,
 }
-impl Default for Editor { fn default() -> Self { Self::new() } }
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl Editor {
-    pub fn new() -> Self { Self { snapshot: None, draft: Vec::new(), selected: 0, status: String::from("Loading displays…"), dirty: false, modes: Vec::new(), mode_draft: Vec::new(), applying: false, drag: None, drag_before: None, drag_snap: (None, None), touch_contact: None } }
+    pub fn new() -> Self {
+        Self {
+            snapshot: None,
+            draft: Vec::new(),
+            selected: 0,
+            status: String::from("Loading displays…"),
+            dirty: false,
+            modes: Vec::new(),
+            mode_draft: Vec::new(),
+            applying: false,
+            drag: None,
+            drag_before: None,
+            drag_snap: (None, None),
+            touch_contact: None,
+        }
+    }
     fn adopt(&mut self, snapshot: OutputSnapshot) {
-        let selected_id = self.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(self.selected)).map(|output| output.monitor_key.clone());
-        self.selected = selected_id.and_then(|key| snapshot.outputs.iter().position(|output| output.monitor_key == key)).unwrap_or(0);
+        let selected_id = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.outputs.get(self.selected))
+            .map(|output| output.monitor_key.clone());
+        self.selected = selected_id
+            .and_then(|key| {
+                snapshot
+                    .outputs
+                    .iter()
+                    .position(|output| output.monitor_key == key)
+            })
+            .unwrap_or(0);
         self.mode_draft.clear();
         self.draft = snapshot.configuration.clone();
         self.snapshot = Some(snapshot);
-        self.dirty = false; self.drag = None; self.drag_before = None; self.drag_snap = (None, None); self.touch_contact = None;
+        self.dirty = false;
+        self.drag = None;
+        self.drag_before = None;
+        self.drag_snap = (None, None);
+        self.touch_contact = None;
     }
     pub fn selected_modes(&self) -> Vec<outputs::OutputMode> {
-        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return Vec::new(); };
-        self.modes.iter().find(|(id, _)| *id == output.id).map(|(_, modes)| modes.clone()).unwrap_or_else(|| vec![output.mode])
+        let Some(output) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.outputs.get(self.selected))
+        else {
+            return Vec::new();
+        };
+        self.modes
+            .iter()
+            .find(|(id, _)| *id == output.id)
+            .map(|(_, modes)| modes.clone())
+            .unwrap_or_else(|| vec![output.mode])
     }
     pub fn selected_mode_index(&self) -> usize {
-        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return 0; };
-        let mode = self.mode_draft.iter().find(|(id, _)| *id == output.id).map_or(output.mode, |(_, mode)| *mode);
-        self.selected_modes().iter().position(|candidate| *candidate == mode).unwrap_or(usize::MAX)
+        let Some(output) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.outputs.get(self.selected))
+        else {
+            return 0;
+        };
+        let mode = self
+            .mode_draft
+            .iter()
+            .find(|(id, _)| *id == output.id)
+            .map_or(output.mode, |(_, mode)| *mode);
+        self.selected_modes()
+            .iter()
+            .position(|candidate| *candidate == mode)
+            .unwrap_or(usize::MAX)
     }
     fn preview_mode(&self, output: &outputs::OutputDescriptor) -> outputs::OutputMode {
-        self.mode_draft.iter().find(|(id, _)| *id == output.id).map_or(output.mode, |(_, mode)| *mode)
+        self.mode_draft
+            .iter()
+            .find(|(id, _)| *id == output.id)
+            .map_or(output.mode, |(_, mode)| *mode)
     }
     pub fn logical_size_label(&self) -> String {
-        let Some(output) = self.snapshot.as_ref().and_then(|s| s.outputs.get(self.selected)) else { return "—".into(); };
-        self.draft.iter().find(|config| config.id == output.id)
-            .and_then(|config| self.preview_mode(output).logical_size(config.scale_milli).ok())
+        let Some(output) = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.outputs.get(self.selected))
+        else {
+            return "—".into();
+        };
+        self.draft
+            .iter()
+            .find(|config| config.id == output.id)
+            .and_then(|config| {
+                self.preview_mode(output)
+                    .logical_size(config.scale_milli)
+                    .ok()
+            })
             .map_or_else(|| "—".into(), |(w, h)| format!("{w} × {h}"))
     }
     fn geometry(&self, viewport_width: f32) -> Option<(f32, f32, f32)> {
         // Keep the preview coordinate system fixed while the pointer moves.
         // Re-fitting to the moving card would move it away from the drag anchor.
-        if let Some((_, _, _, _, _, geometry)) = self.drag { return Some(geometry); }
-        let snapshot = self.snapshot.as_ref()?;
-        let mut left = 0i64; let mut top = 0i64; let mut right = 1i64; let mut bottom = 1i64;
-        for config in &self.draft {
-            let output = snapshot.outputs.iter().find(|output| output.id == config.id)?;
-            let (width, height) = self.preview_mode(output).logical_size(config.scale_milli).ok()?;
-            left = left.min(i64::from(config.x)); top = top.min(i64::from(config.y));
-            right = right.max(i64::from(config.x) + i64::from(width)); bottom = bottom.max(i64::from(config.y) + i64::from(height));
+        if let Some((_, _, _, _, _, geometry)) = self.drag {
+            return Some(geometry);
         }
-        let zoom = ((viewport_width - 48.0) / (right - left) as f32).min((HEIGHT - 48.0) / (bottom - top) as f32).max(0.001);
-        Some(((viewport_width - (right - left) as f32 * zoom) * 0.5 - left as f32 * zoom,
-            (HEIGHT - (bottom - top) as f32 * zoom) * 0.5 - top as f32 * zoom, zoom))
+        let snapshot = self.snapshot.as_ref()?;
+        let mut left = 0i64;
+        let mut top = 0i64;
+        let mut right = 1i64;
+        let mut bottom = 1i64;
+        for config in &self.draft {
+            let output = snapshot
+                .outputs
+                .iter()
+                .find(|output| output.id == config.id)?;
+            let (width, height) = self
+                .preview_mode(output)
+                .logical_size(config.scale_milli)
+                .ok()?;
+            left = left.min(i64::from(config.x));
+            top = top.min(i64::from(config.y));
+            right = right.max(i64::from(config.x) + i64::from(width));
+            bottom = bottom.max(i64::from(config.y) + i64::from(height));
+        }
+        let zoom = ((viewport_width - 48.0) / (right - left) as f32)
+            .min((HEIGHT - 48.0) / (bottom - top) as f32)
+            .max(0.001);
+        Some((
+            (viewport_width - (right - left) as f32 * zoom) * 0.5 - left as f32 * zoom,
+            (HEIGHT - (bottom - top) as f32 * zoom) * 0.5 - top as f32 * zoom,
+            zoom,
+        ))
     }
     fn card(&self, index: usize, viewport_width: f32) -> Option<(f32, f32, f32, f32)> {
-        let snapshot = self.snapshot.as_ref()?; let output = snapshot.outputs.get(index)?;
+        let snapshot = self.snapshot.as_ref()?;
+        let output = snapshot.outputs.get(index)?;
         let config = self.draft.iter().find(|config| config.id == output.id)?;
-        let (width, height) = self.preview_mode(output).logical_size(config.scale_milli).ok()?;
+        let (width, height) = self
+            .preview_mode(output)
+            .logical_size(config.scale_milli)
+            .ok()?;
         let (x, y, zoom) = self.geometry(viewport_width)?;
-        Some((x + config.x as f32 * zoom, y + config.y as f32 * zoom, width as f32 * zoom, height as f32 * zoom))
+        Some((
+            x + config.x as f32 * zoom,
+            y + config.y as f32 * zoom,
+            width as f32 * zoom,
+            height as f32 * zoom,
+        ))
     }
     fn move_preview(&mut self, id: u32, desired: (i32, i32), zoom: f32) {
-        let Some(snapshot) = &self.snapshot else { return; };
-        let Some(moving) = self.draft.iter().find(|config| config.id == id) else { return; };
-        let Some(output) = snapshot.outputs.iter().find(|output| output.id == id) else { return; };
-        let Ok((width, height)) = self.preview_mode(output).logical_size(moving.scale_milli) else { return; };
-        let neighbours: Vec<_> = self.draft.iter().filter(|config| config.id != id).filter_map(|config| {
-            let output = snapshot.outputs.iter().find(|output| output.id == config.id)?;
-            let (w, h) = self.preview_mode(output).logical_size(config.scale_milli).ok()?;
-            Some((config.x, config.y, w, h))
-        }).collect();
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(moving) = self.draft.iter().find(|config| config.id == id) else {
+            return;
+        };
+        let Some(output) = snapshot.outputs.iter().find(|output| output.id == id) else {
+            return;
+        };
+        let Ok((width, height)) = self.preview_mode(output).logical_size(moving.scale_milli) else {
+            return;
+        };
+        let neighbours: Vec<_> = self
+            .draft
+            .iter()
+            .filter(|config| config.id != id)
+            .filter_map(|config| {
+                let output = snapshot
+                    .outputs
+                    .iter()
+                    .find(|output| output.id == config.id)?;
+                let (w, h) = self
+                    .preview_mode(output)
+                    .logical_size(config.scale_milli)
+                    .ok()?;
+                Some((config.x, config.y, w, h))
+            })
+            .collect();
         let nearby = |a: i32, length: u32, b: i32, other_length: u32| {
             let gap = (i64::from(a) - i64::from(b) - i64::from(other_length))
-                .max(i64::from(b) - i64::from(a) - i64::from(length)).max(0);
+                .max(i64::from(b) - i64::from(a) - i64::from(length))
+                .max(0);
             gap as f32 * zoom <= SNAP_RELEASE
         };
-        let x_snap = snap_axis(desired.0, width, neighbours.iter()
-            .filter(|(_, y, _, h)| nearby(desired.1, height, *y, *h))
-            .map(|(x, _, w, _)| (*x, *w)), zoom, self.drag_snap.0);
-        let y_snap = snap_axis(desired.1, height, neighbours.iter()
-            .filter(|(x, _, w, _)| nearby(desired.0, width, *x, *w))
-            .map(|(_, y, _, h)| (*y, *h)), zoom, self.drag_snap.1);
+        let x_snap = snap_axis(
+            desired.0,
+            width,
+            neighbours
+                .iter()
+                .filter(|(_, y, _, h)| nearby(desired.1, height, *y, *h))
+                .map(|(x, _, w, _)| (*x, *w)),
+            zoom,
+            self.drag_snap.0,
+        );
+        let y_snap = snap_axis(
+            desired.1,
+            height,
+            neighbours
+                .iter()
+                .filter(|(x, _, w, _)| nearby(desired.0, width, *x, *w))
+                .map(|(_, y, _, h)| (*y, *h)),
+            zoom,
+            self.drag_snap.1,
+        );
         // Do not pull the preview into another monitor. Keep free dragging
         // possible through occupied space; final topology validation is on drop.
-        let nonoverlapping = |x: i32, y: i32| neighbours.iter().all(|&(ox, oy, w, h)|
-            i64::from(x) >= i64::from(ox) + i64::from(w)
-                || i64::from(ox) >= i64::from(x) + i64::from(width)
-                || i64::from(y) >= i64::from(oy) + i64::from(h)
-                || i64::from(oy) >= i64::from(y) + i64::from(height));
+        let nonoverlapping = |x: i32, y: i32| {
+            neighbours.iter().all(|&(ox, oy, w, h)| {
+                i64::from(x) >= i64::from(ox) + i64::from(w)
+                    || i64::from(ox) >= i64::from(x) + i64::from(width)
+                    || i64::from(y) >= i64::from(oy) + i64::from(h)
+                    || i64::from(oy) >= i64::from(y) + i64::from(height)
+            })
+        };
         let mut position = desired;
         self.drag_snap = (None, None);
         for (sx, sy) in [(x_snap, y_snap), (x_snap, None), (None, y_snap)] {
             let x = sx.map_or(desired.0, |snap| snap.position);
             let y = sy.map_or(desired.1, |snap| snap.position);
             if (sx.is_some() || sy.is_some()) && nonoverlapping(x, y) {
-                position = (x, y); self.drag_snap = (sx, sy); break;
+                position = (x, y);
+                self.drag_snap = (sx, sy);
+                break;
             }
         }
         if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) {
-            config.x = position.0; config.y = position.1;
+            config.x = position.0;
+            config.y = position.1;
         }
     }
     fn settle(&mut self, id: u32) {
-        let Some(snapshot) = &self.snapshot else { return; };
-        let Some(current) = self.draft.iter().find(|config| config.id == id).copied() else { return; };
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(current) = self.draft.iter().find(|config| config.id == id).copied() else {
+            return;
+        };
         let mut projected = snapshot.outputs.clone();
-        for output in &mut projected { output.mode = self.preview_mode(output); }
+        for output in &mut projected {
+            output.mode = self.preview_mode(output);
+        }
         match outputs::snapped_position(&projected, &self.draft, id, (current.x, current.y)) {
             Ok((x, y)) => {
-                if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) { config.x = x; config.y = y; }
-                if let Ok(canonical) = outputs::canonical_layout(&projected, &self.draft) { self.draft = canonical; }
+                if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) {
+                    config.x = x;
+                    config.y = y;
+                }
+                if let Ok(canonical) = outputs::canonical_layout(&projected, &self.draft) {
+                    self.draft = canonical;
+                }
                 self.dirty = !self.mode_draft.is_empty() || self.draft != snapshot.configuration;
                 self.status.clear();
             }
-            Err(_) => { self.draft = snapshot.configuration.clone(); self.dirty = !self.mode_draft.is_empty(); self.status = String::from("Displays must touch at an edge or corner without overlapping."); }
+            Err(_) => {
+                self.draft = snapshot.configuration.clone();
+                self.dirty = !self.mode_draft.is_empty();
+                self.status =
+                    String::from("Displays must touch at an edge or corner without overlapping.");
+            }
         }
     }
 }
 
-fn mode_catalog(connection: &Connection, snapshot: &OutputSnapshot) -> Vec<(u32, Vec<outputs::OutputMode>)> {
-    snapshot.outputs.iter().map(|output| (output.id, connection.output_modes(output.id).unwrap_or_else(|_| vec![output.mode]))).collect()
+fn mode_catalog(
+    connection: &Connection,
+    snapshot: &OutputSnapshot,
+) -> Vec<(u32, Vec<outputs::OutputMode>)> {
+    snapshot
+        .outputs
+        .iter()
+        .map(|output| {
+            (
+                output.id,
+                connection
+                    .output_modes(output.id)
+                    .unwrap_or_else(|_| vec![output.mode]),
+            )
+        })
+        .collect()
 }
 pub(super) fn resolution(state: &State<Editor>, id: u32, mode: outputs::OutputMode) {
     state.update(|editor| {
         if editor.applying {
             return;
         }
-        let Some(output) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected))
-            .filter(|output| output.id == id) else { return; };
+        let Some(output) = editor
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
+            .filter(|output| output.id == id)
+        else {
+            return;
+        };
         if !editor.selected_modes().contains(&mode) {
             return;
         }
@@ -186,24 +389,56 @@ pub(super) fn resolution(state: &State<Editor>, id: u32, mode: outputs::OutputMo
 }
 
 pub(super) fn watch(state: State<Editor>) {
-    thread::spawn(move || loop {
-        let Ok(connection) = Connection::connect_default() else { thread::sleep(Duration::from_secs(1)); continue; };
-        let Ok(snapshot) = connection.outputs() else {
-            state.update(|editor| editor.status = String::from("Display configuration is unavailable.")); return;
-        };
-        let modes = mode_catalog(&connection, &snapshot);
-        state.update(|editor| { editor.adopt(snapshot); editor.modes = modes; editor.status.clear(); });
+    thread::spawn(move || {
         loop {
-            if connection.wait_for_window_events(Duration::from_millis(500)).is_err() || connection.dispatch().is_err() { break; }
-            while let Some(event) = connection.poll_event() {
-                if let sws_client::event::Event::Output(outputs::OutputEvent::Snapshot(snapshot)) = event {
-                    if state.get().applying || state.get().snapshot.as_ref().is_some_and(|old| old.generation >= snapshot.generation) { continue; }
-                    let modes = mode_catalog(&connection, &snapshot);
-                    state.update(|editor| {
-                        if editor.applying { return; }
-                        editor.adopt(snapshot); editor.modes = modes;
-                        editor.status.clear();
-                    });
+            let Ok(connection) = Connection::connect_default() else {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            };
+            let Ok(snapshot) = connection.outputs() else {
+                state.update(|editor| {
+                    editor.status = String::from("Display configuration is unavailable.")
+                });
+                return;
+            };
+            let modes = mode_catalog(&connection, &snapshot);
+            state.update(|editor| {
+                editor.adopt(snapshot);
+                editor.modes = modes;
+                editor.status.clear();
+            });
+            loop {
+                if connection
+                    .wait_for_window_events(Duration::from_millis(500))
+                    .is_err()
+                    || connection.dispatch().is_err()
+                {
+                    break;
+                }
+                while let Some(event) = connection.poll_event() {
+                    if let sws_client::event::Event::Output(outputs::OutputEvent::Snapshot(
+                        snapshot,
+                    )) = event
+                    {
+                        if state.get().applying
+                            || state
+                                .get()
+                                .snapshot
+                                .as_ref()
+                                .is_some_and(|old| old.generation >= snapshot.generation)
+                        {
+                            continue;
+                        }
+                        let modes = mode_catalog(&connection, &snapshot);
+                        state.update(|editor| {
+                            if editor.applying {
+                                return;
+                            }
+                            editor.adopt(snapshot);
+                            editor.modes = modes;
+                            editor.status.clear();
+                        });
+                    }
                 }
             }
         }
@@ -214,79 +449,173 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
     let paint = state.clone();
     let viewport = Rc::new(Cell::new(WIDTH));
     let paint_viewport = viewport.clone();
-    scarlet_ui::views::CanvasView::new(WIDTH, HEIGHT, Rc::new(move |buffer, width, height| {
-        let editor = paint.get();
-        let mut canvas = scarlet_ui::graphics::Canvas::new(buffer, width, height);
-        canvas.fill_rect(0, 0, width, height, Color::rgb(35, 38, 45));
-        let scale = height as f32 / HEIGHT;
-        let viewport_width = width as f32 / scale.max(0.001);
-        paint_viewport.set(viewport_width);
-        if let Some((origin_x, origin_y, zoom)) = editor.geometry(viewport_width) {
-            let guide_color = Color::rgb(113, 206, 255);
-            if let Some(snap) = editor.drag_snap.0 {
-                let x = libm::roundf((origin_x + snap.guide as f32 * zoom) * scale) as i32;
-                canvas.fill_rect(x, (12.0 * scale) as i32, libm::ceilf(scale) as u32, height.saturating_sub((24.0 * scale) as u32), guide_color);
+    scarlet_ui::views::CanvasView::new(
+        WIDTH,
+        HEIGHT,
+        Rc::new(move |buffer, width, height| {
+            let editor = paint.get();
+            let mut canvas = scarlet_ui::graphics::Canvas::new(buffer, width, height);
+            canvas.fill_rect(0, 0, width, height, Color::rgb(35, 38, 45));
+            let scale = height as f32 / HEIGHT;
+            let viewport_width = width as f32 / scale.max(0.001);
+            paint_viewport.set(viewport_width);
+            if let Some((origin_x, origin_y, zoom)) = editor.geometry(viewport_width) {
+                let guide_color = Color::rgb(113, 206, 255);
+                if let Some(snap) = editor.drag_snap.0 {
+                    let x = libm::roundf((origin_x + snap.guide as f32 * zoom) * scale) as i32;
+                    canvas.fill_rect(
+                        x,
+                        (12.0 * scale) as i32,
+                        libm::ceilf(scale) as u32,
+                        height.saturating_sub((24.0 * scale) as u32),
+                        guide_color,
+                    );
+                }
+                if let Some(snap) = editor.drag_snap.1 {
+                    let y = libm::roundf((origin_y + snap.guide as f32 * zoom) * scale) as i32;
+                    canvas.fill_rect(
+                        (12.0 * scale) as i32,
+                        y,
+                        width.saturating_sub((24.0 * scale) as u32),
+                        libm::ceilf(scale) as u32,
+                        guide_color,
+                    );
+                }
             }
-            if let Some(snap) = editor.drag_snap.1 {
-                let y = libm::roundf((origin_y + snap.guide as f32 * zoom) * scale) as i32;
-                canvas.fill_rect((12.0 * scale) as i32, y, width.saturating_sub((24.0 * scale) as u32), libm::ceilf(scale) as u32, guide_color);
+            let count = editor
+                .snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.outputs.len());
+            for index in 0..count {
+                let Some((x, y, w, h)) = editor.card(index, viewport_width) else {
+                    continue;
+                };
+                let (x, y, w, h) = (
+                    (x * scale) as i32,
+                    (y * scale) as i32,
+                    (w * scale) as u32,
+                    (h * scale) as u32,
+                );
+                let color = if index == editor.selected {
+                    Color::rgb(44, 116, 220)
+                } else {
+                    Color::rgb(91, 101, 118)
+                };
+                canvas.fill_rect(x, y, w, h, Color::rgb(180, 192, 210));
+                canvas.fill_rect(
+                    x + 2,
+                    y + 2,
+                    w.saturating_sub(4),
+                    h.saturating_sub(4),
+                    color,
+                );
+                canvas.draw_text_sized(
+                    x + (w / 2) as i32 - (5.0 * scale) as i32,
+                    y + (h / 2) as i32 - (9.0 * scale) as i32,
+                    &format!("{}", index + 1),
+                    Color::WHITE,
+                    18.0 * scale,
+                );
             }
+        }),
+    )
+    .touch_drag_axis(TouchDragAxis::Both)
+    .on_event(move |event| {
+        if state.get().applying {
+            return false;
         }
-        let count = editor.snapshot.as_ref().map_or(0, |snapshot| snapshot.outputs.len());
-        for index in 0..count {
-            let Some((x, y, w, h)) = editor.card(index, viewport_width) else { continue; };
-            let (x, y, w, h) = ((x * scale) as i32, (y * scale) as i32, (w * scale) as u32, (h * scale) as u32);
-            let color = if index == editor.selected { Color::rgb(44, 116, 220) } else { Color::rgb(91, 101, 118) };
-            canvas.fill_rect(x, y, w, h, Color::rgb(180, 192, 210));
-            canvas.fill_rect(x + 2, y + 2, w.saturating_sub(4), h.saturating_sub(4), color);
-            canvas.draw_text_sized(x + (w / 2) as i32 - (5.0 * scale) as i32, y + (h / 2) as i32 - (9.0 * scale) as i32,
-                &format!("{}", index + 1), Color::WHITE, 18.0 * scale);
-        }
-    })).touch_drag_axis(TouchDragAxis::Both).on_event(move |event| {
-        if state.get().applying { return false; }
         let viewport_width = viewport.get();
         // Canvas owns a single contact; a second finger cannot move or finish
         // the first finger's display arrangement.
         let owner = state.get().touch_contact;
-        if matches!(event, Event::Mouse(_)) && owner.is_some() { return false; }
+        if matches!(event, Event::Mouse(_)) && owner.is_some() {
+            return false;
+        }
         let touch_contact = match *event {
             Event::Touch(change) => Some((change.seat_id, change.id)),
             _ => None,
         };
         let input = match *event {
-            Event::Mouse(MouseEvent::ButtonPressed { button: MouseButton::Left, x, y, .. }) => (0, x, y),
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x,
+                y,
+                ..
+            }) => (0, x, y),
             Event::Mouse(MouseEvent::Moved { x, y }) => (1, x, y),
-            Event::Mouse(MouseEvent::ButtonReleased { button: MouseButton::Left, x, y, .. }) => (2, x, y),
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x,
+                y,
+                ..
+            }) => (2, x, y),
             Event::Mouse(MouseEvent::ButtonCancelled { .. }) => (3, 0, 0),
             Event::Touch(change) => {
                 if change.phase == TouchPhase::Down {
-                    if owner.is_some() { return false; }
-                } else if owner != touch_contact { return false; }
-                let phase = match change.phase { TouchPhase::Down => 0, TouchPhase::Move => 1, TouchPhase::Up => 2, TouchPhase::Cancel => 3 };
+                    if owner.is_some() {
+                        return false;
+                    }
+                } else if owner != touch_contact {
+                    return false;
+                }
+                let phase = match change.phase {
+                    TouchPhase::Down => 0,
+                    TouchPhase::Move => 1,
+                    TouchPhase::Up => 2,
+                    TouchPhase::Cancel => 3,
+                };
                 (phase, change.x, change.y)
             }
-            Event::TouchGesture(TouchGesture::Pinch { first_id, second_id, .. })
-                if owner.is_some_and(|(_, id)| id == first_id || id == second_id) => (3, 0, 0),
+            Event::TouchGesture(TouchGesture::Pinch {
+                first_id,
+                second_id,
+                ..
+            }) if owner.is_some_and(|(_, id)| id == first_id || id == second_id) => (3, 0, 0),
             _ => return false,
         };
         match input {
             (0, x, y) => {
                 let editor = state.get();
-                let count = editor.snapshot.as_ref().map_or(0, |snapshot| snapshot.outputs.len());
+                let count = editor
+                    .snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.outputs.len());
                 for index in (0..count).rev() {
-                    let Some((left, top, width, height)) = editor.card(index, viewport_width) else { continue; };
-                    if x as f32 >= left && y as f32 >= top && (x as f32) < left + width && (y as f32) < top + height {
+                    let Some((left, top, width, height)) = editor.card(index, viewport_width)
+                    else {
+                        continue;
+                    };
+                    if x as f32 >= left
+                        && y as f32 >= top
+                        && (x as f32) < left + width
+                        && (y as f32) < top + height
+                    {
                         let id = editor.snapshot.as_ref().unwrap().outputs[index].id;
-                        let config = editor.draft.iter().find(|config| config.id == id).copied().unwrap();
+                        let config = editor
+                            .draft
+                            .iter()
+                            .find(|config| config.id == id)
+                            .copied()
+                            .unwrap();
                         let geometry = editor.geometry(viewport_width).unwrap();
-                        state.update(|editor| { editor.selected = index; editor.touch_contact = touch_contact; editor.drag_snap = (None, None); editor.drag_before = Some(editor.draft.clone()); editor.drag = Some((id, x, y, config.x, config.y, geometry)); });
+                        state.update(|editor| {
+                            editor.selected = index;
+                            editor.touch_contact = touch_contact;
+                            editor.drag_snap = (None, None);
+                            editor.drag_before = Some(editor.draft.clone());
+                            editor.drag = Some((id, x, y, config.x, config.y, geometry));
+                        });
                         return true;
                     }
                 }
                 false
             }
             (1, x, y) => {
-                let Some((id, start_x, start_y, origin_x, origin_y, (_, _, zoom))) = state.get().drag else { return false; };
+                let Some((id, start_x, start_y, origin_x, origin_y, (_, _, zoom))) =
+                    state.get().drag
+                else {
+                    return false;
+                };
                 let desired = (
                     origin_x.saturating_add(((x - start_x) as f32 / zoom) as i32),
                     origin_y.saturating_add(((y - start_y) as f32 / zoom) as i32),
@@ -295,54 +624,105 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                 true
             }
             (2, _, _) => {
-                let Some((id, ..)) = state.get().drag else { return false; };
-                state.update(|editor| { editor.drag = None; editor.touch_contact = None; editor.drag_snap = (None, None); editor.settle(id); editor.drag_before = None; }); true
+                let Some((id, ..)) = state.get().drag else {
+                    return false;
+                };
+                state.update(|editor| {
+                    editor.drag = None;
+                    editor.touch_contact = None;
+                    editor.drag_snap = (None, None);
+                    editor.settle(id);
+                    editor.drag_before = None;
+                });
+                true
             }
             (3, _, _) => {
-                if state.get().drag.is_none() { return false; }
-                state.update(|editor| { editor.drag = None; editor.touch_contact = None; editor.drag_snap = (None, None); if let Some(draft) = editor.drag_before.take() { editor.draft = draft; } }); true
+                if state.get().drag.is_none() {
+                    return false;
+                }
+                state.update(|editor| {
+                    editor.drag = None;
+                    editor.touch_contact = None;
+                    editor.drag_snap = (None, None);
+                    if let Some(draft) = editor.drag_before.take() {
+                        editor.draft = draft;
+                    }
+                });
+                true
             }
             _ => false,
         }
-    }).frame_height(HEIGHT)
+    })
+    .frame_height(HEIGHT)
 }
 
 pub(super) fn apply(state: &State<Editor>) {
     let editor = state.get();
-    if editor.applying { return; }
-    let Some(original) = editor.snapshot else { return; };
+    if editor.applying {
+        return;
+    }
+    let Some(original) = editor.snapshot else {
+        return;
+    };
     let state = state.clone();
-    state.update(|editor| { editor.applying = true; editor.status.clear(); });
+    state.update(|editor| {
+        editor.applying = true;
+        editor.status.clear();
+    });
     thread::spawn(move || {
         let result = (|| -> core::result::Result<OutputSnapshot, String> {
             let connection = Connection::connect_default().map_err(|e| format!("{e:?}"))?;
             let read = || connection.outputs().map_err(|e| format!("{e:?}"));
             let mut live = read()?;
-            if live.generation != original.generation { return Err("Displays changed before applying".into()); }
+            if live.generation != original.generation {
+                return Err("Displays changed before applying".into());
+            }
             for (id, mode) in &editor.mode_draft {
-                connection.set_output_mode(*id, *mode).map_err(|e| format!("{e:?}"))?;
+                connection
+                    .set_output_mode(*id, *mode)
+                    .map_err(|e| format!("{e:?}"))?;
             }
             // The driver acknowledges a request before the new timing is live.
             // Validate layout against the confirmed modes, including fractional scales.
             let start = scarlet_os::time::monotonic_time_ns();
-            while !editor.mode_draft.iter().all(|(id, mode)| live.outputs.iter().any(|o| o.id == *id && o.mode == *mode)) {
+            while !editor
+                .mode_draft
+                .iter()
+                .all(|(id, mode)| live.outputs.iter().any(|o| o.id == *id && o.mode == *mode))
+            {
                 if scarlet_os::time::monotonic_time_ns().saturating_sub(start) > 10_000_000_000 {
                     return Err("Display did not confirm the selected resolution".into());
                 }
                 thread::sleep(Duration::from_millis(100));
                 live = read()?;
-                if live.outputs.len() != original.outputs.len() || !original.outputs.iter().all(|old|
-                    live.outputs.iter().any(|o| o.id == old.id && o.monitor_key == old.monitor_key)) {
+                if live.outputs.len() != original.outputs.len()
+                    || !original.outputs.iter().all(|old| {
+                        live.outputs
+                            .iter()
+                            .any(|o| o.id == old.id && o.monitor_key == old.monitor_key)
+                    })
+                {
                     return Err("Connected displays changed".into());
                 }
             }
-            connection.configure_outputs(outputs::OutputTransaction { base_generation: live.generation, configuration: editor.draft })
+            connection
+                .configure_outputs(outputs::OutputTransaction {
+                    base_generation: live.generation,
+                    configuration: editor.draft,
+                })
                 .map_err(|e| format!("{e:?}"))
         })();
-        let status = match &result { Ok(_) => String::new(), Err(e) => format!("Display settings: {e}.") };
-        let snapshot = result.ok().or_else(|| Connection::connect_default().ok()?.outputs().ok());
+        let status = match &result {
+            Ok(_) => String::new(),
+            Err(e) => format!("Display settings: {e}."),
+        };
+        let snapshot = result
+            .ok()
+            .or_else(|| Connection::connect_default().ok()?.outputs().ok());
         state.update(|editor| {
-            if let Some(snapshot) = snapshot { editor.adopt(snapshot); }
+            if let Some(snapshot) = snapshot {
+                editor.adopt(snapshot);
+            }
             editor.applying = false;
             editor.status = status;
         });
@@ -350,18 +730,47 @@ pub(super) fn apply(state: &State<Editor>) {
 }
 
 pub(super) fn scale(state: &State<Editor>, index: usize) {
-    if state.get().applying { return; }
-    let Some(scale) = SCALES.get(index).copied() else { return; };
+    if state.get().applying {
+        return;
+    }
+    let Some(scale) = SCALES.get(index).copied() else {
+        return;
+    };
     state.update(|editor| {
-        let Some(id) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)).map(|output| output.id) else { return; };
-        if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) { config.scale_milli = scale; }
+        let Some(id) = editor
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
+            .map(|output| output.id)
+        else {
+            return;
+        };
+        if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) {
+            config.scale_milli = scale;
+        }
         editor.settle(id);
     });
 }
 pub(super) fn experience(state: &State<Editor>, index: usize) {
-    if state.get().applying { return; }
+    if state.get().applying {
+        return;
+    }
     state.update(|editor| {
-        let Some(id) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)).map(|output| output.id) else { return; };
-        if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) { config.experience = match index { 1 => OutputExperience::Desktop, 2 => OutputExperience::Tablet, _ => OutputExperience::Auto }; editor.dirty = true; }
+        let Some(id) = editor
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
+            .map(|output| output.id)
+        else {
+            return;
+        };
+        if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) {
+            config.experience = match index {
+                1 => OutputExperience::Desktop,
+                2 => OutputExperience::Tablet,
+                _ => OutputExperience::Auto,
+            };
+            editor.dirty = true;
+        }
     });
 }

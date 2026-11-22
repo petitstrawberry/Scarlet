@@ -19,13 +19,13 @@ pub const fn is_hv_available() -> bool {
 pub const fn is_vhe_enabled() -> bool {
     false
 }
+#[cfg_attr(feature = "hosted", path = "../../hosted/cache.rs")]
+mod cache;
 #[cfg(not(feature = "hosted"))]
 pub mod context;
 #[cfg(feature = "hosted")]
 #[path = "../../hosted/context.rs"]
 pub mod context;
-#[cfg_attr(feature = "hosted", path = "../../hosted/cache.rs")]
-mod cache;
 pub mod cpu_features;
 pub mod earlycon;
 pub mod fpu;

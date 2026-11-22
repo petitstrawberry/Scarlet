@@ -169,8 +169,14 @@ impl Default for HidMouseDevice {
 }
 
 const MODIFIER_KEYS: [u16; 8] = [
-    key_codes::KEY_LEFTCTRL, key_codes::KEY_LEFTSHIFT, key_codes::KEY_LEFTALT, key_codes::KEY_LEFTMETA,
-    key_codes::KEY_RIGHTCTRL, key_codes::KEY_RIGHTSHIFT, key_codes::KEY_RIGHTALT, key_codes::KEY_RIGHTMETA,
+    key_codes::KEY_LEFTCTRL,
+    key_codes::KEY_LEFTSHIFT,
+    key_codes::KEY_LEFTALT,
+    key_codes::KEY_LEFTMETA,
+    key_codes::KEY_RIGHTCTRL,
+    key_codes::KEY_RIGHTSHIFT,
+    key_codes::KEY_RIGHTALT,
+    key_codes::KEY_RIGHTMETA,
 ];
 
 /// Translate a USB keyboard/keypad usage, including left and right modifiers.

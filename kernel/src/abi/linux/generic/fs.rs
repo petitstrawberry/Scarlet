@@ -2364,7 +2364,11 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let address = buf_addr + total_read;
         let page_offset = address & (PAGE_SIZE - 1);
         let chunk = (PAGE_SIZE - page_offset).min(count - total_read);
-        if task.vm_manager.translate_to_kva_for_write(address).is_none() {
+        if task
+            .vm_manager
+            .translate_to_kva_for_write(address)
+            .is_none()
+        {
             error = Some(errno::EFAULT);
             break;
         }
@@ -2394,7 +2398,9 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     }
     trapframe.increment_pc_next(&task);
-    if total_read == 0 && let Some(error) = error {
+    if total_read == 0
+        && let Some(error) = error
+    {
         return errno::to_result(error);
     }
     total_read
@@ -5470,7 +5476,12 @@ fn epoll_wait_for_task(
             // racing the scan then remains visible on the next iteration.
             let generations = interest.generations();
             let raw_ready = epoll_ready_events(abi, &task, interest);
-            if interest.delivery.lock().pending(interest.events, raw_ready, &generations) == 0 {
+            if interest
+                .delivery
+                .lock()
+                .pending(interest.events, raw_ready, &generations)
+                == 0
+            {
                 continue;
             }
 

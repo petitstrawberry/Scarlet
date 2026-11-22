@@ -119,7 +119,9 @@ fn return_stub(abi: &LinuxAbi, task: &Task) -> Result<usize, &'static str> {
         return Ok(address);
     }
     // mov x8, #139; svc #0 (rt_sigreturn).
-    let address = task.vm_manager.map_user_instructions(&[0xd280_1168, 0xd400_0001])?;
+    let address = task
+        .vm_manager
+        .map_user_instructions(&[0xd280_1168, 0xd400_0001])?;
     *cached = Some(address);
     Ok(address)
 }
@@ -377,8 +379,8 @@ pub fn dispatch_arch_syscall(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::sync::Arc;
     use crate::environment::PAGE_SIZE;
+    use alloc::sync::Arc;
 
     #[test_case]
     fn signal_frame_preserves_signal_info_sender_and_payload() {

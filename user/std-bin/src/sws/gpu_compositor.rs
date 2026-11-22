@@ -3,8 +3,8 @@
 #[path = "output_admission.rs"]
 mod output_admission;
 
-use super::output::OutputProjection;
 use super::cursor::Cursor;
+use super::output::OutputProjection;
 use super::status_backdrop::{BackdropDamage, BackdropGeometry, backdrop_refreshes};
 use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_rect_row_span};
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
@@ -367,21 +367,35 @@ fn translate_rect(rect: (i32, i32, u32, u32), origin: (i32, i32)) -> (i32, i32, 
 }
 
 fn window_samples_output(window: &Window, output: &GpuOutputFrame<'_>) -> bool {
-    if !window.is_presented() { return false; }
-    if !window.presentation_cross_output && window.output_id != output.id && (window.presentation_transform.is_some()
-        || !window.presentation_instances.is_empty()
-        || matches!(window.window_type, WindowType::Desktop | WindowType::Taskbar
-            | WindowType::ShellBackground | WindowType::ShellChrome | WindowType::ShellPanel)) { return false; }
+    if !window.is_presented() {
+        return false;
+    }
+    if !window.presentation_cross_output
+        && window.output_id != output.id
+        && (window.presentation_transform.is_some()
+            || !window.presentation_instances.is_empty()
+            || matches!(
+                window.window_type,
+                WindowType::Desktop
+                    | WindowType::Taskbar
+                    | WindowType::ShellBackground
+                    | WindowType::ShellChrome
+                    | WindowType::ShellPanel
+            ))
+    {
+        return false;
+    }
     let intersects = |(x, y, width, height): (i32, i32, u32, u32)| {
         i64::from(x) < i64::from(output.origin.0) + i64::from(output.scene_width)
             && i64::from(output.origin.0) < i64::from(x) + i64::from(width)
             && i64::from(y) < i64::from(output.origin.1) + i64::from(output.scene_height)
             && i64::from(output.origin.1) < i64::from(y) + i64::from(height)
     };
-    intersects(window.presentation_geometry()) || window.presentation_instances.iter().any(|instance| {
-        let t = instance.transform;
-        intersects((t.x, t.y, t.width, t.height))
-    })
+    intersects(window.presentation_geometry())
+        || window.presentation_instances.iter().any(|instance| {
+            let t = instance.transform;
+            intersects((t.x, t.y, t.width, t.height))
+        })
 }
 
 /// GPU resources and texture cache used by the internal SWS compositor.
@@ -424,7 +438,9 @@ impl GpuCompositor {
     }
 
     pub(super) fn window_in_flight(&self, window: WindowId) -> bool {
-        self.pending_frames.iter().any(|frame| frame.sampled_windows.contains(&window))
+        self.pending_frames
+            .iter()
+            .any(|frame| frame.sampled_windows.contains(&window))
     }
 
     pub(super) fn needs_redraw(&self) -> bool {
@@ -436,9 +452,15 @@ impl GpuCompositor {
     }
 
     fn output_can_admit(&self, index: usize) -> bool {
-        output_admission::can_admit(index,
-            self.output_dependencies.get(index).map_or(&[], Vec::as_slice),
-            self.pending_frames.iter().map(|frame| (frame.outputs[0].0, frame.sampled_windows.as_slice())))
+        output_admission::can_admit(
+            index,
+            self.output_dependencies
+                .get(index)
+                .map_or(&[], Vec::as_slice),
+            self.pending_frames
+                .iter()
+                .map(|frame| (frame.outputs[0].0, frame.sampled_windows.as_slice())),
+        )
     }
 
     pub(super) fn retire_pending_frame(
@@ -450,23 +472,37 @@ impl GpuCompositor {
         // outputs. A shared client image is released only after its last reader.
         for mut frame in core::mem::take(&mut self.pending_frames) {
             let index = frame.outputs[0].0;
-            if let Some(elapsed) = self.target.poll_output_gpu_completion(index).map_err(GpuCompositionError::Backend)? {
-                if let Some(timings) = &mut frame.timings { timings.gpu_wait_ns += elapsed.as_nanos(); }
+            if let Some(elapsed) = self
+                .target
+                .poll_output_gpu_completion(index)
+                .map_err(GpuCompositionError::Backend)?
+            {
+                if let Some(timings) = &mut frame.timings {
+                    timings.gpu_wait_ns += elapsed.as_nanos();
+                }
                 completed.push(frame);
             } else {
                 self.pending_frames.push(frame);
             }
         }
-        if completed.is_empty() { return Ok(None); }
+        if completed.is_empty() {
+            return Ok(None);
+        }
         let mut releases = Vec::new();
         let mut promoted = Vec::new();
         for mut frame in completed {
             frame.shared.retain(|snapshot| {
-                if self.window_in_flight(snapshot.window_id) || promoted.contains(&snapshot.window_id) { return false; }
+                if self.window_in_flight(snapshot.window_id)
+                    || promoted.contains(&snapshot.window_id)
+                {
+                    return false;
+                }
                 promoted.push(snapshot.window_id);
                 true
             });
-            if let Some(damage) = frame.logical_damage { self.completed_primary_damage.push(damage); }
+            if let Some(damage) = frame.logical_damage {
+                self.completed_primary_damage.push(damage);
+            }
             releases.extend(self.publish_completed_frame(displays, frame)?);
         }
         Ok(Some(releases))
@@ -733,11 +769,18 @@ impl GpuCompositor {
             .map(|entry| (entry.texture, entry.width, entry.height))
     }
 
-    fn transfer_visible_imported_shm(&mut self, windows: &[Window], sampled: &[WindowId]) -> Result<(), &'static str> {
+    fn transfer_visible_imported_shm(
+        &mut self,
+        windows: &[Window],
+        sampled: &[WindowId],
+    ) -> Result<(), &'static str> {
         let Some(imported) = self.imported_shm_context.as_ref() else {
             return Ok(());
         };
-        for window in windows.iter().filter(|window| window.is_presented() && sampled.contains(&window.id)) {
+        for window in windows
+            .iter()
+            .filter(|window| window.is_presented() && sampled.contains(&window.id))
+        {
             let (Some(client_id), Some(buffer_id)) =
                 (window.owner_client_id, window.external_buffer_id)
             else {
@@ -831,18 +874,39 @@ impl GpuCompositor {
     }
 
     /// Poll proven display progress without constructing or admitting GPU work.
-    pub(super) fn admitted_outputs(&self) -> &[usize] { &self.admitted_outputs }
-    pub(super) fn take_completed_outputs(&mut self) -> Vec<usize> { core::mem::take(&mut self.completed_outputs) }
+    pub(super) fn admitted_outputs(&self) -> &[usize] {
+        &self.admitted_outputs
+    }
+    pub(super) fn take_completed_outputs(&mut self) -> Vec<usize> {
+        core::mem::take(&mut self.completed_outputs)
+    }
     pub(super) fn render_target_ready(&mut self, wanted: &[bool]) -> Result<bool, &'static str> {
-        if self.drain_for_rebuild && self.has_pending_frame() { return Ok(false); }
+        if self.drain_for_rebuild && self.has_pending_frame() {
+            return Ok(false);
+        }
         let mut ready = false;
         for (index, wanted) in wanted.iter().enumerate() {
-            if !wanted && !self.force_full_repaint && !self.full_repaint_outputs.get(index).copied().unwrap_or(false) { continue; }
-            if !self.output_can_admit(index) { continue; }
-            self.target.select_surface(index).map_err(|_| "GPU output is missing")?;
+            if !wanted
+                && !self.force_full_repaint
+                && !self
+                    .full_repaint_outputs
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if !self.output_can_admit(index) {
+                continue;
+            }
+            self.target
+                .select_surface(index)
+                .map_err(|_| "GPU output is missing")?;
             ready |= self.target.try_acquire_render_target()?;
         }
-        self.target.select_surface(0).map_err(|_| "GPU primary output is missing")?;
+        self.target
+            .select_surface(0)
+            .map_err(|_| "GPU primary output is missing")?;
         Ok(ready)
     }
 
@@ -1148,9 +1212,11 @@ impl GpuCompositor {
             .and_then(|instance| instance.clip)
             .or(window.presentation_clip)
             .map(|rect| projection.rect(rect));
-        let clip_radius = projection.radius(instance.map_or(window.presentation_clip_radius, |instance| {
-            instance.clip_radius
-        }));
+        let clip_radius = projection.radius(
+            instance.map_or(window.presentation_clip_radius, |instance| {
+                instance.clip_radius
+            }),
+        );
         let rounded_clip = presentation_clip
             .filter(|_| clip_radius > 0)
             .map(|rect| (rect, clip_radius));
@@ -1206,15 +1272,13 @@ impl GpuCompositor {
             );
         }
         let directly_imported_shm = imported_shm_texture.is_some();
-        let visual_geometry = projection.rect(
-            instance.map_or_else(
-                || window.presentation_geometry(),
-                |instance| {
-                    let transform = instance.transform;
-                    (transform.x, transform.y, transform.width, transform.height)
-                },
-            ),
-        );
+        let visual_geometry = projection.rect(instance.map_or_else(
+            || window.presentation_geometry(),
+            |instance| {
+                let transform = instance.transform;
+                (transform.x, transform.y, transform.width, transform.height)
+            },
+        ));
         // Nothing of this window is on the selected output.
         if clipped_rect(
             visual_geometry.0,
@@ -1458,7 +1522,11 @@ impl GpuCompositor {
         // cached allocation once. Moving a region only invalidates its content;
         // it must not drain presentation, rebuild the context/cursor atlas and
         // reimport every client image on every animation frame.
-        if self.active_backdrops.iter().any(|old| !backdrops.contains(old)) {
+        if self
+            .active_backdrops
+            .iter()
+            .any(|old| !backdrops.contains(old))
+        {
             // Keep the old rebuild's conservative invalidation for changed
             // placement/rounding and overlapping upper materials. Only the
             // expensive allocation/context reset is removed.
@@ -1498,15 +1566,24 @@ impl GpuCompositor {
             self.rebuild_pending = true;
         }
         let rebuilt = self.rebuild_if_needed(cursor, windows)?;
-        if self.drain_for_rebuild { return Err(GpuCompositionError::DisplayBusy); }
+        if self.drain_for_rebuild {
+            return Err(GpuCompositionError::DisplayBusy);
+        }
         self.full_repaint_outputs.resize(outputs.len(), false);
         if self.force_full_repaint {
             self.full_repaint_outputs.fill(true);
             self.force_full_repaint = false;
         }
-        self.output_dependencies = outputs.iter().map(|output|
-            windows.iter().filter(|window| window_samples_output(window, output)).map(|window| window.id).collect()
-        ).collect();
+        self.output_dependencies = outputs
+            .iter()
+            .map(|output| {
+                windows
+                    .iter()
+                    .filter(|window| window_samples_output(window, output))
+                    .map(|window| window.id)
+                    .collect()
+            })
+            .collect();
         if let Some(profile) = &mut damage_profile {
             profile.gpu_forced |= u64::from(rebuilt);
         }
@@ -1517,16 +1594,34 @@ impl GpuCompositor {
         self.admitted_outputs.clear();
         let mut ready_outputs = vec![false; outputs.len()];
         for (index, output) in outputs.iter().enumerate() {
-            if output.damage == OutputDamage::Skip && !self.full_repaint_outputs[index] { continue; }
-            if !self.output_can_admit(index) { continue; }
-            self.target.select_surface(index).map_err(|_| "GPU output is missing")?;
-            ready_outputs[index] = self.target.try_acquire_render_target().map_err(GpuCompositionError::Backend)?;
+            if output.damage == OutputDamage::Skip && !self.full_repaint_outputs[index] {
+                continue;
+            }
+            if !self.output_can_admit(index) {
+                continue;
+            }
+            self.target
+                .select_surface(index)
+                .map_err(|_| "GPU output is missing")?;
+            ready_outputs[index] = self
+                .target
+                .try_acquire_render_target()
+                .map_err(GpuCompositionError::Backend)?;
         }
-        self.target.select_surface(0).map_err(|_| "GPU primary output is missing")?;
-        if !ready_outputs.iter().any(|ready| *ready) { return Err(GpuCompositionError::DisplayBusy); }
+        self.target
+            .select_surface(0)
+            .map_err(|_| "GPU primary output is missing")?;
+        if !ready_outputs.iter().any(|ready| *ready) {
+            return Err(GpuCompositionError::DisplayBusy);
+        }
         self.target.frame_timings = profiling.then(Default::default);
-        let sampled_windows: Vec<_> = self.output_dependencies.iter().enumerate()
-            .filter(|(index, _)| ready_outputs[*index]).flat_map(|(_, windows)| windows.iter().copied()).collect();
+        let sampled_windows: Vec<_> = self
+            .output_dependencies
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| ready_outputs[*index])
+            .flat_map(|(_, windows)| windows.iter().copied())
+            .collect();
         let mut texture_uploads = Vec::new();
         self.prepare_scene_textures(scenes, windows, &sampled_windows, &mut texture_uploads)?;
         self.transfer_visible_imported_shm(windows, &sampled_windows)?;
@@ -1579,7 +1674,11 @@ impl GpuCompositor {
             backdrop_refreshes(
                 backdrops,
                 &window_order,
-                if ready_outputs.iter().enumerate().any(|(index, ready)| *ready && self.full_repaint_outputs[index]) {
+                if ready_outputs
+                    .iter()
+                    .enumerate()
+                    .any(|(index, ready)| *ready && self.full_repaint_outputs[index])
+                {
                     None
                 } else {
                     capture_damage.as_deref()
@@ -1597,14 +1696,23 @@ impl GpuCompositor {
             }
         }
         if let Some(profile) = &mut damage_profile {
-            profile.material_refreshes = self.backdrops.iter().filter(|(id, geometry, textures)|
-                !textures.valid && backdrops.contains(&(*id, *geometry))).count() as u64;
+            profile.material_refreshes = self
+                .backdrops
+                .iter()
+                .filter(|(id, geometry, textures)| {
+                    !textures.valid && backdrops.contains(&(*id, *geometry))
+                })
+                .count() as u64;
             profile.requested_pixels = damage.map_or(
                 u64::from(self.target.width) * u64::from(self.target.height),
-                |rect| u64::from(rect.2) * u64::from(rect.3));
+                |rect| u64::from(rect.2) * u64::from(rect.3),
+            );
         }
         let mut uploaded_texture_indices = Vec::new();
-        for window in windows.iter().filter(|window| sampled_windows.contains(&window.id)) {
+        for window in windows
+            .iter()
+            .filter(|window| sampled_windows.contains(&window.id))
+        {
             super::trace::set_gpu_window(window.id);
             // CPU-backed texture extent changes are detected before this loop
             // and cause a fresh private resource table. Each active window is
@@ -1631,8 +1739,14 @@ impl GpuCompositor {
         let mut logical_damage = None;
         let mut published_backdrops = Vec::new();
         for (output_index, frame) in outputs.iter().enumerate() {
-            if !ready_outputs[output_index] { continue; }
-            let projection = OutputProjection { origin: frame.origin, scene: (frame.scene_width, frame.scene_height), native: (frame.width, frame.height) };
+            if !ready_outputs[output_index] {
+                continue;
+            }
+            let projection = OutputProjection {
+                origin: frame.origin,
+                scene: (frame.scene_width, frame.scene_height),
+                native: (frame.width, frame.height),
+            };
             let damage = match frame.damage {
                 _ if self.full_repaint_outputs[output_index] => None,
                 OutputDamage::Skip => continue,
@@ -1645,43 +1759,46 @@ impl GpuCompositor {
                 .select_surface(output_index)
                 .map_err(|_| "GPU output is missing")?;
             let local_materials = self
-                    .backdrops
-                    .iter()
-                    .filter(|(id, geometry, _)| backdrops.contains(&(*id, *geometry)))
-                    .filter_map(|(_, geometry, textures)| {
-                        geometry
-                            .relative_to(origin, frame.width, frame.height)
-                            .map(|g| (g, textures))
+                .backdrops
+                .iter()
+                .filter(|(id, geometry, _)| backdrops.contains(&(*id, *geometry)))
+                .filter_map(|(_, geometry, textures)| {
+                    geometry
+                        .relative_to(origin, frame.width, frame.height)
+                        .map(|g| (g, textures))
+                })
+                .map(|(g, textures)| {
+                    Ok(MaterialDamage {
+                        source: PixelRect::new(
+                            g.source.0 as u32,
+                            g.source.1 as u32,
+                            g.source.2,
+                            g.source.3,
+                        )?,
+                        output: PixelRect::new(
+                            g.output.0 as u32,
+                            g.output.1 as u32,
+                            g.output.2,
+                            g.output.3,
+                        )?,
+                        refresh: !textures.valid,
                     })
-                    .map(|(g, textures)| {
-                        Ok(MaterialDamage {
-                            source: PixelRect::new(
-                                g.source.0 as u32,
-                                g.source.1 as u32,
-                                g.source.2,
-                                g.source.3,
-                            )?,
-                            output: PixelRect::new(
-                                g.output.0 as u32,
-                                g.output.1 as u32,
-                                g.output.2,
-                                g.output.3,
-                            )?,
-                            refresh: !textures.valid,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, sgfx::ir::Error>>()
-                    .map_err(|_| "Invalid output backdrop geometry")?;
+                })
+                .collect::<Result<Vec<_>, sgfx::ir::Error>>()
+                .map_err(|_| "Invalid output backdrop geometry")?;
             let output_materials = local_materials.as_slice();
-            let output_shadows: Vec<_> = frame.overview_shadows
+            let output_shadows: Vec<_> = frame
+                .overview_shadows
                 .iter()
                 .map(|&(r, rad, c)| (projection.rect(r), projection.radius(rad), c))
                 .collect();
-            let output_cards: Vec<_> = frame.overview_cards
+            let output_cards: Vec<_> = frame
+                .overview_cards
                 .iter()
                 .map(|&(r, a, b)| (projection.rect(r), a, b))
                 .collect();
-            let output_remove_buttons: Vec<_> = frame.overview_remove_buttons
+            let output_remove_buttons: Vec<_> = frame
+                .overview_remove_buttons
                 .iter()
                 .map(|&(id, r, h)| (id, projection.rect(r), h))
                 .collect();
@@ -1726,11 +1843,18 @@ impl GpuCompositor {
                 }
                 // Overview actors and shell surfaces belong to one output.
                 // Only ordinary, untransformed windows may span its edge.
-                if !window.presentation_cross_output && window.output_id != frame.id
+                if !window.presentation_cross_output
+                    && window.output_id != frame.id
                     && (window.presentation_transform.is_some()
                         || !window.presentation_instances.is_empty()
-                        || matches!(window.window_type, WindowType::Desktop | WindowType::Taskbar
-                            | WindowType::ShellBackground | WindowType::ShellChrome | WindowType::ShellPanel))
+                        || matches!(
+                            window.window_type,
+                            WindowType::Desktop
+                                | WindowType::Taskbar
+                                | WindowType::ShellBackground
+                                | WindowType::ShellChrome
+                                | WindowType::ShellPanel
+                        ))
                 {
                     continue;
                 }
@@ -1779,7 +1903,13 @@ impl GpuCompositor {
                         backdrop_splits.push((index, operations.len()));
                     }
                 }
-                self.append_window_projection(&mut operations, window, None, damage_clip, projection)?;
+                self.append_window_projection(
+                    &mut operations,
+                    window,
+                    None,
+                    damage_clip,
+                    projection,
+                )?;
                 for instance in &window.presentation_instances {
                     self.append_window_projection(
                         &mut operations,
@@ -1845,11 +1975,18 @@ impl GpuCompositor {
                 (texture, cursor_image.width, cursor_image.height)
             };
             let (cursor_x, cursor_y) = cursor.draw_position();
-            let (cursor_x, cursor_y, destination_width, destination_height) = projection.rect((cursor_x, cursor_y, cursor_width, cursor_height));
+            let (cursor_x, cursor_y, destination_width, destination_height) =
+                projection.rect((cursor_x, cursor_y, cursor_width, cursor_height));
             if cursor_visible
                 && let Some((destination, source)) = clipped_scaled_rect(
-                    cursor_x, cursor_y, destination_width, destination_height, cursor_width, cursor_height,
-                    self.target.width, self.target.height,
+                    cursor_x,
+                    cursor_y,
+                    destination_width,
+                    destination_height,
+                    cursor_width,
+                    cursor_height,
+                    self.target.width,
+                    self.target.height,
                 )
                 && damage_clip.is_none_or(|clip| pixel_rects_intersect(destination, clip))
             {
@@ -2037,16 +2174,29 @@ impl GpuCompositor {
             .select_surface(0)
             .map_err(|_| "GPU output is missing")?;
         let receipts = submitted?;
-        self.admitted_outputs = publication.outputs.iter().map(|(index, _)| *index).collect();
-        for &index in &self.admitted_outputs { self.full_repaint_outputs[index] = false; }
+        self.admitted_outputs = publication
+            .outputs
+            .iter()
+            .map(|(index, _)| *index)
+            .collect();
+        for &index in &self.admitted_outputs {
+            self.full_repaint_outputs[index] = false;
+        }
         for texture_index in uploaded_texture_indices {
             self.textures[texture_index].pending_damage = None;
         }
         publication.profile[3] = profiling.then(Instant::now);
         publication.timings = self.target.frame_timings.clone();
         if self.target.supports_tracked_submission() {
-            let groups = publication.outputs.iter().map(|(index, _)| *index).zip(receipts).collect();
-            self.target.queue_output_gpu_completions(groups).map_err(GpuCompositionError::Backend)?;
+            let groups = publication
+                .outputs
+                .iter()
+                .map(|(index, _)| *index)
+                .zip(receipts)
+                .collect();
+            self.target
+                .queue_output_gpu_completions(groups)
+                .map_err(GpuCompositionError::Backend)?;
             // Publications and buffer leases retire independently per output.
             for &(index, region) in &publication.outputs {
                 let readers = self.output_dependencies[index].clone();
@@ -2054,12 +2204,32 @@ impl GpuCompositor {
                     outputs: vec![(index, region)],
                     sampled_windows: readers.clone(),
                     timings: publication.timings.clone(),
-                    other_outputs_pending_at_admission: publication.other_outputs_pending_at_admission,
-                    logical_damage: if index == 0 { publication.logical_damage } else { None },
+                    other_outputs_pending_at_admission: publication
+                        .other_outputs_pending_at_admission,
+                    logical_damage: if index == 0 {
+                        publication.logical_damage
+                    } else {
+                        None
+                    },
                     damage_profile: publication.damage_profile,
-                    shared: publication.shared.iter().filter(|state| readers.contains(&state.window_id)).cloned().collect(),
-                    backdrops: publication.backdrops.iter().copied().filter(|(i, _)| readers.contains(&self.backdrops[*i].0)).collect(),
-                    scenes: publication.scenes.iter().filter(|scene| readers.contains(&scene.window_id)).cloned().collect(),
+                    shared: publication
+                        .shared
+                        .iter()
+                        .filter(|state| readers.contains(&state.window_id))
+                        .cloned()
+                        .collect(),
+                    backdrops: publication
+                        .backdrops
+                        .iter()
+                        .copied()
+                        .filter(|(i, _)| readers.contains(&self.backdrops[*i].0))
+                        .collect(),
+                    scenes: publication
+                        .scenes
+                        .iter()
+                        .filter(|scene| readers.contains(&scene.window_id))
+                        .cloned()
+                        .collect(),
                     profile: publication.profile,
                     quads: publication.quads,
                     damage_pixels: publication.damage_pixels,
@@ -2221,7 +2391,10 @@ impl GpuCompositor {
     /// retired its work). The hidden surface is not sampled by a new display
     /// frame, so replacing its retained image needs no display presentation.
     pub(super) fn take_prepared_shell_releases(&mut self, window: &Window) -> Vec<SgfxCommitToken> {
-        if self.window_in_flight(window.id) || !window.prepares_while_workspace_hidden() || window.retains_native_transition_frame() {
+        if self.window_in_flight(window.id)
+            || !window.prepares_while_workspace_hidden()
+            || window.retains_native_transition_frame()
+        {
             return Vec::new();
         }
         self.shared_windows
@@ -2265,7 +2438,9 @@ impl GpuCompositor {
     ) -> Result<(), GpuCompositionError> {
         for view in scenes {
             let scene = view.scene;
-            if !sampled.contains(&scene.window_id) { continue; }
+            if !sampled.contains(&scene.window_id) {
+                continue;
+            }
             if scene.layers.is_empty()
                 || !windows
                     .iter()
@@ -2816,7 +2991,8 @@ fn append_cursor_images(
     if count == 0 {
         return Err("Cursor theme has no GPU-uploadable images");
     }
-    images.try_reserve_exact(count - images.len())
+    images
+        .try_reserve_exact(count - images.len())
         .map_err(|_| "Failed to reserve GPU cursor images")?;
     for image_index in images.len()..count {
         let (width, height) = cursor

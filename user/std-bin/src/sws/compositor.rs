@@ -2842,17 +2842,29 @@ impl Compositor {
         let (x, y) = self.outputs.clamp_point(self.cursor.x, self.cursor.y);
         if (x, y) != (self.cursor.x, self.cursor.y) {
             let bounds = self.outputs.bounds();
-            self.cursor.set_position_in_rect(x, y, (bounds.x, bounds.y, bounds.width, bounds.height));
+            self.cursor.set_position_in_rect(
+                x,
+                y,
+                (bounds.x, bounds.y, bounds.width, bounds.height),
+            );
         }
     }
 
     /// Frames accepted by this window's owning output.
     fn window_present_counter(&self, window: u32) -> u64 {
-        self.window_manager.get_window(window).and_then(|window| self.outputs.get(window.output_id)).map_or(0, |output| output.present_counter)
+        self.window_manager
+            .get_window(window)
+            .and_then(|window| self.outputs.get(window.output_id))
+            .map_or(0, |output| output.present_counter)
     }
     fn output_frame_interval(&self, output: u32) -> u64 {
-        self.outputs.get(output).map(|output| output.metadata.mode.refresh_millihz).filter(|rate| *rate > 0)
-            .map_or(FRAME_BATCH_INTERVAL_NS, |rate| 1_000_000_000_000u64 / u64::from(rate))
+        self.outputs
+            .get(output)
+            .map(|output| output.metadata.mode.refresh_millihz)
+            .filter(|rate| *rate > 0)
+            .map_or(FRAME_BATCH_INTERVAL_NS, |rate| {
+                1_000_000_000_000u64 / u64::from(rate)
+            })
     }
 
     fn present_counter(&self) -> u64 {
@@ -2895,8 +2907,15 @@ impl Compositor {
             sws_config.ime_toggle_bindings.clear();
         }
         let output_scale_milli = sws_config.output_scale_milli;
-        let logical = sws_protocol::outputs::OutputMode { pixel_width, pixel_height, refresh_millihz: 0 }.logical_size(output_scale_milli).map_err(|_| "Invalid output scale")?;
-        let (screen_width, screen_height) = (logical.0.saturating_mul(2), logical.1.saturating_mul(2));
+        let logical = sws_protocol::outputs::OutputMode {
+            pixel_width,
+            pixel_height,
+            refresh_millihz: 0,
+        }
+        .logical_size(output_scale_milli)
+        .map_err(|_| "Invalid output scale")?;
+        let (screen_width, screen_height) =
+            (logical.0.saturating_mul(2), logical.1.saturating_mul(2));
         let bytes_per_pixel = 4; // BGRA
 
         println!("[Compositor] Screen: {}x{}", screen_width, screen_height);
@@ -2951,8 +2970,7 @@ impl Compositor {
         // Initialize the configured theme at the center of the output. Keep a
         // built-in arrow available so a damaged manifest or image cannot prevent
         // the window server from starting.
-        let mut cursor = match load_cursor_theme(&sws_config.cursor.theme_path, 2000)
-        {
+        let mut cursor = match load_cursor_theme(&sws_config.cursor.theme_path, 2000) {
             Ok(cursor) => cursor,
             Err(error) => {
                 println!(
@@ -3030,8 +3048,18 @@ impl Compositor {
         // the first-frame filtering policy.
         let _ = gesture_recognizer.set_tablet_mode(input_environment.tablet_mode());
 
-        let primary_metadata = output_control::describe_output(PRIMARY_OUTPUT_ID, display.get_output_info().ok(), pixel_width, pixel_height, true);
-        let primary_display_key = if primary_metadata.identity_is_unique { primary_metadata.monitor_key.clone() } else { String::from("session:primary") };
+        let primary_metadata = output_control::describe_output(
+            PRIMARY_OUTPUT_ID,
+            display.get_output_info().ok(),
+            pixel_width,
+            pixel_height,
+            true,
+        );
+        let primary_display_key = if primary_metadata.identity_is_unique {
+            primary_metadata.monitor_key.clone()
+        } else {
+            String::from("session:primary")
+        };
         let mut workspace_manager = super::workspace::WorkspaceManager::with_auto_remove_empty(
             auto_remove_empty_workspaces,
         );
@@ -3203,7 +3231,9 @@ impl Compositor {
     }
 
     fn publish_workspace_state(&self) {
-        super::ipc::publish_workspace_state(sws_protocol::workspace::encode_state(&self.workspace_manager.snapshot()));
+        super::ipc::publish_workspace_state(sws_protocol::workspace::encode_state(
+            &self.workspace_manager.snapshot(),
+        ));
         self.publish_outputs();
     }
 
@@ -3265,7 +3295,12 @@ impl Compositor {
         if !shell_workspace_rail_accepts_selection(self.keyboard_workspace().presentation()) {
             return false;
         }
-        let changed = if self.outputs.get(self.keyboard_output_id()).unwrap().overview_add_selected {
+        let changed = if self
+            .outputs
+            .get(self.keyboard_output_id())
+            .unwrap()
+            .overview_add_selected
+        {
             self.keyboard_workspace_mut().create_workspace().is_some()
         } else {
             let workspace_id = self.keyboard_workspace().active_workspace();
@@ -3730,21 +3765,34 @@ impl Compositor {
             old_mode.pixel_width, old_mode.pixel_height, pixel_width, pixel_height,
         );
 
-        let refresh_millihz = self.outputs.primary().target.display.get_output_info()
+        let refresh_millihz = self
+            .outputs
+            .primary()
+            .target
+            .display
+            .get_output_info()
             .map_or(old_mode.refresh_millihz, |info| info.refresh_mhz);
         let mode = sws_protocol::outputs::OutputMode {
             pixel_width,
             pixel_height,
             refresh_millihz,
         };
-        let configuration = self.outputs.layout_for_mode(id, mode)
+        let configuration = self
+            .outputs
+            .layout_for_mode(id, mode)
             .map_err(|_| "Failed to lay out resized primary display")?;
 
         let output = self.outputs.primary_mut();
-        output.target.display.refresh_mapping()
+        output
+            .target
+            .display
+            .refresh_mapping()
             .map_err(|_| "Failed to refresh display mapping")?;
         output.metadata.mode = mode;
-        if self.install_output_configuration(&configuration, false).is_err() {
+        if self
+            .install_output_configuration(&configuration, false)
+            .is_err()
+        {
             self.outputs.primary_mut().metadata.mode = old_mode;
             return Err("Failed to apply resized primary display layout");
         }
@@ -3759,7 +3807,9 @@ impl Compositor {
         target.full_redraw = true;
 
         let gpu_resize_failed = match self.gpu_compositor.as_mut() {
-            Some(gpu_compositor) => gpu_compositor.resize_target(pixel_width, pixel_height).is_err(),
+            Some(gpu_compositor) => gpu_compositor
+                .resize_target(pixel_width, pixel_height)
+                .is_err(),
             None => false,
         };
         if gpu_resize_failed {
@@ -4150,8 +4200,8 @@ impl Compositor {
             return;
         }
 
-        let Some(clamped) = OutputRect::new(rect.0, rect.1, rect.2, rect.3)
-            .intersect(self.outputs.bounds())
+        let Some(clamped) =
+            OutputRect::new(rect.0, rect.1, rect.2, rect.3).intersect(self.outputs.bounds())
         else {
             return;
         };
@@ -4563,7 +4613,9 @@ impl Compositor {
                 let Some(rects) = rects.filter(|_| !output.target.full_redraw) else {
                     return (output.id, OutputDamage::Full);
                 };
-                let local = rects.iter().filter_map(|&rect| output.projection().clipped(rect))
+                let local = rects
+                    .iter()
+                    .filter_map(|&rect| output.projection().clipped(rect))
                     .chain(output.target.deferred_gpu_damage)
                     .map(|(x, y, width, height)| (x as i32, y as i32, width, height))
                     .reduce(Self::union_damage_rect);
@@ -4763,20 +4815,31 @@ impl Compositor {
         let mut changed = false;
         let mut topology_changed = false;
         for index in 0..self.secondary_endpoints.len() {
-            let Ok(info) = self.secondary_endpoints[index].control.get_output_info() else { continue; };
+            let Ok(info) = self.secondary_endpoints[index].control.get_output_info() else {
+                continue;
+            };
             // A failed query or incomplete timing is not an unplug notification.
-            if info.is_connected() && (info.width == 0 || info.height == 0) { continue; }
+            if info.is_connected() && (info.width == 0 || info.height == 0) {
+                continue;
+            }
             let info = info.is_connected().then_some(info);
             let attached = self.secondary_endpoints[index].output;
             match (info, attached) {
-                (Some(_), None) => { topology_changed |= self.attach_secondary_output(index); }
+                (Some(_), None) => {
+                    topology_changed |= self.attach_secondary_output(index);
+                }
                 (Some(info), Some(id)) => {
                     let same_monitor_and_mode = self.outputs.get(id).is_some_and(|output| {
-                        output.metadata.mode.pixel_width == info.width && output.metadata.mode.pixel_height == info.height
+                        output.metadata.mode.pixel_width == info.width
+                            && output.metadata.mode.pixel_height == info.height
                             && output.metadata.monitor_key == info.monitor_key().unwrap_or("")
                             && output.metadata.mode.refresh_millihz == info.refresh_mhz
                     });
-                    if !same_monitor_and_mode && self.outputs.get(id).is_some_and(|output| output.metadata.monitor_key == info.monitor_key().unwrap_or("")) {
+                    if !same_monitor_and_mode
+                        && self.outputs.get(id).is_some_and(|output| {
+                            output.metadata.monitor_key == info.monitor_key().unwrap_or("")
+                        })
+                    {
                         changed |= self.refresh_secondary_mode(index, id);
                     } else if !same_monitor_and_mode {
                         self.detach_secondary_output(index);
@@ -4796,7 +4859,9 @@ impl Compositor {
             if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
                 gpu_compositor.outputs_changed();
             }
-            if topology_changed { self.restore_output_configuration(); }
+            if topology_changed {
+                self.restore_output_configuration();
+            }
             let cursor_rect = self.cursor_rect();
             self.confine_cursor_to_outputs();
             self.add_pending_damage(cursor_rect);
@@ -4809,13 +4874,30 @@ impl Compositor {
 
     /// A modeset changes scanout resources, not workspace/output identity.
     fn refresh_secondary_mode(&mut self, index: usize, id: u32) -> bool {
-        let Ok(display) = DisplaySurface::open(&self.secondary_endpoints[index].path) else { return false; };
-        let Ok(info) = display.get_var_screen_info() else { return false; };
-        let metadata = output_control::describe_output(id, display.get_output_info().ok(), info.xres, info.yres, false);
-        let Ok(configuration) = self.outputs.layout_for_mode(id, metadata.mode) else { return false; };
-        let Some(output) = self.outputs.get_mut(id) else { return false; };
+        let Ok(display) = DisplaySurface::open(&self.secondary_endpoints[index].path) else {
+            return false;
+        };
+        let Ok(info) = display.get_var_screen_info() else {
+            return false;
+        };
+        let metadata = output_control::describe_output(
+            id,
+            display.get_output_info().ok(),
+            info.xres,
+            info.yres,
+            false,
+        );
+        let Ok(configuration) = self.outputs.layout_for_mode(id, metadata.mode) else {
+            return false;
+        };
+        let Some(output) = self.outputs.get_mut(id) else {
+            return false;
+        };
         let old_metadata = core::mem::replace(&mut output.metadata, metadata);
-        if self.install_output_configuration(&configuration, false).is_err() {
+        if self
+            .install_output_configuration(&configuration, false)
+            .is_err()
+        {
             self.outputs.get_mut(id).unwrap().metadata = old_metadata;
             return false;
         }
@@ -4828,15 +4910,27 @@ impl Compositor {
         target.deferred_gpu_damage = None;
         target.full_redraw = true;
         let rect = self.outputs.get(id).unwrap().rect;
-        let windows: Vec<_> = self.window_manager.get_windows().iter().filter(|w| w.output_id == id).map(|w| w.id).collect();
+        let windows: Vec<_> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter(|w| w.output_id == id)
+            .map(|w| w.id)
+            .collect();
         for window in windows {
-            if self.window_manager.resize_fullscreen_window_on(window, (rect.x, rect.y, rect.width, rect.height)) {
+            if self
+                .window_manager
+                .resize_fullscreen_window_on(window, (rect.x, rect.y, rect.width, rect.height))
+            {
                 self.send_fullscreen_configure(window);
             }
             self.notify_window_output(window);
         }
-        let requested = self.pending_output_modes.iter().any(|(output, mode)| *output == id && *mode == self.outputs.get(id).unwrap().metadata.mode);
-        self.pending_output_modes.retain(|(output, _)| *output != id);
+        let requested = self.pending_output_modes.iter().any(|(output, mode)| {
+            *output == id && *mode == self.outputs.get(id).unwrap().metadata.mode
+        });
+        self.pending_output_modes
+            .retain(|(output, _)| *output != id);
         if requested {
             if let Err(error) = super::config::persist_outputs(&self.outputs.snapshot()) {
                 println!("[Compositor] Resolution applied but not saved: {}", error);
@@ -4868,8 +4962,21 @@ impl Compositor {
         let backbuffer = vec![0; backbuffer_stride as usize * height as usize];
         let id = self.next_output_id;
         self.next_output_id += 1;
-        let metadata = output_control::describe_output(id, self.secondary_endpoints[index].control.get_output_info().ok(), width, height, false);
-        let display_key = if metadata.identity_is_unique { metadata.monitor_key.clone() } else { format!("session:output{}", id) };
+        let metadata = output_control::describe_output(
+            id,
+            self.secondary_endpoints[index]
+                .control
+                .get_output_info()
+                .ok(),
+            width,
+            height,
+            false,
+        );
+        let display_key = if metadata.identity_is_unique {
+            metadata.monitor_key.clone()
+        } else {
+            format!("session:output{}", id)
+        };
         if !self.workspace_manager.attach_output(id, &display_key) {
             println!(
                 "[Compositor] {}: no workspace available for this output",
@@ -4878,8 +4985,15 @@ impl Compositor {
             return false;
         }
         let scale_milli = self.outputs.primary().scale_milli;
-        let (logical_width, logical_height) = metadata.mode.logical_size(scale_milli).map_err(|_| "Invalid output mode").unwrap();
-        let rect = self.outputs.next_placement(logical_width.saturating_mul(2), logical_height.saturating_mul(2));
+        let (logical_width, logical_height) = metadata
+            .mode
+            .logical_size(scale_milli)
+            .map_err(|_| "Invalid output mode")
+            .unwrap();
+        let rect = self.outputs.next_placement(
+            logical_width.saturating_mul(2),
+            logical_height.saturating_mul(2),
+        );
         self.outputs.push(
             Output::new(
                 id,
@@ -4894,31 +5008,50 @@ impl Compositor {
                     cpu_backdrops: Vec::new(),
                     full_redraw: true,
                     deferred_gpu_damage: None,
-                workspace_motion: None,
-                drawer_motion: None,
-                drawer_open_pending: false,
+                    workspace_motion: None,
+                    drawer_motion: None,
+                    drawer_open_pending: false,
                 },
             )
             .with_metadata(metadata),
         );
         self.secondary_endpoints[index].output = Some(id);
-        let reattached = self.window_manager.get_windows().iter().filter_map(|window| {
-            let root = self.top_level_window_id(window.id);
-            (self.workspace_manager.output_for_window(root) == Some(id) && window.output_id != id).then_some((window.id, window.output_id))
-        }).collect::<Vec<_>>();
+        let reattached = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter_map(|window| {
+                let root = self.top_level_window_id(window.id);
+                (self.workspace_manager.output_for_window(root) == Some(id)
+                    && window.output_id != id)
+                    .then_some((window.id, window.output_id))
+            })
+            .collect::<Vec<_>>();
         for (window_id, previous_output) in reattached {
-            let previous = self.detached_output_geometry.get(&previous_output).copied().unwrap_or(rect);
+            let previous = self
+                .detached_output_geometry
+                .get(&previous_output)
+                .copied()
+                .unwrap_or(rect);
             if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                window.translate_output(rect.x.saturating_sub(previous.x), rect.y.saturating_sub(previous.y));
+                window.translate_output(
+                    rect.x.saturating_sub(previous.x),
+                    rect.y.saturating_sub(previous.y),
+                );
                 window.output_id = id;
-                if window.owner_client_id.is_some_and(|client| super::ipc::client_output_context(client).is_some()) {
+                if window
+                    .owner_client_id
+                    .is_some_and(|client| super::ipc::client_output_context(client).is_some())
+                {
                     window.prefer_scale(scale_milli);
                 }
                 window.last_frame_credit_tick = None;
                 window.last_frame_submission_counter = Some(0);
             }
             for callback in &mut self.pending_frame_callbacks {
-                if callback.window_id == window_id && callback.requested_after_present.is_some() { callback.requested_after_present = Some(0); }
+                if callback.window_id == window_id && callback.requested_after_present.is_some() {
+                    callback.requested_after_present = Some(0);
+                }
             }
             self.notify_window_output(window_id);
         }
@@ -4935,7 +5068,8 @@ impl Compositor {
         if let Some(id) = self.secondary_endpoints[index].output.take()
             && let Some(output) = self.outputs.remove(id)
         {
-            self.pending_output_modes.retain(|(output, _)| *output != id);
+            self.pending_output_modes
+                .retain(|(output, _)| *output != id);
             self.detached_output_geometry.insert(id, output.rect);
             self.workspace_manager.detach_output(id);
             let primary = self.outputs.primary();
@@ -4943,27 +5077,52 @@ impl Compositor {
             let rect = primary.rect;
             let scale = primary.scale_milli;
             let present_counter = primary.present_counter;
-            let recovered = self.window_manager.get_windows().iter().filter_map(|window| {
-                let root = self.top_level_window_id(window.id);
-                (window.output_id == id && self.workspace_manager.output_for_window(root) == Some(destination)).then_some(window.id)
-            }).collect::<Vec<_>>();
+            let recovered = self
+                .window_manager
+                .get_windows()
+                .iter()
+                .filter_map(|window| {
+                    let root = self.top_level_window_id(window.id);
+                    (window.output_id == id
+                        && self.workspace_manager.output_for_window(root) == Some(destination))
+                    .then_some(window.id)
+                })
+                .collect::<Vec<_>>();
             for window_id in recovered {
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                    window.translate_output(rect.x.saturating_sub(output.rect.x), rect.y.saturating_sub(output.rect.y));
+                    window.translate_output(
+                        rect.x.saturating_sub(output.rect.x),
+                        rect.y.saturating_sub(output.rect.y),
+                    );
                     window.output_id = destination;
                     // Keep floating windows reachable on the smaller display.
                     let geometry = window.surface_geometry();
-                    let x = geometry.0.clamp(rect.x, rect.x.saturating_add(rect.width.saturating_sub(geometry.2) as i32));
-                    let y = geometry.1.clamp(rect.y, rect.y.saturating_add(rect.height.saturating_sub(geometry.3) as i32));
-                    window.translate_output(x.saturating_sub(geometry.0), y.saturating_sub(geometry.1));
-                    if window.owner_client_id.is_some_and(|client| super::ipc::client_output_context(client).is_some()) {
+                    let x = geometry.0.clamp(
+                        rect.x,
+                        rect.x
+                            .saturating_add(rect.width.saturating_sub(geometry.2) as i32),
+                    );
+                    let y = geometry.1.clamp(
+                        rect.y,
+                        rect.y
+                            .saturating_add(rect.height.saturating_sub(geometry.3) as i32),
+                    );
+                    window.translate_output(
+                        x.saturating_sub(geometry.0),
+                        y.saturating_sub(geometry.1),
+                    );
+                    if window
+                        .owner_client_id
+                        .is_some_and(|client| super::ipc::client_output_context(client).is_some())
+                    {
                         window.prefer_scale(scale);
                     }
                     window.last_frame_credit_tick = None;
                     window.last_frame_submission_counter = Some(present_counter);
                 }
                 for callback in &mut self.pending_frame_callbacks {
-                    if callback.window_id == window_id && callback.requested_after_present.is_some() {
+                    if callback.window_id == window_id && callback.requested_after_present.is_some()
+                    {
                         callback.requested_after_present = Some(present_counter);
                     }
                 }
@@ -5115,8 +5274,13 @@ impl Compositor {
                 id: output.id,
                 overview_shadows: self.overview_render_shadows(output.id),
                 overview_cards: self.overview_render_backplates(output.id),
-                overview_remove_buttons: overview_remove_buttons.iter().copied().filter(|(workspace, _, _)|
-                    self.workspace_manager.output_for_workspace(*workspace) == Some(output.id)).collect(),
+                overview_remove_buttons: overview_remove_buttons
+                    .iter()
+                    .copied()
+                    .filter(|(workspace, _, _)| {
+                        self.workspace_manager.output_for_workspace(*workspace) == Some(output.id)
+                    })
+                    .collect(),
                 display: &output.target.display,
                 origin: (output.rect.x, output.rect.y),
                 width: output.metadata.mode.pixel_width,
@@ -5145,7 +5309,11 @@ impl Compositor {
         );
         drop(frames);
         drop(scenes);
-        let admitted = self.gpu_compositor.as_ref().map(|gpu| gpu.admitted_outputs().to_vec()).unwrap_or_default();
+        let admitted = self
+            .gpu_compositor
+            .as_ref()
+            .map(|gpu| gpu.admitted_outputs().to_vec())
+            .unwrap_or_default();
         match result {
             Ok((releases, primary_damage)) => {
                 self.account_output_presents();
@@ -5183,7 +5351,8 @@ impl Compositor {
                 self.outputs.primary_mut().target.presented_damage.clear();
                 for (index, (id, damage)) in output_damage.into_iter().enumerate() {
                     if let Some(output) = self.outputs.get_mut(id) {
-                        output.target.full_redraw = !admitted.contains(&index) && damage == OutputDamage::Full;
+                        output.target.full_redraw =
+                            !admitted.contains(&index) && damage == OutputDamage::Full;
                         output.target.deferred_gpu_damage = match damage {
                             OutputDamage::Region(rect) if !admitted.contains(&index) => Some(rect),
                             _ => None,
@@ -5197,7 +5366,8 @@ impl Compositor {
                 // New input accumulates independently while the GPU retires.
                 for (index, (id, damage)) in output_damage.iter().enumerate() {
                     if let Some(output) = self.outputs.get_mut(*id) {
-                        output.target.full_redraw = !admitted.contains(&index) && *damage == OutputDamage::Full;
+                        output.target.full_redraw =
+                            !admitted.contains(&index) && *damage == OutputDamage::Full;
                         output.target.deferred_gpu_damage = match *damage {
                             OutputDamage::Region(rect) if !admitted.contains(&index) => Some(rect),
                             _ => None,
@@ -5260,13 +5430,25 @@ impl Compositor {
     }
 
     fn account_output_presents(&mut self) {
-        let indices = self.gpu_compositor.as_mut().map(|gpu| gpu.take_completed_outputs()).unwrap_or_default();
-        if indices.is_empty() { return; }
+        let indices = self
+            .gpu_compositor
+            .as_mut()
+            .map(|gpu| gpu.take_completed_outputs())
+            .unwrap_or_default();
+        if indices.is_empty() {
+            return;
+        }
         let now = monotonic_time_ns();
         for (index, output) in self.outputs.iter_mut().enumerate() {
             if indices.contains(&index) {
                 output.present_counter = output.present_counter.saturating_add(1);
-                for motion in [&mut output.target.workspace_motion, &mut output.target.drawer_motion].into_iter().flatten() {
+                for motion in [
+                    &mut output.target.workspace_motion,
+                    &mut output.target.drawer_motion,
+                ]
+                .into_iter()
+                .flatten()
+                {
                     motion.note_presented(now);
                 }
             }
@@ -5302,8 +5484,14 @@ impl Compositor {
                 for release in releases {
                     send_sgfx_buffer_released(release);
                 }
-                for (x, y, width, height) in self.gpu_compositor.as_mut().unwrap().take_completed_primary_damage() {
-                    self.capture_session.frame_presented(&Some(vec![(x as i32, y as i32, width, height)]));
+                for (x, y, width, height) in self
+                    .gpu_compositor
+                    .as_mut()
+                    .unwrap()
+                    .take_completed_primary_damage()
+                {
+                    self.capture_session
+                        .frame_presented(&Some(vec![(x as i32, y as i32, width, height)]));
                 }
                 // Do not clear current damage/cursor: input may have changed
                 // them since admission of this exact completed frame.
@@ -6216,10 +6404,10 @@ impl Compositor {
     /// Broadcast focus change event to all connected clients
     fn broadcast_focus_change(&mut self, window_id: u32) {
         self.sync_gamepad_focus();
-        if self.workspace_manager.activate_window(
-            window_id,
-            self.window_uses_focused_mode(window_id),
-        ) {
+        if self
+            .workspace_manager
+            .activate_window(window_id, self.window_uses_focused_mode(window_id))
+        {
             self.apply_workspace_presentation_policy();
             self.publish_workspace_state();
             self.full_redraw_needed = true;
@@ -6473,9 +6661,7 @@ impl Compositor {
                 super::input::abs_codes::ABS_Y,
                 window_y,
             );
-            super::ipc::send_input_to_window(
-                            window_id, 0, super::input::event_types::EV_SYN, 0, 0,
-                        );
+            super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
         }
     }
 
@@ -6644,15 +6830,17 @@ impl Compositor {
     }
 
     fn point_in_overview_add_workspace(&self, x: i32, y: i32) -> bool {
-        self.overview_layout_for_output(self.pointer_output_id(x, y)).into_iter()
-            .find_map(|(id, rect)| (id == 0).then_some(rect)).is_some_and(|rect| {
-            rounded_rect_contains_point(
-                rect,
-                sws_protocol::workspace::OVERVIEW_CARD_CORNER_RADIUS,
-                x,
-                y,
-            )
-        })
+        self.overview_layout_for_output(self.pointer_output_id(x, y))
+            .into_iter()
+            .find_map(|(id, rect)| (id == 0).then_some(rect))
+            .is_some_and(|rect| {
+                rounded_rect_contains_point(
+                    rect,
+                    sws_protocol::workspace::OVERVIEW_CARD_CORNER_RADIUS,
+                    x,
+                    y,
+                )
+            })
     }
 
     fn overview_window_at_point(&self, x: i32, y: i32) -> Option<u32> {
@@ -6758,47 +6946,99 @@ impl Compositor {
     }
 
     fn finish_overview_window_drag(&mut self, drag: OverviewWindowDrag) -> bool {
-        let crossed = drag.current_x.saturating_sub(drag.start_x).unsigned_abs()
-            .max(drag.current_y.saturating_sub(drag.start_y).unsigned_abs()) >= self.overview_window_drag_threshold();
+        let crossed = drag
+            .current_x
+            .saturating_sub(drag.start_x)
+            .unsigned_abs()
+            .max(drag.current_y.saturating_sub(drag.start_y).unsigned_abs())
+            >= self.overview_window_drag_threshold();
         let destination = self.pointer_output_id(drag.current_x, drag.current_y);
         let source = self.window_output_id(drag.window_id);
-        let tablet = self.output_context_for(destination).is_some_and(|context| context.tablet);
+        let tablet = self
+            .output_context_for(destination)
+            .is_some_and(|context| context.tablet);
         let adding = self.point_in_overview_add_workspace(drag.current_x, drag.current_y);
-        let card = self.overview_layout_for_output(destination).into_iter().find_map(|(id, rect)|
-            ((adding && id == 0) || Some(id) == self.workspace_card_at_point(drag.current_x, drag.current_y)).then_some(rect));
+        let card = self
+            .overview_layout_for_output(destination)
+            .into_iter()
+            .find_map(|(id, rect)| {
+                ((adding && id == 0)
+                    || Some(id) == self.workspace_card_at_point(drag.current_x, drag.current_y))
+                .then_some(rect)
+            });
         let position = if crossed && !tablet {
             card.and_then(|card| self.overview_drop_position_for_window(drag.window_id, card))
-                .or_else(|| (destination != source).then(|| {
-                    let (_, _, width, height) = self.window_manager.get_window(drag.window_id).unwrap().window_geometry();
-                    self.output_window_position(destination, width, height, true)
-                }))
-        } else { None };
+                .or_else(|| {
+                    (destination != source).then(|| {
+                        let (_, _, width, height) = self
+                            .window_manager
+                            .get_window(drag.window_id)
+                            .unwrap()
+                            .window_geometry();
+                        self.output_window_position(destination, width, height, true)
+                    })
+                })
+        } else {
+            None
+        };
         let changed = if crossed {
             let target = if adding {
-                self.workspace_manager.output_mut(destination).and_then(|mut state| state.create_workspace())
+                self.workspace_manager
+                    .output_mut(destination)
+                    .and_then(|mut state| state.create_workspace())
             } else {
-                self.workspace_card_at_point(drag.current_x, drag.current_y).or_else(||
-                    (destination != source).then(|| self.workspace_manager.output(destination).unwrap().active_workspace()))
+                self.workspace_card_at_point(drag.current_x, drag.current_y)
+                    .or_else(|| {
+                        (destination != source).then(|| {
+                            self.workspace_manager
+                                .output(destination)
+                                .unwrap()
+                                .active_workspace()
+                        })
+                    })
             };
-            target.filter(|target| *target != drag.source_workspace_id).is_some_and(|target| {
-                let layout = self.workspace_manager.tablet_layout(target);
-                if tablet && matches!(layout, sws_protocol::workspace::TabletLayout::Split { .. }) { return false; }
-                let moved = if tablet && matches!(layout, sws_protocol::workspace::TabletLayout::Single { .. }) {
-                    self.workspace_manager.move_window_to_workspace_as_split(drag.window_id, target)
-                } else { self.workspace_manager.move_window_to_workspace(drag.window_id, target) };
-                if moved && destination != source { self.bind_window_output(drag.window_id, destination); }
-                moved
-            })
+            target
+                .filter(|target| *target != drag.source_workspace_id)
+                .is_some_and(|target| {
+                    let layout = self.workspace_manager.tablet_layout(target);
+                    if tablet
+                        && matches!(layout, sws_protocol::workspace::TabletLayout::Split { .. })
+                    {
+                        return false;
+                    }
+                    let moved = if tablet
+                        && matches!(layout, sws_protocol::workspace::TabletLayout::Single { .. })
+                    {
+                        self.workspace_manager
+                            .move_window_to_workspace_as_split(drag.window_id, target)
+                    } else {
+                        self.workspace_manager
+                            .move_window_to_workspace(drag.window_id, target)
+                    };
+                    if moved && destination != source {
+                        self.bind_window_output(drag.window_id, destination);
+                    }
+                    moved
+                })
         } else {
             self.overview_restore_focus = Some(drag.window_id);
-            if let Some(output) = self.outputs.get_mut(source) { output.restore_focus = Some(drag.window_id); }
-            self.workspace_manager.select_workspace_from_overview(drag.source_workspace_id)
+            if let Some(output) = self.outputs.get_mut(source) {
+                output.restore_focus = Some(drag.window_id);
+            }
+            self.workspace_manager
+                .select_workspace_from_overview(drag.source_workspace_id)
         };
-        if changed && let Some((x, y)) = position { self.set_window_position_with_damage(drag.window_id, x, y); }
+        if changed && let Some((x, y)) = position {
+            self.set_window_position_with_damage(drag.window_id, x, y);
+        }
         self.overview_window_drag = None;
-        for output in self.outputs.iter_mut() { output.overview_add_selected = false; }
+        for output in self.outputs.iter_mut() {
+            output.overview_add_selected = false;
+        }
         self.apply_workspace_presentation_policy_on(Some(destination));
-        if changed { self.publish_workspace_state(); }
+        if changed {
+            self.publish_workspace_state();
+        }
         self.full_redraw_needed = true;
         self.damage_profile.full(line!());
         changed
@@ -6815,7 +7055,8 @@ impl Compositor {
     }
 
     fn point_in_overview_workspace_region(&self, x: i32, y: i32) -> bool {
-        let (region_x, region_y, width, height) = self.overview_region_for_output(self.pointer_output_id(x, y));
+        let (region_x, region_y, width, height) =
+            self.overview_region_for_output(self.pointer_output_id(x, y));
         x >= region_x
             && x < region_x.saturating_add(width as i32)
             && y >= region_y
@@ -6823,7 +7064,11 @@ impl Compositor {
     }
 
     fn shell_navigation_captures_pointer_at(&self, x: i32, y: i32) -> bool {
-        if self.workspace_manager.output(self.pointer_output_id(x, y)).unwrap().presentation()
+        if self
+            .workspace_manager
+            .output(self.pointer_output_id(x, y))
+            .unwrap()
+            .presentation()
             == sws_protocol::workspace::ShellPresentation::Workspace
         {
             return false;
@@ -6861,7 +7106,11 @@ impl Compositor {
 
     fn move_overview_selection_on(&mut self, output: u32, direction: i32) -> bool {
         if direction == 0
-            || self.workspace_manager.output(output).unwrap().presentation()
+            || self
+                .workspace_manager
+                .output(output)
+                .unwrap()
+                .presentation()
                 == sws_protocol::workspace::ShellPresentation::Workspace
         {
             return false;
@@ -6891,14 +7140,22 @@ impl Compositor {
             return true;
         }
 
-        let changed = self.workspace_manager.output_mut(output).unwrap().move_overview_selection(direction);
+        let changed = self
+            .workspace_manager
+            .output_mut(output)
+            .unwrap()
+            .move_overview_selection(direction);
         self.apply_overview_navigation_change_on(output, changed)
     }
 
     fn handle_overview_horizontal_scroll(&mut self, dx: i32) -> bool {
         let output = self.pointer_output_id(self.cursor.x, self.cursor.y);
         if dx == 0
-            || self.workspace_manager.output(output).unwrap().presentation()
+            || self
+                .workspace_manager
+                .output(output)
+                .unwrap()
+                .presentation()
                 == sws_protocol::workspace::ShellPresentation::Workspace
         {
             return false;
@@ -6912,7 +7169,10 @@ impl Compositor {
         }
         let changed = self.move_overview_selection_on(output, if dx < 0 { 1 } else { -1 });
         if changed {
-            self.outputs.get_mut(output).unwrap().overview_scroll_step_ns = now;
+            self.outputs
+                .get_mut(output)
+                .unwrap()
+                .overview_scroll_step_ns = now;
         }
         true
     }
@@ -6924,7 +7184,9 @@ impl Compositor {
         end_y: i32,
     ) -> bool {
         let output = self.pointer_output_id(navigation.start_x, navigation.start_y);
-        if self.pointer_output_id(end_x, end_y) != output { return false; }
+        if self.pointer_output_id(end_x, end_y) != output {
+            return false;
+        }
         let dx = end_x.saturating_sub(navigation.start_x);
         let dy = end_y.saturating_sub(navigation.start_y);
         let drag_threshold = (self.outputs.get(output).unwrap().rect.width / 14).clamp(48, 160);
@@ -6940,12 +7202,19 @@ impl Compositor {
         {
             let changed = self.workspace_manager.remove_workspace(
                 workspace_id,
-                !self.output_context_for(output).is_some_and(|context| context.tablet),
+                !self
+                    .output_context_for(output)
+                    .is_some_and(|context| context.tablet),
             );
             return self.apply_overview_navigation_change_on(output, changed);
         }
         if navigation.start_add_workspace && self.point_in_overview_add_workspace(end_x, end_y) {
-            let changed = self.workspace_manager.output_mut(output).unwrap().create_workspace().is_some();
+            let changed = self
+                .workspace_manager
+                .output_mut(output)
+                .unwrap()
+                .create_workspace()
+                .is_some();
             return self.apply_overview_navigation_change_on(output, changed);
         }
         let end_workspace_id = self.workspace_card_at_point(end_x, end_y);
@@ -7022,7 +7291,8 @@ impl Compositor {
             .iter()
             .filter_map(|window| {
                 let root = self.top_level_window_id(window.id);
-                if window.output_id != output || !window.is_presented()
+                if window.output_id != output
+                    || !window.is_presented()
                     || self.workspace_manager.workspace_for_window(root).is_none()
                 {
                     return None;
@@ -7676,8 +7946,11 @@ impl Compositor {
                 screen_y,
                 frame.time_ns,
                 self.output_scale_milli(),
-            ).with_desktop_drag(
-                !self.output_context_for(self.pointer_output_id(screen_x, screen_y)).is_some_and(|context| context.tablet),
+            )
+            .with_desktop_drag(
+                !self
+                    .output_context_for(self.pointer_output_id(screen_x, screen_y))
+                    .is_some_and(|context| context.tablet),
                 over_laptop_spread,
             ),
             pan_origin: self.overview_pan,
@@ -7699,7 +7972,9 @@ impl Compositor {
         if !self.login_seat && self.handle_tablet_navigation(&frame) {
             return true;
         }
-        if !self.login_seat && let Some(shell_redraw) = self.handle_system_touch_navigation(&frame) {
+        if !self.login_seat
+            && let Some(shell_redraw) = self.handle_system_touch_navigation(&frame)
+        {
             return redraw || shell_redraw;
         }
         let context = self.current_input_frame;
@@ -7761,7 +8036,9 @@ impl Compositor {
                         .is_some_and(|state| state.window_id == grab.window_id)
                 {
                     self.move_drag = None;
-                    if !frame.cancelled { self.finish_window_output_drag(grab.window_id); }
+                    if !frame.cancelled {
+                        self.finish_window_output_drag(grab.window_id);
+                    }
                 }
             } else {
                 index += 1;
@@ -8172,7 +8449,9 @@ impl Compositor {
                 .tablet_motion
                 .as_ref()
                 .is_some_and(|motion| motion.started_ns.is_some())
-                || self.outputs.iter().any(|o| o.target.drawer_motion.is_some() || o.target.workspace_motion.is_some()))
+                || self.outputs.iter().any(|o| {
+                    o.target.drawer_motion.is_some() || o.target.workspace_motion.is_some()
+                }))
         {
             timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
         }
@@ -8516,15 +8795,22 @@ impl Compositor {
         }
         let mut output_motion_changed = false;
         for output in self.outputs.iter_mut() {
-            for slot in [&mut output.target.workspace_motion, &mut output.target.drawer_motion] {
+            for slot in [
+                &mut output.target.workspace_motion,
+                &mut output.target.drawer_motion,
+            ] {
                 if let Some(motion) = slot {
-                    if motion.advance(now) { *slot = None; }
+                    if motion.advance(now) {
+                        *slot = None;
+                    }
                     output.target.full_redraw = true;
                     output_motion_changed = true;
                 }
             }
         }
-        if output_motion_changed && !motion_changed { self.update_overview_transforms(); }
+        if output_motion_changed && !motion_changed {
+            self.update_overview_transforms();
+        }
         if motion_changed {
             self.update_overview_transforms();
             self.full_redraw_needed = true;
@@ -8535,9 +8821,16 @@ impl Compositor {
     }
 
     fn has_pending_redraw(&self) -> bool {
-        self.full_redraw_needed || !self.pending_damage.is_empty() || self.cursor.needs_redraw()
-            || self.gpu_compositor.as_ref().is_some_and(|gpu| gpu.needs_redraw())
-            || self.outputs.iter().any(|output| output.target.full_redraw || output.target.deferred_gpu_damage.is_some())
+        self.full_redraw_needed
+            || !self.pending_damage.is_empty()
+            || self.cursor.needs_redraw()
+            || self
+                .gpu_compositor
+                .as_ref()
+                .is_some_and(|gpu| gpu.needs_redraw())
+            || self.outputs.iter().any(|output| {
+                output.target.full_redraw || output.target.deferred_gpu_damage.is_some()
+            })
     }
 
     fn wait_for_frame_batch(&mut self) -> Result<(), &'static str> {
@@ -8643,7 +8936,11 @@ impl Compositor {
         if self.gpu_admission_retry.waiting_for_display() {
             // Completion wakes are hints. Poll the current target and its exact
             // N+1 image lifetime before lifting ONLY the display admission gate.
-            let wanted = self.output_damage(&self.pending_present_damage()).iter().map(|(_, damage)| *damage != OutputDamage::Skip).collect::<Vec<_>>();
+            let wanted = self
+                .output_damage(&self.pending_present_damage())
+                .iter()
+                .map(|(_, damage)| *damage != OutputDamage::Skip)
+                .collect::<Vec<_>>();
             let ready = match self.gpu_compositor.as_mut() {
                 Some(gpu) => gpu.render_target_ready(&wanted),
                 None => Ok(true),
@@ -8658,11 +8955,18 @@ impl Compositor {
         }
         // Only global resource/topology mutations require quiescence. A
         // submitted frame on another output does not block normal composition.
-        if self.gpu_frame_pending() && (!self.deferred_gpu_remote.is_empty()
-            || self.deferred_gpu_ipc.iter().any(|event| ipc_frame_window(event).is_none())) {
+        if self.gpu_frame_pending()
+            && (!self.deferred_gpu_remote.is_empty()
+                || self
+                    .deferred_gpu_ipc
+                    .iter()
+                    .any(|event| ipc_frame_window(event).is_none()))
+        {
             self.consume_event_signal_if_ready();
             self.retire_gpu_frame()?;
-            if self.gpu_frame_pending() && !self.has_queued_event_work() { self.wait_for_event_signal(); }
+            if self.gpu_frame_pending() && !self.has_queued_event_work() {
+                self.wait_for_event_signal();
+            }
             return Ok(());
         }
         if self.gpu_compositor.is_some()
@@ -8728,7 +9032,9 @@ impl Compositor {
             super::trace::compositor_present();
             super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
             self.note_frame_presented();
-            if self.gpu_compositor.is_none() { self.outputs.primary_mut().present_counter += 1; }
+            if self.gpu_compositor.is_none() {
+                self.outputs.primary_mut().present_counter += 1;
+            }
             presented = true;
             // Grant only after the display accepted the frame. Presentation
             // policy applied below may expose a different scene, which must
@@ -8868,8 +9174,11 @@ impl Compositor {
                     return Ok(true);
                 }
                 let bounds = self.outputs.bounds();
-                self.cursor.set_position_in_rect(self.cursor.x.saturating_add(dx), self.cursor.y.saturating_add(dy),
-                    (bounds.x, bounds.y, bounds.width, bounds.height));
+                self.cursor.set_position_in_rect(
+                    self.cursor.x.saturating_add(dx),
+                    self.cursor.y.saturating_add(dy),
+                    (bounds.x, bounds.y, bounds.width, bounds.height),
+                );
                 self.confine_cursor_to_outputs();
                 self.refresh_cursor_icon();
                 if self.workspace_manager.presentation()
@@ -8978,7 +9287,11 @@ impl Compositor {
                     return Ok(true);
                 }
                 let bounds = self.outputs.bounds();
-                self.cursor.set_position_in_rect(x, y, (bounds.x, bounds.y, bounds.width, bounds.height));
+                self.cursor.set_position_in_rect(
+                    x,
+                    y,
+                    (bounds.x, bounds.y, bounds.width, bounds.height),
+                );
                 self.confine_cursor_to_outputs();
                 self.refresh_cursor_icon();
                 if self.workspace_manager.presentation()
@@ -9164,7 +9477,11 @@ impl Compositor {
                         return Ok(true);
                     }
                     let output = self.pointer_output_id(self.cursor.x, self.cursor.y);
-                    let presentation = self.workspace_manager.output(output).unwrap().presentation();
+                    let presentation = self
+                        .workspace_manager
+                        .output(output)
+                        .unwrap()
+                        .presentation();
                     let overview =
                         presentation == sws_protocol::workspace::ShellPresentation::Overview;
                     let shell_navigation =
@@ -9172,7 +9489,9 @@ impl Compositor {
                     let in_workspace_region = shell_navigation
                         && self.point_in_overview_workspace_region(self.cursor.x, self.cursor.y);
                     let over_laptop_spread = overview
-                        && !self.output_context_for(output).is_some_and(|context| context.tablet)
+                        && !self
+                            .output_context_for(output)
+                            .is_some_and(|context| context.tablet)
                         && self
                             .overview_window_at_point(self.cursor.x, self.cursor.y)
                             .is_some();
@@ -9272,7 +9591,9 @@ impl Compositor {
                                 state.last_width,
                                 state.last_height,
                             );
-                            if let Some(window) = self.window_manager.get_window_mut(state.window_id) {
+                            if let Some(window) =
+                                self.window_manager.get_window_mut(state.window_id)
+                            {
                                 window.set_scene_extent(width, height);
                             }
                             self.send_current_window_configure(state.window_id);
@@ -9529,9 +9850,19 @@ impl Compositor {
                 if self.login_seat {
                     if let Some(window_id) = focused_id {
                         super::ipc::send_input_to_window(
-                            window_id, 0, super::input::event_types::EV_KEY, code, value,
+                            window_id,
+                            0,
+                            super::input::event_types::EV_KEY,
+                            code,
+                            value,
                         );
-                        super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+                        super::ipc::send_input_to_window(
+                            window_id,
+                            0,
+                            super::input::event_types::EV_SYN,
+                            0,
+                            0,
+                        );
                     }
                     return Ok(false);
                 }
@@ -9573,7 +9904,8 @@ impl Compositor {
                 }
                 if is_initial_press(value)
                     && laptop_overview_space_opens_home(
-                        self.output_context_for(self.keyboard_output_id()).is_some_and(|context| context.tablet),
+                        self.output_context_for(self.keyboard_output_id())
+                            .is_some_and(|context| context.tablet),
                         self.keyboard_workspace().presentation(),
                         code,
                         modifiers,
@@ -9592,7 +9924,11 @@ impl Compositor {
                 if is_initial_press(value)
                     && code == key_codes::KEY_ENTER
                     && modifiers == KeyModifiers::default()
-                    && self.outputs.get(self.keyboard_output_id()).unwrap().overview_add_selected
+                    && self
+                        .outputs
+                        .get(self.keyboard_output_id())
+                        .unwrap()
+                        .overview_add_selected
                     && self.keyboard_workspace().presentation()
                         == sws_protocol::workspace::ShellPresentation::Overview
                 {
@@ -11023,15 +11359,22 @@ impl Compositor {
         if !self.is_workspace_scene_root(window_id) {
             return false;
         }
-        let output_id = self.window_manager.get_window(window_id).map_or(0, |window| window.output_id);
-        let tablet = self.output_context_for(output_id).is_some_and(|context| context.tablet);
+        let output_id = self
+            .window_manager
+            .get_window(window_id)
+            .map_or(0, |window| window.output_id);
+        let tablet = self
+            .output_context_for(output_id)
+            .is_some_and(|context| context.tablet);
         if tablet || (output_id == 0 && self.console_shell_present()) {
             if !self.pending_workspace_scenes.contains(&window_id) {
                 self.pending_workspace_scenes.push(window_id);
             }
             return false;
         }
-        if let Some(mut output) = self.workspace_manager.output_mut(output_id) { output.add_scene_root(window_id, false, false); }
+        if let Some(mut output) = self.workspace_manager.output_mut(output_id) {
+            output.add_scene_root(window_id, false, false);
+        }
         true
     }
 
@@ -11059,9 +11402,16 @@ impl Compositor {
             return false;
         }
 
-        let output_id = self.window_manager.get_window(window_id).map_or(0, |window| window.output_id);
-        let tablet = self.output_context_for(output_id).is_some_and(|context| context.tablet);
-        if let Some(mut output) = self.workspace_manager.output_mut(output_id) { output.add_scene_root(window_id, tablet, tablet); }
+        let output_id = self
+            .window_manager
+            .get_window(window_id)
+            .map_or(0, |window| window.output_id);
+        let tablet = self
+            .output_context_for(output_id)
+            .is_some_and(|context| context.tablet);
+        if let Some(mut output) = self.workspace_manager.output_mut(output_id) {
+            output.add_scene_root(window_id, tablet, tablet);
+        }
         if let Some(focused_window_id) = self.window_manager.get_focused_window_id()
             && self.top_level_window_id(focused_window_id) == window_id
         {
@@ -11116,8 +11466,12 @@ impl Compositor {
             .window_manager
             .get_window(window_id)
             .and_then(|window| window.last_frame_submission_counter);
-        let requested_after_present = (!is_credit)
-            .then(|| frame_callback_target(self.window_present_counter(window_id), last_submission_counter));
+        let requested_after_present = (!is_credit).then(|| {
+            frame_callback_target(
+                self.window_present_counter(window_id),
+                last_submission_counter,
+            )
+        });
         self.pending_frame_callbacks.push(PendingFrameCallback {
             client_id,
             window_id,
@@ -11484,7 +11838,10 @@ impl Compositor {
             self.route_pointer_motion_at_cursor();
         }
         if let Some(window) = self.window_manager.get_window(window_id)
-            && self.outputs.get(window.output_id).is_some_and(|o| o.target.drawer_open_pending)
+            && self
+                .outputs
+                .get(window.output_id)
+                .is_some_and(|o| o.target.drawer_open_pending)
             && window.window_type == WindowType::ShellBackground
             && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
         {
@@ -11714,12 +12071,11 @@ impl Compositor {
         let Some(window) = self.window_manager.get_window(window_id) else {
             return false;
         };
-        let Some(output_state) = self.workspace_manager.output(window.output_id) else { return false; };
+        let Some(output_state) = self.workspace_manager.output(window.output_id) else {
+            return false;
+        };
         let presentation = output_state.presentation();
-        if let Some(visible) = fixed_depth_visibility(
-            window.app_id.as_deref(),
-            presentation,
-        ) {
+        if let Some(visible) = fixed_depth_visibility(window.app_id.as_deref(), presentation) {
             return visible;
         }
         if matches!(
@@ -11754,17 +12110,20 @@ impl Compositor {
         };
         match presentation {
             sws_protocol::workspace::ShellPresentation::Workspace => {
-                if window.output_id == self.outputs.primary_id() && self
-                    .tablet_motion
-                    .as_ref()
-                    .is_some_and(|motion| motion.exit_target(window_id).is_some())
+                if window.output_id == self.outputs.primary_id()
+                    && self
+                        .tablet_motion
+                        .as_ref()
+                        .is_some_and(|motion| motion.exit_target(window_id).is_some())
                 {
                     return true;
                 }
                 if workspace_id != output_state.active_workspace() {
                     return false;
                 }
-                !self.output_context_for(window.output_id).is_some_and(|context| context.tablet)
+                !self
+                    .output_context_for(window.output_id)
+                    .is_some_and(|context| context.tablet)
                     || self.tablet_slot_for_window(root_id).is_some()
             }
             sws_protocol::workspace::ShellPresentation::Home
@@ -11781,10 +12140,22 @@ impl Compositor {
                     *candidate == workspace_id
                         && intersect_compositor_rects(
                             *rect,
-                            self.outputs.get(window.output_id).map(|output| (output.rect.x, output.rect.y, output.rect.width, output.rect.height)).unwrap_or((0, 0, 0, 0)),
+                            self.outputs
+                                .get(window.output_id)
+                                .map(|output| {
+                                    (
+                                        output.rect.x,
+                                        output.rect.y,
+                                        output.rect.width,
+                                        output.rect.height,
+                                    )
+                                })
+                                .unwrap_or((0, 0, 0, 0)),
                         )
                         .is_some()
-                }) && (!self.output_context_for(window.output_id).is_some_and(|context| context.tablet)
+                }) && (!self
+                    .output_context_for(window.output_id)
+                    .is_some_and(|context| context.tablet)
                     || self.tablet_slot_for_window(root_id).is_some())
             }
         }
@@ -11828,14 +12199,21 @@ impl Compositor {
                 let scale = u64::from(window.preferred_scale_milli.max(1));
                 let scene_length = |value: u32| (u64::from(value) * 2000 / scale) as u32;
                 let output = (
-                    window.x.saturating_add(scene_length(region.x.max(0) as u32) as i32),
-                    window.y.saturating_add(scene_length(region.y.max(0) as u32) as i32),
-                    scene_length(width), scene_length(height),
+                    window
+                        .x
+                        .saturating_add(scene_length(region.x.max(0) as u32) as i32),
+                    window
+                        .y
+                        .saturating_add(scene_length(region.y.max(0) as u32) as i32),
+                    scene_length(width),
+                    scene_length(height),
                 );
                 for target in self.outputs.iter() {
                     let projection = target.projection();
                     if let Some(geometry) = BackdropGeometry::new_projected(
-                        projection.origin, projection.scene, projection.native,
+                        projection.origin,
+                        projection.scene,
+                        projection.native,
                         projection.rect(output),
                         projection.radius(scene_length(region.blur_radius)).max(1),
                         projection.radius(scene_length(region.corner_radius)),
@@ -11861,31 +12239,72 @@ impl Compositor {
 
     fn overview_region_for_output(&self, output: u32) -> (i32, i32, u32, u32) {
         let workarea = self.output_workarea(output);
-        if output == self.outputs.primary_id() && self.console_home_active() { return (workarea.0, workarea.1, workarea.2, 0); }
-        let Some(state) = self.workspace_manager.output(output) else { return (workarea.0, workarea.1, workarea.2, 0); };
-        overview_workspace_region_for(workarea, self.output_context_for(output).is_some_and(|context| context.tablet),
-            self.output_scale_milli(), state.presentation())
+        if output == self.outputs.primary_id() && self.console_home_active() {
+            return (workarea.0, workarea.1, workarea.2, 0);
+        }
+        let Some(state) = self.workspace_manager.output(output) else {
+            return (workarea.0, workarea.1, workarea.2, 0);
+        };
+        overview_workspace_region_for(
+            workarea,
+            self.output_context_for(output)
+                .is_some_and(|context| context.tablet),
+            self.output_scale_milli(),
+            state.presentation(),
+        )
     }
 
     fn overview_layout_for_output(&self, output: u32) -> Vec<(u32, (i32, i32, u32, u32))> {
-        if output == self.outputs.primary_id() && self.console_home_active() { return Vec::new(); }
-        let Some(state) = self.workspace_manager.output(output) else { return Vec::new(); };
+        if output == self.outputs.primary_id() && self.console_home_active() {
+            return Vec::new();
+        }
+        let Some(state) = self.workspace_manager.output(output) else {
+            return Vec::new();
+        };
         let state = state.snapshot();
-        if state.presentation == sws_protocol::workspace::ShellPresentation::Workspace { return Vec::new(); }
+        if state.presentation == sws_protocol::workspace::ShellPresentation::Workspace {
+            return Vec::new();
+        }
         let workarea = self.output_workarea(output);
-        let tablet = self.output_context_for(output).is_some_and(|context| context.tablet);
-        let mut workspace_ids = state.workspaces.iter().map(|workspace| workspace.id).collect::<Vec<_>>();
-        if workspace_ids.len() < sws_protocol::workspace::MAX_WORKSPACES { workspace_ids.push(0); }
-        layout_overview_cards(workarea, tablet, self.output_scale_milli(), state.presentation,
-            &workspace_ids, state.active_workspace).into_iter().map(|(id, (x, y, w, h))| {
-            let pan = if output == self.outputs.primary_id() && tablet
-                && state.presentation == sws_protocol::workspace::ShellPresentation::Overview { self.overview_pan } else { 0.0 };
+        let tablet = self
+            .output_context_for(output)
+            .is_some_and(|context| context.tablet);
+        let mut workspace_ids = state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        if workspace_ids.len() < sws_protocol::workspace::MAX_WORKSPACES {
+            workspace_ids.push(0);
+        }
+        layout_overview_cards(
+            workarea,
+            tablet,
+            self.output_scale_milli(),
+            state.presentation,
+            &workspace_ids,
+            state.active_workspace,
+        )
+        .into_iter()
+        .map(|(id, (x, y, w, h))| {
+            let pan = if output == self.outputs.primary_id()
+                && tablet
+                && state.presentation == sws_protocol::workspace::ShellPresentation::Overview
+            {
+                self.overview_pan
+            } else {
+                0.0
+            };
             (id, (x.saturating_add(pan.round() as i32), y, w, h))
-        }).collect()
+        })
+        .collect()
     }
 
     fn overview_layout_rects(&self) -> Vec<(u32, (i32, i32, u32, u32))> {
-        self.outputs.iter().flat_map(|output| self.overview_layout_for_output(output.id)).collect()
+        self.outputs
+            .iter()
+            .flat_map(|output| self.overview_layout_for_output(output.id))
+            .collect()
     }
 
     fn overview_card_rects(&self) -> Vec<(u32, (i32, i32, u32, u32))> {
@@ -11914,15 +12333,21 @@ impl Compositor {
             .filter_map(|(workspace_id, card)| {
                 let output = self.workspace_manager.output_for_workspace(workspace_id)?;
                 let state = self.workspace_manager.output(output)?;
-                if state.tablet_experience() || state.presentation() != sws_protocol::workspace::ShellPresentation::Overview
-                    || !state.can_remove_workspace(workspace_id, true) { return None; }
+                if state.tablet_experience()
+                    || state.presentation() != sws_protocol::workspace::ShellPresentation::Overview
+                    || !state.can_remove_workspace(workspace_id, true)
+                {
+                    return None;
+                }
                 let hovered = rounded_rect_contains_point(
                     card,
                     sws_protocol::workspace::OVERVIEW_CARD_CORNER_RADIUS,
                     pointer_x,
                     pointer_y,
                 );
-                if !hovered { return None; }
+                if !hovered {
+                    return None;
+                }
                 let short_side = card.2.min(card.3);
                 let size = (short_side / 7).clamp(28, 44);
                 let inset = (size / 4).max(6);
@@ -11945,8 +12370,10 @@ impl Compositor {
     fn overview_remove_workspace_at_point(&self, x: i32, y: i32) -> Option<u32> {
         self.overview_remove_buttons()
             .into_iter()
-            .filter(|(workspace, _, _)| self.workspace_manager.output_for_workspace(*workspace)
-                == Some(self.pointer_output_id(x, y)))
+            .filter(|(workspace, _, _)| {
+                self.workspace_manager.output_for_workspace(*workspace)
+                    == Some(self.pointer_output_id(x, y))
+            })
             .find_map(|(workspace_id, rect, _)| {
                 rounded_rect_contains_point(rect, rect.2 / 2, x, y).then_some(workspace_id)
             })
@@ -11968,7 +12395,10 @@ impl Compositor {
         })
     }
 
-    fn overview_render_backplates(&self, output_id: u32) -> Vec<((i32, i32, u32, u32), bool, bool)> {
+    fn overview_render_backplates(
+        &self,
+        output_id: u32,
+    ) -> Vec<((i32, i32, u32, u32), bool, bool)> {
         let mut backplates = self
             .overview_layout_for_output(output_id)
             .into_iter()
@@ -11976,13 +12406,22 @@ impl Compositor {
             .map(|(workspace_id, rect)| {
                 (
                     rect,
-                    self.workspace_manager.output_for_workspace(workspace_id).and_then(|id| self.workspace_manager.output(id)).is_some_and(|state| state.active_workspace() == workspace_id),
+                    self.workspace_manager
+                        .output_for_workspace(workspace_id)
+                        .and_then(|id| self.workspace_manager.output(id))
+                        .is_some_and(|state| state.active_workspace() == workspace_id),
                     false,
                 )
             })
             .collect::<Vec<_>>();
         for output in self.outputs.iter().filter(|output| output.id == output_id) {
-            let Some(rect) = self.overview_layout_for_output(output.id).into_iter().find_map(|(id, rect)| (id == 0).then_some(rect)) else { continue; };
+            let Some(rect) = self
+                .overview_layout_for_output(output.id)
+                .into_iter()
+                .find_map(|(id, rect)| (id == 0).then_some(rect))
+            else {
+                continue;
+            };
             let (pointer_x, pointer_y) = self
                 .overview_window_drag
                 .map_or((self.cursor.x, self.cursor.y), |drag| {
@@ -12052,10 +12491,9 @@ impl Compositor {
             .overview_card_rects()
             .into_iter()
             .find(|(candidate, _)| *candidate == workspace_id)?;
-        let (work_x, work_y, work_width, work_height) = self.output_workarea(self.window_output_id(window_id));
-        let surface = if self.window_uses_focused_mode(window_id)
-            && window_id == root_id
-        {
+        let (work_x, work_y, work_width, work_height) =
+            self.output_workarea(self.window_output_id(window_id));
+        let surface = if self.window_uses_focused_mode(window_id) && window_id == root_id {
             self.tablet_slot_for_window(root_id)
                 .and_then(|slot| self.tablet_surface_geometry_for_window(window_id, slot))
         } else {
@@ -12107,14 +12545,20 @@ impl Compositor {
     }
 
     fn laptop_overview_spread_slots(&self) -> Vec<OverviewSpreadSlot> {
-        self.outputs.iter().flat_map(|output| self.overview_spread_for_output(output.id)).collect()
+        self.outputs
+            .iter()
+            .flat_map(|output| self.overview_spread_for_output(output.id))
+            .collect()
     }
 
     fn overview_spread_for_output(&self, output: u32) -> Vec<OverviewSpreadSlot> {
-        let Some(state) = self.workspace_manager.output(output) else { return Vec::new(); };
-        if self.output_context_for(output).is_some_and(|context| context.tablet)
-            || state.presentation()
-                != sws_protocol::workspace::ShellPresentation::Overview
+        let Some(state) = self.workspace_manager.output(output) else {
+            return Vec::new();
+        };
+        if self
+            .output_context_for(output)
+            .is_some_and(|context| context.tablet)
+            || state.presentation() != sws_protocol::workspace::ShellPresentation::Overview
         {
             return Vec::new();
         }
@@ -12200,14 +12644,19 @@ impl Compositor {
             // first upward movement. Within one output this is the original y.
             let start_y = i64::from(target_workarea.1)
                 + (i64::from(drag.start_y) - i64::from(source_workarea.1))
-                    * i64::from(target_workarea.3) / i64::from(source_workarea.3.max(1));
+                    * i64::from(target_workarea.3)
+                    / i64::from(source_workarea.3.max(1));
             let progress = overview_drag_progress_milli(
                 start_y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-                drag.current_y, rail_bottom);
+                drag.current_y,
+                rail_bottom,
+            );
             let card = self.overview_layout_for_output(destination).first()?.1;
             let thumbnail_size = (
-                (u64::from(root_geometry.2) * u64::from(card.2) / u64::from(target_workarea.2.max(1))) as u32,
-                (u64::from(root_geometry.3) * u64::from(card.3) / u64::from(target_workarea.3.max(1))) as u32,
+                (u64::from(root_geometry.2) * u64::from(card.2)
+                    / u64::from(target_workarea.2.max(1))) as u32,
+                (u64::from(root_geometry.3) * u64::from(card.3)
+                    / u64::from(target_workarea.3.max(1))) as u32,
             );
             let dragged_root = overview_dragged_root_rect(
                 slot.rect,
@@ -12236,10 +12685,13 @@ impl Compositor {
     fn uses_laptop_overview_spread(&self, window_id: u32) -> bool {
         let root_id = self.top_level_window_id(window_id);
         let output = self.window_output_id(window_id);
-        let Some(state) = self.workspace_manager.output(output) else { return false; };
-        !self.output_context_for(output).is_some_and(|context| context.tablet)
-            && state.presentation()
-                == sws_protocol::workspace::ShellPresentation::Overview
+        let Some(state) = self.workspace_manager.output(output) else {
+            return false;
+        };
+        !self
+            .output_context_for(output)
+            .is_some_and(|context| context.tablet)
+            && state.presentation() == sws_protocol::workspace::ShellPresentation::Overview
             && self.workspace_manager.workspace_for_window(root_id)
                 == Some(state.active_workspace())
             && !self
@@ -12277,16 +12729,29 @@ impl Compositor {
 
     fn update_overview_transforms(&mut self) -> bool {
         let cards = self.overview_card_rects();
-        let shell_foreground = self.outputs.iter().any(|output| self.workspace_manager.output(output.id)
-            .is_some_and(|state| state.presentation() != sws_protocol::workspace::ShellPresentation::Workspace));
+        let shell_foreground = self.outputs.iter().any(|output| {
+            self.workspace_manager
+                .output(output.id)
+                .is_some_and(|state| {
+                    state.presentation() != sws_protocol::workspace::ShellPresentation::Workspace
+                })
+        });
         let transforms = self
             .window_manager
             .get_windows()
             .iter()
             .map(|window| {
-                let shell_presentation = self.workspace_manager.output(window.output_id).is_some_and(|state|
-                    state.presentation() != sws_protocol::workspace::ShellPresentation::Workspace);
-                if let Some(motion) = self.outputs.get(window.output_id).and_then(|o| o.target.drawer_motion.as_ref())
+                let shell_presentation = self
+                    .workspace_manager
+                    .output(window.output_id)
+                    .is_some_and(|state| {
+                        state.presentation()
+                            != sws_protocol::workspace::ShellPresentation::Workspace
+                    });
+                if let Some(motion) = self
+                    .outputs
+                    .get(window.output_id)
+                    .and_then(|o| o.target.drawer_motion.as_ref())
                     && motion.contains(window.id)
                 {
                     let (x, y, width, height) = window.surface_geometry();
@@ -12314,9 +12779,21 @@ impl Compositor {
                 } else {
                     None
                 };
-                let gesture = self.tablet_motion.as_ref().filter(|_| window.output_id == self.outputs.primary_id());
-                let animating = gesture.or_else(|| self.outputs.get(window.output_id)?.target.workspace_motion.as_ref())
-                    .filter(|_| workspace_id.is_some() && self.desired_workspace_visibility(window.id));
+                let gesture = self
+                    .tablet_motion
+                    .as_ref()
+                    .filter(|_| window.output_id == self.outputs.primary_id());
+                let animating = gesture
+                    .or_else(|| {
+                        self.outputs
+                            .get(window.output_id)?
+                            .target
+                            .workspace_motion
+                            .as_ref()
+                    })
+                    .filter(|_| {
+                        workspace_id.is_some() && self.desired_workspace_visibility(window.id)
+                    });
                 let transform = if let Some(motion) = animating {
                     let (x, y, width, height) = window.surface_geometry();
                     Some(motion.project(
@@ -12340,9 +12817,19 @@ impl Compositor {
                     || self
                         .pending_card_close
                         .is_some_and(|close| close.drag.window_id == root_id);
-                let clip = if shell_foreground && !shell_presentation && !dragging
-                    && workspace_id.is_some() {
-                    self.outputs.get(window.output_id).map(|output| (output.rect.x, output.rect.y, output.rect.width, output.rect.height))
+                let clip = if shell_foreground
+                    && !shell_presentation
+                    && !dragging
+                    && workspace_id.is_some()
+                {
+                    self.outputs.get(window.output_id).map(|output| {
+                        (
+                            output.rect.x,
+                            output.rect.y,
+                            output.rect.width,
+                            output.rect.height,
+                        )
+                    })
                 } else if animating.is_some() {
                     transform.map(|rect| (rect.x, rect.y, rect.width, rect.height))
                 } else {
@@ -12376,7 +12863,9 @@ impl Compositor {
         let mut changed = false;
         for (window_id, transform, instances, clip, clip_radius) in transforms {
             let root = self.top_level_window_id(window_id);
-            let cross_output = self.overview_window_drag.is_some_and(|drag| drag.window_id == root);
+            let cross_output = self
+                .overview_window_drag
+                .is_some_and(|drag| drag.window_id == root);
             if let Some(window) = self.window_manager.get_window_mut(window_id) {
                 changed |= window.presentation_cross_output != cross_output;
                 window.presentation_cross_output = cross_output;
@@ -12405,60 +12894,124 @@ impl Compositor {
 
     fn sync_shell_presentation_focus(&mut self, requested_output: Option<u32>) -> bool {
         let current = self.window_manager.get_focused_window_id();
-        let output_id = requested_output.or_else(|| current.map(|window| self.window_output_id(window)))
-            .or_else(|| self.outputs.output_at(self.cursor.x, self.cursor.y).map(|output| output.id))
+        let output_id = requested_output
+            .or_else(|| current.map(|window| self.window_output_id(window)))
+            .or_else(|| {
+                self.outputs
+                    .output_at(self.cursor.x, self.cursor.y)
+                    .map(|output| output.id)
+            })
             .unwrap_or(self.outputs.primary_id());
-        let Some(state) = self.workspace_manager.output(output_id) else { return false; };
-        if focused_overlay_survives_workspace_policy(&self.window_manager) { return false; }
+        let Some(state) = self.workspace_manager.output(output_id) else {
+            return false;
+        };
+        if focused_overlay_survives_workspace_policy(&self.window_manager) {
+            return false;
+        }
         let shell = state.presentation() != sws_protocol::workspace::ShellPresentation::Workspace;
         let destination = if shell {
-            if let Some(window) = current.filter(|id| self.window_manager.get_window(*id).is_some_and(|window|
-                window.output_id == output_id && window.window_type == WindowType::Normal)) {
-                if let Some(output) = self.outputs.get_mut(output_id) { output.restore_focus.get_or_insert(window); }
+            if let Some(window) = current.filter(|id| {
+                self.window_manager.get_window(*id).is_some_and(|window| {
+                    window.output_id == output_id && window.window_type == WindowType::Normal
+                })
+            }) {
+                if let Some(output) = self.outputs.get_mut(output_id) {
+                    output.restore_focus.get_or_insert(window);
+                }
             }
-            self.window_manager.get_windows().iter().rev().find(|window|
-                window.output_id == output_id && window.window_type == WindowType::ShellBackground
-                && window.app_id.as_deref() != Some(b"org.scarlet-os.desktop.shell.home-backdrop")
-                && window.is_logically_presented()).map(|window| window.id)
+            self.window_manager
+                .get_windows()
+                .iter()
+                .rev()
+                .find(|window| {
+                    window.output_id == output_id
+                        && window.window_type == WindowType::ShellBackground
+                        && window.app_id.as_deref()
+                            != Some(b"org.scarlet-os.desktop.shell.home-backdrop")
+                        && window.is_logically_presented()
+                })
+                .map(|window| window.id)
         } else {
-            let preferred = self.outputs.get_mut(output_id).and_then(|output| output.restore_focus.take());
-            preferred.into_iter().chain(current).chain(self.last_workspace_focus).find(|id|
-                self.window_manager.get_window(*id).is_some_and(|window|
-                    window.output_id == output_id && window.window_type == WindowType::Normal
-                    && window.is_presented() && !window.presentation_exiting))
-                .or_else(|| self.window_manager.get_windows().iter().rev().find(|window|
-                    window.output_id == output_id && window.window_type == WindowType::Normal
-                    && window.is_presented() && !window.presentation_exiting).map(|window| window.id))
+            let preferred = self
+                .outputs
+                .get_mut(output_id)
+                .and_then(|output| output.restore_focus.take());
+            preferred
+                .into_iter()
+                .chain(current)
+                .chain(self.last_workspace_focus)
+                .find(|id| {
+                    self.window_manager.get_window(*id).is_some_and(|window| {
+                        window.output_id == output_id
+                            && window.window_type == WindowType::Normal
+                            && window.is_presented()
+                            && !window.presentation_exiting
+                    })
+                })
+                .or_else(|| {
+                    self.window_manager
+                        .get_windows()
+                        .iter()
+                        .rev()
+                        .find(|window| {
+                            window.output_id == output_id
+                                && window.window_type == WindowType::Normal
+                                && window.is_presented()
+                                && !window.presentation_exiting
+                        })
+                        .map(|window| window.id)
+                })
         };
-        let Some(destination) = destination.filter(|id| Some(*id) != current) else { return false; };
-        if let Some(previous) = current { self.damage_compositor_focus_style(previous); }
+        let Some(destination) = destination.filter(|id| Some(*id) != current) else {
+            return false;
+        };
+        if let Some(previous) = current {
+            self.damage_compositor_focus_style(previous);
+        }
         self.window_manager.set_focus(destination);
         self.broadcast_focus_change(destination);
         self.damage_compositor_focus_style(destination);
         true
     }
 
-    fn apply_workspace_presentation_policy(&mut self) -> bool { self.apply_workspace_presentation_policy_on(None) }
+    fn apply_workspace_presentation_policy(&mut self) -> bool {
+        self.apply_workspace_presentation_policy_on(None)
+    }
 
     fn apply_workspace_presentation_policy_on(&mut self, focus_output: Option<u32>) -> bool {
         use sws_protocol::workspace::ShellPresentation;
-        let transitions: Vec<_> = self.outputs.iter().filter_map(|output| {
-            let current = self.workspace_manager.output(output.id)?.presentation();
-            (current != output.last_presentation).then_some((output.id, output.last_presentation, current))
-        }).collect();
+        let transitions: Vec<_> = self
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                let current = self.workspace_manager.output(output.id)?.presentation();
+                (current != output.last_presentation).then_some((
+                    output.id,
+                    output.last_presentation,
+                    current,
+                ))
+            })
+            .collect();
         let entering = !self.overview_session_active
-            && transitions.iter().any(|(_, _, current)| *current == ShellPresentation::Overview);
+            && transitions
+                .iter()
+                .any(|(_, _, current)| *current == ShellPresentation::Overview);
         // Home is the local drawer within the Overview session. Only an
         // explicit return to Workspace ends the session on the other outputs;
         // opening or lowering a drawer must leave their presentation alone.
-        let leaving = self.overview_session_active && transitions.iter().any(|(_, previous, current)|
-            *previous != ShellPresentation::Workspace && *current == ShellPresentation::Workspace);
+        let leaving = self.overview_session_active
+            && transitions.iter().any(|(_, previous, current)| {
+                *previous != ShellPresentation::Workspace
+                    && *current == ShellPresentation::Workspace
+            });
         if !self.console_shell_present() && (entering || leaving) {
             let ids: Vec<_> = self.outputs.iter().map(|output| output.id).collect();
             for id in ids {
                 let mut state = self.workspace_manager.output_mut(id).unwrap();
                 if leaving {
-                    if state.presentation() != ShellPresentation::Workspace { state.return_to_workspace(); }
+                    if state.presentation() != ShellPresentation::Workspace {
+                        state.return_to_workspace();
+                    }
                 } else {
                     state.set_presentation(ShellPresentation::Overview);
                 }
@@ -12489,21 +13042,31 @@ impl Compositor {
         }
         let accelerated = self.animations_enabled();
         let drawer_enabled = accelerated && !self.console_shell_present();
-        let changes: Vec<_> = self.outputs.iter().filter_map(|output| {
-            let current = self.workspace_manager.output(output.id)?.presentation();
-            (current != output.last_presentation).then_some((output.id, current))
-        }).collect();
+        let changes: Vec<_> = self
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                let current = self.workspace_manager.output(output.id)?.presentation();
+                (current != output.last_presentation).then_some((output.id, current))
+            })
+            .collect();
         for (id, current) in changes {
-            let gesture_active = id == self.outputs.primary_id() && self.tablet_drag_origin.is_some();
+            let gesture_active =
+                id == self.outputs.primary_id() && self.tablet_drag_origin.is_some();
             let motion = (accelerated && !gesture_active)
                 .then(|| self.scene_snapshot_on(id))
-                .and_then(|starts| tablet_motion::Motion::settle(starts, monotonic_time_ns(), true));
-            if id == self.outputs.primary_id() && motion.is_some() { self.tablet_motion = None; }
+                .and_then(|starts| {
+                    tablet_motion::Motion::settle(starts, monotonic_time_ns(), true)
+                });
+            if id == self.outputs.primary_id() && motion.is_some() {
+                self.tablet_motion = None;
+            }
             let output = self.outputs.get_mut(id).unwrap();
             output.last_presentation = current;
             output.target.workspace_motion = motion;
             output.target.drawer_motion = None;
-            output.target.drawer_open_pending = drawer_enabled && current == ShellPresentation::Home;
+            output.target.drawer_open_pending =
+                drawer_enabled && current == ShellPresentation::Home;
         }
         let withhold_shell_background =
             shell_background_must_be_withheld(self.last_shell_presentation, presentation);
@@ -12579,11 +13142,20 @@ impl Compositor {
             }
         }
 
-        let cached_drawers: Vec<_> = self.window_manager.get_windows().iter()
-            .filter(|window| self.outputs.get(window.output_id).is_some_and(|o| o.target.drawer_open_pending)
-                && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
-                && window.has_presented_frame && window.is_presented())
-            .map(|window| window.id).collect();
+        let cached_drawers: Vec<_> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter(|window| {
+                self.outputs
+                    .get(window.output_id)
+                    .is_some_and(|o| o.target.drawer_open_pending)
+                    && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                    && window.has_presented_frame
+                    && window.is_presented()
+            })
+            .map(|window| window.id)
+            .collect();
         for id in cached_drawers {
             self.begin_home_drawer_motion(id);
             changed = true;
@@ -12598,13 +13170,21 @@ impl Compositor {
 
         for window_id in window_ids {
             let output = self.window_output_id(window_id);
-            let workspace_visible = self.workspace_manager.output(output).is_some_and(|state| state.presentation() == sws_protocol::workspace::ShellPresentation::Workspace);
-            if !self.window_uses_focused_mode(window_id) || !workspace_visible
+            let workspace_visible = self.workspace_manager.output(output).is_some_and(|state| {
+                state.presentation() == sws_protocol::workspace::ShellPresentation::Workspace
+            });
+            if !self.window_uses_focused_mode(window_id)
+                || !workspace_visible
                 || self.top_level_window_id(window_id) != window_id
                 || !self.is_workspace_scene_root(window_id)
                 || !self.desired_workspace_visibility(window_id)
-                || self.window_manager.is_fullscreen(window_id) { continue; }
-            if let Some(slot) = self.tablet_slot_for_window(window_id) { changed |= self.apply_tablet_geometry(window_id, slot); }
+                || self.window_manager.is_fullscreen(window_id)
+            {
+                continue;
+            }
+            if let Some(slot) = self.tablet_slot_for_window(window_id) {
+                changed |= self.apply_tablet_geometry(window_id, slot);
+            }
         }
 
         // A same-sized tablet transition still needs a replacement backing.
@@ -12722,7 +13302,11 @@ impl Compositor {
         } else {
             requested_placement
         };
-        (placement, true, self.outputs.get(record.output_id).map(|output| output.id))
+        (
+            placement,
+            true,
+            self.outputs.get(record.output_id).map(|output| output.id),
+        )
     }
 
     /// Choose a safe compositor-managed position for a regular window.
@@ -12751,7 +13335,7 @@ impl Compositor {
                 .find(|window| {
                     matches!(window.window_type, super::window::WindowType::Normal)
                         && window.is_presented()
-                    && window.output_id == output_id
+                        && window.output_id == output_id
                 })
         });
         let anchor_position = anchor.map(|window| {
@@ -12759,8 +13343,7 @@ impl Compositor {
             (x, y)
         });
 
-        let (bounds_x, bounds_y, bounds_width, bounds_height) =
-            self.output_workarea(output_id);
+        let (bounds_x, bounds_y, bounds_width, bounds_height) = self.output_workarea(output_id);
         let min_x = bounds_x as i64;
         let min_y = bounds_y as i64;
         let max_x = (min_x + bounds_width as i64 - width as i64).max(min_x);
@@ -12802,16 +13385,24 @@ impl Compositor {
     }
 
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
-        let independent = matches!(&event,
-            IpcEvent::PrepareWindowCreation { .. } | IpcEvent::RequestFrame { .. }
-                | IpcEvent::GetScreenSize { .. } | IpcEvent::GetOutputScale { .. }
-                | IpcEvent::GetWindowList { .. } | IpcEvent::RequestMove { .. }
-                | IpcEvent::MoveWindow { .. } | IpcEvent::SetPointerLock { .. }
-                | IpcEvent::SetCursorIcon { .. } | IpcEvent::Clipboard { .. }
-                | IpcEvent::InputPanelKey { .. });
+        let independent = matches!(
+            &event,
+            IpcEvent::PrepareWindowCreation { .. }
+                | IpcEvent::RequestFrame { .. }
+                | IpcEvent::GetScreenSize { .. }
+                | IpcEvent::GetOutputScale { .. }
+                | IpcEvent::GetWindowList { .. }
+                | IpcEvent::RequestMove { .. }
+                | IpcEvent::MoveWindow { .. }
+                | IpcEvent::SetPointerLock { .. }
+                | IpcEvent::SetCursorIcon { .. }
+                | IpcEvent::Clipboard { .. }
+                | IpcEvent::InputPanelKey { .. }
+        );
         if self.gpu_frame_pending() && !independent {
             let window = ipc_frame_window(&event);
-            let blocked = window.is_none_or(|id| self.gpu_compositor.as_ref().unwrap().window_in_flight(id))
+            let blocked = window
+                .is_none_or(|id| self.gpu_compositor.as_ref().unwrap().window_in_flight(id))
                 || self.deferred_gpu_ipc.iter().any(|earlier| {
                     let earlier_window = ipc_frame_window(earlier);
                     earlier_window.is_none() || earlier_window == window
@@ -12914,25 +13505,53 @@ impl Compositor {
                 result?;
             }
             IpcEvent::PrepareWindowCreation {
-                client_id, app_id, window_type, placement, activation_token, reply,
+                client_id,
+                app_id,
+                window_type,
+                placement,
+                activation_token,
+                reply,
             } => {
                 let (placement, activated, activation_output) = self.consume_activation_token(
-                    activation_token.as_deref(), &app_id, window_type, placement,
+                    activation_token.as_deref(),
+                    &app_id,
+                    window_type,
+                    placement,
                 );
                 let requested = super::ipc::client_output_context(client_id);
                 let fallback = match window_type {
-                    sws_protocol::window_types::NORMAL | sws_protocol::window_types::ALWAYS_ON_TOP => self.pointer_output_id(self.cursor.x, self.cursor.y),
+                    sws_protocol::window_types::NORMAL
+                    | sws_protocol::window_types::ALWAYS_ON_TOP => {
+                        self.pointer_output_id(self.cursor.x, self.cursor.y)
+                    }
                     _ => self.outputs.primary_id(),
                 };
-                let output = activation_output.or(requested.map(|context| context.id))
-                    .filter(|id| self.outputs.get(*id).is_some()).unwrap_or(fallback);
-                let context = self.output_context_for(output).ok_or("Window output disappeared")?;
-                let workarea = self.outputs.get(output).and_then(|output| output.workarea)
-                    .or_else(|| (output == self.outputs.primary_id()).then_some(self.workarea).flatten());
+                let output = activation_output
+                    .or(requested.map(|context| context.id))
+                    .filter(|id| self.outputs.get(*id).is_some())
+                    .unwrap_or(fallback);
+                let context = self
+                    .output_context_for(output)
+                    .ok_or("Window output disappeared")?;
+                let workarea = self
+                    .outputs
+                    .get(output)
+                    .and_then(|output| output.workarea)
+                    .or_else(|| {
+                        (output == self.outputs.primary_id())
+                            .then_some(self.workarea)
+                            .flatten()
+                    });
                 let _ = reply.send(super::ipc::WindowCreationTarget {
-                    context, workarea, placement, activated,
-                    focused: context.tablet || (output == self.outputs.primary_id() && self.windowing_mode == sws_protocol::WindowingMode::Focused),
-                    client_scale_milli: requested.map_or(self.output_scale_milli(), |context| context.scale_milli),
+                    context,
+                    workarea,
+                    placement,
+                    activated,
+                    focused: context.tablet
+                        || (output == self.outputs.primary_id()
+                            && self.windowing_mode == sws_protocol::WindowingMode::Focused),
+                    client_scale_milli: requested
+                        .map_or(self.output_scale_milli(), |context| context.scale_milli),
                 });
             }
             IpcEvent::CreateWindow {
@@ -12962,15 +13581,29 @@ impl Compositor {
                 let activated = creation.activated;
                 let requested_output = super::ipc::client_output_context(client_id);
                 // Hot-unplug during SHM allocation must fall back safely.
-                let output_id = self.outputs.get(creation.context.id)
+                let output_id = self
+                    .outputs
+                    .get(creation.context.id)
                     .map_or(self.outputs.primary_id(), |output| output.id);
-                let mut context = self.output_context_for(output_id).ok_or("Window output disappeared")?;
+                let mut context = self
+                    .output_context_for(output_id)
+                    .ok_or("Window output disappeared")?;
                 let preferred_scale = context.scale_milli;
                 context.scale_milli = creation.client_scale_milli;
-                let scene_length = |value: u32| if context.scale_milli == 2000 { value } else { ((u64::from(value) * 1000 / u64::from(context.scale_milli)) * 2).max(1) as u32 };
+                let scene_length = |value: u32| {
+                    if context.scale_milli == 2000 {
+                        value
+                    } else {
+                        ((u64::from(value) * 1000 / u64::from(context.scale_milli)) * 2).max(1)
+                            as u32
+                    }
+                };
                 let (scene_width, scene_height) = (scene_length(width), scene_length(height));
                 use sws_protocol::window_types;
-                if activated { focus_on_create = true; active_on_focus = true; }
+                if activated {
+                    focus_on_create = true;
+                    active_on_focus = true;
+                }
                 let center_on_first_geometry =
                     matches!(initial_position, sws_protocol::WindowPlacement::Centered);
 
@@ -12981,10 +13614,14 @@ impl Compositor {
                             "[Compositor] Using requested position for window #{}: ({}, {})",
                             window_id, x, y
                         );
-                        (((i64::from(x) * 2000) / i64::from(context.scale_milli)) as i32, ((i64::from(y) * 2000) / i64::from(context.scale_milli)) as i32)
+                        (
+                            ((i64::from(x) * 2000) / i64::from(context.scale_milli)) as i32,
+                            ((i64::from(y) * 2000) / i64::from(context.scale_milli)) as i32,
+                        )
                     }
                     sws_protocol::WindowPlacement::Centered => {
-                        let (x, y) = self.output_window_position(output_id, scene_width, scene_height, true);
+                        let (x, y) =
+                            self.output_window_position(output_id, scene_width, scene_height, true);
                         println!(
                             "[Compositor] Centering window #{} in workarea at ({}, {})",
                             window_id, x, y
@@ -12994,7 +13631,12 @@ impl Compositor {
                     sws_protocol::WindowPlacement::Default => {
                         match window_type {
                             window_types::NORMAL | window_types::ALWAYS_ON_TOP => {
-                                let position = self.output_window_position(output_id, scene_width, scene_height, false);
+                                let position = self.output_window_position(
+                                    output_id,
+                                    scene_width,
+                                    scene_height,
+                                    false,
+                                );
                                 println!(
                                     "[Compositor] Default placement for window #{}: ({}, {})",
                                     window_id, position.0, position.1
@@ -13007,7 +13649,10 @@ impl Compositor {
                             | window_types::SHELL_BACKGROUND
                             | window_types::SHELL_CHROME => {
                                 println!("[Compositor] Positioning shell window at output origin");
-                                (context.rect.x.saturating_mul(2), context.rect.y.saturating_mul(2))
+                                (
+                                    context.rect.x.saturating_mul(2),
+                                    context.rect.y.saturating_mul(2),
+                                )
                             }
                             // IME popups are positioned later from the text-input cursor.
                             _ => (0, 0),
@@ -13104,7 +13749,12 @@ impl Compositor {
                         );
                     }
                     if center_on_first_geometry {
-                        let (x, y) = self.output_window_position(output_id, scene_length(managed_width), scene_length(managed_height), true);
+                        let (x, y) = self.output_window_position(
+                            output_id,
+                            scene_length(managed_width),
+                            scene_length(managed_height),
+                            true,
+                        );
                         self.window_manager.set_window_position(window_id, x, y);
                     }
                     let (restore_width, restore_height) =
@@ -13117,8 +13767,12 @@ impl Compositor {
                             window.workspace_restore_geometry = Some((
                                 x,
                                 y,
-                                scene_length(restore_width.saturating_sub(insets.horizontal()).max(1)),
-                                scene_length(restore_height.saturating_sub(insets.vertical()).max(1)),
+                                scene_length(
+                                    restore_width.saturating_sub(insets.horizontal()).max(1),
+                                ),
+                                scene_length(
+                                    restore_height.saturating_sub(insets.vertical()).max(1),
+                                ),
                             ));
                         }
                     }
@@ -13141,8 +13795,8 @@ impl Compositor {
                     super::window::WindowType::Desktop
                     | super::window::WindowType::ShellBackground
                     | super::window::WindowType::ShellChrome => {
-                        let needs_resize =
-                            width != context.mode.pixel_width || height != context.mode.pixel_height;
+                        let needs_resize = width != context.mode.pixel_width
+                            || height != context.mode.pixel_height;
                         if needs_resize {
                             println!(
                                 "[Compositor] Auto-resizing DESKTOP window #{} from {}x{} to {}x{}",
@@ -13176,13 +13830,29 @@ impl Compositor {
                             self.send_current_window_configure(window_id);
                         }
 
-                        let workarea_y = context.rect.y.saturating_mul(2).saturating_add(scene_height as i32);
-                        let workarea_height = context.rect.height.saturating_mul(2).saturating_sub(scene_height);
-                        let area = (context.rect.x.saturating_mul(2), workarea_y, context.rect.width.saturating_mul(2), workarea_height);
-                        if let Some(output) = self.outputs.get_mut(output_id) { output.workarea = Some(area); }
+                        let workarea_y = context
+                            .rect
+                            .y
+                            .saturating_mul(2)
+                            .saturating_add(scene_height as i32);
+                        let workarea_height = context
+                            .rect
+                            .height
+                            .saturating_mul(2)
+                            .saturating_sub(scene_height);
+                        let area = (
+                            context.rect.x.saturating_mul(2),
+                            workarea_y,
+                            context.rect.width.saturating_mul(2),
+                            workarea_height,
+                        );
+                        if let Some(output) = self.outputs.get_mut(output_id) {
+                            output.workarea = Some(area);
+                        }
                         if output_id == self.outputs.primary_id() {
                             self.workarea = Some(area);
-                            self.window_manager.set_workarea(area.0, area.1, area.2, area.3);
+                            self.window_manager
+                                .set_workarea(area.0, area.1, area.2, area.3);
                             self.publish_window_creation_environment();
                         }
                         println!(
@@ -13209,8 +13879,12 @@ impl Compositor {
                 // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
                 // self.full_redraw_needed = true;
 
-                if requested_output.is_some_and(|requested| requested.id != output_id || requested.scale_milli != preferred_scale) {
-                    if let Some(window) = self.window_manager.get_window_mut(window_id) { window.prefer_scale(preferred_scale); }
+                if requested_output.is_some_and(|requested| {
+                    requested.id != output_id || requested.scale_milli != preferred_scale
+                }) {
+                    if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                        window.prefer_scale(preferred_scale);
+                    }
                     self.send_current_window_configure(window_id);
                 }
                 self.dump_memory_layout("after IPC CreateWindow");
@@ -13312,15 +13986,28 @@ impl Compositor {
                 let bounds = self.outputs.bounds();
                 let left = i64::from(damage_x).max(0);
                 let top = i64::from(damage_y).max(0);
-                let right = (i64::from(damage_x) + i64::from(damage_width)).min(i64::from(backing.0));
-                let bottom = (i64::from(damage_y) + i64::from(damage_height)).min(i64::from(backing.1));
+                let right =
+                    (i64::from(damage_x) + i64::from(damage_width)).min(i64::from(backing.0));
+                let bottom =
+                    (i64::from(damage_y) + i64::from(damage_height)).min(i64::from(backing.1));
                 let damage = if right > left && bottom > top {
                     crate::sgfx_ir_support::projected_image_damage_in_bounds(
-                        backing, geometry, None,
+                        backing,
+                        geometry,
+                        None,
                         (bounds.x, bounds.y, bounds.width, bounds.height),
-                        &[(left as u32, top as u32, (right - left) as u32, (bottom - top) as u32)],
-                    ).into_iter().next()
-                } else { None };
+                        &[(
+                            left as u32,
+                            top as u32,
+                            (right - left) as u32,
+                            (bottom - top) as u32,
+                        )],
+                    )
+                    .into_iter()
+                    .next()
+                } else {
+                    None
+                };
                 if damage.is_none()
                     && presentation_transform.is_none()
                     && presentation_instances.is_empty()
@@ -13722,7 +14409,10 @@ impl Compositor {
                 self.refresh_cursor_icon();
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
-                let scale = self.window_manager.get_window(window_id).map_or(2000, |window| window.preferred_scale_milli.max(1));
+                let scale = self
+                    .window_manager
+                    .get_window(window_id)
+                    .map_or(2000, |window| window.preferred_scale_milli.max(1));
                 let x = (i64::from(x) * 2000 / i64::from(scale)) as i32;
                 let y = (i64::from(y) * 2000 / i64::from(scale)) as i32;
                 if self.window_manager.is_fullscreen(window_id)
@@ -14021,8 +14711,15 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .map(|window| window.surface_geometry());
-                let output = self.outputs.get(self.window_output_id(window_id)).unwrap_or_else(|| self.outputs.primary()).rect;
-                if !self.window_manager.set_fullscreen_window_on(window_id, (output.x, output.y, output.width, output.height)) {
+                let output = self
+                    .outputs
+                    .get(self.window_output_id(window_id))
+                    .unwrap_or_else(|| self.outputs.primary())
+                    .rect;
+                if !self.window_manager.set_fullscreen_window_on(
+                    window_id,
+                    (output.x, output.y, output.width, output.height),
+                ) {
                     self.send_fullscreen_configure(window_id);
                     super::ipc::send_message_to_client(
                         client_id,
@@ -14197,9 +14894,7 @@ impl Compositor {
                 {
                     return Ok(false);
                 }
-                if let Some(fullscreen_id) = self
-                    .window_manager
-                    .fullscreen_window_for(window_id)
+                if let Some(fullscreen_id) = self.window_manager.fullscreen_window_for(window_id)
                     && !self.window_manager.is_in_fullscreen_group(window_id)
                 {
                     println!(
@@ -14716,7 +15411,10 @@ impl Compositor {
                     let is_backdrop = |region: &&sws_protocol::surface_regions::SurfaceRegion| {
                         region.flags & sws_protocol::surface_regions::BACKDROP != 0
                     };
-                    let changed = !window.surface_regions.iter().filter(is_backdrop)
+                    let changed = !window
+                        .surface_regions
+                        .iter()
+                        .filter(is_backdrop)
                         .eq(regions.iter().filter(is_backdrop));
                     window.surface_regions = regions;
                     window.restrict_input_to_regions = restrict_input;
@@ -14811,7 +15509,12 @@ impl Compositor {
                                     (width, height)
                                 })
                             {
-                                let (x, y) = self.output_window_position(self.window_output_id(window_id), width, height, true);
+                                let (x, y) = self.output_window_position(
+                                    self.window_output_id(window_id),
+                                    width,
+                                    height,
+                                    true,
+                                );
                                 self.window_manager.set_window_position(window_id, x, y);
                             }
                             if let Some(window) = self.window_manager.get_window_mut(window_id) {
@@ -14948,12 +15651,15 @@ impl Compositor {
                     "[Compositor] GetScreenSize request from client {}",
                     client_id
                 );
-                let payload =
-                    {
-                        let id = super::ipc::client_output_context(client_id).map_or(self.outputs.primary_id(), |context| context.id);
-                        let output = self.outputs.get(id).unwrap_or(self.outputs.primary());
-                        sws_protocol::payload_screen_size(output.metadata.mode.pixel_width, output.metadata.mode.pixel_height)
-                    };
+                let payload = {
+                    let id = super::ipc::client_output_context(client_id)
+                        .map_or(self.outputs.primary_id(), |context| context.id);
+                    let output = self.outputs.get(id).unwrap_or(self.outputs.primary());
+                    sws_protocol::payload_screen_size(
+                        output.metadata.mode.pixel_width,
+                        output.metadata.mode.pixel_height,
+                    )
+                };
                 super::ipc::send_response_to_client(
                     client_id,
                     sws_protocol::server_msg::SCREEN_SIZE,
@@ -14976,7 +15682,8 @@ impl Compositor {
                     client_id
                 );
                 let payload = sws_protocol::payload_output_scale({
-                    super::ipc::client_output_context(client_id).and_then(|context| self.outputs.get(context.id))
+                    super::ipc::client_output_context(client_id)
+                        .and_then(|context| self.outputs.get(context.id))
                         .map_or(self.output_scale_milli(), |output| output.scale_milli)
                 });
                 super::ipc::send_response_to_client(
@@ -15186,7 +15893,11 @@ impl Compositor {
                     }
                 }
             }
-            IpcEvent::OutputControl { client_id, request_id, command } => {
+            IpcEvent::OutputControl {
+                client_id,
+                request_id,
+                command,
+            } => {
                 self.handle_output_control(client_id, request_id, command)?;
             }
             IpcEvent::GetWorkspaceState {
@@ -15218,8 +15929,13 @@ impl Compositor {
                     return Ok(false);
                 }
                 let primary = self.outputs.primary_id();
-                let live_window_ids = self.live_workspace_window_ids().into_iter()
-                    .filter(|window| self.workspace_manager.output_for_window(*window) == Some(primary)).collect::<Vec<_>>();
+                let live_window_ids = self
+                    .live_workspace_window_ids()
+                    .into_iter()
+                    .filter(|window| {
+                        self.workspace_manager.output_for_window(*window) == Some(primary)
+                    })
+                    .collect::<Vec<_>>();
                 match self
                     .workspace_manager
                     .apply_transaction(transaction, &live_window_ids)

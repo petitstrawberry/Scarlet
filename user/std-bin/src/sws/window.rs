@@ -496,27 +496,47 @@ impl Window {
     pub(super) fn translate_output(&mut self, dx: i32, dy: i32) {
         self.x = self.x.saturating_add(dx);
         self.y = self.y.saturating_add(dy);
-        for geometry in [&mut self.saved_geometry, &mut self.fullscreen_restore_geometry, &mut self.workspace_restore_geometry] {
-            if let Some(rect) = geometry { rect.0 = rect.0.saturating_add(dx); rect.1 = rect.1.saturating_add(dy); }
+        for geometry in [
+            &mut self.saved_geometry,
+            &mut self.fullscreen_restore_geometry,
+            &mut self.workspace_restore_geometry,
+        ] {
+            if let Some(rect) = geometry {
+                rect.0 = rect.0.saturating_add(dx);
+                rect.1 = rect.1.saturating_add(dy);
+            }
         }
     }
     /// Return the extent of the buffer most recently attached by the client.
     ///
     /// # Returns
     ///
-    pub(super) fn configured_pixel_extent(&self) -> (u32, u32) { (self.width, self.height) }
+    pub(super) fn configured_pixel_extent(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
     pub(super) fn client_length(&self, scene: u32) -> u32 {
-        if self.preferred_scale_milli == 2000 { return scene; }
-        (u64::from(scene) * u64::from(self.preferred_scale_milli)).div_ceil(2000).min(u64::from(u32::MAX)) as u32
+        if self.preferred_scale_milli == 2000 {
+            return scene;
+        }
+        (u64::from(scene) * u64::from(self.preferred_scale_milli))
+            .div_ceil(2000)
+            .min(u64::from(u32::MAX)) as u32
     }
     pub(super) fn scene_length(&self, pixels: u32) -> u32 {
-        if self.preferred_scale_milli == 2000 { return pixels; }
-        ((u64::from(pixels) * 1000 / u64::from(self.preferred_scale_milli.max(1))) * 2).min(u64::from(u32::MAX)) as u32
+        if self.preferred_scale_milli == 2000 {
+            return pixels;
+        }
+        ((u64::from(pixels) * 1000 / u64::from(self.preferred_scale_milli.max(1))) * 2)
+            .min(u64::from(u32::MAX)) as u32
     }
     pub(super) fn scene_insets(&self) -> WindowGeometryInsets {
         let i = self.window_geometry_insets;
-        WindowGeometryInsets { left: self.scene_length(i.left), top: self.scene_length(i.top),
-            right: self.scene_length(i.right), bottom: self.scene_length(i.bottom) }
+        WindowGeometryInsets {
+            left: self.scene_length(i.left),
+            top: self.scene_length(i.top),
+            right: self.scene_length(i.right),
+            bottom: self.scene_length(i.bottom),
+        }
     }
     pub(super) fn set_scene_extent(&mut self, width: u32, height: u32) {
         self.scene_extent = (width.max(1), height.max(1));
@@ -526,16 +546,30 @@ impl Window {
     pub(super) fn accept_client_scale(&mut self, scale: u32) {
         self.preferred_scale_milli = scale.max(1);
         self.buffer_scale_milli = self.preferred_scale_milli;
-        self.scene_extent = (self.scene_length(self.width).max(1), self.scene_length(self.height).max(1));
+        self.scene_extent = (
+            self.scene_length(self.width).max(1),
+            self.scene_length(self.height).max(1),
+        );
     }
     pub(super) fn prefer_scale(&mut self, scale: u32) {
         let old = self.preferred_scale_milli;
-        if old == scale { return; }
-        let convert = |value: u32| (u64::from(value) * u64::from(scale)).div_ceil(u64::from(old.max(1))).min(u64::from(u32::MAX)) as u32;
+        if old == scale {
+            return;
+        }
+        let convert = |value: u32| {
+            (u64::from(value) * u64::from(scale))
+                .div_ceil(u64::from(old.max(1)))
+                .min(u64::from(u32::MAX)) as u32
+        };
         let insets = &mut self.window_geometry_insets;
-        insets.left = convert(insets.left); insets.top = convert(insets.top); insets.right = convert(insets.right); insets.bottom = convert(insets.bottom);
-        self.size_limits.min_width = convert(self.size_limits.min_width); self.size_limits.min_height = convert(self.size_limits.min_height);
-        self.size_limits.max_width = convert(self.size_limits.max_width); self.size_limits.max_height = convert(self.size_limits.max_height);
+        insets.left = convert(insets.left);
+        insets.top = convert(insets.top);
+        insets.right = convert(insets.right);
+        insets.bottom = convert(insets.bottom);
+        self.size_limits.min_width = convert(self.size_limits.min_width);
+        self.size_limits.min_height = convert(self.size_limits.min_height);
+        self.size_limits.max_width = convert(self.size_limits.max_width);
+        self.size_limits.max_height = convert(self.size_limits.max_height);
         self.preferred_scale_milli = scale;
         self.set_scene_extent(self.scene_extent.0, self.scene_extent.1);
     }
@@ -1080,8 +1114,11 @@ impl Window {
 
     /// Return the complete surface rectangle used for composition and damage.
     pub const fn surface_geometry(&self) -> (i32, i32, u32, u32) {
-        if self.preferred_scale_milli == 2000 { (self.x, self.y, self.width, self.height) }
-        else { (self.x, self.y, self.scene_extent.0, self.scene_extent.1) }
+        if self.preferred_scale_milli == 2000 {
+            (self.x, self.y, self.width, self.height)
+        } else {
+            (self.x, self.y, self.scene_extent.0, self.scene_extent.1)
+        }
     }
 
     /// Return the managed visible geometry in screen coordinates.
@@ -1098,8 +1135,12 @@ impl Window {
         (
             self.x.saturating_add(self.scene_length(insets.left) as i32),
             self.y.saturating_add(self.scene_length(insets.top) as i32),
-            scene_width.saturating_sub(self.scene_length(insets.horizontal())).max(1),
-            scene_height.saturating_sub(self.scene_length(insets.vertical())).max(1),
+            scene_width
+                .saturating_sub(self.scene_length(insets.horizontal()))
+                .max(1),
+            scene_height
+                .saturating_sub(self.scene_length(insets.vertical()))
+                .max(1),
         )
     }
 
@@ -1115,8 +1156,12 @@ impl Window {
         (
             x.saturating_sub(self.scene_length(insets.left) as i32),
             y.saturating_sub(self.scene_length(insets.top) as i32),
-            width.saturating_add(self.scene_length(insets.horizontal())).max(1),
-            height.saturating_add(self.scene_length(insets.vertical())).max(1),
+            width
+                .saturating_add(self.scene_length(insets.horizontal()))
+                .max(1),
+            height
+                .saturating_add(self.scene_length(insets.vertical()))
+                .max(1),
         )
     }
 
@@ -1219,7 +1264,10 @@ impl Window {
                 .div_euclid(i64::from(scene.max(1)))
                 .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
         };
-        (project(x, self.x, self.width, width), project(y, self.y, self.height, height))
+        (
+            project(x, self.x, self.width, width),
+            project(y, self.y, self.height, height),
+        )
     }
 
     fn input_region_contains(&self, x: i32, y: i32) -> bool {
@@ -2286,9 +2334,16 @@ impl WindowManager {
     }
 
     pub fn clamp_scene_size_for_window(&self, id: WindowId, width: u32, height: u32) -> (u32, u32) {
-        let Some(w) = self.get_window(id) else { return (width.max(1), height.max(1)); };
-        let (pixels_w, pixels_h) = w.size_limits.clamp(w.client_length(width), w.client_length(height));
-        (w.scene_length(pixels_w).max(1), w.scene_length(pixels_h).max(1))
+        let Some(w) = self.get_window(id) else {
+            return (width.max(1), height.max(1));
+        };
+        let (pixels_w, pixels_h) = w
+            .size_limits
+            .clamp(w.client_length(width), w.client_length(height));
+        (
+            w.scene_length(pixels_w).max(1),
+            w.scene_length(pixels_h).max(1),
+        )
     }
 
     /// Get focused window ID
@@ -2307,7 +2362,9 @@ impl WindowManager {
     }
 
     /// Get all windows in Z-order (bottom to top)
-    pub(super) fn get_windows_mut(&mut self) -> &mut [Window] { &mut self.windows }
+    pub(super) fn get_windows_mut(&mut self) -> &mut [Window] {
+        &mut self.windows
+    }
 
     pub fn get_windows(&self) -> &[Window] {
         &self.windows
@@ -2366,8 +2423,10 @@ impl WindowManager {
         // delta to transient descendants.
         let (surface_x, surface_y, dx, dy) = match self.get_window(id) {
             Some(w) => {
-                let surface_x = x.saturating_sub(w.scene_length(w.window_geometry_insets.left) as i32);
-                let surface_y = y.saturating_sub(w.scene_length(w.window_geometry_insets.top) as i32);
+                let surface_x =
+                    x.saturating_sub(w.scene_length(w.window_geometry_insets.left) as i32);
+                let surface_y =
+                    y.saturating_sub(w.scene_length(w.window_geometry_insets.top) as i32);
                 (surface_x, surface_y, surface_x - w.x, surface_y - w.y)
             }
             None => return,
@@ -2418,7 +2477,9 @@ impl WindowManager {
 
             // IMPORTANT: Do not clamp here. The SHM buffer was already allocated
             // for the provided width/height by the IPC thread.
-            if (width, height) != (w.width, w.height) { w.scene_extent = (w.scene_length(width).max(1), w.scene_length(height).max(1)); }
+            if (width, height) != (w.width, w.height) {
+                w.scene_extent = (w.scene_length(width).max(1), w.scene_length(height).max(1));
+            }
             w.width = width.max(1);
             w.height = height.max(1);
             w.buffer_scale_milli = w.preferred_scale_milli;
@@ -2585,7 +2646,10 @@ impl WindowManager {
 
     /// Fullscreen ownership and scene geometry belong to one output.
     pub fn set_fullscreen_window_on(&mut self, id: WindowId, rect: (i32, i32, u32, u32)) -> bool {
-        if self.fullscreen_window_for(id).is_some_and(|owner| owner != id) {
+        if self
+            .fullscreen_window_for(id)
+            .is_some_and(|owner| owner != id)
+        {
             return false;
         }
 
@@ -2596,8 +2660,7 @@ impl WindowManager {
             return false;
         }
 
-        window.fullscreen_restore_geometry =
-            Some(window.surface_geometry());
+        window.fullscreen_restore_geometry = Some(window.surface_geometry());
         // Unlike maximize, fullscreen sizes the complete client surface to the
         // output. Expanding the surface by normal-mode shadow outsets makes an
         // undecorated fullscreen frame larger than the output and clips its
@@ -2640,9 +2703,17 @@ impl WindowManager {
         self.resize_fullscreen_window_on(id, (0, 0, screen_width, screen_height))
     }
 
-    pub fn resize_fullscreen_window_on(&mut self, id: WindowId, rect: (i32, i32, u32, u32)) -> bool {
-        let Some(window) = self.get_window_mut(id) else { return false; };
-        if !window.fullscreen { return false; }
+    pub fn resize_fullscreen_window_on(
+        &mut self,
+        id: WindowId,
+        rect: (i32, i32, u32, u32),
+    ) -> bool {
+        let Some(window) = self.get_window_mut(id) else {
+            return false;
+        };
+        if !window.fullscreen {
+            return false;
+        }
         window.begin_native_transition();
         window.x = rect.0;
         window.y = rect.1;
@@ -2715,9 +2786,12 @@ impl WindowManager {
     /// retain fullscreen state without confining the active workspace's focus.
     pub fn fullscreen_window_for(&self, id: WindowId) -> Option<WindowId> {
         let output = self.get_window(id)?.output_id;
-        self.windows.iter().find(|window| {
-            window.output_id == output && window.fullscreen && window.is_logically_presented()
-        }).map(|window| window.id)
+        self.windows
+            .iter()
+            .find(|window| {
+                window.output_id == output && window.fullscreen && window.is_logically_presented()
+            })
+            .map(|window| window.id)
     }
 
     fn fullscreen_window_id(&self) -> Option<WindowId> {
@@ -2844,7 +2918,9 @@ impl WindowManager {
 
     /// Rebuild type and fullscreen layers while preserving order within each layer.
     fn rebuild_z_order(&mut self) {
-        let fullscreen_ids: Vec<_> = self.windows.iter()
+        let fullscreen_ids: Vec<_> = self
+            .windows
+            .iter()
             .filter(|window| window.fullscreen)
             .map(|window| window.id)
             .collect();
@@ -3891,7 +3967,13 @@ mod tests {
         manager.focus_window(external);
         manager.raise_to_top(external);
         assert_eq!(manager.get_focused_window_id(), Some(external));
-        let rank = |manager: &WindowManager, id| manager.get_windows().iter().position(|w| w.id == id).unwrap();
+        let rank = |manager: &WindowManager, id| {
+            manager
+                .get_windows()
+                .iter()
+                .position(|w| w.id == id)
+                .unwrap()
+        };
         assert!(rank(&manager, external) > rank(&manager, other));
         assert!(rank(&manager, primary) > rank(&manager, chrome));
         assert!(manager.set_fullscreen_window_on(external, (-1920, 0, 1920, 1080)));

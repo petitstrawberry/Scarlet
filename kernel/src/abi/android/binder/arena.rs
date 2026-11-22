@@ -126,7 +126,10 @@ impl MemoryMappingOps for Arena {
     fn on_mapped(&self, vaddr: usize, _: u64, _: usize, _: usize) {
         self.base.store(vaddr, Ordering::Relaxed);
         let _ = self.lifecycle.compare_exchange(
-            ARENA_PENDING, ARENA_LIVE, Ordering::Release, Ordering::Relaxed,
+            ARENA_PENDING,
+            ARENA_LIVE,
+            Ordering::Release,
+            Ordering::Relaxed,
         );
     }
     fn on_unmapped(&self, _: usize, _: usize) {
@@ -186,7 +189,10 @@ impl BinderFile {
                     true,
                     Some(arena.clone()),
                 );
-                let base = task.vm_manager.add_memory_map_anywhere(map).map_err(|_| errno::ENOMEM)?;
+                let base = task
+                    .vm_manager
+                    .add_memory_map_anywhere(map)
+                    .map_err(|_| errno::ENOMEM)?;
                 arena.on_mapped(base, arena.paddr, length, 0);
                 Ok((base, arena))
             })();

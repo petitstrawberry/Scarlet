@@ -419,9 +419,7 @@ pub fn build_control_center_view(
         ControlCenterPage::Network | ControlCenterPage::System => {
             details_page(metrics, &snapshot, &session)
         }
-        ControlCenterPage::Power | ControlCenterPage::Session => {
-            session_page(metrics, &session)
-        }
+        ControlCenterPage::Power | ControlCenterPage::Session => session_page(metrics, &session),
         ControlCenterPage::Confirm(confirmed) => {
             confirmation_page(metrics, confirmed, &action, &session)
         }
@@ -1139,36 +1137,50 @@ fn session_page(
     session: &State<ControlCenterSession>,
 ) -> Vec<Box<dyn View>> {
     let (title, options): (_, &[_]) = if metrics.page == ControlCenterPage::Power {
-        ("Power", &[
-            (SessionAction::Restart, Icon::Refresh),
-            (SessionAction::PowerOff, Icon::Power),
-        ])
+        (
+            "Power",
+            &[
+                (SessionAction::Restart, Icon::Refresh),
+                (SessionAction::PowerOff, Icon::Power),
+            ],
+        )
     } else {
         ("Session", &[(SessionAction::LogOut, Icon::Logout)])
     };
     let width = metrics.content_width();
     let gap = (metrics.gap as f32).min(width / 4.0);
-    let height = (metrics.details_height as f32).min(metrics.target_height as f32).max(1.0);
+    let height = (metrics.details_height as f32)
+        .min(metrics.target_height as f32)
+        .max(1.0);
     let button_width = ((width - gap) / 2.0).max(1.0);
-    let buttons = options.iter().map(|&(command, icon)| {
-        let session = session.clone();
-        boxed(Button::new(alloc::format!("{}…", command.label()))
-            .icon(icon)
-            .icon_size(IconSize::Small)
-            .font_size(12.0)
-            .padding(0.0)
-            .enabled(command.available())
-            .on_click(move || {
-                session.update(|session| session.page = ControlCenterPage::Confirm(command));
-            })
-            .frame(button_width, height)
-            .clip())
-    }).collect();
+    let buttons = options
+        .iter()
+        .map(|&(command, icon)| {
+            let session = session.clone();
+            boxed(
+                Button::new(alloc::format!("{}…", command.label()))
+                    .icon(icon)
+                    .icon_size(IconSize::Small)
+                    .font_size(12.0)
+                    .padding(0.0)
+                    .enabled(command.available())
+                    .on_click(move || {
+                        session
+                            .update(|session| session.page = ControlCenterPage::Confirm(command));
+                    })
+                    .frame(button_width, height)
+                    .clip(),
+            )
+        })
+        .collect();
     vec![
         details_header(title, metrics, session),
-        content_section(width, metrics.details_height as f32, vec![
-            control_row(buttons, width, height, gap),
-        ], gap),
+        content_section(
+            width,
+            metrics.details_height as f32,
+            vec![control_row(buttons, width, height, gap)],
+            gap,
+        ),
     ]
 }
 
@@ -1180,7 +1192,9 @@ fn confirmation_page(
 ) -> Vec<Box<dyn View>> {
     let width = metrics.content_width();
     let gap = metrics.gap as f32;
-    let height = (metrics.details_height as f32 / 2.0).min(metrics.target_height as f32).max(1.0);
+    let height = (metrics.details_height as f32 / 2.0)
+        .min(metrics.target_height as f32)
+        .max(1.0);
     let previous = if confirmed == SessionAction::LogOut {
         ControlCenterPage::Session
     } else {
@@ -1188,21 +1202,33 @@ fn confirmation_page(
     };
     let session = session.clone();
     let action = action.clone();
-    let buttons = control_row(vec![
-        boxed(Spacer::new()),
-        boxed(Button::new("Cancel").on_click(move || session.update(|s| s.page = previous))),
-        boxed(Button::new(confirmed.label()).on_click(move || {
-            confirmed.confirm(&action);
-        })),
-    ], width, height, gap);
+    let buttons = control_row(
+        vec![
+            boxed(Spacer::new()),
+            boxed(Button::new("Cancel").on_click(move || session.update(|s| s.page = previous))),
+            boxed(Button::new(confirmed.label()).on_click(move || {
+                confirmed.confirm(&action);
+            })),
+        ],
+        width,
+        height,
+        gap,
+    );
     vec![
-        boxed(Text::new(confirmed.question())
-            .font_size(14.0)
-            .frame(width, metrics.target_height as f32)),
-        content_section(width, metrics.details_height as f32, vec![
-            boxed(Text::new("Unsaved work may be lost.").text_style(TextStyle::Caption)),
-            buttons,
-        ], gap),
+        boxed(
+            Text::new(confirmed.question())
+                .font_size(14.0)
+                .frame(width, metrics.target_height as f32),
+        ),
+        content_section(
+            width,
+            metrics.details_height as f32,
+            vec![
+                boxed(Text::new("Unsaved work may be lost.").text_style(TextStyle::Caption)),
+                buttons,
+            ],
+            gap,
+        ),
     ]
 }
 
@@ -1229,17 +1255,27 @@ fn footer_row(
     };
     let shortcut = |icon_id, page| {
         let session = session.clone();
-        boxed(icon(icon_id, metrics.page == page).on_click(move || {
-            session.update(|session| {
-                session.page = if session.page == page { ControlCenterPage::Controls } else { page };
-            });
-        }).frame(icon_width, height))
+        boxed(
+            icon(icon_id, metrics.page == page)
+                .on_click(move || {
+                    session.update(|session| {
+                        session.page = if session.page == page {
+                            ControlCenterPage::Controls
+                        } else {
+                            page
+                        };
+                    });
+                })
+                .frame(icon_width, height),
+        )
     };
     let power = shortcut(Icon::Power, ControlCenterPage::Power);
     let session_menu = shortcut(Icon::Lock, ControlCenterPage::Session);
-    let settings = boxed(icon(Icon::Settings, false)
-        .on_click(move || action.set(Some(ControlCenterAction::OpenSettings)))
-        .frame(icon_width, height));
+    let settings = boxed(
+        icon(Icon::Settings, false)
+            .on_click(move || action.set(Some(ControlCenterAction::OpenSettings)))
+            .frame(icon_width, height),
+    );
     let system_width = (width - 3.0 * icon_width - 4.0 * gap).max(1.0);
     let status = system_label(&snapshot.system);
     let input = input_label(&snapshot.input_environment);
@@ -1257,8 +1293,11 @@ fn footer_row(
         let icon_width = 22.0_f32.min(system_width / 4.0);
         let text_width = (system_width - icon_width - gap).max(1.0);
         let line = |label: String| {
-            Text::new(label).font_size(11.0).line_limit(Some(1))
-                .alignment(Alignment::Trailing).frame(text_width, height / 2.0)
+            Text::new(label)
+                .font_size(11.0)
+                .line_limit(Some(1))
+                .alignment(Alignment::Trailing)
+                .frame(text_width, height / 2.0)
         };
         let icon = page_button(
             "",
@@ -1268,17 +1307,23 @@ fn footer_row(
             session,
         );
         let session = session.clone();
-        boxed(HStack::new(DynamicViews::new(vec![
-            icon,
-            boxed(VStack::new((line(status), line(input.into()))).spacing(0.0)),
-        ]))
-        .spacing(gap)
-        .alignment(Alignment::Center)
-        .frame(system_width, height)
-        .on_click(move || session.update(|current| current.page = ControlCenterPage::System)))
+        boxed(
+            HStack::new(DynamicViews::new(vec![
+                icon,
+                boxed(VStack::new((line(status), line(input.into()))).spacing(0.0)),
+            ]))
+            .spacing(gap)
+            .alignment(Alignment::Center)
+            .frame(system_width, height)
+            .on_click(move || session.update(|current| current.page = ControlCenterPage::System)),
+        )
     };
-    control_row(vec![power, session_menu, settings, boxed(Spacer::new()), system],
-        width, height, gap)
+    control_row(
+        vec![power, session_menu, settings, boxed(Spacer::new()), system],
+        width,
+        height,
+        gap,
+    )
 }
 
 fn control_row(children: Vec<Box<dyn View>>, width: f32, height: f32, gap: f32) -> Box<dyn View> {

@@ -50,8 +50,7 @@ use crate::println;
 use crate::sync::{IrqSpinLock, Once};
 use crate::{
     arch::{
-        Arch, Trapframe, get_cpu, instruction::idle, task_context,
-        trap::user::arch_switch_to_user,
+        Arch, Trapframe, get_cpu, instruction::idle, task_context, trap::user::arch_switch_to_user,
     },
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},

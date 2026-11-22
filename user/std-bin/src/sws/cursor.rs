@@ -342,13 +342,19 @@ impl Cursor {
     /// Decode the initial pointer now. Other theme images are decoded once,
     /// when a client or a resize grip first selects that shape.
     pub(super) fn from_theme(theme: &CursorTheme, scale_milli: u32) -> Result<Self, &'static str> {
-        let arrow = theme.image(sws_protocol::CursorIcon::Arrow)
+        let arrow = theme
+            .image(sws_protocol::CursorIcon::Arrow)
             .ok_or("Cursor theme does not contain an arrow image")?;
         let decoded = decode_png_file(&arrow.image_path)?;
-        let mut cursor = Self::from_decoded(decoded, scale_milli, arrow.hotspot_x, arrow.hotspot_y)?;
-        cursor.pending_images.extend(theme.images().iter()
-            .filter(|entry| entry.icon != sws_protocol::CursorIcon::Arrow)
-            .cloned());
+        let mut cursor =
+            Self::from_decoded(decoded, scale_milli, arrow.hotspot_x, arrow.hotspot_y)?;
+        cursor.pending_images.extend(
+            theme
+                .images()
+                .iter()
+                .filter(|entry| entry.icon != sws_protocol::CursorIcon::Arrow)
+                .cloned(),
+        );
         Ok(cursor)
     }
 
@@ -498,7 +504,11 @@ impl Cursor {
     fn load_image(&mut self, entry: &CursorThemeImage) -> Result<(), &'static str> {
         let decoded = decode_png_file(&entry.image_path)?;
         let image = Self::scaled_image_from_decoded(
-            entry.icon, decoded, self.scale_milli, entry.hotspot_x, entry.hotspot_y,
+            entry.icon,
+            decoded,
+            self.scale_milli,
+            entry.hotspot_x,
+            entry.hotspot_y,
         )?;
         self.images.push(image);
         Ok(())
@@ -519,10 +529,17 @@ impl Cursor {
         if self.images[self.active_index].icon == icon {
             return false;
         }
-        if let Some(index) = self.pending_images.iter().position(|entry| entry.icon == icon) {
+        if let Some(index) = self
+            .pending_images
+            .iter()
+            .position(|entry| entry.icon == icon)
+        {
             let entry = self.pending_images.swap_remove(index);
             if let Err(error) = self.load_image(&entry) {
-                println!("[Compositor] Cursor theme image {} unavailable: {}", entry.image_path, error);
+                println!(
+                    "[Compositor] Cursor theme image {} unavailable: {}",
+                    entry.image_path, error
+                );
             }
         }
         let next_index = self
@@ -684,11 +701,18 @@ impl Cursor {
     }
 
     /// A desktop may extend left or above the primary output.
-    pub(super) fn set_position_in_rect(&mut self, x: i32, y: i32, bounds: (i32, i32, u32, u32)) -> bool {
+    pub(super) fn set_position_in_rect(
+        &mut self,
+        x: i32,
+        y: i32,
+        bounds: (i32, i32, u32, u32),
+    ) -> bool {
         let old_x = self.x;
         let old_y = self.y;
-        let right = (i64::from(bounds.0) + i64::from(bounds.2.max(1)) - 1).min(i64::from(i32::MAX)) as i32;
-        let bottom = (i64::from(bounds.1) + i64::from(bounds.3.max(1)) - 1).min(i64::from(i32::MAX)) as i32;
+        let right =
+            (i64::from(bounds.0) + i64::from(bounds.2.max(1)) - 1).min(i64::from(i32::MAX)) as i32;
+        let bottom =
+            (i64::from(bounds.1) + i64::from(bounds.3.max(1)) - 1).min(i64::from(i32::MAX)) as i32;
         self.x = x.clamp(bounds.0, right);
         self.y = y.clamp(bounds.1, bottom);
         let moved = old_x != self.x || old_y != self.y;
@@ -921,8 +945,10 @@ mod tests {
     #[test]
     fn theme_decodes_each_requested_shape_once() {
         let theme = super::CursorTheme::load(concat!(
-            env!("CARGO_MANIFEST_DIR"), "/../../bundles/desktop/fs/share/cursors/default"
-        )).unwrap();
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../bundles/desktop/fs/share/cursors/default"
+        ))
+        .unwrap();
         let mut cursor = Cursor::from_theme(&theme, 1000).unwrap();
         assert_eq!(cursor.image_count(), 1);
         assert!(cursor.set_icon(CursorIcon::Pointer));

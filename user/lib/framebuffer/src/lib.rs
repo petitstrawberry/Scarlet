@@ -11,17 +11,17 @@ extern crate scarlet_std as std;
 
 use alloc::{format, vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::capability::SeekFrom;
-#[cfg(feature = "std")]
 use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::SeekFrom;
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
-        Handle, HandleError, HandleResult,
         capability::memory_mapping::{flags, munmap, prot},
+        Handle, HandleError, HandleResult,
     },
     io::SeekFrom,
 };
@@ -272,17 +272,31 @@ impl DisplayOutputInfo {
     }
 
     pub fn monitor_key(&self) -> Option<&str> {
-        if self.size < 272 { return None; }
-        let end = self.monitor_key.iter().position(|byte| *byte == 0).unwrap_or(self.monitor_key.len());
+        if self.size < 272 {
+            return None;
+        }
+        let end = self
+            .monitor_key
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.monitor_key.len());
         let text = core::str::from_utf8(&self.monitor_key[..end]).ok()?;
         (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
     }
     pub fn monitor_name(&self) -> &str {
-        if self.size < 336 { return ""; }
-        let end = self.monitor_name.iter().position(|byte| *byte == 0).unwrap_or(self.monitor_name.len());
+        if self.size < 336 {
+            return "";
+        }
+        let end = self
+            .monitor_name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.monitor_name.len());
         core::str::from_utf8(&self.monitor_name[..end]).unwrap_or("")
     }
-    pub fn monitor_has_serial(&self) -> bool { self.flags & DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL != 0 }
+    pub fn monitor_has_serial(&self) -> bool {
+        self.flags & DISPLAY_OUTPUT_FLAG_MONITOR_SERIAL != 0
+    }
 
     /// Stable connector identity for display profiles and retained workspaces.
     pub fn connector_key(&self) -> Option<alloc::string::String> {
@@ -679,7 +693,11 @@ pub struct DisplayMode {
 }
 #[repr(C)]
 #[derive(Default)]
-struct DisplayModeQuery { index: u32, count: u32, mode: DisplayMode }
+struct DisplayModeQuery {
+    index: u32,
+    count: u32,
+    mode: DisplayMode,
+}
 
 pub struct DisplayControl {
     file: File,
@@ -722,17 +740,32 @@ impl DisplayControl {
     pub fn modes(&self) -> HandleResult<alloc::vec::Vec<DisplayMode>> {
         let mut modes = alloc::vec::Vec::new();
         for index in 0..256 {
-            let mut query = DisplayModeQuery { index, ..Default::default() };
+            let mut query = DisplayModeQuery {
+                index,
+                ..Default::default()
+            };
             // SAFETY: synchronous fixed-size control borrows this initialized query.
-            unsafe { self.file.as_handle().control(display_commands::DISPLAY_GET_MODE, &mut query as *mut _ as usize) }?;
-            if index >= query.count { return Ok(modes); }
+            unsafe {
+                self.file.as_handle().control(
+                    display_commands::DISPLAY_GET_MODE,
+                    &mut query as *mut _ as usize,
+                )
+            }?;
+            if index >= query.count {
+                return Ok(modes);
+            }
             modes.push(query.mode);
         }
         Err(HandleError::InvalidParameter)
     }
     pub fn request_mode(&self, mode: DisplayMode) -> HandleResult<()> {
         // SAFETY: the kernel copies this initialized fixed-size value before returning.
-        unsafe { self.file.as_handle().control(display_commands::DISPLAY_REQUEST_MODE, &mode as *const _ as usize) }?;
+        unsafe {
+            self.file.as_handle().control(
+                display_commands::DISPLAY_REQUEST_MODE,
+                &mode as *const _ as usize,
+            )
+        }?;
         Ok(())
     }
     const PRIMARY_DISPLAY_SCAN_LIMIT: usize = 16;
@@ -898,7 +931,9 @@ impl DisplaySurface {
         // A drawing surface requests a writable mapping and may write rows
         // through the stream on devices without mmap.
         #[cfg(feature = "std")]
-        let file = File { handle: Handle::open(path, 2)? };
+        let file = File {
+            handle: Handle::open(path, 2)?,
+        };
         #[cfg(not(feature = "std"))]
         let file = File::open_with_flags(path, 2).map_err(|_| HandleError::NotFound)?;
         let mut display = Self {
@@ -2689,7 +2724,7 @@ impl Drop for DisplaySurface {
 
 #[cfg(test)]
 mod tests {
-    use super::{HandleError, brightness_percent_from_control};
+    use super::{brightness_percent_from_control, HandleError};
 
     #[test]
     fn brightness_control_result_accepts_inclusive_range() {

@@ -422,7 +422,9 @@ impl MemoryMappingOps for MemfdMapping {
     ) {
         let state = self.backing.state.read();
         let file_page = self.offset / PAGE_SIZE;
-        let available = self.length.div_ceil(PAGE_SIZE)
+        let available = self
+            .length
+            .div_ceil(PAGE_SIZE)
             .min(state.pages.len().saturating_sub(file_page));
         for page in start..start.saturating_add(count).min(available) {
             if let Some(pa) = state.pages[file_page + page] {

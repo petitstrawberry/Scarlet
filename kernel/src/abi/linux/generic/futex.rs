@@ -410,8 +410,9 @@ pub fn wake_task_address(task: &crate::task::Task, uaddr: usize, max: usize) -> 
         woken += wake_key(private_key, max, FUTEX_BITSET_MATCH_ANY);
     }
     if woken < max
-        && let Some(shared_key) =
-            futex_key(task, uaddr, false, || task.vm_manager.translate_to_phys(uaddr))
+        && let Some(shared_key) = futex_key(task, uaddr, false, || {
+            task.vm_manager.translate_to_phys(uaddr)
+        })
     {
         woken += wake_key(shared_key, max - woken, FUTEX_BITSET_MATCH_ANY);
     }

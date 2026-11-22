@@ -31,7 +31,10 @@ macro_rules! driver_initcall {
     ($func:ident) => {
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__sc_init_driver"))]
         #[cfg_attr(target_os = "linux", unsafe(link_section = "sc_init_driver"))]
-        #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), unsafe(link_section = ".initcall.driver"))]
+        #[cfg_attr(
+            not(any(target_os = "linux", target_os = "macos")),
+            unsafe(link_section = ".initcall.driver")
+        )]
         #[used]
         static __DRIVER_INITCALL__: fn() = $func;
     };

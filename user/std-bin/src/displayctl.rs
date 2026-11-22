@@ -27,13 +27,17 @@ fn usage() {
 fn backlight(percent: Option<u8>) -> Result<u8, String> {
     if let Ok(display) = DisplayControl::open_primary() {
         if let Some(percent) = percent {
-            display.set_brightness_percent(percent).map_err(|error| format!("{error:?}"))?;
+            display
+                .set_brightness_percent(percent)
+                .map_err(|error| format!("{error:?}"))?;
         }
-        return display.get_brightness_percent().map_err(|error| format!("{error:?}"));
+        return display
+            .get_brightness_percent()
+            .map_err(|error| format!("{error:?}"));
     }
 
-    let display = sws_client::Connection::connect_backlight()
-        .map_err(|error| format!("{error:?}"))?;
+    let display =
+        sws_client::Connection::connect_backlight().map_err(|error| format!("{error:?}"))?;
     match percent {
         Some(percent) => display.set_backlight_percent(percent),
         None => display.backlight_percent(),
@@ -134,18 +138,16 @@ fn main() -> ExitCode {
 
     match command.as_str() {
         "info" if args.next().is_none() => print_info(),
-        "get" if args.next().is_none() => {
-            match backlight(None) {
-                Ok(percent) => {
-                    println!("brightness={percent}%");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("displayctl: failed to read brightness: {error:?}");
-                    ExitCode::from(1)
-                }
+        "get" if args.next().is_none() => match backlight(None) {
+            Ok(percent) => {
+                println!("brightness={percent}%");
+                ExitCode::SUCCESS
             }
-        }
+            Err(error) => {
+                eprintln!("displayctl: failed to read brightness: {error:?}");
+                ExitCode::from(1)
+            }
+        },
         "set" => {
             let Some(value) = args.next() else {
                 usage();

@@ -41,9 +41,9 @@ use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
 use self::time::PosixTimer;
 use crate::arch::Trapframe;
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 #[cfg(target_arch = "aarch64")]
 use crate::sync::Mutex;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 
 const MAX_FDS: usize = 1024;
 /// Maximum POSIX timers owned by one Linux process/thread group.

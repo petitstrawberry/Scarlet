@@ -230,7 +230,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     } else if private_demand {
         return usize::MAX;
     } else {
-        match task.vm_manager.add_memory_map_at_offset(vm_map, placement_alignment, 0) {
+        match task
+            .vm_manager
+            .add_memory_map_at_offset(vm_map, placement_alignment, 0)
+        {
             Ok(addr) => (addr, Vec::new()),
             Err(_) => return usize::MAX,
         }
@@ -354,7 +357,8 @@ fn handle_anonymous_mapping(
         pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
-        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous().with_tail_padding(requested, aligned_length),
+        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous()
+            .with_tail_padding(requested, aligned_length),
         maximum_permissions: usize::MAX,
         permissions,
         is_shared,
