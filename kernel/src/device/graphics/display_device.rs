@@ -1494,7 +1494,7 @@ mod tests {
         let manager = DeviceManager::new_for_test();
         let graphics = Arc::new(TestBrightnessGraphicsDevice::new(42));
         let display = display_for_test(&manager, graphics);
-        let record_len = core::mem::size_of::<DisplayOutputInfo>();
+        const RECORD_LEN: usize = core::mem::size_of::<DisplayOutputInfo>();
 
         let mut short = output_info_request(super::DISPLAY_OUTPUT_INFO_V1_SIZE as u32 - 1);
         assert_eq!(
@@ -1523,7 +1523,7 @@ mod tests {
 
         // A newer caller may pass a larger record; the kernel writes only the
         // fields it knows and leaves the tail untouched.
-        let mut buffer = [0xa5u8; 256];
+        let mut buffer = [0xa5u8; RECORD_LEN + 16];
         let buffer_len = buffer.len() as u32;
         buffer[..4].copy_from_slice(&buffer_len.to_ne_bytes());
         display
@@ -1534,13 +1534,13 @@ mod tests {
             .expect("larger request should succeed");
         assert_eq!(
             u32::from_ne_bytes(buffer[..4].try_into().unwrap()) as usize,
-            record_len
+            RECORD_LEN
         );
         assert_eq!(
             u32::from_ne_bytes(buffer[4..8].try_into().unwrap()),
             DISPLAY_OUTPUT_INFO_VERSION
         );
-        assert!(buffer[record_len..].iter().all(|byte| *byte == 0xa5));
+        assert!(buffer[RECORD_LEN..].iter().all(|byte| *byte == 0xa5));
 
         assert_eq!(
             display
