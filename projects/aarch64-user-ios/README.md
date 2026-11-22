@@ -23,6 +23,22 @@ Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージ
 
 現在の AOT 入力は 16 KiB ページで分離された 1 個の RX セグメントを持つ自己完結の PIE です。再配置は `R_AARCH64_RELATIVE` に対応します。動的インタープリタ、依存ライブラリ、初期化関数テーブルには追加のローダー処理が必要です。
 
+## ネイティブの init をパッケージ化
+
+Scarlet 開発シェルで、予約レジスタを守るように `core` と `alloc` も含めてビルドします。これで `user/bin` の `init` を AOT パッケージ工程に渡せます。
+
+```sh
+RUSTFLAGS='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"' \
+  cargo build --locked --release --target aarch64-unknown-scarlet \
+  -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem \
+  --manifest-path user/bin/Cargo.toml --target-dir .build/scarlet-ios/native-init \
+  --no-default-features --features ios-init-pie --bin init
+cargo run --locked --manifest-path tools/ios-aot/Cargo.toml \
+  --target-dir .build/scarlet-ios/rust -- \
+  .build/scarlet-ios/native-init/aarch64-unknown-scarlet/release/init \
+  .build/scarlet-ios/native-init/payload
+```
+
 ## 署名済みコードの再配置を検証
 
 `tests/native-execution/` は iOS 実機で署名済み AArch64 コードの再配置と実行を確認する独立した検証です。位置独立のアセンブリを Mach-O フレームワークとしてビルドし、dyld で読み込んだファイルの RX セグメントを 2 つの仮想アドレスに配置します。それぞれに独立した DATA、BSS、関数ポインタ、TLS、ヒープ、ガード付きスタックを用意します。
