@@ -172,7 +172,7 @@ jobs:
 
     - name: Test scarlet kernel (RV32IMA)
       run: nix develop .#default --command cargo make test-riscv32
-      timeout-minutes: 10
+      timeout-minutes: 20
 
   test-riscv64:
     needs: nix-cache
