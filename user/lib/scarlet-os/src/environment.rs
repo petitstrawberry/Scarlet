@@ -16,7 +16,8 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::convert::Infallible;
-use scarlet_abi::{RawEnvironmentExec, RawEnvironmentHandleMapping};
+pub use scarlet_abi::environment::SpawnPlacement;
+use scarlet_abi::{RawEnvironmentExec, RawEnvironmentHandleMapping, RawEnvironmentSpawn};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 
 /// One file capability to publish in a View. Access is 1 for read, 2 for write,
@@ -350,6 +351,14 @@ pub struct HandleMapping<'a> {
     pub source: &'a Handle,
     pub target: u32,
 }
+
+/// Optional configuration applied before the child runs.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SpawnOptions<'a> {
+    pub abi: Option<&'a str>,
+    pub placement: SpawnPlacement,
+}
+
 impl Environment {
     /// Adopt a transferred Environment handle without changing its authority.
     pub fn from_handle(handle: Handle) -> HandleResult<Self> {
@@ -424,6 +433,25 @@ impl Environment {
         cwd: &str,
         handles: &[HandleMapping<'_>],
     ) -> HandleResult<u32> {
+        self.spawn_with_options(
+            executable,
+            argv,
+            envp,
+            cwd,
+            handles,
+            SpawnOptions::default(),
+        )
+    }
+    /// Spawn with explicit job-control placement and only the mapped handles.
+    pub fn spawn_with_options(
+        &self,
+        executable: &Handle,
+        argv: &[&str],
+        envp: &[&str],
+        cwd: &str,
+        handles: &[HandleMapping<'_>],
+        options: SpawnOptions<'_>,
+    ) -> HandleResult<u32> {
         self.execute(
             Syscall::EnvironmentSpawn,
             executable,
@@ -431,7 +459,8 @@ impl Environment {
             envp,
             cwd,
             handles,
-            None,
+            options.abi,
+            options.placement,
         )
         .map(|pid| pid as u32)
     }
@@ -453,6 +482,7 @@ impl Environment {
             cwd,
             handles,
             None,
+            SpawnPlacement::Inherit,
         )?;
         Err(HandleError::SystemError(-1)) // a successful exec never resumes here
     }
@@ -475,6 +505,7 @@ impl Environment {
             cwd,
             handles,
             Some(abi),
+            SpawnPlacement::Inherit,
         )?;
         Err(HandleError::SystemError(-1))
     }
@@ -488,16 +519,17 @@ impl Environment {
         cwd: &str,
         handles: &[HandleMapping<'_>],
     ) -> HandleResult<u32> {
-        self.execute(
-            Syscall::EnvironmentSpawn,
+        self.spawn_with_options(
             executable,
             argv,
             envp,
             cwd,
             handles,
-            Some(abi),
+            SpawnOptions {
+                abi: Some(abi),
+                placement: SpawnPlacement::Inherit,
+            },
         )
-        .map(|pid| pid as u32)
     }
     fn execute(
         &self,
@@ -508,6 +540,7 @@ impl Environment {
         cwd: &str,
         handles: &[HandleMapping<'_>],
         abi: Option<&str>,
+        placement: SpawnPlacement,
     ) -> HandleResult<usize> {
         if argv.len() > 256 || envp.len() > 256 || handles.len() > 1024 || !cwd.starts_with('/') {
             return Err(HandleError::InvalidParameter);
@@ -542,6 +575,20 @@ impl Environment {
             handles: handles.as_ptr() as usize,
             handle_count: handles.len(),
         };
+        let (tag, process_group) = placement.encode();
+        let extended = RawEnvironmentSpawn {
+            exec: RawEnvironmentExec {
+                size: core::mem::size_of::<RawEnvironmentSpawn>() as u32,
+                ..raw
+            },
+            placement: tag,
+            process_group,
+        };
+        let options = if placement == SpawnPlacement::Inherit {
+            &raw const raw as usize
+        } else {
+            &raw const extended as usize
+        };
         // SAFETY: all records, arrays, C strings, and borrowed handles outlive
         // this synchronous call. The kernel copies inputs before replacing memory.
         result(unsafe {
@@ -549,7 +596,7 @@ impl Environment {
                 syscall,
                 self.raw(),
                 executable.as_raw() as usize,
-                &raw as *const _ as usize,
+                options,
                 abi.as_ref().map_or(0, |abi| abi.as_ptr() as usize),
             )
         })

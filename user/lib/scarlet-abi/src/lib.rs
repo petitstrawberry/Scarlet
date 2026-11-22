@@ -71,6 +71,20 @@ pub struct RawEnvironmentExec {
     pub handle_count: usize,
 }
 
+/// Extended EnvironmentSpawn record. The embedded size covers the entire
+/// record. EnvironmentExec continues to accept only RawEnvironmentExec.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawEnvironmentSpawn {
+    pub exec: RawEnvironmentExec,
+    pub placement: u32,
+    pub process_group: u32,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<RawEnvironmentSpawn>() == core::mem::size_of::<RawEnvironmentExec>() + 8
+);
+
 #[cfg(target_pointer_width = "64")]
 const _: [(); 48] = [(); core::mem::size_of::<RawEnvironmentExec>()];
 #[cfg(target_pointer_width = "32")]

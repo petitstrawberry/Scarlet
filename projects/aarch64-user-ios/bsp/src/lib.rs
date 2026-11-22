@@ -46,10 +46,15 @@ const _: () = {
     assert!(Syscall::GetKernelInfo as usize == 51);
     assert!(Syscall::Clone as usize == 2);
     assert!(Syscall::Waitpid as usize == 5);
+    assert!(Syscall::Getpid as usize == 7);
+    assert!(Syscall::Getppid as usize == 8);
     assert!(Syscall::Sbrk as usize == 13);
+    assert!(Syscall::GetSessionId as usize == 27);
+    assert!(Syscall::GetProcessGroupId as usize == 28);
     assert!(Syscall::EnvironmentCurrent as usize == 1304);
     assert!(Syscall::EnvironmentSpawn as usize == 1306);
     assert!(size_of::<scarlet_abi::RawEnvironmentExec>() == 48);
+    assert!(size_of::<scarlet_abi::RawEnvironmentSpawn>() == 56);
 };
 
 #[repr(C)]
@@ -96,7 +101,7 @@ fn watch(callback: Log) {
             );
             log(
                 callback,
-                "EnvironmentSpawn started a signed child and Waitpid returned its exit status.",
+                "EnvironmentSpawn applied process group and session placement before entry, and Waitpid returned each child's exit status.",
             );
             log(
                 callback,

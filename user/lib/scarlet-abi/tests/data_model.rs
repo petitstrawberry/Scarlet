@@ -2,7 +2,9 @@
 //! byte contracts, not a round trip through the implementation's own encoder.
 
 use scarlet_abi::data_model::{AbiDataError, AbiDataModel, ByteOrder, WordWidth};
-use scarlet_abi::environment::{EnvironmentExec, EnvironmentExecError};
+use scarlet_abi::environment::{
+    EnvironmentExec, EnvironmentExecError, EnvironmentSpawn, SpawnPlacement,
+};
 
 const LE32: AbiDataModel = AbiDataModel::new(WordWidth::Bits32, ByteOrder::Little);
 const LE64: AbiDataModel = AbiDataModel::new(WordWidth::Bits64, ByteOrder::Little);
@@ -256,6 +258,43 @@ fn environment_rejects_truncated_wrong_width_and_reserved_records() {
         EnvironmentExec::decode(LE64, &ENV32),
         Err(EnvironmentExecError::UnsupportedSize)
     );
+}
+
+#[test]
+fn spawn_placement_extends_both_word_models_without_changing_exec() {
+    for (model, fixture) in [(LE32, ENV32.as_slice()), (LE64, ENV64.as_slice())] {
+        let inherited = EnvironmentSpawn::decode(model, fixture).unwrap();
+        assert_eq!(inherited.placement, SpawnPlacement::Inherit);
+        let mut extended = fixture.to_vec();
+        extended[0] += 8;
+        for (tail, placement) in [
+            ([1, 0, 0, 0, 0, 0, 0, 0], SpawnPlacement::NewProcessGroup),
+            (
+                [2, 0, 0, 0, 42, 0, 0, 0],
+                SpawnPlacement::JoinProcessGroup(42),
+            ),
+            ([3, 0, 0, 0, 0, 0, 0, 0], SpawnPlacement::NewSession),
+        ] {
+            extended.truncate(fixture.len());
+            extended.extend_from_slice(&tail);
+            let decoded = EnvironmentSpawn::decode(model, &extended).unwrap();
+            assert_eq!(decoded.exec, inherited.exec);
+            assert_eq!(decoded.placement, placement);
+            assert_eq!(
+                EnvironmentExec::decode(model, &extended),
+                Err(EnvironmentExecError::UnsupportedSize)
+            );
+            assert_eq!(
+                EnvironmentSpawn::decode(model, &extended[..extended.len() - 1]),
+                Err(EnvironmentExecError::Encoding(AbiDataError::BufferTooShort))
+            );
+        }
+        extended[fixture.len()] = 2; // Joining requires a non-zero group.
+        assert_eq!(
+            EnvironmentSpawn::decode(model, &extended),
+            Err(EnvironmentExecError::InvalidPlacement)
+        );
+    }
 }
 
 #[test]

@@ -229,16 +229,34 @@ Lscarlet_scheduler_check:
     svc #0
     cmn x0, #1
     b.eq Lscarlet_scheduler_fail
-    ldr x1, [sp]
-    sub sp, sp, #80
-    mov x12, #48
-    add x13, sp, #48
+    mov x24, x0
+    mov x0, #0
+    mov x8, #28 // GetProcessGroupId
+    svc #0
+    tbnz x0, #63, Lscarlet_scheduler_fail
+    mov x27, x0
+    sub sp, sp, #96
+    mov x26, #0
+Lscarlet_scheduler_spawn:
+    mov x0, x24
+    ldr x1, [sp, #96]
+    mov x12, #56
+    mov x13, #48
+    cmp x26, #0
+    csel x12, x13, x12, eq // Use the original ABI for the inherited case.
+    add x13, sp, #56
     stp x12, x13, [sp]
     stp xzr, xzr, [sp, #16]
     stp xzr, xzr, [sp, #32]
+    str x26, [sp, #48]
+    cmp x26, #2 // JoinProcessGroup
+    b.ne Lscarlet_scheduler_spawn_args
+    str w27, [sp, #52]
+Lscarlet_scheduler_spawn_args:
     adrp x12, child_path
     add x12, x12, :lo12:child_path
-    stp x12, xzr, [sp, #48]
+    add x12, x12, x26, lsl #3
+    stp x12, xzr, [sp, #56]
     mov x2, sp
     adrp x3, abi_name
     add x3, x3, :lo12:abi_name
@@ -248,16 +266,19 @@ Lscarlet_scheduler_check:
     b.eq Lscarlet_scheduler_fail
     cbz x0, Lscarlet_scheduler_fail
     mov x25, x0
-    add x1, sp, #64
+    add x1, sp, #72
     mov x2, #0
     mov x8, #5
     svc #0
     cmp x0, x25
     b.ne Lscarlet_scheduler_fail
-    ldr w12, [sp, #64]
-    add sp, sp, #80
+    ldr w12, [sp, #72]
     cmp w12, #42
     b.ne Lscarlet_scheduler_fail
+    add x26, x26, #1
+    cmp x26, #4
+    b.lo Lscarlet_scheduler_spawn
+    add sp, sp, #96
 
 Lscarlet_scheduler_ok:
     mov x0, #0
@@ -274,7 +295,53 @@ Lscarlet_scheduler_publish:
     brk #0x5101
 
 Lscarlet_scheduler_child:
+    ldrb w22, [x13, #6] // Placement selected in argv[0].
+    mov x8, #7 // Getpid
+    svc #0
+    mov x19, x0
+    mov x8, #8 // Getppid
+    svc #0
+    mov x20, x0
+    mov x0, #0
+    mov x8, #28 // GetProcessGroupId
+    svc #0
+    mov x21, x0
+    cmp w22, #'G'
+    b.eq Lscarlet_scheduler_child_own_group
+    cmp w22, #'S'
+    b.eq Lscarlet_scheduler_child_own_group
+    mov x0, x20
+    mov x8, #28 // GetProcessGroupId
+    svc #0
+    cmp x21, x0
+    b.ne Lscarlet_scheduler_child_fail
+    b Lscarlet_scheduler_child_session
+Lscarlet_scheduler_child_own_group:
+    cmp x21, x19
+    b.ne Lscarlet_scheduler_child_fail
+Lscarlet_scheduler_child_session:
+    mov x0, #0
+    mov x8, #27 // GetSessionId
+    svc #0
+    tbnz x0, #63, Lscarlet_scheduler_child_fail
+    cmp w22, #'S'
+    b.eq Lscarlet_scheduler_child_own_session
+    mov x21, x0
+    mov x0, x20
+    mov x8, #27 // GetSessionId
+    svc #0
+    cmp x21, x0
+    b.ne Lscarlet_scheduler_child_fail
+    b Lscarlet_scheduler_child_pass
+Lscarlet_scheduler_child_own_session:
+    cmp x0, x19
+    b.ne Lscarlet_scheduler_child_fail
+Lscarlet_scheduler_child_pass:
     mov x0, #42
+    b Lscarlet_scheduler_child_exit
+Lscarlet_scheduler_child_fail:
+    mov x0, #1
+Lscarlet_scheduler_child_exit:
     mov x8, #1
     svc #0
     brk #0x5101
@@ -290,7 +357,7 @@ Lscarlet_scheduler_constant:
 unsigned_path:
     .asciz "/unsigned"
 child_path:
-    .asciz "/child"
+    .asciz "/childI", "/childG", "/childJ", "/childS"
 abi_name:
     .asciz "scarlet"
 
