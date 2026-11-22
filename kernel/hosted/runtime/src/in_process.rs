@@ -119,6 +119,10 @@ impl SignedText {
     pub fn contains(&self, pc: u64) -> bool {
         self.bounds.contains(&pc)
     }
+
+    pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
+        self.lease.as_ref()?.user_bounds(address, write)
+    }
 }
 
 struct Request {

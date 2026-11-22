@@ -8,6 +8,8 @@ pub use crate::elf::Segment;
 
 pub struct Layout {
     pub entry: usize,
+    /// Address and entry count of a file-backed ELF program header table.
+    pub program_headers: Option<(usize, usize)>,
     pub address_span: Range<usize>,
     pub segments: Vec<Segment>,
     pub tls: Option<(Segment, usize)>,
@@ -67,7 +69,8 @@ pub fn inspect_aarch64_pie(bytes: &[u8], page: usize) -> Result<Layout, Error> {
             return Err(Error::Unsupported("only R_AARCH64_RELATIVE is supported"));
         }
         let value = usize::try_from(relocation.addend).map_err(|_| Error::Overflow)?;
-        if !targets.insert(relocation.offset)
+        if !relocation.offset.is_multiple_of(8)
+            || !targets.insert(relocation.offset)
             || !image
                 .segments
                 .iter()
@@ -79,8 +82,18 @@ pub fn inspect_aarch64_pie(bytes: &[u8], page: usize) -> Result<Layout, Error> {
         }
         relative_pointers.push((relocation.offset, value));
     }
+    // The main ELF parser already checked the table's bounds and 56-byte entries.
+    let first = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    let end = first + 56 * count;
+    let program_headers = image
+        .segments
+        .iter()
+        .find(|segment| segment.offset <= first && end <= segment.offset + segment.file_size)
+        .map(|segment| (segment.vaddr + (first - segment.offset), count));
     Ok(Layout {
         entry: image.entry,
+        program_headers,
         address_span: image.min_vaddr..image.max_vaddr,
         segments: image.segments,
         tls: image.tls.map(|tls| (tls, image.tls_alignment)),

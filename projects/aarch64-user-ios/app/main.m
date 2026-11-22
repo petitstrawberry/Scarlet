@@ -3,7 +3,7 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
-extern void scarlet_ios_run(const char *image, void (*log)(const char *));
+extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
 #endif
 
 static UITextView *output;
@@ -48,8 +48,9 @@ static void show_line(const char *line) {
 #else
         NSString *path = [NSBundle.mainBundle.privateFrameworksPath
             stringByAppendingPathComponent:@"ScarletGuest.framework/ScarletGuest"];
+        NSString *elf = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"scheduler.elf"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            scarlet_ios_run(path.fileSystemRepresentation, show_line);
+            scarlet_ios_run(path.fileSystemRepresentation, elf.fileSystemRepresentation, show_line);
         });
 #endif
     });

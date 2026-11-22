@@ -829,6 +829,13 @@ impl AbiModule for ScarletAbi {
         task: &crate::task::Task,
         trapframe: &mut Trapframe,
     ) -> Result<(), &'static str> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        {
+            let tls = crate::hosted::signed_exec::prepare(file_object, argv, envp, task, trapframe)?;
+            *self.elf_tls.write() = tls.map(Arc::new);
+            Ok(())
+        }
+        #[cfg(not(all(feature = "hosted", target_os = "ios")))]
         // Get file object from KernelObject::File
         match file_object.as_file() {
             Some(file_obj) => {

@@ -64,6 +64,7 @@ else
         --target-dir "$build_root/rust" -- "$elf" "$out/image"
     framework="$out/$app_name.app/Frameworks/ScarletGuest.framework"
     mkdir -p "$framework"
+    cp "$elf" "$out/$app_name.app/scheduler.elf"
     (
         cd "$out/image"
         "$clang" "${flags[@]}" -dynamiclib -nostdlib \

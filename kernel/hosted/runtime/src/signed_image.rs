@@ -129,9 +129,14 @@ pub struct Image(Arc<Inner>);
 
 pub struct Instance {
     text: Arc<SignedText>,
-    entry: usize,
-    tls: usize,
-    stack_top: usize,
+    lease: Arc<Lease>,
+}
+
+pub struct TlsTemplate {
+    pub address: usize,
+    pub file_size: usize,
+    pub memory_size: usize,
+    pub alignment: usize,
 }
 
 impl Instance {
@@ -140,15 +145,49 @@ impl Instance {
     }
 
     pub fn entry(&self) -> usize {
-        self.entry
+        self.lease.base + self.lease.image.manifest.entry
     }
 
     pub fn tls(&self) -> usize {
-        self.tls
+        self.lease.base + self.lease.image.manifest.span
     }
 
     pub fn stack_top(&self) -> usize {
-        self.stack_top
+        self.tls() + MUTABLE_TAIL
+    }
+
+    pub fn stack_size(&self) -> usize {
+        STACK_SIZE
+    }
+
+    pub fn text_size(&self) -> usize {
+        self.lease.image.manifest.rx_pages().len()
+    }
+
+    pub fn writable_size(&self) -> usize {
+        self.lease
+            .image
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.access == Access::ReadWrite)
+            .map(|segment| segment.pages().len())
+            .sum()
+    }
+
+    pub fn program_headers(&self) -> Option<(usize, usize)> {
+        let (address, count) = self.lease.image.manifest.phdr?;
+        Some((self.lease.base + address, count))
+    }
+
+    pub fn tls_template(&self) -> Option<TlsTemplate> {
+        let template = self.lease.image.manifest.tls.as_ref()?;
+        Some(TlsTemplate {
+            address: self.lease.base + template.template.start,
+            file_size: template.template.len(),
+            memory_size: template.memory_size,
+            alignment: template.alignment,
+        })
     }
 }
 
@@ -156,6 +195,41 @@ pub(crate) struct Lease {
     image: Arc<Inner>,
     slot: usize,
     base: usize,
+}
+
+impl Lease {
+    pub(crate) fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
+        let offset = address.checked_sub(self.base)?;
+        let manifest = &self.image.manifest;
+        let end = manifest.span;
+        let tail = [end..end + 2 * PAGE, end + 3 * PAGE..end + MUTABLE_TAIL];
+        let pages = if let Some(bounds) = tail.into_iter().find(|bounds| bounds.contains(&offset)) {
+            bounds
+        } else {
+            let (segment, mut bounds) = manifest.segments.iter().find_map(|segment| {
+                let bounds = segment.pages();
+                bounds.contains(&offset).then_some((segment, bounds))
+            })?;
+            if write {
+                if segment.access != Access::ReadWrite {
+                    return None;
+                }
+                if let Some(relro) = &manifest.relro {
+                    if relro.contains(&offset) {
+                        return None;
+                    }
+                    if bounds.contains(&relro.start) && offset < relro.start {
+                        bounds.end = relro.start;
+                    }
+                    if bounds.contains(&relro.end) && offset >= relro.end {
+                        bounds.start = relro.end;
+                    }
+                }
+            }
+            bounds
+        };
+        Some(self.base + pages.start..self.base + pages.end)
+    }
 }
 
 impl Drop for Lease {
@@ -233,7 +307,6 @@ impl Image {
         let base = lease.base;
         let manifest = &inner.manifest;
         let tls = base + manifest.span;
-        let stack_top = base + manifest.span + MUTABLE_TAIL;
         inner.initialize(base, tls)?;
         let rx = manifest.rx_pages();
         let patches = manifest
@@ -243,12 +316,10 @@ impl Image {
         // SAFETY: This lease pins the exact immutable file-backed RX range.
         let mut text =
             unsafe { SignedText::new((base + rx.start) as u64..(base + rx.end) as u64, patches)? };
-        text.retain_mapping(lease);
+        text.retain_mapping(lease.clone());
         Ok(Instance {
             text: Arc::new(text),
-            entry: base + manifest.entry,
-            tls,
-            stack_top,
+            lease,
         })
     }
 }
@@ -300,9 +371,10 @@ impl Inner {
             RESERVED.fetch_sub(size, Ordering::Release);
             return Err(io::Error::last_os_error());
         }
+        let base_address = base.expose_provenance();
         let rx = self.manifest.rx_pages();
         if let Err(error) = map_at(
-            base.addr(),
+            base_address,
             rx,
             libc::PROT_READ | libc::PROT_EXEC,
             Some((&self.file, self.rx.start)),
@@ -313,7 +385,7 @@ impl Inner {
                 "mmap signed executable segment: {error}"
             )));
         }
-        Ok(base.addr())
+        Ok(base_address)
     }
 
     fn initialize(&self, base: usize, tls: usize) -> io::Result<()> {

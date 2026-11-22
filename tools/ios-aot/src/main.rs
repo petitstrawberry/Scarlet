@@ -146,6 +146,9 @@ fn package(
     writeln!(manifest, "sha256 {:x}", Sha256::digest(bytes))?;
     writeln!(manifest, "span {}", layout.address_span.len())?;
     writeln!(manifest, "entry {}", layout.entry - origin)?;
+    if let Some((address, count)) = layout.program_headers {
+        writeln!(manifest, "phdr {} {count}", address - origin)?;
+    }
 
     let mut payload = Vec::new();
     for segment in &layout.segments {

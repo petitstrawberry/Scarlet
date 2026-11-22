@@ -2,15 +2,34 @@
 .p2align 2
 .globl _scarlet_scheduler_start
 _scarlet_scheduler_start:
-    mov x19, x0
-    mov x20, x1
-    mov x21, x2
-    mov x24, x3
+    mov x19, x5
+    mov x20, x6
+    mov x21, x7
+    mov x24, x9
     mov x27, x4
     mov x16, x4
     mov x17, x4
     movi v31.16b, #0x5a
     mov x22, #0
+
+    cmp x0, #1
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [sp]
+    cmp x13, x0
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x1]
+    ldrb w13, [x13]
+    cmp w13, #'/'
+    b.ne Lscarlet_scheduler_fail
+    mov x29, x1
+    add x12, sp, #32
+Lscarlet_scheduler_aux:
+    ldp x13, x14, [x12], #16
+    cbz x13, Lscarlet_scheduler_fail
+    cmp x13, #6
+    b.ne Lscarlet_scheduler_aux
+    cmp x14, #4, lsl #12
+    b.ne Lscarlet_scheduler_fail
 
     mrs x23, tpidr_el0
     msr tpidr_el0, x27
@@ -104,6 +123,35 @@ Lscarlet_scheduler_spin:
     b.ne Lscarlet_scheduler_fail
 
 Lscarlet_scheduler_check:
+    adrp x0, unsigned_path
+    add x0, x0, :lo12:unsigned_path
+    mov x1, x29
+    mov x2, #0
+    adrp x3, abi_name
+    add x3, x3, :lo12:abi_name
+    mov x4, #0
+    mov x8, #4
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+
+    sub sp, sp, #1024
+    mov x0, sp
+    mov x1, #1024
+    mov x8, #51
+    svc #0
+    add sp, sp, #1024
+    cbz x0, Lscarlet_scheduler_fail
+    cmn x0, #1
+    b.eq Lscarlet_scheduler_fail
+    // Usercopy must reject addresses owned by the app instead of this guest.
+    mov x0, x20
+    mov x1, #1024
+    mov x8, #51
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+
     cmp x16, x27
     b.ne Lscarlet_scheduler_fail
     cmp x17, x27
@@ -145,6 +193,12 @@ guest_helper:
 
 Lscarlet_scheduler_constant:
     .word 0xd4000001
+
+.section .rodata,"a",@progbits
+unsigned_path:
+    .asciz "/unsigned"
+abi_name:
+    .asciz "scarlet"
 
 .data
 .p2align 3

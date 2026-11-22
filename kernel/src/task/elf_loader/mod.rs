@@ -1428,11 +1428,11 @@ pub(crate) fn setup_native_stack(
         .checked_add(strings_size)
         .ok_or("Process stack size overflows")?;
     let start = top.checked_sub(total).ok_or("Process stack underflows")? & !15;
-    let stack_map = task
+    let (stack_base, _) = task
         .vm_manager
-        .search_memory_map(top.checked_sub(1).ok_or("Empty process stack")?)
+        .user_mapping_bounds(top.checked_sub(1).ok_or("Empty process stack")?)
         .ok_or("Process stack is not mapped")?;
-    if start < stack_map.vmarea.start {
+    if start < stack_base {
         return Err("Process arguments exceed stack mapping");
     }
     let mut bytes = vec![0; top - start];

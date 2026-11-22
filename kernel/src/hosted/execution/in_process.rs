@@ -74,6 +74,17 @@ pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()>
 }
 
 impl Image {
+    /// Some means this address space has signed text. A miss must stay a
+    /// miss, even if the legacy software map covers a numeric address.
+    pub(crate) fn signed_bounds(
+        &self,
+        address: usize,
+        write: bool,
+    ) -> Option<Option<core::ops::Range<usize>>> {
+        let image = self.local.lock().unwrap();
+        Some(image.as_ref()?.text.user_bounds(address, write))
+    }
+
     pub(crate) fn try_parked(&self) -> bool {
         self.local
             .try_lock()

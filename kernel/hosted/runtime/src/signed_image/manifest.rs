@@ -37,12 +37,15 @@ impl Segment {
 pub(super) struct Tls {
     pub template: Range<usize>,
     pub offset: usize,
+    pub alignment: usize,
+    pub memory_size: usize,
 }
 
 pub(super) struct Manifest {
     pub hash: String,
     pub span: usize,
     pub entry: usize,
+    pub phdr: Option<(usize, usize)>,
     pub segments: Vec<Segment>,
     pub relro: Option<Range<usize>>,
     pub tls: Option<Tls>,
@@ -100,6 +103,7 @@ impl Manifest {
             hash: hash.into(),
             span,
             entry,
+            phdr: None,
             segments: Vec::new(),
             relro: None,
             tls: None,
@@ -111,6 +115,13 @@ impl Manifest {
         for line in lines {
             let items: Vec<_> = line.split_ascii_whitespace().collect();
             match items.as_slice() {
+                ["phdr", address, count] if result.phdr.is_none() => {
+                    let (address, count) = (number(address)?, number(count)?);
+                    if count == 0 || count >= u16::MAX as usize {
+                        return Err(invalid("Invalid ELF program header count"));
+                    }
+                    result.phdr = Some((address, count));
+                }
                 ["segment", access, address, filed, size, source] => {
                     let access = match *access {
                         "ro" => Access::ReadOnly,
@@ -150,12 +161,18 @@ impl Manifest {
                 ["tls", start, filed, size, align] if result.tls.is_none() => {
                     let (start, filed, size) = (number(start)?, number(filed)?, number(size)?);
                     let template = range(start, filed)?;
-                    let offset = aarch64_elf_tls_offset(number(align)?, size)
+                    let alignment = number(align)?;
+                    let offset = aarch64_elf_tls_offset(alignment, size)
                         .ok_or_else(|| invalid("Unsupported static TLS layout"))?;
                     if filed > size || template.end > span {
                         return Err(invalid("Invalid static TLS template size"));
                     }
-                    result.tls = Some(Tls { template, offset });
+                    result.tls = Some(Tls {
+                        template,
+                        offset,
+                        alignment,
+                        memory_size: size,
+                    });
                 }
                 ["reloc", target, value] => {
                     let (target, value) = (number(target)?, number(value)?);
@@ -206,7 +223,16 @@ impl Manifest {
                     && range.end <= s.pages().end
             })
         };
-        if self.relro.clone().is_some_and(|relro| !covers(relro))
+        let file_contains = |address: usize, size: usize| {
+            self.segments.iter().any(|segment| {
+                segment.contains(address, size)
+                    && (address - segment.address) + size <= segment.source.len()
+            })
+        };
+        if self
+            .phdr
+            .is_some_and(|(address, count)| !file_contains(address, 56 * count))
+            || self.relro.clone().is_some_and(|relro| !covers(relro))
             || self.relocs.iter().any(|&(target, value)| {
                 !self
                     .segments

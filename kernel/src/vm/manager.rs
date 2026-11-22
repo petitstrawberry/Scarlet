@@ -154,12 +154,24 @@ impl MappingTransaction<'_> {
     }
 
     pub(crate) fn read_alias(&self, address: usize) -> Option<usize> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(bounds) = self.vm.hosted_image().signed_bounds(address, false) {
+            bounds?;
+            self.prepare_fault().ok()?;
+            return Some(address);
+        }
         self.vm
             .translate_with_access(self, address, AccessOp::Load, true)
             .map(phys_to_virt)
     }
 
     pub(crate) fn write_alias(&self, address: usize) -> Option<usize> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(bounds) = self.vm.hosted_image().signed_bounds(address, true) {
+            bounds?;
+            self.prepare_fault().ok()?;
+            return Some(address);
+        }
         self.vm
             .translate_with_access(self, address, AccessOp::Store, false)
             .map(phys_to_virt)
@@ -1596,6 +1608,10 @@ impl VirtualMemoryManager {
     /// private COW fragments. A touched page is not a whole stack boundary.
     /// Hold one read lock so a concurrent split/unmap cannot produce mixed bounds.
     pub fn user_mapping_bounds(&self, address: usize) -> Option<(usize, usize)> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(bounds) = self.hosted_image().signed_bounds(address, false) {
+            return bounds.map(|bounds| (bounds.start, bounds.end));
+        }
         let g = self.inner.read();
         let (_, first) = g.memmap.range(..=address).next_back()?;
         if address > first.vmarea.end || first.permissions & 0x08 == 0 {

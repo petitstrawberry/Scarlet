@@ -1,7 +1,16 @@
 //! Exercise the hosted iOS scheduler from the probe application's CPU0 thread.
 
 use scarlet::{
-    hosted, interrupt::InterruptManager, sched::scheduler, task, timer::get_kernel_timer,
+    abi::{AbiRegistry, scarlet::ScarletAbi},
+    arch::Trapframe,
+    executor::{TransparentExecutor, environment::Environment},
+    fs::{FileType, VfsManager},
+    hosted,
+    interrupt::InterruptManager,
+    object::KernelObject,
+    sched::scheduler,
+    task,
+    timer::get_kernel_timer,
 };
 use scarlet_abi::Syscall;
 use scarlet_hosted_runtime::signed_image::Image;
@@ -10,7 +19,10 @@ use std::{
     io,
     os::unix::ffi::OsStrExt,
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -19,6 +31,8 @@ const _: () = {
     assert!(Syscall::Sleep as usize == 20);
     assert!(Syscall::MonotonicTime as usize == 35);
     assert!(Syscall::Exit as usize == 1);
+    assert!(Syscall::ExecveABI as usize == 4);
+    assert!(Syscall::GetKernelInfo as usize == 51);
 };
 
 #[repr(C)]
@@ -59,6 +73,10 @@ fn watch(callback: Log) {
                 "Scarlet Sleep blocked one Task while the peer ran. TLS and registers survived resumption.",
             );
             log(callback, "SCARLET_P1_PASS");
+            log(
+                callback,
+                "Signed ELF images used the exec stack, rejected an unsigned executable and kept running.",
+            );
             log(callback, "SCARLET_AOT_PASS");
             return;
         }
@@ -76,9 +94,30 @@ fn watch(callback: Log) {
     }
 }
 
-fn boot(path: &Path, callback: Log) -> io::Result<()> {
+fn add_executable(vfs: &VfsManager, path: &str, bytes: &[u8]) -> io::Result<KernelObject> {
+    let describe = |error: scarlet::fs::FileSystemError| io::Error::other(error.message);
+    vfs.create_file_with_mode(path, FileType::RegularFile, 0o755)
+        .map_err(describe)?;
+    let writable = vfs.open(path, 2).map_err(describe)?;
+    let file = writable
+        .as_file()
+        .ok_or_else(|| io::Error::other("Expected writable ELF file"))?;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let count = file
+            .write_at(offset as u64, &bytes[offset..])
+            .map_err(|error| io::Error::other(format!("Cannot write guest ELF: {error:?}")))?;
+        if count == 0 || count > bytes.len() - offset {
+            return Err(io::Error::other("Short write of guest ELF"));
+        }
+        offset += count;
+    }
+    vfs.open(path, 0).map_err(describe)
+}
+
+fn boot(path: &Path, elf: &Path, callback: Log) -> io::Result<()> {
     // SAFETY: The UIKit entry supplies the immutable framework in this app bundle.
-    let image = unsafe { Image::open(path)? };
+    let image = Arc::new(unsafe { Image::open(path)? });
     log(
         callback,
         &format!("Loaded signed ELF image {}", image.elf_sha256()),
@@ -91,29 +130,7 @@ fn boot(path: &Path, callback: Log) -> io::Result<()> {
     // No guest owns this instance yet.
     unsafe { (*marker).errno = 123 };
     drop(retired);
-    let first = image.instantiate()?;
-    let second = image.instantiate()?;
-    let errno = unsafe {
-        (*std::ptr::with_exposed_provenance::<scarlet_abi::tls::NativeTlsHeader>(first.tls())).errno
-    };
-    if first.entry() != reused_entry
-        || first.tls() != retired_tls
-        || errno != 0
-        || first.entry() == second.entry()
-        || first.tls() == second.tls()
-    {
-        return Err(io::Error::other(
-            "Signed image instances did not reset or use distinct VA",
-        ));
-    }
-    log(
-        callback,
-        &format!(
-            "Signed RX aliases at {:#x} and {:#x}",
-            first.entry(),
-            second.entry()
-        ),
-    );
+    hosted::register_signed_image(image).map_err(io::Error::other)?;
     let mut platform =
         hosted::prepare(hosted::DEFAULT_VCPUS, 64 * 1024 * 1024).map_err(io::Error::other)?;
     let interrupts = InterruptManager::global();
@@ -125,24 +142,86 @@ fn boot(path: &Path, callback: Log) -> io::Result<()> {
     scheduler::register_online_cpu(0);
     scheduler::spawn_idle_task(0);
 
-    for (role, (progress, instance)) in PROGRESS.iter().zip([first, second]).enumerate() {
+    AbiRegistry::register::<ScarletAbi>();
+    let vfs = VfsManager::new();
+    let mut bytes = std::fs::read(elf)?;
+    let executable = add_executable(&vfs, "/scheduler", &bytes)?;
+    bytes.push(1);
+    add_executable(&vfs, "/unsigned", &bytes)?;
+    let environment = Environment::new();
+    environment
+        .set_root("scarlet".into(), vfs.view())
+        .map_err(io::Error::other)?;
+    environment.seal().map_err(io::Error::other)?;
+
+    let mut entries = [0; 2];
+    for (role, progress) in PROGRESS.iter().enumerate() {
         let task = task::new_user_task(format!("ios-fixture-{role}"), 0);
         task.init();
+        let prepare = |argv: &[&str], frame: &mut Trapframe| {
+            TransparentExecutor::execute_in_environment_with_abi(
+                environment.clone(),
+                &executable,
+                argv,
+                &[],
+                "/",
+                &[],
+                &task,
+                &task,
+                frame,
+                Some("scarlet"),
+            )
+        };
+        let mut frame = Trapframe::new();
+        prepare(&["/scheduler"], &mut frame)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let (entry, tls, old_asid) = (frame.elr, frame.tpidr_el0, task.vm_manager.get_asid());
+        let failed = prepare(&["/scheduler", "invalid\0arg"], &mut frame);
+        if !failed.is_err_and(|error| {
+            error
+                .to_string()
+                .contains("Invalid or oversized process arguments")
+        }) || frame.elr != entry
+            || frame.tpidr_el0 != tls
+            || task.vm_manager.get_asid() != old_asid
+        {
+            return Err(io::Error::other("Failed exec changed the previous image"));
+        }
+        if role == 0 {
+            let errno = unsafe {
+                (*std::ptr::with_exposed_provenance::<scarlet_abi::tls::NativeTlsHeader>(
+                    tls as usize,
+                ))
+                .errno
+            };
+            if entry as usize != reused_entry || tls as usize != retired_tls || errno != 0 {
+                return Err(io::Error::other(
+                    "Signed image did not reset its reused slot",
+                ));
+            }
+        }
         {
             let mut vcpu = task.vcpu.lock();
-            vcpu.set_pc(instance.entry() as u64);
-            vcpu.set_sp(instance.stack_top());
-            vcpu.set_tls_pointer(instance.tls());
-            vcpu.iregs.reg[0] = std::ptr::from_ref(progress).addr();
-            vcpu.iregs.reg[1] = std::ptr::from_ref(&PROGRESS[1 - role]).addr();
-            vcpu.iregs.reg[2] = role;
-            vcpu.iregs.reg[3] = 100_000_000;
             vcpu.iregs.reg[4] = 0x731a + role;
+            vcpu.iregs.reg[5] = std::ptr::from_ref(progress).addr();
+            vcpu.iregs.reg[6] = std::ptr::from_ref(&PROGRESS[1 - role]).addr();
+            vcpu.iregs.reg[7] = role;
+            vcpu.iregs.reg[9] = 100_000_000;
         }
-        hosted::install_signed_text(&task, instance.text())?;
+        entries[role] = entry;
         let id = scheduler::register_task(task);
         scheduler::enqueue_task(id, 0);
     }
+    if entries[0] == entries[1] {
+        return Err(io::Error::other("Signed guest instances share an RX alias"));
+    }
+    log(
+        callback,
+        &format!(
+            "Signed RX aliases at {:#x} and {:#x}",
+            entries[0], entries[1]
+        ),
+    );
     let first = scheduler::start_scheduler()
         .ok_or_else(|| io::Error::other("CPU0 has no runnable Task"))?;
     platform.start_secondary_cpus().map_err(io::Error::other)?;
@@ -159,13 +238,14 @@ fn boot(path: &Path, callback: Log) -> io::Result<()> {
 /// Run once from the app's dedicated CPU0 pthread.
 ///
 /// # Safety
-/// `path` is a NUL-terminated path to the app-bundled signed guest framework.
+/// Both pointers are NUL-terminated paths inside the app bundle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn scarlet_ios_run(path: *const c_char, callback: Log) {
+pub unsafe extern "C" fn scarlet_ios_run(path: *const c_char, elf: *const c_char, callback: Log) {
     let path = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(path) }.to_bytes(),
     ));
-    if let Err(error) = boot(path, callback) {
+    let elf = Path::new(OsStr::from_bytes(unsafe { CStr::from_ptr(elf) }.to_bytes()));
+    if let Err(error) = boot(path, elf, callback) {
         log(callback, &format!("Scarlet boot failed: {error}"));
         log(callback, "SCARLET_AOT_FAIL");
     }
