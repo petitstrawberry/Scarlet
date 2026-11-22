@@ -338,6 +338,7 @@ name = "scarlet-hosted-runtime"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "scarlet-abi",
  "yaxpeax-arch",
  "yaxpeax-arm",
 ]

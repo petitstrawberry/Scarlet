@@ -20,6 +20,8 @@ mod platform_vm;
 pub use platform_vm::synchronize_instructions;
 pub mod ram;
 pub mod run_gate;
+#[cfg(target_os = "ios")]
+pub mod signed_image;
 pub mod smp;
 #[cfg(not(target_os = "ios"))]
 pub mod worker;

@@ -6,15 +6,57 @@ _scarlet_scheduler_start:
     mov x20, x1
     mov x21, x2
     mov x24, x3
-    mov x23, x4
+    mov x27, x4
     mov x16, x4
     mov x17, x4
     movi v31.16b, #0x5a
     mov x22, #0
 
-.globl _scarlet_scheduler_write_tls
-_scarlet_scheduler_write_tls:
-    brk #0x5500
+    mrs x23, tpidr_el0
+    msr tpidr_el0, x27
+    mrs x14, tpidr_el0
+    cmp x14, x27
+    b.ne Lscarlet_scheduler_fail
+    msr tpidr_el0, x23
+    ldr x13, [x23, #16]
+    cmp x13, #73
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x23, #24]
+    cbnz x13, Lscarlet_scheduler_fail
+    add x13, x21, #74
+    str x13, [x23, #16]
+    add x13, x21, #1
+    str x13, [x23, #24]
+
+    adrp x9, guest_got
+    add x9, x9, :lo12:guest_got
+    ldr x28, [x9]
+    adrp x10, guest_counter
+    add x10, x10, :lo12:guest_counter
+    cmp x10, x28
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x28]
+    cmp x13, #40
+    b.ne Lscarlet_scheduler_fail
+    add x13, x21, #41
+    str x13, [x28]
+    ldr x12, [x9, #8]
+    blr x12
+    cmp x0, #42
+    b.ne Lscarlet_scheduler_fail
+    adrp x9, guest_bss
+    add x9, x9, :lo12:guest_bss
+    ldr x13, [x9]
+    cbnz x13, Lscarlet_scheduler_fail
+    add x13, x21, #1
+    str x13, [x9]
+
+    // This data word in the executable segment matches the SVC encoding.
+    ldr w13, Lscarlet_scheduler_constant
+    movz w12, #1
+    movk w12, #0xd400, lsl #16
+    cmp w13, w12
+    b.ne Lscarlet_scheduler_fail
 
     // Advancing each round requires both guests to run without a syscall.
     add x10, x19, #16
@@ -33,25 +75,19 @@ Lscarlet_scheduler_first:
     b.lo Lscarlet_scheduler_round
     cbnz x21, Lscarlet_scheduler_peer
 
-    mov x8, #{time}
-.globl _scarlet_scheduler_before_sleep
-_scarlet_scheduler_before_sleep:
-    brk #0x5300
+    mov x8, #35
+    svc #0
     mov x25, x0
     ldar x26, [x20]
     mov x0, x24
-    mov x8, #{sleep}
-.globl _scarlet_scheduler_sleep
-_scarlet_scheduler_sleep:
-    brk #0x5300
+    mov x8, #20
+    svc #0
     cbnz x0, Lscarlet_scheduler_fail
     ldar x13, [x20]
     cmp x13, x26
     b.ls Lscarlet_scheduler_fail
-    mov x8, #{time}
-.globl _scarlet_scheduler_after_sleep
-_scarlet_scheduler_after_sleep:
-    brk #0x5300
+    mov x8, #35
+    svc #0
     sub x0, x0, x25
     cmp x0, x24
     b.lo Lscarlet_scheduler_fail
@@ -68,17 +104,27 @@ Lscarlet_scheduler_spin:
     b.ne Lscarlet_scheduler_fail
 
 Lscarlet_scheduler_check:
-    cmp x16, x23
+    cmp x16, x27
     b.ne Lscarlet_scheduler_fail
-    cmp x17, x23
+    cmp x17, x27
     b.ne Lscarlet_scheduler_fail
     umov w13, v31.b[15]
     cmp w13, #0x5a
     b.ne Lscarlet_scheduler_fail
-.globl _scarlet_scheduler_read_tls
-_scarlet_scheduler_read_tls:
-    brk #0x5400
+    mrs x14, tpidr_el0
     cmp x14, x23
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x14, #16]
+    add x12, x21, #74
+    cmp x13, x12
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x14, #24]
+    add x12, x21, #1
+    cmp x13, x12
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x28]
+    add x12, x21, #41
+    cmp x13, x12
     b.ne Lscarlet_scheduler_fail
     mov x0, #0
     mov x13, #1
@@ -89,11 +135,37 @@ Lscarlet_scheduler_fail:
 Lscarlet_scheduler_publish:
     add x12, x19, #8
     stlr x13, [x12]
-    mov x8, #{exit}
-.globl _scarlet_scheduler_exit
-_scarlet_scheduler_exit:
-    brk #0x5300
+    mov x8, #1
+    svc #0
     brk #0x5101
 
-.globl _scarlet_scheduler_end
-_scarlet_scheduler_end:
+guest_helper:
+    mov x0, #42
+    ret
+
+Lscarlet_scheduler_constant:
+    .word 0xd4000001
+
+.data
+.p2align 3
+guest_counter:
+    .quad 40
+
+.bss
+.p2align 3
+guest_bss:
+    .zero 8
+
+.section .data.rel.ro,"aw",@progbits
+.p2align 3
+guest_got:
+    .quad guest_counter
+    .quad guest_helper
+
+.section .tdata,"awT",@progbits
+.p2align 3
+    .quad 73
+
+.section .tbss,"awT",@nobits
+.p2align 3
+    .zero 8

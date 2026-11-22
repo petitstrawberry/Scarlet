@@ -56,6 +56,20 @@ if $probe; then
         -Wl,-install_name,@rpath/ScarletFixture.framework/ScarletFixture \
         "$probe_src/fixture.S" -lSystem -o "$framework/ScarletFixture"
 else
+    elf="$out/scheduler.elf"
+    "$clang" -target aarch64-none-elf -c "$project/tests/scheduler_fixture.S" -o "$out/scheduler.o"
+    ld.lld -pie --no-dynamic-linker -z max-page-size=16384 -z separate-loadable-segments \
+        -e _scarlet_scheduler_start "$out/scheduler.o" -o "$elf"
+    cargo run --quiet --locked --manifest-path "$repo/tools/ios-aot/Cargo.toml" \
+        --target-dir "$build_root/rust" -- "$elf" "$out/image"
+    framework="$out/$app_name.app/Frameworks/ScarletGuest.framework"
+    mkdir -p "$framework"
+    (
+        cd "$out/image"
+        "$clang" "${flags[@]}" -dynamiclib -nostdlib \
+            -Wl,-install_name,@rpath/ScarletGuest.framework/ScarletGuest \
+            image.S -lSystem -o "$framework/ScarletGuest"
+    )
     SDKROOT="$sdkroot" IPHONEOS_DEPLOYMENT_TARGET=16.0 \
         cargo build --locked --release -Zbuild-std=std,panic_abort \
         --manifest-path "$project/bsp/Cargo.toml" --target "$rust_target" \
@@ -96,7 +110,8 @@ common = {
 }
 bundles = [(app, app_name, "APPL", bundle_id)]
 if framework:
-    bundles.append((framework, "ScarletFixture", "FMWK", f"{bundle_id}.fixture"))
+    name = Path(framework).stem
+    bundles.append((framework, name, "FMWK", f"{bundle_id}.{name.lower()}"))
 for directory, name, kind, ident in bundles:
     info = dict(common, CFBundleExecutable=name, CFBundleIdentifier=ident,
                 CFBundleName=name, CFBundlePackageType=kind)

@@ -3,7 +3,7 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
-extern void scarlet_ios_run(void (*log)(const char *));
+extern void scarlet_ios_run(const char *image, void (*log)(const char *));
 #endif
 
 static UITextView *output;
@@ -46,8 +46,10 @@ static void show_line(const char *line) {
             show_line(passed ? "SCARLET_P0_PASS" : "SCARLET_P0_FAIL");
         });
 #else
+        NSString *path = [NSBundle.mainBundle.privateFrameworksPath
+            stringByAppendingPathComponent:@"ScarletGuest.framework/ScarletGuest"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            scarlet_ios_run(show_line);
+            scarlet_ios_run(path.fileSystemRepresentation, show_line);
         });
 #endif
     });

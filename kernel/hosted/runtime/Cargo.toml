@@ -8,3 +8,6 @@ publish = false
 libc = "0.2"
 yaxpeax-arch = { version = "0.3", default-features = false }
 yaxpeax-arm = { version = "0.5", default-features = false }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+scarlet-abi = { path = "../../../user/lib/scarlet-abi" }

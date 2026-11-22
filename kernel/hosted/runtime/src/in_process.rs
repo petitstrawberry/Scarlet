@@ -45,6 +45,18 @@ pub enum Patch {
 }
 
 impl Patch {
+    pub(crate) fn from_guest_word(word: u32) -> Option<Self> {
+        if word & 0xffe0_001f == 0xd400_0001 {
+            return Some(Self::Syscall(((word >> 5) & 0xffff) as u16));
+        }
+        let register = (word & 31) as u8;
+        match word & !31 {
+            0xd53b_d040 => Some(Self::ReadTls(register)),
+            0xd51b_d040 => Some(Self::WriteTls(register)),
+            _ => None,
+        }
+    }
+
     fn breakpoint(self) -> u16 {
         match self {
             Self::Syscall(_) => SYSCALL_BRK,
@@ -57,6 +69,7 @@ impl Patch {
 pub struct SignedText {
     bounds: Range<u64>,
     patches: BTreeMap<u64, Patch>,
+    lease: Option<Arc<crate::signed_image::Lease>>,
 }
 
 impl SignedText {
@@ -95,7 +108,12 @@ impl SignedText {
         Ok(Self {
             bounds,
             patches: sites,
+            lease: None,
         })
+    }
+
+    pub(crate) fn retain_mapping(&mut self, lease: Arc<crate::signed_image::Lease>) {
+        self.lease = Some(lease);
     }
 
     pub fn contains(&self, pc: u64) -> bool {

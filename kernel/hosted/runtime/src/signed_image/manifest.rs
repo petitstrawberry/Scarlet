@@ -1,0 +1,236 @@
+//! Signed manifest for a packaged, self-contained Scarlet PIE.
+
+use super::PAGE;
+use crate::in_process::Patch;
+use scarlet_abi::tls::aarch64_elf_tls_offset;
+use std::{collections::BTreeSet, io, ops::Range};
+
+const MAX_SPAN: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Access {
+    ReadOnly,
+    ReadWrite,
+    Execute,
+}
+
+pub(super) struct Segment {
+    pub access: Access,
+    pub address: usize,
+    pub size: usize,
+    pub source: Range<usize>,
+}
+
+impl Segment {
+    pub fn pages(&self) -> Range<usize> {
+        align_down(self.address)..align_up(self.address + self.size)
+    }
+
+    fn contains(&self, address: usize, length: usize) -> bool {
+        address >= self.address
+            && address
+                .checked_add(length)
+                .is_some_and(|end| end <= self.address + self.size)
+    }
+}
+
+pub(super) struct Tls {
+    pub template: Range<usize>,
+    pub offset: usize,
+}
+
+pub(super) struct Manifest {
+    pub hash: String,
+    pub span: usize,
+    pub entry: usize,
+    pub segments: Vec<Segment>,
+    pub relro: Option<Range<usize>>,
+    pub tls: Option<Tls>,
+    pub relocs: Vec<(usize, usize)>,
+    pub patches: Vec<(usize, Patch)>,
+}
+
+pub(super) fn align_up(value: usize) -> usize {
+    value.next_multiple_of(PAGE)
+}
+
+fn align_down(value: usize) -> usize {
+    value & !(PAGE - 1)
+}
+
+fn invalid(error: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn number(value: &str) -> io::Result<usize> {
+    value
+        .parse()
+        .map_err(|_| invalid("Invalid image manifest number"))
+}
+
+fn range(start: usize, len: usize) -> io::Result<Range<usize>> {
+    Ok(start
+        ..start
+            .checked_add(len)
+            .ok_or_else(|| invalid("Image manifest range overflow"))?)
+}
+
+impl Manifest {
+    pub fn parse(manifest: &str, data_size: usize, rx_size: usize) -> io::Result<Self> {
+        let mut lines = manifest.lines();
+        if lines.next() != Some("scarlet-ios-image 1") || lines.next() != Some("abi scarlet") {
+            return Err(invalid("Unsupported signed image version or ABI"));
+        }
+        let mut header = |key| {
+            lines
+                .next()
+                .and_then(|line| line.strip_prefix(key))
+                .ok_or_else(|| invalid("Missing image manifest header field"))
+        };
+        let hash = header("sha256 ")?;
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid("Invalid ELF image digest"));
+        }
+        let span = number(header("span ")?)?;
+        let entry = number(header("entry ")?)?;
+        if span == 0 || span > MAX_SPAN || !span.is_multiple_of(PAGE) || !entry.is_multiple_of(4) {
+            return Err(invalid("Invalid image span or entry alignment"));
+        }
+        let mut result = Self {
+            hash: hash.into(),
+            span,
+            entry,
+            segments: Vec::new(),
+            relro: None,
+            tls: None,
+            relocs: Vec::new(),
+            patches: Vec::new(),
+        };
+        let mut targets = BTreeSet::new();
+        let mut patch_sites = BTreeSet::new();
+        for line in lines {
+            let items: Vec<_> = line.split_ascii_whitespace().collect();
+            match items.as_slice() {
+                ["segment", access, address, filed, size, source] => {
+                    let access = match *access {
+                        "ro" => Access::ReadOnly,
+                        "rw" => Access::ReadWrite,
+                        "rx" => Access::Execute,
+                        _ => return Err(invalid("Invalid signed segment permissions")),
+                    };
+                    let address = number(address)?;
+                    let size = number(size)?;
+                    let source = range(number(source)?, number(filed)?)?;
+                    let end = range(address, size)?.end;
+                    if size == 0
+                        || end > span
+                        || source.len() > size
+                        || (access != Access::Execute && source.end > data_size)
+                        || result
+                            .segments
+                            .last()
+                            .is_some_and(|s| s.pages().end > align_down(address))
+                    {
+                        return Err(invalid("Overlapping or out of bounds signed image segment"));
+                    }
+                    result.segments.push(Segment {
+                        access,
+                        address,
+                        size,
+                        source,
+                    });
+                }
+                ["relro", begin, end] if result.relro.is_none() => {
+                    let (begin, end) = (number(begin)?, number(end)?);
+                    if begin >= end || end > span {
+                        return Err(invalid("Invalid RELRO span"));
+                    }
+                    result.relro = Some(align_down(begin)..align_up(end));
+                }
+                ["tls", start, filed, size, align] if result.tls.is_none() => {
+                    let (start, filed, size) = (number(start)?, number(filed)?, number(size)?);
+                    let template = range(start, filed)?;
+                    let offset = aarch64_elf_tls_offset(number(align)?, size)
+                        .ok_or_else(|| invalid("Unsupported static TLS layout"))?;
+                    if filed > size || template.end > span {
+                        return Err(invalid("Invalid static TLS template size"));
+                    }
+                    result.tls = Some(Tls { template, offset });
+                }
+                ["reloc", target, value] => {
+                    let (target, value) = (number(target)?, number(value)?);
+                    if !targets.insert(target) || !target.is_multiple_of(8) || value > span {
+                        return Err(invalid("Invalid signed relocation"));
+                    }
+                    result.relocs.push((target, value));
+                }
+                ["patch", pc, original] => {
+                    let pc = number(pc)?;
+                    let word = u32::from_str_radix(original, 16)
+                        .map_err(|_| invalid("Invalid original patch instruction"))?;
+                    let patch = Patch::from_guest_word(word)
+                        .ok_or_else(|| invalid("Unsupported instruction patch"))?;
+                    if !pc.is_multiple_of(4) || !patch_sites.insert(pc) {
+                        return Err(invalid("Invalid instruction patch position"));
+                    }
+                    result.patches.push((pc, patch));
+                }
+                _ => return Err(invalid("Unknown or duplicate image manifest record")),
+            }
+        }
+        result.validate(rx_size)?;
+        Ok(result)
+    }
+
+    fn validate(&self, rx_size: usize) -> io::Result<()> {
+        let mut text = self.segments.iter().filter(|s| s.access == Access::Execute);
+        let rx = text
+            .next()
+            .ok_or_else(|| invalid("Missing signed RX segment"))?;
+        let file_bounds =
+            |address| rx.contains(address, 4) && address - rx.address + 4 <= rx.source.len();
+        if text.next().is_some()
+            || rx.pages().len() != rx_size
+            || !file_bounds(self.entry)
+            || self
+                .patches
+                .iter()
+                .any(|&(address, _)| !file_bounds(address))
+        {
+            return Err(invalid("Invalid signed RX layout or entry"));
+        }
+        let covers = |range: Range<usize>| {
+            self.segments.iter().any(|s| {
+                s.access == Access::ReadWrite
+                    && s.pages().start <= range.start
+                    && range.end <= s.pages().end
+            })
+        };
+        if self.relro.clone().is_some_and(|relro| !covers(relro))
+            || self.relocs.iter().any(|&(target, value)| {
+                !self
+                    .segments
+                    .iter()
+                    .any(|s| s.access == Access::ReadWrite && s.contains(target, 8))
+                    || !self.segments.iter().any(|s| s.contains(value, 0))
+            })
+            || self.tls.as_ref().is_some_and(|tls| {
+                !self.segments.iter().any(|s| {
+                    s.contains(tls.template.start, tls.template.len())
+                        && tls.template.end - s.address <= s.source.len()
+                })
+            })
+        {
+            return Err(invalid("Invalid signed RELRO, TLS or relocation range"));
+        }
+        Ok(())
+    }
+
+    pub fn rx_pages(&self) -> Range<usize> {
+        self.segments
+            .iter()
+            .find(|s| s.access == Access::Execute)
+            .unwrap()
+            .pages()
+    }
+}

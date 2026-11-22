@@ -4,36 +4,22 @@ use scarlet::{
     hosted, interrupt::InterruptManager, sched::scheduler, task, timer::get_kernel_timer,
 };
 use scarlet_abi::Syscall;
-use scarlet_hosted_runtime::in_process::{Patch, SignedText};
+use scarlet_hosted_runtime::signed_image::Image;
 use std::{
-    arch::global_asm,
-    ffi::{CString, c_char},
+    ffi::{CStr, CString, OsStr, c_char},
     io,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    os::unix::ffi::OsStrExt,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
-global_asm!(
-    include_str!("../../tests/scheduler_fixture.S"),
-    sleep = const Syscall::Sleep as usize,
-    time = const Syscall::MonotonicTime as usize,
-    exit = const Syscall::Exit as usize,
-);
-
-unsafe extern "C" {
-    static scarlet_scheduler_start: u8;
-    static scarlet_scheduler_end: u8;
-    static scarlet_scheduler_write_tls: u8;
-    static scarlet_scheduler_read_tls: u8;
-    static scarlet_scheduler_before_sleep: u8;
-    static scarlet_scheduler_sleep: u8;
-    static scarlet_scheduler_after_sleep: u8;
-    static scarlet_scheduler_exit: u8;
-}
+const _: () = {
+    assert!(Syscall::Sleep as usize == 20);
+    assert!(Syscall::MonotonicTime as usize == 35);
+    assert!(Syscall::Exit as usize == 1);
+};
 
 #[repr(C)]
 struct Progress {
@@ -73,6 +59,7 @@ fn watch(callback: Log) {
                 "Scarlet Sleep blocked one Task while the peer ran. TLS and registers survived resumption.",
             );
             log(callback, "SCARLET_P1_PASS");
+            log(callback, "SCARLET_AOT_PASS");
             return;
         }
         if outcomes.iter().any(|&outcome| outcome > 1) || Instant::now() >= deadline {
@@ -82,13 +69,51 @@ fn watch(callback: Log) {
                 &format!("Guest fixture did not complete (outcomes {outcomes:?}, loops {loops:?})"),
             );
             log(callback, "SCARLET_P1_FAIL");
+            log(callback, "SCARLET_AOT_FAIL");
             return;
         }
         thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn boot(callback: Log) -> io::Result<()> {
+fn boot(path: &Path, callback: Log) -> io::Result<()> {
+    // SAFETY: The UIKit entry supplies the immutable framework in this app bundle.
+    let image = unsafe { Image::open(path)? };
+    log(
+        callback,
+        &format!("Loaded signed ELF image {}", image.elf_sha256()),
+    );
+    let retired = image.instantiate()?;
+    let reused_entry = retired.entry();
+    let retired_tls = retired.tls();
+    let marker =
+        std::ptr::with_exposed_provenance_mut::<scarlet_abi::tls::NativeTlsHeader>(retired_tls);
+    // No guest owns this instance yet.
+    unsafe { (*marker).errno = 123 };
+    drop(retired);
+    let first = image.instantiate()?;
+    let second = image.instantiate()?;
+    let errno = unsafe {
+        (*std::ptr::with_exposed_provenance::<scarlet_abi::tls::NativeTlsHeader>(first.tls())).errno
+    };
+    if first.entry() != reused_entry
+        || first.tls() != retired_tls
+        || errno != 0
+        || first.entry() == second.entry()
+        || first.tls() == second.tls()
+    {
+        return Err(io::Error::other(
+            "Signed image instances did not reset or use distinct VA",
+        ));
+    }
+    log(
+        callback,
+        &format!(
+            "Signed RX aliases at {:#x} and {:#x}",
+            first.entry(),
+            second.entry()
+        ),
+    );
     let mut platform =
         hosted::prepare(hosted::DEFAULT_VCPUS, 64 * 1024 * 1024).map_err(io::Error::other)?;
     let interrupts = InterruptManager::global();
@@ -100,55 +125,21 @@ fn boot(callback: Log) -> io::Result<()> {
     scheduler::register_online_cpu(0);
     scheduler::spawn_idle_task(0);
 
-    let entry = (&raw const scarlet_scheduler_start).addr() as u64;
-    // SAFETY: These immutable, signed routines are linked into the app.
-    let text = Arc::new(unsafe {
-        SignedText::new(
-            entry..(&raw const scarlet_scheduler_end).addr() as u64,
-            [
-                (
-                    (&raw const scarlet_scheduler_write_tls).addr() as u64,
-                    Patch::WriteTls(23),
-                ),
-                (
-                    (&raw const scarlet_scheduler_read_tls).addr() as u64,
-                    Patch::ReadTls(14),
-                ),
-                (
-                    (&raw const scarlet_scheduler_before_sleep).addr() as u64,
-                    Patch::Syscall(0),
-                ),
-                (
-                    (&raw const scarlet_scheduler_sleep).addr() as u64,
-                    Patch::Syscall(0),
-                ),
-                (
-                    (&raw const scarlet_scheduler_after_sleep).addr() as u64,
-                    Patch::Syscall(0),
-                ),
-                (
-                    (&raw const scarlet_scheduler_exit).addr() as u64,
-                    Patch::Syscall(0),
-                ),
-            ],
-        )?
-    });
-
-    for (role, progress) in PROGRESS.iter().enumerate() {
+    for (role, (progress, instance)) in PROGRESS.iter().zip([first, second]).enumerate() {
         let task = task::new_user_task(format!("ios-fixture-{role}"), 0);
         task.init();
-        let stack = Box::leak(Box::new([0u128; 4096]));
         {
             let mut vcpu = task.vcpu.lock();
-            vcpu.set_pc(entry);
-            vcpu.set_sp(stack.as_ptr_range().end.addr());
+            vcpu.set_pc(instance.entry() as u64);
+            vcpu.set_sp(instance.stack_top());
+            vcpu.set_tls_pointer(instance.tls());
             vcpu.iregs.reg[0] = std::ptr::from_ref(progress).addr();
             vcpu.iregs.reg[1] = std::ptr::from_ref(&PROGRESS[1 - role]).addr();
             vcpu.iregs.reg[2] = role;
             vcpu.iregs.reg[3] = 100_000_000;
             vcpu.iregs.reg[4] = 0x731a + role;
         }
-        hosted::install_signed_text(&task, text.clone())?;
+        hosted::install_signed_text(&task, instance.text())?;
         let id = scheduler::register_task(task);
         scheduler::enqueue_task(id, 0);
     }
@@ -166,10 +157,16 @@ fn boot(callback: Log) -> io::Result<()> {
 }
 
 /// Run once from the app's dedicated CPU0 pthread.
+///
+/// # Safety
+/// `path` is a NUL-terminated path to the app-bundled signed guest framework.
 #[unsafe(no_mangle)]
-pub extern "C" fn scarlet_ios_run(callback: Log) {
-    if let Err(error) = boot(callback) {
+pub unsafe extern "C" fn scarlet_ios_run(path: *const c_char, callback: Log) {
+    let path = Path::new(OsStr::from_bytes(
+        unsafe { CStr::from_ptr(path) }.to_bytes(),
+    ));
+    if let Err(error) = boot(path, callback) {
         log(callback, &format!("Scarlet boot failed: {error}"));
-        log(callback, "SCARLET_P1_FAIL");
+        log(callback, "SCARLET_AOT_FAIL");
     }
 }

@@ -13,7 +13,11 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
   --terminate-running-process --console booted org.scarletos.ios
 ```
 
-アプリは Scarlet のスケジューラで 2 つの CPU ループがシステムコールを使わずに互いの進行を 4 回確認し、片方が Scarlet の `Sleep` で待機中にもう片方が実行されることを確かめます。結果はアプリ画面とコンソールに `SCARLET_P1_PASS` または `SCARLET_P1_FAIL` と表示されます。ゲストコードは検証用にアプリへリンクしています。ELF の AOT 変換と署名済みイメージのロードは P2 の作業です。
+ビルドはテスト用の AArch64 PIE を ELF としてリンクし、`tools/ios-aot` で Mach-O フレームワークに変換して署名します。Scarlet は署名済みの RX を異なるアドレスへファイルマップし、インスタンスごとに DATA、BSS、GOT、静的 TLS、スタックを初期化します。同じ枠を再利用するときは RX を保持し、可変ページを作り直します。
+
+アプリは 2 つのゲストで再配置された関数ポインタ、BSS、TLS の独立性を確認します。2 つのループはシステムコールを使わずに互いの進行を 4 回確認し、片方が Scarlet の `Sleep` で待機中にもう片方が進みます。結果はアプリ画面とコンソールに `SCARLET_AOT_PASS` または `SCARLET_AOT_FAIL` と表示されます。
+
+現在の AOT 入力は 16 KiB ページで分離された 1 個の RX セグメントを持つ自己完結の PIE です。再配置は `R_AARCH64_RELATIVE` に対応します。動的インタープリタ、依存ライブラリ、初期化関数テーブルには追加のローダー処理が必要です。
 
 ## 署名済みコードの再配置を検証
 
