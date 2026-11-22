@@ -1,4 +1,9 @@
-//! Exercise the hosted iOS scheduler from the probe application's CPU0 thread.
+//! Hosted Scarlet on the iOS application's CPU0 thread.
+
+mod boot;
+#[allow(dead_code)]
+#[path = "../../../shared/hosted/terminal.rs"]
+mod terminal;
 
 use scarlet::{
     abi::{AbiRegistry, scarlet::ScarletAbi},

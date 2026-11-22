@@ -40,36 +40,69 @@ if [[ "$sdk" == macosx ]]; then
     exit
 fi
 
-app_name=Scarlet
-display_name=Scarlet
-default_id=org.scarletos.ios
-framework=""
-link_flags=(-framework UIKit -framework Foundation)
 if $probe; then
     app_name=ScarletExecutionProbe
     display_name="Scarlet Execution Probe"
     default_id=org.scarletos.ios-p0
+else
+    app_name=Scarlet
+    display_name=Scarlet
+    default_id=org.scarletos.ios
+fi
+app="$out/$app_name.app"
+mkdir -p "$app"
+link_flags=(-framework UIKit -framework Foundation)
+
+build_fixture() {
+    local source=$1 entry=$2 elf=$3
+    "$clang" -target aarch64-none-elf -c "$project/tests/$source.S" -o "$out/$source.o"
+    ld.lld -pie --no-dynamic-linker -z max-page-size=16384 -z separate-loadable-segments \
+        -e "$entry" "$out/$source.o" -o "$elf"
+    # Mark the freestanding ELF with Scarlet's OS ABI.
+    printf '\123' | dd of="$elf" bs=1 seek=7 conv=notrunc 2>/dev/null
+}
+
+package_guest() {
+    local elf=$1 name=$2
+    local image="$out/images/$name" framework="$app/Frameworks/$name.framework"
+    mkdir -p "$image" "$framework"
+    cargo run --quiet --locked --manifest-path "$repo/tools/ios-aot/Cargo.toml" \
+        --target-dir "$build_root/rust" -- "$elf" "$image"
+    (
+        cd "$image"
+        "$clang" "${flags[@]}" -dynamiclib -nostdlib \
+            "-Wl,-install_name,@rpath/$name.framework/$name" \
+            image.S -lSystem -o "$framework/$name"
+    )
+}
+
+if $probe; then
     flags+=(-DSCARLET_EXECUTION_PROBE -I "$probe_src")
-    framework="$out/$app_name.app/Frameworks/ScarletFixture.framework"
+    framework="$app/Frameworks/ScarletFixture.framework"
     mkdir -p "$framework"
     "$clang" "${flags[@]}" -dynamiclib -nostdlib \
         -Wl,-install_name,@rpath/ScarletFixture.framework/ScarletFixture \
         "$probe_src/fixture.S" -lSystem -o "$framework/ScarletFixture"
 else
-    elf="$out/scheduler.elf"
-    "$clang" -target aarch64-none-elf -c "$project/tests/scheduler_fixture.S" -o "$out/scheduler.o"
-    ld.lld -pie --no-dynamic-linker -z max-page-size=16384 -z separate-loadable-segments \
-        -e _scarlet_scheduler_start "$out/scheduler.o" -o "$elf"
-    cargo run --quiet --locked --manifest-path "$repo/tools/ios-aot/Cargo.toml" \
-        --target-dir "$build_root/rust" -- "$elf" "$out/image"
-    framework="$out/$app_name.app/Frameworks/ScarletGuest.framework"
-    mkdir -p "$framework"
-    cp "$elf" "$out/$app_name.app/scheduler.elf"
+    build_fixture scheduler_fixture _scarlet_scheduler_start "$app/scheduler.elf"
+    package_guest "$app/scheduler.elf" ScarletGuest
+
+    native="$build_root/native-init"
+    RUSTFLAGS='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"' \
+        cargo build --locked --release --target aarch64-unknown-scarlet \
+        -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem \
+        --manifest-path "$repo/user/bin/Cargo.toml" --target-dir "$native" \
+        --no-default-features --features ios-init-pie --bin init >&2
+    root="$out/initramfs"
+    mkdir -p "$root"/{bin,dev,mnt/newroot}
+    cp "$native/aarch64-unknown-scarlet/release/init" "$root/init"
+    build_fixture boot_fixture _scarlet_boot_start "$root/bin/boot-check"
+    package_guest "$root/init" ScarletInit
+    package_guest "$root/bin/boot-check" ScarletBootCheck
     (
-        cd "$out/image"
-        "$clang" "${flags[@]}" -dynamiclib -nostdlib \
-            -Wl,-install_name,@rpath/ScarletGuest.framework/ScarletGuest \
-            image.S -lSystem -o "$framework/ScarletGuest"
+        cd "$root"
+        printf '%s\n' bin bin/boot-check dev init mnt mnt/newroot |
+            /usr/bin/cpio -o -H newc -R 0:0 > "$app/initramfs.cpio"
     )
     SDKROOT="$sdkroot" IPHONEOS_DEPLOYMENT_TARGET=16.0 \
         cargo build --locked --release -Zbuild-std=std,panic_abort \
@@ -78,9 +111,7 @@ else
     implementation=("$build_root/rust/$rust_target/release/libscarlet_aarch64_user_ios_bsp.a")
     link_flags+=(-Wl,-dead_strip -framework Security -framework CoreFoundation)
 fi
-app="$out/$app_name.app"
 bundle_id=${BUNDLE_ID:-"$default_id"}
-mkdir -p "$app"
 "$clang" "${flags[@]}" -fobjc-arc "$project/app/main.m" "${implementation[@]}" \
     "${link_flags[@]}" -o "$app/$app_name"
 
@@ -96,12 +127,12 @@ if [[ -n "$profile" || -n "$identity" ]]; then
     cp "$profile" "$app/embedded.mobileprovision"
 fi
 
-python3 - "$app" "$framework" "$bundle_id" "$platform" "$out" "$app_name" "$display_name" <<'PY'
+python3 - "$app" "$bundle_id" "$platform" "$out" "$app_name" "$display_name" <<'PY'
 from pathlib import Path
 import plistlib
 import sys
 
-app, framework, bundle_id, platform, build, app_name, display_name = sys.argv[1:]
+app, bundle_id, platform, build, app_name, display_name = sys.argv[1:]
 common = {
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleShortVersionString": "1.0",
@@ -110,8 +141,8 @@ common = {
     "MinimumOSVersion": "16.0",
 }
 bundles = [(app, app_name, "APPL", bundle_id)]
-if framework:
-    name = Path(framework).stem
+for framework in (Path(app) / "Frameworks").glob("*.framework"):
+    name = framework.stem
     bundles.append((framework, name, "FMWK", f"{bundle_id}.{name.lower()}"))
 for directory, name, kind, ident in bundles:
     info = dict(common, CFBundleExecutable=name, CFBundleIdentifier=ident,
@@ -147,12 +178,20 @@ if profile_path.exists():
     profile_path.unlink()
 PY
 
+sign_frameworks() {
+    local framework
+    for framework in "$app"/Frameworks/*.framework; do
+        [[ -d "$framework" ]] || continue
+        codesign --force --sign "$1" "$framework"
+    done
+}
+
 if [[ -n "$identity" ]]; then
-    if [[ -n "$framework" ]]; then codesign --force --sign "$identity" "$framework"; fi
+    sign_frameworks "$identity"
     codesign --force --sign "$identity" --entitlements "$entitlements" "$app"
     codesign --verify --deep --strict "$app"
 elif [[ "$sdk" == iphonesimulator ]]; then
-    if [[ -n "$framework" ]]; then codesign --force --sign - "$framework"; fi
+    sign_frameworks -
     codesign --force --sign - "$app"
 else
     echo "Built without development provisioning. A device install requires signing." >&2

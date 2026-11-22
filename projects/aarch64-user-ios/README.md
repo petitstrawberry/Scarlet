@@ -1,6 +1,6 @@
 # Scarlet on iOS
 
-`bsp/` に iOS のホスト起動コード、`app/` に UIKit のエントリポイント、`tests/` に実行検証用のコードを置きます。アプリは Scarlet を CPU0 で起動し、2 つの署名済み AArch64 ゲストを同じ carrier pthread で実行します。
+`bsp/` に iOS のホスト起動コード、`app/` に UIKit のエントリポイント、`tests/` に実行検証用のコードを置きます。
 
 ## Simulator で Scarlet を起動
 
@@ -13,7 +13,16 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
   --terminate-running-process --console booted org.scarletos.ios
 ```
 
-ビルドはテスト用の AArch64 PIE を ELF としてリンクし、`tools/ios-aot` で Mach-O フレームワークに変換して署名します。Scarlet は署名済みの RX を異なるアドレスへファイルマップし、インスタンスごとに DATA、BSS、GOT、静的 TLS、スタックを初期化します。同じ枠を再利用するときは RX を保持し、可変ページを作り直します。
+通常起動では Scarlet の共通ブート処理が同梱 initramfs をマウントします。Rust 製の `/init` が PID 1 で起動し、`/dev/tty0` と書込み可能なルートビューを初期化して `EnvironmentExec` で `/bin/boot-check` に切り替わります。検証プログラム自身が引き継いだ標準出力に `SCARLET_BOOT_PASS` を書き、UIKit の画面とホストのコンソールに表示されます。
+
+ビルドでは `/init` と検証用 AArch64 PIE の ELF を `tools/ios-aot` で Mach-O フレームワークに変換して署名します。Scarlet は署名済みの RX を異なるアドレスへファイルマップし、インスタンスごとに DATA、BSS、GOT、静的 TLS、スタックを初期化します。同じ枠を再利用するときは RX を保持し、可変ページを作り直します。
+
+## スケジューラとプロセス起動の回帰検証
+
+```sh
+env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
+  --terminate-running-process --console booted org.scarletos.ios --scheduler-check
+```
 
 アプリは 2 つのゲストで再配置された関数ポインタ、BSS、TLS の独立性を確認します。2 つのループはシステムコールを使わずに互いの進行を 4 回確認し、片方が Scarlet の `Sleep` で待機中にもう片方が進みます。結果はアプリ画面とコンソールに `SCARLET_AOT_PASS` または `SCARLET_AOT_FAIL` と表示されます。
 
@@ -27,7 +36,7 @@ Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージ
 
 ## ネイティブの init をパッケージ化
 
-Scarlet 開発シェルで、予約レジスタを守るように `core` と `alloc` も含めてビルドします。これで `user/bin` の `init` を AOT パッケージ工程に渡せます。
+アプリのビルドは、予約レジスタを守るように `core` と `alloc` も含めて `user/bin` の `init` をビルドします。この工程だけを実行する場合は Scarlet 開発シェルで次を実行します。
 
 ```sh
 RUSTFLAGS='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"' \

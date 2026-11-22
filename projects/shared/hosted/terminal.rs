@@ -62,6 +62,28 @@ pub struct HostTerminal {
 }
 
 impl HostTerminal {
+    /// Attach an application-owned console transport without changing termios.
+    #[cfg(target_os = "ios")]
+    pub fn attach_stream(
+        stream: UnixStream,
+        cpu: CpuId,
+        irq: InterruptId,
+        host_stop: impl FnOnce(io::Result<()>) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::attach_transport(
+            cpu,
+            irq,
+            || {
+                stream.set_nonblocking(true)?;
+                Ok(RawTerminal {
+                    file: File::from(std::os::fd::OwnedFd::from(stream)),
+                    saved: None,
+                })
+            },
+            host_stop,
+        )
+    }
+
     /// Use the terminal device that owns this session. On Darwin the
     /// /dev/tty forwarding device does not implement the PTY's poll interface.
     #[cfg(target_os = "macos")]

@@ -3,6 +3,7 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
+extern void scarlet_ios_boot(const char *bundle, void (*log)(const char *));
 extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
 #endif
 
@@ -46,11 +47,16 @@ static void show_line(const char *line) {
             show_line(passed ? "SCARLET_P0_PASS" : "SCARLET_P0_FAIL");
         });
 #else
-        NSString *path = [NSBundle.mainBundle.privateFrameworksPath
-            stringByAppendingPathComponent:@"ScarletGuest.framework/ScarletGuest"];
-        NSString *elf = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"scheduler.elf"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            scarlet_ios_run(path.fileSystemRepresentation, elf.fileSystemRepresentation, show_line);
+            NSBundle *bundle = NSBundle.mainBundle;
+            if ([NSProcessInfo.processInfo.arguments containsObject:@"--scheduler-check"]) {
+                NSString *path = [bundle.privateFrameworksPath
+                    stringByAppendingPathComponent:@"ScarletGuest.framework/ScarletGuest"];
+                NSString *elf = [bundle.resourcePath stringByAppendingPathComponent:@"scheduler.elf"];
+                scarlet_ios_run(path.fileSystemRepresentation, elf.fileSystemRepresentation, show_line);
+            } else {
+                scarlet_ios_boot(bundle.bundlePath.fileSystemRepresentation, show_line);
+            }
         });
 #endif
     });
