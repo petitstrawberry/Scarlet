@@ -3,9 +3,9 @@
 //! The task module defines the structure and behavior of tasks in the system.
 
 pub mod elf_loader;
+mod group_exit;
 pub mod namespace;
 pub mod process_scope;
-mod group_exit;
 pub(crate) use group_exit::device_transaction;
 pub mod reclaim_preference;
 pub mod resource_group;

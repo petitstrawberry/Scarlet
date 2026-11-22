@@ -1407,8 +1407,8 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // A remote CPU may run the child immediately after enqueue via IPI.
             // A concurrent group exit may retire a thread after publication
             // and before we read its namespace-local TID.
-            let registered = crate::sched::scheduler::try_register_task(child_task)
-                .and_then(|child_id| {
+            let registered =
+                crate::sched::scheduler::try_register_task(child_task).and_then(|child_id| {
                     get_task_by_id(child_id)
                         .and_then(|child| child.try_get_namespace_id())
                         .map(|tid| (child_id, tid))

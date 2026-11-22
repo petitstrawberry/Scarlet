@@ -178,7 +178,11 @@ impl ContiguousPages {
         let ptr = phys_to_virt(address) as *mut Page;
         // PMM returned exclusive ownership of exactly this many writable pages.
         unsafe { core::ptr::write_bytes(ptr, 0, count) };
-        Some(Self { ptr, count, memory_attribute: MemoryAttribute::Normal })
+        Some(Self {
+            ptr,
+            count,
+            memory_attribute: MemoryAttribute::Normal,
+        })
     }
 
     /// Allocate contiguous pages with a minimum physical alignment.

@@ -4689,7 +4689,12 @@ impl XhciController {
                 self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
                 self.clear_hub_port_changes(slot_id, port, status, hub.is_superspeed)?;
                 if !status.connected() {
-                    self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
+                    self.remove_disconnected_hub_port(
+                        root_port_id,
+                        hub.route_string,
+                        hub.depth,
+                        port,
+                    );
                     return Ok(false);
                 }
                 if hub.depth >= USB_HUB_ROUTE_DEPTH_MAX || port > 15 {
@@ -4713,7 +4718,12 @@ impl XhciController {
                     return Ok(false);
                 }
                 if child_exists {
-                    self.remove_disconnected_hub_port(root_port_id, hub.route_string, hub.depth, port);
+                    self.remove_disconnected_hub_port(
+                        root_port_id,
+                        hub.route_string,
+                        hub.depth,
+                        port,
+                    );
                 }
 
                 // Our own port reset also wakes the hub worker. Only a physical
@@ -4761,7 +4771,10 @@ impl XhciController {
             match result {
                 Ok(true) => discovered += 1,
                 Ok(false) => {}
-                Err(error) => println!("[xHCI] Hub {} port {} enumeration failed: {}", slot_id, port, error),
+                Err(error) => println!(
+                    "[xHCI] Hub {} port {} enumeration failed: {}",
+                    slot_id, port, error
+                ),
             }
         }
 

@@ -745,8 +745,14 @@ impl ConsoleView {
         } else {
             LINE
         };
-        appearance::action_surface(button, Size::new(width, ACTION_HEIGHT), fill, outline, selected)
-            .on_click(move || frame_click.select(region, index, true))
+        appearance::action_surface(
+            button,
+            Size::new(width, ACTION_HEIGHT),
+            fill,
+            outline,
+            selected,
+        )
+        .on_click(move || frame_click.select(region, index, true))
     }
 
     fn floating_controls(&self, layout: ConsoleLayout) -> FloatingLayer {

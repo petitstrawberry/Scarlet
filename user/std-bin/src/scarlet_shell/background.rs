@@ -7,8 +7,8 @@ use core::time::Duration;
 use sbus::Message as SbusMessage;
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
-    DESKTOP_BACKGROUND_BUS_NAME, DESKTOP_BACKGROUND_CHANGED_SIGNAL,
-    DESKTOP_SETTINGS_INTERFACE, DESKTOP_SETTINGS_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
+    DESKTOP_BACKGROUND_BUS_NAME, DESKTOP_BACKGROUND_CHANGED_SIGNAL, DESKTOP_SETTINGS_INTERFACE,
+    DESKTOP_SETTINGS_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
 };
 use std::println;
 use std::thread;
@@ -22,7 +22,7 @@ static BACKGROUND_CHANGED: AtomicBool = AtomicBool::new(false);
 
 #[path = "wallpaper.rs"]
 mod wallpaper;
-use wallpaper::{load_background_state,BackgroundState};
+use wallpaper::{BackgroundState, load_background_state};
 
 fn background_signal_listener() {
     loop {
@@ -107,28 +107,54 @@ struct OutputBackground {
     extent: (u32, u32),
 }
 
-fn reconcile_outputs(conn: &mut Connection, outputs: &sws_protocol::outputs::OutputSnapshot,
-    surfaces: &mut Vec<OutputBackground>, background: &BackgroundState) {
+fn reconcile_outputs(
+    conn: &mut Connection,
+    outputs: &sws_protocol::outputs::OutputSnapshot,
+    surfaces: &mut Vec<OutputBackground>,
+    background: &BackgroundState,
+) {
     surfaces.retain(|entry| {
-        if outputs.outputs.iter().any(|output| output.id == entry.output) { return true; }
+        if outputs
+            .outputs
+            .iter()
+            .any(|output| output.id == entry.output)
+        {
+            return true;
+        }
         let _ = conn.destroy_surface(entry.surface);
         false
     });
     for output in &outputs.outputs {
-        if conn.output_context(output.id).is_err() { continue; }
+        if conn.output_context(output.id).is_err() {
+            continue;
+        }
         let extent = (output.mode.pixel_width, output.mode.pixel_height);
         if let Some(entry) = surfaces.iter_mut().find(|entry| entry.output == output.id) {
-            if entry.extent != extent && conn.resize_window(entry.surface, extent.0, extent.1).is_ok() {
+            if entry.extent != extent
+                && conn
+                    .resize_window(entry.surface, extent.0, extent.1)
+                    .is_ok()
+            {
                 entry.extent = extent;
                 draw_background(conn, entry.surface, background);
             }
         } else {
             let result = SurfaceBuilder::new()
-                .app_id("org.scarlet-os.desktop.background").app_name("Background").menu_titles("")
-                .size(extent.0, extent.1).window_type(window_types::DESKTOP)
-                .resizable(false).focus_on_create(false).active_on_focus(false).build(conn);
+                .app_id("org.scarlet-os.desktop.background")
+                .app_name("Background")
+                .menu_titles("")
+                .size(extent.0, extent.1)
+                .window_type(window_types::DESKTOP)
+                .resizable(false)
+                .focus_on_create(false)
+                .active_on_focus(false)
+                .build(conn);
             if let Ok(surface) = result {
-                surfaces.push(OutputBackground { output: output.id, surface, extent });
+                surfaces.push(OutputBackground {
+                    output: output.id,
+                    surface,
+                    extent,
+                });
                 draw_background(conn, surface, background);
             }
         }
@@ -138,24 +164,49 @@ fn reconcile_outputs(conn: &mut Connection, outputs: &sws_protocol::outputs::Out
 pub fn run() {
     thread::spawn(background_signal_listener);
     loop {
-        let Ok(mut conn) = connect_sws_with_retry() else { return; };
+        let Ok(mut conn) = connect_sws_with_retry() else {
+            return;
+        };
         let mut background = load_background_state();
         let mut surfaces = Vec::new();
-        let Ok(mut outputs) = conn.outputs() else { return; };
+        let Ok(mut outputs) = conn.outputs() else {
+            return;
+        };
         reconcile_outputs(&mut conn, &outputs, &mut surfaces, &background);
         loop {
-            if conn.dispatch().is_err() { break; }
+            if conn.dispatch().is_err() {
+                break;
+            }
             while let Some(event) = conn.poll_event() {
                 match event {
-                    Event::Output(sws_protocol::outputs::OutputEvent::Snapshot(next)) if next.generation != outputs.generation => {
+                    Event::Output(sws_protocol::outputs::OutputEvent::Snapshot(next))
+                        if next.generation != outputs.generation =>
+                    {
                         reconcile_outputs(&mut conn, &next, &mut surfaces, &background);
                         outputs = next;
                     }
-                    Event::SurfaceConfigure { surface_id, width, height }
-                    | Event::Output(sws_protocol::outputs::OutputEvent::Window { window: surface_id, width, height, .. }) => {
-                        if let Some(entry) = surfaces.iter_mut().find(|entry| entry.surface == surface_id) {
-                            let native = outputs.outputs.iter().find(|output| output.id == entry.output)
-                                .map_or((width, height), |output| (output.mode.pixel_width, output.mode.pixel_height));
+                    Event::SurfaceConfigure {
+                        surface_id,
+                        width,
+                        height,
+                    }
+                    | Event::Output(sws_protocol::outputs::OutputEvent::Window {
+                        window: surface_id,
+                        width,
+                        height,
+                        ..
+                    }) => {
+                        if let Some(entry) = surfaces
+                            .iter_mut()
+                            .find(|entry| entry.surface == surface_id)
+                        {
+                            let native = outputs
+                                .outputs
+                                .iter()
+                                .find(|output| output.id == entry.output)
+                                .map_or((width, height), |output| {
+                                    (output.mode.pixel_width, output.mode.pixel_height)
+                                });
                             // Wallpaper always fills the native output; a scale
                             // change does not increase its backing allocation.
                             if conn.resize_window(surface_id, native.0, native.1).is_ok() {
@@ -164,14 +215,18 @@ pub fn run() {
                             }
                         }
                     }
-                    Event::SurfaceDestroyed { surface_id } => surfaces.retain(|entry| entry.surface != surface_id),
+                    Event::SurfaceDestroyed { surface_id } => {
+                        surfaces.retain(|entry| entry.surface != surface_id)
+                    }
                     _ => {}
                 }
             }
             if BACKGROUND_CHANGED.swap(false, Ordering::Acquire) {
                 let next = load_background_state();
                 if next != background {
-                    for entry in &surfaces { draw_background(&mut conn, entry.surface, &next); }
+                    for entry in &surfaces {
+                        draw_background(&mut conn, entry.surface, &next);
+                    }
                     background = next;
                 }
             }

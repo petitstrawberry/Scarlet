@@ -9,8 +9,8 @@ extern crate alloc;
 extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
-mod settings_network;
 mod settings_displays;
+mod settings_network;
 mod settings_support;
 use settings_support::{Autosave, TimezoneCommitError, atomic_write, commit_timezone};
 
@@ -1642,13 +1642,29 @@ impl Application for SettingsApp {
         self.process_picker_ui_events();
         let editor = self.display_editor.get();
         let mode_index = editor.selected_mode_index();
-        if self.display_resolution_index.get() != mode_index { self.display_resolution_index.set(mode_index); }
-        if let Some(output) = editor.snapshot.as_ref().and_then(|snapshot| snapshot.outputs.get(editor.selected)) {
+        if self.display_resolution_index.get() != mode_index {
+            self.display_resolution_index.set(mode_index);
+        }
+        if let Some(output) = editor
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
+        {
             if let Some(config) = editor.draft.iter().find(|config| config.id == output.id) {
-                if self.display_output_index.get() != editor.selected { self.display_output_index.set(editor.selected); }
-                let scale_index = settings_displays::SCALES.iter().position(|scale| *scale == config.scale_milli).unwrap_or(usize::MAX);
-                if self.display_scale_index.get() != scale_index { self.display_scale_index.set(scale_index); }
-                if self.display_experience_index.get() != config.experience as usize { self.display_experience_index.set(config.experience as usize); }
+                if self.display_output_index.get() != editor.selected {
+                    self.display_output_index.set(editor.selected);
+                }
+                let scale_index = settings_displays::SCALES
+                    .iter()
+                    .position(|scale| *scale == config.scale_milli)
+                    .unwrap_or(usize::MAX);
+                if self.display_scale_index.get() != scale_index {
+                    self.display_scale_index.set(scale_index);
+                }
+                if self.display_experience_index.get() != config.experience as usize {
+                    self.display_experience_index
+                        .set(config.experience as usize);
+                }
             }
         }
     }

@@ -14,8 +14,8 @@ mod home_catalog;
 mod home_style;
 #[path = "../home_trace.rs"]
 mod home_trace;
-mod network_status;
 mod multi_output;
+mod network_status;
 mod options;
 mod popup_menu;
 mod power;
@@ -46,8 +46,7 @@ use scarlet_desktop_config::{
     DESKTOP_STATUS_PREFERENCES_CHANGED_SIGNAL, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
     DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
     DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD, DESKTOP_STEMD_OBJECT_PATH,
-    DESKTOP_STEMD_SOCKET_PATH, StatusItemId,
-    StatusPreferences,
+    DESKTOP_STEMD_SOCKET_PATH, StatusItemId, StatusPreferences,
 };
 use scarlet_os::socket::Socket;
 use scarlet_os::{network, process, scheduler};
@@ -76,10 +75,9 @@ use clap::Parser;
 use console::{ConsoleAction, ConsoleSnapshot, ConsoleState, PowerAction};
 use control_center::{
     AudioOutputSnapshot, AudioSnapshot, ControlCenterAction, ControlCenterMetrics,
-    ControlCenterPage, ControlCenterPresentation, ControlCenterSession,
-    ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot,
-    NetworkInterfaceSnapshot, NetworkInterfaceState, NetworkSnapshot, PercentWriteState,
-    SystemSnapshot, boxed, build_control_center_view,
+    ControlCenterPage, ControlCenterPresentation, ControlCenterSession, ControlCenterSnapshot,
+    DynamicViews, InputEnvironmentSnapshot, NetworkInterfaceSnapshot, NetworkInterfaceState,
+    NetworkSnapshot, PercentWriteState, SystemSnapshot, boxed, build_control_center_view,
 };
 use home_catalog::{ApplicationEntry, HomeApplication};
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
@@ -655,7 +653,9 @@ fn passive_clock_control(
 
 fn toggle_control_center(open: State<ControlCenterSession>, output: u32) {
     let previous = multi_output::session().map_or(0, |bus| bus.panel_output.get());
-    if let Some(bus) = multi_output::session() { bus.panel_output.set(output); }
+    if let Some(bus) = multi_output::session() {
+        bus.panel_output.set(output);
+    }
     if open.get().open && previous == output {
         dismiss_window(multi_output::key(output, CONTROL_CENTER_SCENE_KEY));
         open.update(ControlCenterSession::close);
@@ -908,7 +908,9 @@ fn apply_input_environment(
 ) {
     // ShellSession resolves posture together with each monitor's configured
     // experience. The listener only updates its shared environment snapshot.
-    if multi_output::session().is_some() { return; }
+    if multi_output::session().is_some() {
+        return;
+    }
     let next_layout = ShellLayout::from_tablet_mode(environment.tablet_mode());
     if shell_layout.get() != next_layout {
         open_menu_index.set(None);
@@ -1046,11 +1048,19 @@ struct ShellApp {
 }
 
 impl ShellApp {
-    fn new(shell_layout: ShellLayout) -> Self { Self::new_output(shell_layout, 0) }
+    fn new(shell_layout: ShellLayout) -> Self {
+        Self::new_output(shell_layout, 0)
+    }
 
-    fn scene_key(&self, local: &str) -> String { multi_output::key(self.output_id.get(), local) }
-    fn open_scene(&self, local: &str) { open_window(self.scene_key(local)); }
-    fn dismiss_scene(&self, local: &str) { dismiss_window(self.scene_key(local)); }
+    fn scene_key(&self, local: &str) -> String {
+        multi_output::key(self.output_id.get(), local)
+    }
+    fn open_scene(&self, local: &str) {
+        open_window(self.scene_key(local));
+    }
+    fn dismiss_scene(&self, local: &str) {
+        dismiss_window(self.scene_key(local));
+    }
 
     fn new_output(shell_layout: ShellLayout, output: u32) -> Self {
         let root_menu = MenuTree::default();
@@ -1062,7 +1072,10 @@ impl ShellApp {
         Self {
             output_id: State::new(scarlet_ui::state::generate_state_id(), output),
             mode: State::new(scarlet_ui::state::generate_state_id(), ShellMode::Desktop),
-            console_state: State::new(scarlet_ui::state::generate_state_id(), ConsoleState::default()),
+            console_state: State::new(
+                scarlet_ui::state::generate_state_id(),
+                ConsoleState::default(),
+            ),
             recent_app_ids: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
             console_launch_error: State::new(scarlet_ui::state::generate_state_id(), None),
             console_chrome_position: State::new(scarlet_ui::state::generate_state_id(), None),
@@ -1073,13 +1086,19 @@ impl ShellApp {
                     status_snapshot.audio_muted,
                 ),
             ),
-            volume_feedback: State::new(scarlet_ui::state::generate_state_id(), volume_osd::Feedback::default()),
+            volume_feedback: State::new(
+                scarlet_ui::state::generate_state_id(),
+                volume_osd::Feedback::default(),
+            ),
             volume_position: State::new(scarlet_ui::state::generate_state_id(), None),
             clock: State::new(scarlet_ui::state::generate_state_id(), 0),
             screen_width: State::new(scarlet_ui::state::generate_state_id(), 1920.0),
             screen_height: State::new(scarlet_ui::state::generate_state_id(), 1080.0),
             shell_layout: State::new(scarlet_ui::state::generate_state_id(), shell_layout),
-            menu_bar: State::new(scarlet_ui::state::generate_state_id(), menu_bar_from_tree(&root_menu)),
+            menu_bar: State::new(
+                scarlet_ui::state::generate_state_id(),
+                menu_bar_from_tree(&root_menu),
+            ),
             active_window_id: State::new(scarlet_ui::state::generate_state_id(), 0),
             menu_tree: State::new(scarlet_ui::state::generate_state_id(), root_menu),
             open_menu_index: State::new(scarlet_ui::state::generate_state_id(), None),
@@ -1088,16 +1107,25 @@ impl ShellApp {
             status_snapshot: State::new(scarlet_ui::state::generate_state_id(), status_snapshot),
             windows: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
             overview_page: State::new(scarlet_ui::state::generate_state_id(), 0),
-            control_center_session: State::new(scarlet_ui::state::generate_state_id(), ControlCenterSession::default()),
+            control_center_session: State::new(
+                scarlet_ui::state::generate_state_id(),
+                ControlCenterSession::default(),
+            ),
             control_center_window: State::new(scarlet_ui::state::generate_state_id(), None),
             control_center_position: State::new(scarlet_ui::state::generate_state_id(), None),
-            control_center_volume: State::new(scarlet_ui::state::generate_state_id(), initial_volume),
+            control_center_volume: State::new(
+                scarlet_ui::state::generate_state_id(),
+                initial_volume,
+            ),
             control_center_brightness: State::new(scarlet_ui::state::generate_state_id(), 0.0),
             display_brightness_percent: State::new(scarlet_ui::state::generate_state_id(), None),
             input_environment_snapshot: State::new(scarlet_ui::state::generate_state_id(), None),
             control_center_action: State::new(scarlet_ui::state::generate_state_id(), None),
             home_applications: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
-            home_filtered_applications: State::new(scarlet_ui::state::generate_state_id(), Vec::new()),
+            home_filtered_applications: State::new(
+                scarlet_ui::state::generate_state_id(),
+                Vec::new(),
+            ),
             home_query: State::new(scarlet_ui::state::generate_state_id(), String::new()),
             home_search_focused: State::new(scarlet_ui::state::generate_state_id(), false),
             home_selected: State::new(scarlet_ui::state::generate_state_id(), None),
@@ -1212,8 +1240,12 @@ impl SessionAction {
                 std::process::exit(DESKTOP_SESSION_LOGOUT_STATUS);
             }
             Self::LogOut => {}
-            Self::Restart => actions.set(Some(ControlCenterAction::Power(power_request::PowerAction::Reboot))),
-            Self::PowerOff => actions.set(Some(ControlCenterAction::Power(power_request::PowerAction::PowerOff))),
+            Self::Restart => actions.set(Some(ControlCenterAction::Power(
+                power_request::PowerAction::Reboot,
+            ))),
+            Self::PowerOff => actions.set(Some(ControlCenterAction::Power(
+                power_request::PowerAction::PowerOff,
+            ))),
         }
     }
 }
@@ -2575,23 +2607,41 @@ fn maintain_workspace_shell_role(
         }
         loop {
             if let Some(bus) = multi_output::session() {
-                for endpoint in bus.endpoints.get().into_iter().filter(|endpoint| endpoint.id != 0) {
-                    let Some(command) = endpoint.commands.get().first().copied() else { continue; };
+                for endpoint in bus
+                    .endpoints
+                    .get()
+                    .into_iter()
+                    .filter(|endpoint| endpoint.id != 0)
+                {
+                    let Some(command) = endpoint.commands.get().first().copied() else {
+                        continue;
+                    };
                     let result = connection.output_workspace(endpoint.id).and_then(|state| {
                         match workspace_transaction_for_command(&state, command) {
-                            Some(transaction) => connection.apply_output_workspace(endpoint.id, transaction),
+                            Some(transaction) => {
+                                connection.apply_output_workspace(endpoint.id, transaction)
+                            }
                             None => Ok(state),
                         }
                     });
                     let retry = matches!(&result, Err(sws::Error::ServerError(code)) if *code == sws_protocol::error_codes::STALE_WORKSPACE_GENERATION);
                     match result {
                         Ok(state) => endpoint.workspace.set(Some(state)),
-                        Err(_) if retry => {},
-                        Err(error) => println!("[Shell] Output {} workspace command failed: {:?}", endpoint.id, error),
+                        Err(_) if retry => {}
+                        Err(error) => println!(
+                            "[Shell] Output {} workspace command failed: {:?}",
+                            endpoint.id, error
+                        ),
                     }
                     // Launch/focus and global Overview may change membership
                     // between query and apply. Re-read on the next service tick.
-                    if !retry { endpoint.commands.update(|pending| { if pending.first().copied() == Some(command) { pending.remove(0); } }); }
+                    if !retry {
+                        endpoint.commands.update(|pending| {
+                            if pending.first().copied() == Some(command) {
+                                pending.remove(0);
+                            }
+                        });
+                    }
                 }
             }
             if let Some(command) = commands.get().first().copied() {
@@ -2608,16 +2658,18 @@ fn maintain_workspace_shell_role(
                         snapshot = updated;
                         state.set(Some(snapshot.clone()));
                     }
-                    Err(_) if retry => {},
+                    Err(_) if retry => {}
                     Err(error) => {
                         println!("[Shell] Workspace command failed: {:?}", error);
                     }
                 }
-                if !retry { commands.update(|pending| {
-                    if pending.first().copied() == Some(command) {
-                        pending.remove(0);
-                    }
-                }); }
+                if !retry {
+                    commands.update(|pending| {
+                        if pending.first().copied() == Some(command) {
+                            pending.remove(0);
+                        }
+                    });
+                }
             }
             if connection.dispatch().is_err() {
                 full_app_menus.set(false);
@@ -2631,7 +2683,9 @@ fn maintain_workspace_shell_role(
             while let Some(event) = connection.poll_event() {
                 match event {
                     sws::event::Event::Output(event) => {
-                        if let Some(bus) = multi_output::session() { bus.receive(event); }
+                        if let Some(bus) = multi_output::session() {
+                            bus.receive(event);
+                        }
                     }
                     sws::event::Event::FocusChanged {
                         window_id,
@@ -2836,12 +2890,18 @@ impl ShellApp {
             ConsoleAction::Mute => self
                 .control_center_action
                 .set(Some(ControlCenterAction::ToggleMute)),
-            ConsoleAction::Power(PowerAction::Reboot) => self
-                .control_center_action
-                .set(Some(ControlCenterAction::Power(power_request::PowerAction::Reboot))),
-            ConsoleAction::Power(PowerAction::PowerOff) => self
-                .control_center_action
-                .set(Some(ControlCenterAction::Power(power_request::PowerAction::PowerOff))),
+            ConsoleAction::Power(PowerAction::Reboot) => {
+                self.control_center_action
+                    .set(Some(ControlCenterAction::Power(
+                        power_request::PowerAction::Reboot,
+                    )))
+            }
+            ConsoleAction::Power(PowerAction::PowerOff) => {
+                self.control_center_action
+                    .set(Some(ControlCenterAction::Power(
+                        power_request::PowerAction::PowerOff,
+                    )))
+            }
         }
     }
 
@@ -3441,7 +3501,8 @@ impl ShellApp {
             .alignment(Alignment::Center)
             .padding(status_tokens.bar_padding),
         )
-        .scene_key(self.scene_key("main")).output(self.output_id.get())
+        .scene_key(self.scene_key("main"))
+        .output(self.output_id.get())
         .app_id("org.scarlet-os.desktop.shell")
         .decorated(false)
         .background_color(status_bar_background)
@@ -3494,7 +3555,8 @@ impl ShellApp {
                 self.control_center_session.clone(),
             ),
         )
-        .scene_key(self.scene_key(CONTROL_CENTER_SCENE_KEY)).output(self.output_id.get())
+        .scene_key(self.scene_key(CONTROL_CENTER_SCENE_KEY))
+        .output(self.output_id.get())
         .open_at_launch(false)
         .app_id("org.scarlet-os.popup.control-center")
         .decorated(false)
@@ -3514,7 +3576,8 @@ impl ShellApp {
         let screen_width = self.screen_width.get();
         let screen_height = self.screen_height.get();
         Window::new("Home Backdrop", Spacer::new())
-            .scene_key(self.scene_key(HOME_BACKDROP_SCENE_KEY)).output(self.output_id.get())
+            .scene_key(self.scene_key(HOME_BACKDROP_SCENE_KEY))
+            .output(self.output_id.get())
             .open_at_launch(false)
             .app_id("org.scarlet-os.desktop.shell.home-backdrop")
             .decorated(false)
@@ -3532,7 +3595,8 @@ impl ShellApp {
         let screen_width = self.screen_width.get();
         let screen_height = self.screen_height.get();
         Window::new("Overview Drawer", self.overview_drawer_handle())
-            .scene_key(self.scene_key(OVERVIEW_DRAWER_SCENE_KEY)).output(self.output_id.get())
+            .scene_key(self.scene_key(OVERVIEW_DRAWER_SCENE_KEY))
+            .output(self.output_id.get())
             .open_at_launch(false)
             .app_id(sws_protocol::workspace::OVERVIEW_DRAWER_APP_ID)
             .decorated(false)
@@ -3557,7 +3621,8 @@ impl ShellApp {
         let screen_width = self.screen_width.get();
         let screen_height = self.screen_height.get();
         Window::new("Home", self.home_content())
-            .scene_key(self.scene_key(HOME_SCENE_KEY)).output(self.output_id.get())
+            .scene_key(self.scene_key(HOME_SCENE_KEY))
+            .output(self.output_id.get())
             .open_at_launch(false)
             .app_id(if self.mode.get() == ShellMode::Console {
                 sws_protocol::workspace::CONSOLE_HOME_APP_ID
@@ -3582,7 +3647,8 @@ impl ShellApp {
             "Console Controls",
             self.console_content(console::ConsolePart::Chrome),
         )
-        .scene_key(self.scene_key(CONSOLE_CHROME_SCENE_KEY)).output(self.output_id.get())
+        .scene_key(self.scene_key(CONSOLE_CHROME_SCENE_KEY))
+        .output(self.output_id.get())
         .open_at_launch(false)
         .app_id("org.scarlet-os.desktop.shell.console-chrome")
         .decorated(false)
@@ -3606,7 +3672,8 @@ impl ShellApp {
             "Volume",
             volume_osd::view(self.volume_feedback.get(), osd_size),
         )
-        .scene_key(self.scene_key(volume_osd::SCENE_KEY)).output(self.output_id.get())
+        .scene_key(self.scene_key(volume_osd::SCENE_KEY))
+        .output(self.output_id.get())
         .open_at_launch(false)
         .app_id("org.scarlet-os.desktop.shell.volume-osd")
         .decorated(false)
@@ -3620,7 +3687,6 @@ impl ShellApp {
         .placement(WindowPlacement::At { x: osd_x, y: osd_y })
         .size(osd_size)
     }
-
 }
 
 impl Application for ShellApp {
@@ -3862,7 +3928,9 @@ impl Application for ShellApp {
             if status_bar_resize_needed(window.managed_size(), desired) {
                 let _ = window.resize_managed(desired.width as u32, desired.height as u32);
             }
-            if self.control_center_position.get() != Some((x, y)) && window.move_window(x, y).is_ok() {
+            if self.control_center_position.get() != Some((x, y))
+                && window.move_window(x, y).is_ok()
+            {
                 self.control_center_position.set(Some((x, y)));
             }
             let _ = window.set_surface_regions(
@@ -4052,12 +4120,14 @@ impl ShellApp {
         if !session.open {
             set_state_if_changed(&self.control_center_window, None);
         }
-        let panel_here = multi_output::session().is_none_or(|bus| bus.panel_output.get() == self.output_id.get());
+        let panel_here = multi_output::session()
+            .is_none_or(|bus| bus.panel_output.get() == self.output_id.get());
         if !panel_here && self.control_center_window.get().is_some() {
             self.dismiss_scene(CONTROL_CENTER_SCENE_KEY);
             self.control_center_window.set(None);
         }
-        if session.open && panel_here
+        if session.open
+            && panel_here
             && session.snapshot.is_some()
             && self
                 .control_center_window
@@ -4153,8 +4223,18 @@ impl ShellApp {
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
             if let Ok(context) = conn.output_context(self.output_id.get()) {
-                let workarea = layout.physical_workarea(context.mode.pixel_width, context.mode.pixel_height, context.scale_milli);
-                let _ = conn.set_output_workarea(context.id, workarea.x, workarea.y, workarea.width, workarea.height);
+                let workarea = layout.physical_workarea(
+                    context.mode.pixel_width,
+                    context.mode.pixel_height,
+                    context.scale_milli,
+                );
+                let _ = conn.set_output_workarea(
+                    context.id,
+                    workarea.x,
+                    workarea.y,
+                    workarea.width,
+                    workarea.height,
+                );
                 return;
             }
             let scale_milli = query_output_scale(&conn);
@@ -4167,8 +4247,18 @@ impl ShellApp {
     fn update_workarea_from_screen_query(&self, fallback_width: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
             if let Ok(context) = conn.output_context(self.output_id.get()) {
-                let workarea = layout.physical_workarea(context.mode.pixel_width, context.mode.pixel_height, context.scale_milli);
-                let _ = conn.set_output_workarea(context.id, workarea.x, workarea.y, workarea.width, workarea.height);
+                let workarea = layout.physical_workarea(
+                    context.mode.pixel_width,
+                    context.mode.pixel_height,
+                    context.scale_milli,
+                );
+                let _ = conn.set_output_workarea(
+                    context.id,
+                    workarea.x,
+                    workarea.y,
+                    workarea.width,
+                    workarea.height,
+                );
                 return;
             }
             if let Ok((screen_width, screen_height)) = conn.get_screen_size() {
@@ -4189,7 +4279,8 @@ impl ShellApp {
         let status_snapshot_provider = self.status_snapshot.clone();
         let console_audio_provider = self.console_audio.clone();
         let status_snapshot_listener = self.status_snapshot.clone();
-        let windows_listener = multi_output::session().map_or_else(|| self.windows.clone(), |bus| bus.windows.clone());
+        let windows_listener =
+            multi_output::session().map_or_else(|| self.windows.clone(), |bus| bus.windows.clone());
 
         let shell_layout_listener = self.shell_layout.clone();
         let open_menu_index_listener = self.open_menu_index.clone();
@@ -4403,7 +4494,13 @@ impl ShellApp {
 fn is_shell_menu_name(app_name: &str) -> bool {
     matches!(
         app_name,
-        "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Overview Drawer" | "Menu" | "Control Center"
+        "TaskBar"
+            | "StatusBar"
+            | "Scarlet Shell"
+            | "Home"
+            | "Overview Drawer"
+            | "Menu"
+            | "Control Center"
     )
 }
 

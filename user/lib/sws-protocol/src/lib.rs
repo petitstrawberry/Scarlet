@@ -1589,7 +1589,9 @@ pub enum ClientMessageRef<'a> {
 
     /// Query the current authoritative workspace snapshot.
     GetWorkspaceState {},
-    OutputControl { payload: &'a [u8] },
+    OutputControl {
+        payload: &'a [u8],
+    },
 
     /// Submit a complete generation-checked desired workspace state.
     ApplyWorkspaceTransaction {
