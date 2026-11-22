@@ -294,6 +294,7 @@ static bool round_trip(Carrier *carrier, pthread_t thread, ImagePool *pool, Prob
                           (0x12345678990abc00ull + 32 * i + j);
         }
         state->x[0] = (uintptr_t)guest->tls;
+        state->x[15] = (uintptr_t)&guest->heap[1];
         state->x[29] = guest->sp - 16;
         state->x[30] = guest->entry;
         state->sp = guest->sp - 32;
@@ -335,10 +336,18 @@ static bool round_trip(Carrier *carrier, pthread_t thread, ImagePool *pool, Prob
     for (unsigned turn = 0; turn < 32; ++turn) {
         unsigned i = turn % 2;
         Guest *guest = &pool->guests[i];
-        const Registers *expected = &states[i];
-        Registers stopped = *expected;
+        Registers expected = states[i];
+        Registers stopped = expected;
+        guest->heap[1] = 1;
         if (!run_guest(carrier, thread, guest, i, pool->text_size, &stopped, TIMER, log)) return false;
-        if (!check_registers(&stopped, expected, i, log) ||
+        // The interrupted PC may be on either instruction of the loop.
+        if ((stopped.pc != guest->spin && stopped.pc != guest->spin + 4) || guest->heap[1] != 0) {
+            probe_log(log, "Guest %u did not execute its loop in time slice %u (pc=%p)",
+                      i, turn, (void *)stopped.pc);
+            return false;
+        }
+        expected.pc = stopped.pc;
+        if (!check_registers(&stopped, &expected, i, log) ||
             virtual_tls[i] != (uintptr_t)guest->tls || *guest->tls != 0x1110 + i) {
             probe_log(log, "Guest %u lost registers or TLS at timer stop %u", i, turn);
             return false;
@@ -349,7 +358,7 @@ static bool round_trip(Carrier *carrier, pthread_t thread, ImagePool *pool, Prob
         log("Mappings changed during a guest context switch");
         return false;
     }
-    log("PASS 32 alternating timer stops, full register state, zero guest VM operations");
+    log("PASS 32 alternating time slices with guest progress, full register state and zero guest VM operations");
     return true;
 }
 

@@ -29,6 +29,7 @@ _scarlet_fixture_checkpoint:
     brk #0x5101
 .globl _scarlet_fixture_spin
 _scarlet_fixture_spin:
+    str xzr, [x15]
     b _scarlet_fixture_spin
 
 .globl _scarlet_fixture_tls_write
