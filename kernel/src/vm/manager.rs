@@ -220,6 +220,19 @@ struct InnerVmm {
 }
 
 impl VirtualMemoryManager {
+    #[cfg(all(feature = "hosted", target_os = "ios"))]
+    pub(crate) fn resize_signed_heap(&self, address: usize, limit: usize) -> Option<Result<usize, &'static str>> {
+        let mapping = self.mapping_transaction();
+        let image = self.hosted_image();
+        if !image.has_signed_mapping() {
+            return None;
+        }
+        Some(mapping.prepare_fault().and_then(|()| {
+            // All usercopy on this address space holds this same transaction.
+            unsafe { image.resize_heap(address, limit) }
+        }))
+    }
+
     /// All metadata writers invalidate hosted admission, including COW commits,
     /// fork snapshots and the advanced mutable-map API. Bump under the metadata
     /// lock so an admission snapshot cannot observe a new map with an old key.

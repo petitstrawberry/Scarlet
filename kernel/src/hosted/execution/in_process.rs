@@ -74,6 +74,22 @@ pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()>
 }
 
 impl Image {
+    pub(crate) fn has_signed_mapping(&self) -> bool {
+        self.local.lock().unwrap().is_some()
+    }
+
+    /// The VM transaction and its stop acknowledgement protect the lease.
+    pub(crate) unsafe fn resize_heap(
+        &self,
+        address: usize,
+        limit: usize,
+    ) -> Result<usize, &'static str> {
+        let image = self.local.lock().unwrap();
+        let image = image.as_ref().ok_or("Signed heap is absent")?;
+        unsafe { image.text.resize_heap(address, limit) }
+            .map_err(|_| "Cannot resize signed guest heap")
+    }
+
     /// Some means this address space has signed text. A miss must stay a
     /// miss, even if the legacy software map covers a numeric address.
     pub(crate) fn signed_bounds(

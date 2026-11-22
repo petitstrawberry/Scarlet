@@ -127,6 +127,7 @@ pub(crate) fn prepare(
         .store(instance.writable_size(), Ordering::Relaxed);
     task.stack_size
         .store(instance.stack_size(), Ordering::Relaxed);
+    task.brk.store(instance.heap_start(), Ordering::SeqCst);
     task.set_entry_point(instance.entry());
     let mut vcpu = task.vcpu.lock();
     vcpu.reset_iregs();

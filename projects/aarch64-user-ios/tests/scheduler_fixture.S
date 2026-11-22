@@ -157,6 +157,43 @@ Lscarlet_scheduler_check:
     cmn x0, #1
     b.ne Lscarlet_scheduler_fail
 
+    mov x0, #20480
+    mov x8, #13
+    svc #0
+    cmn x0, #1
+    b.eq Lscarlet_scheduler_fail
+    mov x26, x0
+    str x27, [x26]
+    str x27, [x26, #16384]
+    mov x12, #20480
+    neg x0, x12
+    mov x8, #13
+    svc #0
+    add x13, x26, #5, lsl #12
+    cmp x0, x13
+    b.ne Lscarlet_scheduler_fail
+    // The retired heap range is no longer writable by the kernel.
+    mov x0, x26
+    mov x1, #1024
+    mov x8, #51
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+    mov x0, #0x900000
+    mov x8, #13
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+    mov x0, #20480
+    mov x8, #13
+    svc #0
+    cmp x0, x26
+    b.ne Lscarlet_scheduler_fail
+    ldr x13, [x26]
+    cbnz x13, Lscarlet_scheduler_fail
+    ldr x13, [x26, #16384]
+    cbnz x13, Lscarlet_scheduler_fail
+
     cmp x16, x27
     b.ne Lscarlet_scheduler_fail
     cmp x17, x27

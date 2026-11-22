@@ -123,6 +123,16 @@ impl SignedText {
     pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
         self.lease.as_ref()?.user_bounds(address, write)
     }
+
+    /// # Safety
+    /// The caller must exclude concurrent changes, guest execution and
+    /// asynchronous consumers of the pages being retired.
+    pub unsafe fn resize_heap(&self, address: usize, limit: usize) -> io::Result<usize> {
+        self.lease
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Signed text has no heap lease"))?
+            .resize_heap(address, limit)
+    }
 }
 
 struct Request {

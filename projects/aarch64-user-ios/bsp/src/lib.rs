@@ -35,6 +35,7 @@ const _: () = {
     assert!(Syscall::GetKernelInfo as usize == 51);
     assert!(Syscall::Clone as usize == 2);
     assert!(Syscall::Waitpid as usize == 5);
+    assert!(Syscall::Sbrk as usize == 13);
     assert!(Syscall::EnvironmentCurrent as usize == 1304);
     assert!(Syscall::EnvironmentSpawn as usize == 1306);
     assert!(size_of::<scarlet_abi::RawEnvironmentExec>() == 48);
@@ -85,6 +86,10 @@ fn watch(callback: Log) {
             log(
                 callback,
                 "EnvironmentSpawn started a signed child and Waitpid returned its exit status.",
+            );
+            log(
+                callback,
+                "Signed guest heaps grew, released their pages and returned zero-filled pages on regrowth.",
             );
             log(callback, "SCARLET_AOT_PASS");
             return;

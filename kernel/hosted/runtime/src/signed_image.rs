@@ -24,8 +24,10 @@ use std::{
 
 const PAGE: usize = 16384;
 const STACK_SIZE: usize = 4 * PAGE;
-// TLS, initial heap, a stack guard and the stack.
-const MUTABLE_TAIL: usize = 3 * PAGE + STACK_SIZE;
+const HEAP_CAPACITY: usize = 8 * 1024 * 1024;
+// TLS, heap reservation, a stack guard, then the stack.
+const STACK_OFFSET: usize = PAGE + HEAP_CAPACITY + PAGE;
+const MUTABLE_TAIL: usize = STACK_OFFSET + STACK_SIZE;
 const MAX_SLOTS: usize = 8;
 const MAX_RESERVED: usize = 256 * 1024 * 1024;
 static RESERVED: AtomicUsize = AtomicUsize::new(0);
@@ -156,6 +158,10 @@ impl Instance {
         self.tls() + MUTABLE_TAIL
     }
 
+    pub fn heap_start(&self) -> usize {
+        self.lease.base + self.lease.heap_offset()
+    }
+
     pub fn stack_size(&self) -> usize {
         STACK_SIZE
     }
@@ -165,14 +171,7 @@ impl Instance {
     }
 
     pub fn writable_size(&self) -> usize {
-        self.lease
-            .image
-            .manifest
-            .segments
-            .iter()
-            .filter(|segment| segment.access == Access::ReadWrite)
-            .map(|segment| segment.pages().len())
-            .sum()
+        self.lease.writable_image_size()
     }
 
     pub fn program_headers(&self) -> Option<(usize, usize)> {
@@ -195,14 +194,69 @@ pub(crate) struct Lease {
     image: Arc<Inner>,
     slot: usize,
     base: usize,
+    heap_bytes: AtomicUsize,
 }
 
 impl Lease {
+    fn heap_offset(&self) -> usize {
+        self.image.manifest.span + PAGE
+    }
+
+    fn writable_image_size(&self) -> usize {
+        self.image
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.access == Access::ReadWrite)
+            .map(|segment| segment.pages().len())
+            .sum()
+    }
+
+    pub(crate) fn resize_heap(&self, address: usize, limit: usize) -> io::Result<usize> {
+        let start = self.heap_offset();
+        let bytes = address
+            .checked_sub(self.base + start)
+            .filter(|&bytes| bytes <= HEAP_CAPACITY)
+            .ok_or_else(|| {
+                io::Error::other("Program break is outside the signed heap reservation")
+            })?;
+        let rounded = manifest::align_up(bytes);
+        let new_data = self.writable_image_size() + rounded;
+        if new_data > limit {
+            return Err(io::Error::other(
+                "Program break exceeds the task data limit",
+            ));
+        }
+        let previous = self.heap_bytes.load(Ordering::Acquire);
+        if rounded > previous {
+            map_at(
+                self.base,
+                start + previous..start + rounded,
+                libc::PROT_READ | libc::PROT_WRITE,
+                None,
+            )?;
+        } else if rounded < previous {
+            map_at(
+                self.base,
+                start + rounded..start + previous,
+                libc::PROT_NONE,
+                None,
+            )?;
+        }
+        self.heap_bytes.store(rounded, Ordering::Release);
+        Ok(new_data)
+    }
+
     pub(crate) fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
         let offset = address.checked_sub(self.base)?;
         let manifest = &self.image.manifest;
         let end = manifest.span;
-        let tail = [end..end + 2 * PAGE, end + 3 * PAGE..end + MUTABLE_TAIL];
+        let heap = self.heap_offset();
+        let tail = [
+            end..end + PAGE,
+            heap..heap + self.heap_bytes.load(Ordering::Acquire),
+            end + STACK_OFFSET..end + MUTABLE_TAIL,
+        ];
         let pages = if let Some(bounds) = tail.into_iter().find(|bounds| bounds.contains(&offset)) {
             bounds
         } else {
@@ -347,6 +401,7 @@ impl Inner {
             image: self.clone(),
             slot,
             base: pool.slots[slot].base,
+            heap_bytes: AtomicUsize::new(0),
         }))
     }
 
@@ -413,8 +468,8 @@ impl Inner {
             protect(base, relro.clone(), libc::PROT_READ)?;
         }
         let end = manifest.span;
-        map_at(base, end..end + 2 * PAGE, rw, None)?;
-        map_at(base, end + 3 * PAGE..end + MUTABLE_TAIL, rw, None)?;
+        map_at(base, end..end + PAGE, rw, None)?;
+        map_at(base, end + STACK_OFFSET..end + MUTABLE_TAIL, rw, None)?;
         unsafe {
             ptr::with_exposed_provenance_mut::<NativeTlsHeader>(tls).write(NativeTlsHeader::INITIAL)
         };

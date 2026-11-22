@@ -2089,6 +2089,12 @@ impl Task {
     }
 
     fn set_brk_locked(&self, brk: usize) -> Result<(), &'static str> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(data_size) = self.vm_manager.resize_signed_heap(brk, self.max_data_size) {
+            self.data_size.store(data_size?, Ordering::Relaxed);
+            self.brk.store(brk, Ordering::SeqCst);
+            return Ok(());
+        }
         let prev_brk = self.get_brk();
         // The byte-granular program break is independent of the granule at
         // which the execution platform can install and retire heap backing.
