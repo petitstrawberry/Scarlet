@@ -330,6 +330,41 @@ Lscarlet_scheduler_spawn_args:
     b.lo Lscarlet_scheduler_spawn
     add sp, sp, #96
 
+    // A resident native-sized allocation must survive rejected subpage changes.
+    mov x0, #0
+    mov x1, #0
+    mov x2, #0x4000
+    mov x3, #3 // PROT_READ | PROT_WRITE
+    mov x4, #0x22 // MAP_PRIVATE | MAP_ANONYMOUS
+    mov x5, #0
+    mov x8, #700 // MemoryMap
+    svc #0
+    tbnz x0, #63, Lscarlet_scheduler_fail
+    mov x24, x0
+    mov x12, #0xab
+    str x12, [x24, #0x1000]
+    mov x0, x24
+    mov x1, #0x1000
+    mov x2, #0 // PROT_NONE on a 4 KiB fragment
+    mov x8, #702 // MemoryProtect
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+    mov x0, x24
+    mov x1, #0x1000
+    mov x8, #701 // MemoryUnmap
+    svc #0
+    cmn x0, #1
+    b.ne Lscarlet_scheduler_fail
+    ldr x12, [x24, #0x1000]
+    cmp x12, #0xab
+    b.ne Lscarlet_scheduler_fail
+    mov x0, x24
+    mov x1, #0x4000
+    mov x8, #701 // MemoryUnmap
+    svc #0
+    cbnz x0, Lscarlet_scheduler_fail
+
     b Lscarlet_scheduler_ok
 Lscarlet_fork_child:
     ldr w0, [sp, #16]

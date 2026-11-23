@@ -3,7 +3,7 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
-extern void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login,
+extern void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login, bool shell,
     void (*log)(const char *), void (*screen)(const char *));
 extern bool scarlet_ios_console_send(const void *bytes, size_t length);
 extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
@@ -138,7 +138,8 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
                 }
                 scarlet_ios_boot(bundle.bundlePath.fileSystemRepresentation, root.fileSystemRepresentation,
                     [NSProcessInfo.processInfo.arguments containsObject:@"--boot-check"],
-                    [NSProcessInfo.processInfo.arguments containsObject:@"--login"], show_line, show_screen);
+                    [NSProcessInfo.processInfo.arguments containsObject:@"--login"],
+                    [NSProcessInfo.processInfo.arguments containsObject:@"--shell"], show_line, show_screen);
             }
         });
 #endif

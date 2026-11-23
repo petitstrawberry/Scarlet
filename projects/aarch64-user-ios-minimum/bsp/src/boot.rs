@@ -148,6 +148,7 @@ fn boot(
     screen: Log,
     boot_check: bool,
     login: bool,
+    shell: bool,
 ) -> io::Result<()> {
     let catalog = std::fs::read_to_string(bundle.join("guest-images"))?;
     for name in catalog.lines() {
@@ -200,8 +201,10 @@ fn boot(
             "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/boot-check"
         } else if login {
             "root=/dev/hostroot rootfstype=ext2 init.exec=/bin/login"
-        } else {
+        } else if shell {
             "root=/dev/hostroot rootfstype=ext2 init.exec=/bin/sh"
+        } else {
+            "root=/dev/hostroot rootfstype=ext2"
         },
         DeviceSource::Hosted(populate),
     )
@@ -235,6 +238,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     root: *const c_char,
     boot_check: bool,
     login: bool,
+    shell: bool,
     callback: Log,
     screen: Log,
 ) {
@@ -244,7 +248,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     let root = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(root) }.to_bytes(),
     ));
-    if let Err(error) = boot(bundle, root, callback, screen, boot_check, login) {
+    if let Err(error) = boot(bundle, root, callback, screen, boot_check, login, shell) {
         log(callback, &format!("SCARLET_BOOT_FAIL: {error}"));
     }
 }

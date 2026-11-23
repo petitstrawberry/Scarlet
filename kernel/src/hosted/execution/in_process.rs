@@ -1,5 +1,8 @@
 //! One carrier for every signed image on hosted iOS.
 
+mod data;
+
+use data::DataWindow;
 use super::{Image, load_registers, store_stop};
 use crate::{arch::Trapframe, sched::scheduler, task::Task, vm::manager::VirtualMemoryManager};
 use alloc::sync::Arc;
@@ -24,6 +27,8 @@ pub(in crate::hosted) fn prepare() -> Result<(), &'static str> {
 
 pub(super) struct LocalImage {
     text: Arc<SignedText>,
+    data: Arc<DataWindow>,
+    generation: u64,
     gate: RunGate,
     interrupts: Arc<InterruptTarget>,
 }
@@ -46,10 +51,12 @@ impl InterruptTarget {
 /// Admit an already registered signed image before publishing its first Task.
 /// The loader owns all of its mappings, including the writable stack.
 pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()> {
-    install_mapping(&task.vm_manager, text)
+    let data = Arc::new(DataWindow::new()?);
+    task.vm_manager.set_mmap_window(data.range()).map_err(io::Error::other)?;
+    install_mapping(&task.vm_manager, text, data)
 }
 
-fn install_mapping(vm: &VirtualMemoryManager, text: Arc<SignedText>) -> io::Result<()> {
+fn install_mapping(vm: &VirtualMemoryManager, text: Arc<SignedText>, data: Arc<DataWindow>) -> io::Result<()> {
     let carrier = CARRIER
         .get()
         .ok_or_else(|| io::Error::other("iOS guest carrier unavailable"))?;
@@ -71,6 +78,8 @@ fn install_mapping(vm: &VirtualMemoryManager, text: Arc<SignedText>) -> io::Resu
     };
     *local = Some(Arc::new(LocalImage {
         text,
+        data,
+        generation,
         gate: RunGate::new(id),
         interrupts: Arc::new(InterruptTarget { carrier }),
     }));
@@ -86,12 +95,16 @@ impl Image {
             std::eprintln!("Cannot fork signed guest pages: {error}");
             "Cannot fork signed guest pages"
         })?;
-        install_mapping(child, text).map_err(|_| "Cannot attach forked signed image")
+        install_mapping(child, text, local.data.clone()).map_err(|_| "Cannot attach forked signed image")
     }
 
     pub(crate) fn signed_alias(&self, address: usize, write: bool) -> Option<Option<usize>> {
         let local = self.local.lock().unwrap();
-        let text = &local.as_ref()?.text;
+        let image = local.as_ref()?;
+        if image.data.contains(address) {
+            return None;
+        }
+        let text = &image.text;
         Some(
             text.user_bounds(address, write)
                 .map(|_| text.kernel_alias(address)),
@@ -122,7 +135,11 @@ impl Image {
         write: bool,
     ) -> Option<Option<core::ops::Range<usize>>> {
         let image = self.local.lock().unwrap();
-        Some(image.as_ref()?.text.user_bounds(address, write))
+        let image = image.as_ref()?;
+        if image.data.contains(address) {
+            return None;
+        }
+        Some(image.text.user_bounds(address, write))
     }
 
     pub(crate) fn try_parked(&self) -> bool {
@@ -166,6 +183,7 @@ impl Image {
                 .expect("Running Task") as u64;
             // Under iOS UP the previous carrier request has acknowledged its stop.
             unsafe { image.text.activate()? };
+            image.data.publish(&task.vm_manager, image.generation)?;
             let permit = image
                 .gate
                 .issue(TaskId { id, generation }, 0)

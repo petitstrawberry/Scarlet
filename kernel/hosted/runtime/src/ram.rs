@@ -1,5 +1,10 @@
 //! Shared RAM backing for Scarlet's logical frame addresses.
 
+#[cfg(target_os = "ios")]
+mod local;
+#[cfg(target_os = "ios")]
+pub use local::LocalWindow;
+
 use std::{
     fs::File,
     io,

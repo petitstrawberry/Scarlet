@@ -51,6 +51,9 @@ const _: () = {
     assert!(Syscall::Sbrk as usize == 13);
     assert!(Syscall::GetSessionId as usize == 27);
     assert!(Syscall::GetProcessGroupId as usize == 28);
+    assert!(Syscall::MemoryMap as usize == 700);
+    assert!(Syscall::MemoryUnmap as usize == 701);
+    assert!(Syscall::MemoryProtect as usize == 702);
     assert!(Syscall::EnvironmentCurrent as usize == 1304);
     assert!(Syscall::EnvironmentSpawn as usize == 1306);
     assert!(size_of::<scarlet_abi::RawEnvironmentExec>() == 48);
