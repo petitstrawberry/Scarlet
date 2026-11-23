@@ -89,65 +89,26 @@ else
     build_fixture scheduler_fixture _scarlet_scheduler_start "$app/scheduler.elf"
     package_guest "$app/scheduler.elf" ScarletGuest
 
-    native="$build_root/native-init"
-    guest_flags='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"'
-    guest_build=(--locked --release --target aarch64-unknown-scarlet \
-        -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem \
-        --manifest-path "$repo/user/bin/Cargo.toml" --target-dir "$native" \
-        --no-default-features)
-    RUSTFLAGS="$guest_flags" cargo build "${guest_build[@]}" --features ios-init-pie --bin init >&2
-    root="$out/initramfs"
-    mkdir -p "$root"/{bin,lib,dev,mnt/newroot}
-    cp "$native/aarch64-unknown-scarlet/release/init" "$root/init"
-    for binary in sh login ps; do
-        RUSTFLAGS="$guest_flags" cargo rustc "${guest_build[@]}" --bin "$binary" -- \
-            -C link-arg=-pie -C link-arg=--dynamic-linker=/bin/scarlet-ld -C link-arg=-z \
-            -C link-arg=max-page-size=16384 -C link-arg=-z -C link-arg=separate-loadable-segments >&2
-        cp "$native/aarch64-unknown-scarlet/release/$binary" "$root/bin/$binary"
-        case "$binary" in
-            sh) framework=ScarletShell ;;
-            login) framework=ScarletLogin ;;
-            ps) framework=ScarletPs ;;
-        esac
-        package_guest "$root/bin/$binary" "$framework" --pie
-    done
-    elf_flags=(-z max-page-size=16384 -z separate-loadable-segments)
-    "$clang" -target aarch64-none-elf -c "$project/bsp/tests/boot_library.S" -o "$out/boot_library.o"
-    ld.lld -shared "${elf_flags[@]}" -soname libboot-check.so "$out/boot_library.o" -o "$root/lib/libboot-check.so"
-    "$clang" -target aarch64-none-elf -c "$project/bsp/tests/boot_fixture.S" -o "$out/boot_fixture.o"
-    ld.lld -pie "${elf_flags[@]}" --dynamic-linker=/bin/scarlet-ld -e _scarlet_boot_start \
-        "$out/boot_fixture.o" -L"$root/lib" -lboot-check -o "$root/bin/boot-check"
-    for elf in "$root/bin/boot-check" "$root/lib/libboot-check.so"; do
-        printf '\123' | dd of="$elf" bs=1 seek=7 conv=notrunc 2>/dev/null
-    done
-    package_guest "$root/lib/libboot-check.so" ScarletBootLibrary --dso
-    if [[ "${SCARLET_IOS_TEST_LIBRARIES:-0}" == 1 ]]; then
-        "$clang" -DSCARLET_ALTERNATE_LIBRARY -target aarch64-none-elf -c \
-            "$project/bsp/tests/boot_library.S" -o "$out/boot_library_alt.o"
-        ld.lld -shared "${elf_flags[@]}" -soname libboot-check.so "$out/boot_library_alt.o" -o "$root/lib/libboot-check-alt.so"
-        printf '\123' | dd of="$root/lib/libboot-check-alt.so" bs=1 seek=7 conv=notrunc 2>/dev/null
-        package_guest "$root/lib/libboot-check-alt.so" ScarletBootLibraryAlt --dso
-    fi
-    package_guest "$root/init" ScarletInit
-    package_guest "$root/bin/boot-check" ScarletBootCheck --pie
-    (
-        cd "$root"
-        printf '%s\n' bin bin/* dev init lib lib/* mnt mnt/newroot |
-            /usr/bin/cpio -o -H newc -R 0:0 > "$app/initramfs.cpio"
-    )
-    seed="$out/rootfs"
-    mkdir -p "$seed"/{dev,root,var/lib/scarlet}
-    mke2fs -q -t ext2 -F -d "$seed" "$app/root.ext2" 16M >&2
-    SDKROOT="$sdkroot" IPHONEOS_DEPLOYMENT_TARGET=16.0 \
-        cargo build --locked --release -Zbuild-std=std,panic_abort \
-        --manifest-path "$project/bsp/Cargo.toml" --target "$rust_target" \
-        --target-dir "$build_root/rust" >&2
-    implementation=("$build_root/rust/$rust_target/release/libscarlet_aarch64_user_ios_minimum_bsp.a")
-    link_flags+=(-Wl,-dead_strip -framework Security -framework CoreFoundation)
+    staging="$project/.scarlet/staging"
+    artifacts="$project/.scarlet/images"
+    executable="$project/bsp/target/$rust_target/${SCARLET_PROFILE:-release}/scarlet"
+    python3 "$project/tools/catalog_objects.py" "$staging/initramfs" "$staging/rootfs" > "$out/catalog"
+    while IFS= read -r -d '' mode && IFS= read -r -d '' digest && IFS= read -r -d '' elf; do
+        if [[ -n "$mode" ]]; then
+            package_guest "$elf" "ScarletImage$digest" "$mode"
+        else
+            package_guest "$elf" "ScarletImage$digest"
+        fi
+    done < "$out/catalog"
+    cp "$artifacts/initramfs-aarch64-user-ios-minimum.cpio" "$app/initramfs.cpio"
+    cp "$artifacts/rootfs-aarch64-user-ios-minimum.ext2" "$app/root.ext2"
+    cp "$executable" "$app/$app_name"
 fi
 bundle_id=${BUNDLE_ID:-"$default_id"}
-"$clang" "${flags[@]}" -fobjc-arc "$project/bsp/src/main.m" "${implementation[@]}" \
-    "${link_flags[@]}" -o "$app/$app_name"
+if $probe; then
+    "$clang" "${flags[@]}" -fobjc-arc "$project/bsp/src/main.m" "${implementation[@]}" \
+        "${link_flags[@]}" -o "$app/$app_name"
+fi
 
 entitlements="$out/entitlements.plist"
 profile=${PROVISIONING_PROFILE:-}

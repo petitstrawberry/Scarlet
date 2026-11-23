@@ -36,8 +36,6 @@ def boot(device, bundle, log, expected):
 
 
 def exercise(app, device):
-    if not (app / "Frameworks/ScarletBootLibraryAlt.framework").is_dir():
-        raise ValueError("Build the Simulator app with SCARLET_IOS_TEST_LIBRARIES=1")
     ident = "org.scarletos.linktest." + uuid.uuid4().hex
     # simctl redirects absolute paths under the host's temporary directory into
     # the simulated device. Keep console captures next to the build instead.

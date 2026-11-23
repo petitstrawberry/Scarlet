@@ -4,14 +4,13 @@
 
 ## Simulator で Scarlet を起動
 
-Apple Silicon Mac の Scarlet 開発シェルで、リポジトリのルートから実行します。Simulator を起動しておきます。
+Apple Silicon Mac の Scarlet 開発シェルで、リポジトリのルートから実行します。Xcode の Simulator を起動しておきます。
 
 ```sh
-app=$(projects/aarch64-user-ios-minimum/tools/build_app.sh iphonesimulator)
-env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl install booted "$app"
-env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
-  --terminate-running-process --console booted org.scarletos.ios
+projects/aarch64-user-ios-minimum/tools/scarlet_ios.sh run --release --locked
 ```
+
+`scarlet.toml` が BSP と initramfs・ext2 の構成を定義し、共通の `base` と `cli-utils` バンドルを読み込みます。起動スクリプトは Xcode と x18 を予約したゲスト Rust sysroot を選び、`cargo scarlet run` を呼びます。SDK のイメージ生成後に、iOS 用のフックが ELF をフレームワークへ変換し、`Scarlet.app` を組み立てて署名します。アプリとゲストイメージはプロジェクトの `.scarlet/images/` に出力されます。
 
 初回起動時にアプリは同梱の ext2 イメージを Application Support の `scarlet-root.ext2` にコピーします。以降の起動では同じファイルを `/dev/hostroot` として使います。
 
@@ -19,7 +18,7 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
 
 `--login` を起動引数に加えると、既存の `/bin/login` が端末を取得し、認証後に `fork` と `exec` でシェルを起動します。初期のコンソールアカウントは `root`、パスワードは空です。シェルで `exit` すると次のログインを受け付けます。
 
-`/bin` と `/lib` は現在のアプリに同梱した initramfs を参照します。初期ディスクには BSP がリンクと権限 0600 の `/etc/scarlet-users` を用意します。`--boot-check` では検証用の共有ライブラリを呼び出し、ext2 のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。成功時には `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` に続いて `SCARLET_BOOT_PASS` が表示されます。
+`/bin` と `/lib` は現在のアプリに同梱した initramfs を参照します。初期ディスクのリンクは `rootfs/` で定義し、コンソールアカウントは SDK の `console-root` で作成します。`--boot-check` では検証用の共有ライブラリを呼び出し、ext2 のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。成功時には `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` に続いて `SCARLET_BOOT_PASS` が表示されます。
 
 ## スケジューラとプロセス起動の回帰検証
 
@@ -51,24 +50,9 @@ Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージ
 Simulator で同じ実行ファイルを使ってライブラリの A 版・B 版、依存ファイルの欠落、カタログ未登録の ELF を確認できます。検証は一時アプリと専用のゲストディスクを使用します。
 
 ```sh
-app=$(SCARLET_IOS_TEST_LIBRARIES=1 projects/aarch64-user-ios-minimum/tools/build_app.sh iphonesimulator)
+projects/aarch64-user-ios-minimum/tools/scarlet_ios.sh image --release --locked
+app=$(cat projects/aarch64-user-ios-minimum/.scarlet/images/iphonesimulator-release.app-path)
 python3 projects/aarch64-user-ios-minimum/tools/test_runtime_link.py "$app"
-```
-
-## ネイティブの init をパッケージ化
-
-アプリのビルドは、予約レジスタを守るように `core` と `alloc` も含めて `user/bin` の `init` をビルドします。この工程だけを実行する場合は Scarlet 開発シェルで次を実行します。
-
-```sh
-RUSTFLAGS='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"' \
-  cargo build --locked --release --target aarch64-unknown-scarlet \
-  -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem \
-  --manifest-path user/bin/Cargo.toml --target-dir .build/scarlet-ios/native-init \
-  --no-default-features --features ios-init-pie --bin init
-cargo run --locked --manifest-path tools/ios-aot/Cargo.toml \
-  --target-dir .build/scarlet-ios/rust -- \
-  .build/scarlet-ios/native-init/aarch64-unknown-scarlet/release/init \
-  .build/scarlet-ios/native-init/payload
 ```
 
 ## 署名済みコードの再配置を検証

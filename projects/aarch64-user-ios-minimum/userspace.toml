@@ -1,0 +1,11 @@
+[target.aarch64-unknown-scarlet]
+rustflags = [
+    "-C", "relocation-model=pic",
+    "-Zfixed-x18",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=--dynamic-linker=/bin/scarlet-ld",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=max-page-size=16384",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=separate-loadable-segments",
+]
