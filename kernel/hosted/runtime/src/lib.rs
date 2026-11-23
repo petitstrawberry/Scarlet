@@ -6,6 +6,8 @@
 )))]
 compile_error!("The hosted runtime supports AArch64 Linux, macOS, and iOS");
 
+#[cfg(any(target_os = "ios", test))]
+pub mod anonymous;
 pub mod context;
 pub mod cpu_binding;
 #[cfg(not(target_os = "ios"))]

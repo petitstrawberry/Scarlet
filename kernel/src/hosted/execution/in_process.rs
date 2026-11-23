@@ -5,10 +5,14 @@ use crate::{arch::Trapframe, sched::scheduler, task::Task};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 use scarlet_hosted_runtime::{
+    anonymous::AnonymousMappings,
     in_process::{Carrier, SignedText},
     run_gate::{MappingOutcome, RunGate, RunPermit, TaskId, WorkerId},
 };
-use std::{io, sync::OnceLock};
+use std::{
+    io,
+    sync::{Mutex, OnceLock},
+};
 
 static CARRIER: OnceLock<Carrier> = OnceLock::new();
 
@@ -24,6 +28,7 @@ pub(in crate::hosted) fn prepare() -> Result<(), &'static str> {
 
 pub(super) struct LocalImage {
     text: Arc<SignedText>,
+    anonymous: Mutex<AnonymousMappings>,
     gate: RunGate,
     interrupts: Arc<InterruptTarget>,
 }
@@ -67,6 +72,7 @@ pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()>
     };
     *local = Some(Arc::new(LocalImage {
         text,
+        anonymous: Mutex::new(AnonymousMappings::new()?),
         gate: RunGate::new(id),
         interrupts: Arc::new(InterruptTarget { carrier }),
     }));
@@ -98,7 +104,24 @@ impl Image {
         write: bool,
     ) -> Option<Option<core::ops::Range<usize>>> {
         let image = self.local.lock().unwrap();
-        Some(image.as_ref()?.text.user_bounds(address, write))
+        let image = image.as_ref()?;
+        Some(
+            image
+                .text
+                .user_bounds(address, write)
+                .or_else(|| image.anonymous.lock().unwrap().bounds(address, write)),
+        )
+    }
+
+    /// The caller holds the VM transaction and has stopped its carrier.
+    pub(crate) fn change_anonymous<T>(
+        &self,
+        operation: impl FnOnce(&mut AnonymousMappings) -> io::Result<T>,
+    ) -> Result<T, &'static str> {
+        let image = self.local.lock().unwrap();
+        let image = image.as_ref().ok_or("Signed guest image is absent")?;
+        operation(&mut image.anonymous.lock().unwrap())
+            .map_err(|_| "Cannot modify signed guest mapping")
     }
 
     pub(crate) fn try_parked(&self) -> bool {
