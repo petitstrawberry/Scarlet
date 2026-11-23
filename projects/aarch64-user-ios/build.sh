@@ -88,20 +88,26 @@ else
     package_guest "$app/scheduler.elf" ScarletGuest
 
     native="$build_root/native-init"
-    RUSTFLAGS='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"' \
-        cargo build --locked --release --target aarch64-unknown-scarlet \
+    guest_flags='-C relocation-model=pic -Zfixed-x18 --cfg getrandom_backend="custom"'
+    guest_build=(--locked --release --target aarch64-unknown-scarlet \
         -Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem \
         --manifest-path "$repo/user/bin/Cargo.toml" --target-dir "$native" \
-        --no-default-features --features ios-init-pie --bin init >&2
+        --no-default-features)
+    RUSTFLAGS="$guest_flags" cargo build "${guest_build[@]}" --features ios-init-pie --bin init >&2
+    RUSTFLAGS="$guest_flags" cargo rustc "${guest_build[@]}" --bin sh -- \
+        -C link-arg=-pie -C link-arg=--no-dynamic-linker -C link-arg=-z \
+        -C link-arg=max-page-size=16384 -C link-arg=-z -C link-arg=separate-loadable-segments >&2
     root="$out/initramfs"
     mkdir -p "$root"/{bin,dev,mnt/newroot}
     cp "$native/aarch64-unknown-scarlet/release/init" "$root/init"
+    cp "$native/aarch64-unknown-scarlet/release/sh" "$root/bin/sh"
+    package_guest "$root/bin/sh" ScarletShell
     build_fixture boot_fixture _scarlet_boot_start "$root/bin/boot-check"
     package_guest "$root/init" ScarletInit
     package_guest "$root/bin/boot-check" ScarletBootCheck
     (
         cd "$root"
-        printf '%s\n' bin bin/boot-check dev init mnt mnt/newroot |
+        printf '%s\n' bin bin/boot-check bin/sh dev init mnt mnt/newroot |
             /usr/bin/cpio -o -H newc -R 0:0 > "$app/initramfs.cpio"
     )
     seed="$out/rootfs"

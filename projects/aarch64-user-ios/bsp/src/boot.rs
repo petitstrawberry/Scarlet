@@ -69,8 +69,8 @@ fn forward_console(stream: UnixStream, callback: Log) -> io::Result<()> {
     Ok(())
 }
 
-fn boot(bundle: &Path, root: &Path, callback: Log) -> io::Result<()> {
-    for name in ["ScarletInit", "ScarletBootCheck"] {
+fn boot(bundle: &Path, root: &Path, callback: Log, boot_check: bool) -> io::Result<()> {
+    for name in ["ScarletInit", "ScarletBootCheck", "ScarletShell"] {
         let path = bundle
             .join("Frameworks")
             .join(format!("{name}.framework/{name}"));
@@ -113,7 +113,11 @@ fn boot(bundle: &Path, root: &Path, callback: Log) -> io::Result<()> {
     ROOT.set(Some(root));
     platform.boot(
         &initramfs,
-        "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/boot-check",
+        if boot_check {
+            "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/boot-check"
+        } else {
+            "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/sh"
+        },
         DeviceSource::Hosted(populate),
     )
 }
@@ -144,6 +148,7 @@ pub unsafe extern "C" fn scarlet_ios_console_send(bytes: *const u8, length: usiz
 pub unsafe extern "C" fn scarlet_ios_boot(
     bundle: *const c_char,
     root: *const c_char,
+    boot_check: bool,
     callback: Log,
 ) {
     let bundle = Path::new(OsStr::from_bytes(
@@ -152,7 +157,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     let root = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(root) }.to_bytes(),
     ));
-    if let Err(error) = boot(bundle, root, callback) {
+    if let Err(error) = boot(bundle, root, callback, boot_check) {
         log(callback, &format!("SCARLET_BOOT_FAIL: {error}"));
     }
 }
