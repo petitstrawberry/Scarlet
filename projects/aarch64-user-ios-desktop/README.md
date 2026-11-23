@@ -27,6 +27,9 @@ The runner installs on the booted Simulator. To package for a device, use
 `image --target aarch64-apple-ios --release --locked` with the existing
 `PROVISIONING_PROFILE` and `SIGNING_IDENTITY` settings. The default bundle ID is
 `org.scarletos.ios.desktop`; `BUNDLE_ID` overrides it for provisioning.
+Use a device provisioning profile that grants Extended Virtual Addressing
+for Desktop. Individual signed guests reserve host virtual address windows.
+The packager includes the entitlement when the selected profile grants it.
 Desktop has a separate app container from Minimum, preserving its CLI disk.
 Its Info.plist sets the boolean `ScarletDefaultDisplay` to `true` for the Swift
 launch UI; Minimum defaults to `false`. The shared packager accepts

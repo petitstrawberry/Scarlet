@@ -184,6 +184,11 @@ if profile_path.exists():
         "application-identifier": f"{prefix}.{bundle_id}",
         "com.apple.developer.team-identifier": source["com.apple.developer.team-identifier"],
     }
+    # Signed guests reserve separate address windows inside the native app.
+    # Request the larger address space when the selected profile grants it.
+    extended_va = "com.apple.developer.kernel.extended-virtual-addressing"
+    if source.get(extended_va) is True:
+        entitlements[extended_va] = True
     (Path(build) / "entitlements.plist").write_bytes(plistlib.dumps(entitlements))
     profile_path.unlink()
 PY
