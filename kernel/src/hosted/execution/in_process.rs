@@ -211,7 +211,11 @@ impl Image {
             // Under iOS UP the previous carrier request has acknowledged its stop.
             let text = image.text.lock().unwrap().clone();
             unsafe { text.activate()? };
-            image.data.publish(&task.vm_manager, image.generation)?;
+            image.data.publish(
+                &task.vm_manager,
+                image.generation,
+                self.publication_generation.load(Ordering::Acquire),
+            )?;
             if id == task.get_thread_group_id() {
                 image.link.lock().unwrap().bind_fork_owner(thread);
             }

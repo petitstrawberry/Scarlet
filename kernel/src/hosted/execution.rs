@@ -1,5 +1,4 @@
 //! Native guest execution and trap dispatch for a scheduled Task.
-#[cfg(not(target_os = "ios"))]
 mod admission_cache;
 #[cfg(not(target_os = "ios"))]
 mod boundary;
@@ -65,7 +64,6 @@ struct Extent {
     parts: Vec<boundary::Part>,
 }
 
-#[cfg(not(target_os = "ios"))]
 impl admission_cache::Snapshot for crate::vm::vmem::VirtualMemoryMap {
     fn key(&self) -> usize {
         self.vmarea.start
