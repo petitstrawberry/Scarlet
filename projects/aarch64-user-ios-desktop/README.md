@@ -22,7 +22,8 @@ and sampled-image bindings. GitHub currently does not serve that revision.
 The SDK's project-local Cargo Git cache needs the revision from a trusted
 local SGFX checkout. Both Apple BSPs use this same pin.
 
-`--tablet` enables tablet mode on an iPhone Simulator; iPad selects it naturally.
+iPhone and iPad report tablet posture by default. `--tablet` can also force it
+when running the iOS app on other device idioms.
 The runner installs on the booted Simulator. To package for a device, use
 `image --target aarch64-apple-ios --release --locked` with the existing
 `PROVISIONING_PROFILE` and `SIGNING_IDENTITY` settings. The default bundle ID is

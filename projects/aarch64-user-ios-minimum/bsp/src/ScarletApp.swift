@@ -146,7 +146,9 @@ private final class ScarletSession {
                 runSchedulerCheck()
             }
         } else {
-            let tablet = UIDevice.current.userInterfaceIdiom == .pad || arguments.contains("--tablet")
+            let idiom = UIDevice.current.userInterfaceIdiom
+            // iPhone and iPad have direct touch and no built-in keyboard.
+            let tablet = idiom == .phone || idiom == .pad || arguments.contains("--tablet")
             let arguments = arguments
             DispatchQueue.global(qos: .userInitiated).async {
                 boot(arguments: arguments, width: width, height: height, tablet: tablet)
