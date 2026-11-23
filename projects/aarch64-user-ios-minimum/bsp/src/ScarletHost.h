@@ -38,6 +38,9 @@ typedef struct {
 } ScarletFrameInfo;
 
 void scarlet_ios_set_display_size(uint32_t width, uint32_t height);
+bool scarlet_ios_open_metal(void *layer, uint32_t width, uint32_t height);
+void scarlet_ios_metal_viewport(uint32_t width, uint32_t height);
+void scarlet_ios_metal_set_active(bool active);
 ScarletFrameInfo scarlet_ios_frame_info(void);
 bool scarlet_ios_copy_frame(void *buffer, size_t length, uint64_t generation);
 bool scarlet_ios_console_send(const void *bytes, size_t length);

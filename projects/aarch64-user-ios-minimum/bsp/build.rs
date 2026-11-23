@@ -76,6 +76,7 @@ fn main() {
         "Security",
         "CoreFoundation",
         "CoreGraphics",
+        "QuartzCore",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

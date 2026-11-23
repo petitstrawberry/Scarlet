@@ -11,7 +11,7 @@ mod session;
 mod transport;
 mod worker;
 pub use scanout::{create_scanout, upload_scanout};
-pub use worker::Worker;
+pub use worker::{SubmissionGate, Worker};
 
 /// Host command trace fields; no guest pointers cross this callback.
 pub type TraceFields = Option<(&'static str, u64, u64)>;

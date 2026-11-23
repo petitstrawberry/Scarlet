@@ -126,6 +126,7 @@ impl Presenter {
             queue.clone(),
             texture.clone(),
             crate::gpu::config(),
+            None,
             wake,
         )?;
         Ok((

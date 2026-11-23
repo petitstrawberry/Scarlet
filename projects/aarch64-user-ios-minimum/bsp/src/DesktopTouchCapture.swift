@@ -1,4 +1,5 @@
 #if !SCARLET_EXECUTION_PROBE
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -27,21 +28,26 @@ struct DesktopViewport: Equatable {
 }
 
 struct DesktopTouchCapture: UIViewRepresentable {
+    let active: Bool
+    let metalLayer: CAMetalLayer
     let resize: (DesktopViewport) -> Void
 
     func makeUIView(context: Context) -> TouchView {
         let view = TouchView()
         view.isMultipleTouchEnabled = true
+        view.metalLayer = metalLayer
+        view.active = active
         view.resize = resize
         return view
     }
 
     func updateUIView(_ view: TouchView, context: Context) {
+        view.active = active
         view.resize = resize
     }
 
     static func dismantleUIView(_ view: TouchView, coordinator: ()) {
-        view.releaseContacts()
+        view.active = false
     }
 
     final class TouchView: UIView {
@@ -50,6 +56,13 @@ struct DesktopTouchCapture: UIViewRepresentable {
         private var contacts = [ScarletTouchContact](repeating: inactive, count: Int(SCARLET_IOS_TOUCH_SLOTS))
         private var nextID: Int32 = 0
         var resize: ((DesktopViewport) -> Void)?
+        var metalLayer: CAMetalLayer?
+        var active = false {
+            didSet {
+                guard oldValue != active else { return }
+                if active { setNeedsLayout() } else { detach() }
+            }
+        }
         private var viewport: DesktopViewport?
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -87,8 +100,7 @@ struct DesktopTouchCapture: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window == nil {
-                viewport = nil
-                releaseContacts()
+                detach()
             } else {
                 setNeedsLayout()
             }
@@ -96,22 +108,38 @@ struct DesktopTouchCapture: UIViewRepresentable {
 
         override func layoutSubviews() {
             super.layoutSubviews()
-            guard let screen = window?.windowScene?.screen,
+            guard active, let screen = window?.windowScene?.screen,
                   let size = DesktopViewport(points: bounds.size, nativeScale: screen.nativeScale) else {
-                viewport = nil
-                releaseContacts()
+                detach()
                 return
             }
             guard size != viewport else { return }
             releaseContacts()
             viewport = size
+            if let metalLayer {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                if metalLayer.superlayer !== layer { layer.addSublayer(metalLayer) }
+                metalLayer.contentsScale = screen.nativeScale
+                metalLayer.frame = bounds
+                CATransaction.commit()
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.viewport == size, self.window != nil else { return }
                 self.resize?(size)
             }
         }
 
-        func releaseContacts() {
+        private func detach() {
+            viewport = nil
+            releaseContacts()
+            if let metalLayer, metalLayer.superlayer === layer {
+                metalLayer.removeFromSuperlayer()
+                scarlet_ios_metal_viewport(0, 0)
+            }
+        }
+
+        private func releaseContacts() {
             guard owners.contains(where: { $0 != nil }) else { return }
             for slot in owners.indices { release(slot) }
             publish(cancelled: true)

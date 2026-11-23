@@ -1,3 +1,4 @@
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -14,6 +15,7 @@ private struct ScarletRootView: View {
     private let session = ScarletSession.shared
     @State private var tab: SessionTab = .desktop
     @State private var fullScreen = false
+    @Environment(\.scenePhase) private var scenePhase
 
     private enum SessionTab { case desktop, console }
 
@@ -23,20 +25,28 @@ private struct ScarletRootView: View {
             .onAppear { session.start() }
         #else
         if session.displayEnabled {
-            if fullScreen {
-                desktop
-                    .statusBarHidden(true)
-                    .persistentSystemOverlays(.hidden)
-                    .defersSystemGestures(on: .bottom)
-            } else {
-                TabView(selection: $tab) {
+            Group {
+                if fullScreen {
                     desktop
-                        .tabItem { Label("Desktop", systemImage: "display") }
-                        .tag(SessionTab.desktop)
-                    TerminalView(console: session.console, acceptsInput: true)
-                        .tabItem { Label("Console", systemImage: "terminal") }
-                        .tag(SessionTab.console)
+                        .statusBarHidden(true)
+                        .persistentSystemOverlays(.hidden)
+                        .defersSystemGestures(on: .bottom)
+                } else {
+                    TabView(selection: $tab) {
+                        desktop
+                            .tabItem { Label("Desktop", systemImage: "display") }
+                            .tag(SessionTab.desktop)
+                        TerminalView(console: session.console, acceptsInput: true)
+                            .tabItem { Label("Console", systemImage: "terminal") }
+                            .tag(SessionTab.console)
+                    }
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                scarlet_ios_metal_set_active(false)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                scarlet_ios_metal_set_active(true)
             }
         } else {
             TerminalView(console: session.console, acceptsInput: !session.schedulerCheck)
@@ -47,7 +57,7 @@ private struct ScarletRootView: View {
 
     #if !SCARLET_EXECUTION_PROBE
     private var desktop: some View {
-        DesktopView(display: session.display, active: tab == .desktop,
+        DesktopView(display: session.display, active: tab == .desktop && scenePhase == .active,
                     fullScreen: fullScreen, resize: session.resize)
             .overlay(alignment: .topTrailing) {
                 Button {
@@ -91,10 +101,19 @@ private final class ScarletSession {
     private let arguments = ProcessInfo.processInfo.arguments
     let display = DesktopDisplay()
     var schedulerCheck: Bool { arguments.contains("--scheduler-check") }
-    var displayEnabled: Bool { !schedulerCheck && arguments.contains("--display") }
+    var displayEnabled: Bool {
+        guard !schedulerCheck, !arguments.contains("--console") else { return false }
+        return arguments.contains("--display")
+            || Bundle.main.object(forInfoDictionaryKey: "ScarletDefaultDisplay") as? Bool == true
+    }
 
     func resize(_ viewport: DesktopViewport) {
-        if display.viewport != viewport { display.viewport = viewport }
+        if !started { display.openMetal(viewport) }
+        if display.metalLayer.isHidden {
+            if display.viewport != viewport { display.viewport = viewport }
+        } else {
+            scarlet_ios_metal_viewport(UInt32(viewport.pixels.width), UInt32(viewport.pixels.height))
+        }
         scarlet_ios_set_display_size(viewport.width, viewport.height)
         start(width: viewport.width, height: viewport.height)
     }
@@ -175,7 +194,7 @@ private struct DesktopView: View {
         }
         .clipped()
         .overlay {
-            DesktopTouchCapture(resize: resize)
+            DesktopTouchCapture(active: active, metalLayer: display.metalLayer, resize: resize)
                 .accessibilityHidden(true)
         }
         .ignoresSafeArea(.container, edges: ignoredEdges)
@@ -249,9 +268,20 @@ private struct DesktopTabInput: UIViewRepresentable {
 private final class DesktopDisplay: ObservableObject {
     @Published private(set) var frame: CGImage?
     @Published var viewport: DesktopViewport?
+    let metalLayer = CAMetalLayer()
     private var generation: UInt64 = 0
     private let colors = CGColorSpaceCreateDeviceRGB()
     private var pixels = Data()
+
+    init() {
+        metalLayer.isOpaque = true
+        metalLayer.isHidden = true
+    }
+
+    func openMetal(_ viewport: DesktopViewport) {
+        let layer = Unmanaged.passUnretained(metalLayer).toOpaque()
+        metalLayer.isHidden = !scarlet_ios_open_metal(layer, viewport.width, viewport.height)
+    }
 
     func render() {
         let mode = scarlet_ios_frame_info()

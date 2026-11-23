@@ -7,7 +7,10 @@ use scarlet::{
     arch::Trapframe,
     device::{
         Device, DeviceType,
-        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat, output::DisplayRegion},
+        graphics::{
+            FramebufferConfig, GpuDisplayResource, GpuPresentOptions, GraphicsDevice, PixelFormat,
+            PresentationOwners, PresentationWait, output::DisplayRegion,
+        },
         input::{
             event_device::{EventDevice, INPUT_CAP_INTERNAL, InputDeviceKind, InputDeviceMetadata},
             event_types::{EV_SW, EV_SYN},
@@ -36,10 +39,11 @@ const LABEL: &str = "Scarlet iOS display";
 const MAX_EDGE: u32 = 4096;
 
 #[derive(Clone)]
-struct Mode {
+pub(crate) struct Mode {
     scanout: Arc<scanout::Scanout>,
-    frames: Arc<Mutex<scanout::Frames>>,
-    generation: u64,
+    pub(crate) frames: Arc<Mutex<scanout::Frames>>,
+    pub(crate) generation: u64,
+    pub(crate) texture: Option<wgpu::Texture>,
 }
 
 impl Mode {
@@ -56,6 +60,8 @@ impl Mode {
             scanout: Arc::new(scanout),
             frames,
             generation,
+            texture: crate::metal::presenter()
+                .map(|presenter| presenter.create_scanout(width, height)),
         })
     }
 }
@@ -64,6 +70,7 @@ struct Output {
     // The graphics manager retains the original fb0 physical address.
     _boot: Arc<scanout::Scanout>,
     current: Mutex<Mode>,
+    gpu: Option<crate::sgfx::Endpoint>,
 }
 
 static OUTPUT: OnceLock<Arc<Output>> = OnceLock::new();
@@ -73,7 +80,7 @@ fn dimensions(width: u32, height: u32) -> u64 {
     u64::from(width) << 32 | u64::from(height)
 }
 
-fn valid_size(width: u32, height: u32) -> bool {
+pub(crate) fn valid_size(width: u32, height: u32) -> bool {
     (2..=MAX_EDGE).contains(&width) && (2..=MAX_EDGE).contains(&height)
 }
 
@@ -94,18 +101,41 @@ impl Output {
             return current.scanout;
         };
         let mut published = self.current.lock().unwrap();
+        let mut mode_changed = false;
         if published.generation == current.generation
             && REQUESTED.load(Ordering::Acquire) == desired
         {
+            if let (Some(presenter), Some(texture)) = (crate::metal::presenter(), &next.texture) {
+                presenter.use_scanout(texture);
+            }
             *published = next;
+            mode_changed = true;
         }
-        published.scanout.clone()
+        let scanout = published.scanout.clone();
+        drop(published);
+        if mode_changed && let Some(presenter) = crate::metal::presenter() {
+            presenter.redraw();
+        }
+        scanout
     }
 }
 
 scanout::graphics_endpoint!(Output, |_: &Output| NAME);
 
 impl GraphicsDevice for Output {
+    fn begin_gpu_resource_present(
+        &self,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+        _options: GpuPresentOptions,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        match &self.gpu {
+            Some(endpoint) => endpoint.begin_present(resource, region, owners),
+            None => Ok(None),
+        }
+    }
+
     fn get_display_name(&self) -> &'static str {
         LABEL
     }
@@ -208,15 +238,36 @@ impl Configuration {
         );
         let requested = REQUESTED.load(Ordering::Acquire);
         let damage = self.damage;
+        let presenter = crate::metal::presenter();
         let mode = Mode::new(
             (requested >> 32) as u32,
             requested as u32,
             1,
-            Arc::new(move || damage()),
+            Arc::new(move || {
+                if let Some(presenter) = presenter {
+                    presenter.redraw();
+                } else {
+                    damage();
+                }
+            }),
         )?;
+        let gpu = match (presenter, &mode.texture) {
+            (Some(presenter), Some(texture)) => {
+                presenter.use_scanout(texture);
+                match presenter.endpoint().register() {
+                    Ok(()) => Some(presenter.endpoint().clone()),
+                    Err(error) => {
+                        eprintln!("Scarlet iOS: cannot register SGFX: {error}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let output = Arc::new(Output {
             _boot: mode.scanout.clone(),
             current: Mutex::new(mode),
+            gpu,
         });
         OUTPUT
             .set(output.clone())
@@ -253,6 +304,12 @@ pub extern "C" fn scarlet_ios_frame_info() -> FrameInfo {
             generation: current.generation,
         }
     })
+}
+
+pub(crate) fn current_mode() -> Option<Mode> {
+    OUTPUT
+        .get()
+        .map(|output| output.current.lock().unwrap().clone())
 }
 
 /// Copy current damage to the caller's persistent, tightly packed BGRA buffer.
