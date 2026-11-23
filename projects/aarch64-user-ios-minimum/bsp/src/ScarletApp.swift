@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct ScarletApp: App {
@@ -11,6 +12,9 @@ struct ScarletApp: App {
 
 private struct ScarletRootView: View {
     private let session = ScarletSession.shared
+    @State private var tab: SessionTab = .desktop
+
+    private enum SessionTab { case desktop, console }
 
     var body: some View {
         GeometryReader { geometry in
@@ -19,11 +23,13 @@ private struct ScarletRootView: View {
                 TerminalView(console: session.console, acceptsInput: false)
                 #else
                 if session.displayEnabled {
-                    TabView {
-                        DesktopView(display: session.display)
+                    TabView(selection: $tab) {
+                        DesktopView(display: session.display, active: tab == .desktop)
                             .tabItem { Label("Desktop", systemImage: "display") }
+                            .tag(SessionTab.desktop)
                         TerminalView(console: session.console, acceptsInput: true)
                             .tabItem { Label("Console", systemImage: "terminal") }
+                            .tag(SessionTab.console)
                     }
                 } else {
                     TerminalView(console: session.console, acceptsInput: !session.schedulerCheck)
@@ -121,6 +127,7 @@ private func receiveDamage() {
 
 private struct DesktopView: View {
     @ObservedObject var display: DesktopDisplay
+    let active: Bool
 
     var body: some View {
         ZStack {
@@ -138,6 +145,65 @@ private struct DesktopView: View {
         .accessibilityElement()
         .accessibilityIdentifier("scarlet-display")
         .accessibilityLabel("Scarlet display")
+        .background {
+            DesktopTabInput(active: active)
+                .frame(width: 1, height: 1)
+                .accessibilityHidden(true)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack {
+                Spacer()
+                Button("Tab") { scarlet_ios_desktop_tab() }
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("Send Tab to Desktop")
+            }
+            .padding(.horizontal)
+            .background(.bar)
+        }
+    }
+}
+
+private struct DesktopTabInput: UIViewRepresentable {
+    let active: Bool
+
+    func makeUIView(context: Context) -> KeyView { KeyView() }
+
+    func updateUIView(_ view: KeyView, context: Context) { view.active = active }
+
+    static func dismantleUIView(_ view: KeyView, coordinator: ()) { view.active = false }
+
+    final class KeyView: UIView {
+        var active = false {
+            didSet { updateFocus() }
+        }
+
+        override var canBecomeFirstResponder: Bool { active }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            updateFocus()
+        }
+
+        private func updateFocus() {
+            if active && window != nil {
+                if !isFirstResponder { becomeFirstResponder() }
+            } else if isFirstResponder {
+                resignFirstResponder()
+            }
+        }
+
+        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            var unhandled = presses
+            for press in presses {
+                guard let key = press.key, key.keyCode == .keyboardTab,
+                      key.modifierFlags.intersection([.command, .alternate, .control, .shift]).isEmpty else {
+                    continue
+                }
+                scarlet_ios_desktop_tab()
+                unhandled.remove(press)
+            }
+            if !unhandled.isEmpty { super.pressesBegan(unhandled, with: event) }
+        }
     }
 }
 

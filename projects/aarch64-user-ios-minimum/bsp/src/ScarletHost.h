@@ -29,6 +29,7 @@ typedef struct {
 } ScarletTouchContact;
 
 void scarlet_ios_touch(const ScarletTouchContact *contacts, size_t count, bool cancelled);
+void scarlet_ios_desktop_tab(void);
 bool scarlet_ios_copy_frame(void *buffer, size_t length);
 bool scarlet_ios_console_send(const void *bytes, size_t length);
 void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login, bool shell,

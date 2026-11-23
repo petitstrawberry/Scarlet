@@ -67,6 +67,7 @@ impl Configuration {
             .map_err(|_| "iOS scanout is already registered")?;
         manager.register_device(Arc::new(scanout));
         crate::touch::register(manager, self.width, self.height)?;
+        crate::buttons::register(manager)?;
         Ok(())
     }
 }
