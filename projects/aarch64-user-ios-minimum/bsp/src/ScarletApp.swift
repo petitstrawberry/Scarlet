@@ -68,7 +68,7 @@ private final class ScarletSession {
     #endif
 
     func start(size: CGSize) {
-        guard !started, size.width >= 1, size.height >= 1 else { return }
+        guard !started, size.width >= 2, size.height >= 2 else { return }
         started = true
 
         #if SCARLET_EXECUTION_PROBE
@@ -90,8 +90,10 @@ private final class ScarletSession {
                 runSchedulerCheck()
             }
         } else {
-            let width = displayEnabled ? UInt32(size.width) : 0
-            let height = displayEnabled ? UInt32(size.height) : 0
+            // Keep the virtual scanout an exact number of logical pixels at
+            // the bundled Desktop's 2x output scale.
+            let width = displayEnabled ? UInt32(size.width) & ~1 : 0
+            let height = displayEnabled ? UInt32(size.height) & ~1 : 0
             let tablet = UIDevice.current.userInterfaceIdiom == .pad || arguments.contains("--tablet")
             let arguments = arguments
             if displayEnabled {
