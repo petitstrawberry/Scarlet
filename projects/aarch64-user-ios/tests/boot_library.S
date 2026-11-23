@@ -7,8 +7,18 @@ scarlet_boot_pid_syscall:
 
 .text
 .p2align 2
+#ifdef SCARLET_ALTERNATE_LIBRARY
+    // Keep the alternate implementation at different symbol addresses.
+    nop
+    nop
+#endif
 .type initialize_syscall,%function
 initialize_syscall:
+    mov x0, #1
+    adr x1, version_message
+    mov x2, #version_size
+    mov x8, #201 // StreamWrite
+    svc #0
     adrp x9, :got:scarlet_boot_pid_syscall
     ldr x9, [x9, :got_lo12:scarlet_boot_pid_syscall]
     mov x10, #7
@@ -25,4 +35,22 @@ scarlet_boot_pid:
     ldr x9, [x9, :got_lo12:scarlet_boot_pid_syscall]
     ldr x8, [x9]
     svc #0
+    ret
+
+.section .rodata
+version_message:
+#ifdef SCARLET_ALTERNATE_LIBRARY
+    .ascii "SCARLET_LIBRARY_B\n"
+#else
+    .ascii "SCARLET_LIBRARY_A\n"
+#endif
+.set version_size, . - version_message
+
+.text
+.globl scarlet_boot_clear_syscall
+.type scarlet_boot_clear_syscall,%function
+scarlet_boot_clear_syscall:
+    adrp x9, :got:scarlet_boot_pid_syscall
+    ldr x9, [x9, :got_lo12:scarlet_boot_pid_syscall]
+    str xzr, [x9]
     ret

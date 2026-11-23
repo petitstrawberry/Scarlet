@@ -40,11 +40,20 @@ Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージ
 
 現行の `sh` では、パイプライン内の組み込みコマンドの出力が端末に出る場合があります。シェルはパイプ端に標準出力の役割を設定しますが、組み込みの `echo` は引き続きハンドル 1 に書き込みます。
 
-## 動的 ELF のパッケージ化
+## 動的 ELF の起動
 
-`tools/ios-aot` は静的 PIE のほか、`--lib-dir DIRECTORY` を指定すると `PT_INTERP=/bin/scarlet-ld` の Scarlet AArch64 PIE を処理します。パッケージ時に Scarlet の ELF ローダーと同じ `LoaderContext` を使い、`DT_NEEDED` を再帰的に読み、シンボルと再配置を解決します。検証用の `boot-check` は PLT 経由で `libboot-check.so` を呼び、同ライブラリは GOT 経由でデータを参照します。
+`tools/ios-aot --pie` と `--dso` は、Scarlet AArch64 の実行ファイルと共有ライブラリを一つずつ独立したフレームワークに変換します。アプリには各オブジェクトの署名済み実行ページと、元の ELF に対応する SHA-256 を収録します。
 
-exec 時は元の実行ファイルと依存する各 `/lib` ファイルの SHA-256 を照合し、署名済み RX とインスタンスごとの可変ページを配置します。依存ライブラリの初期化関数を呼んでから元のエントリに入ります。対象は 16 KiB のページ境界に合う配置と x18 を予約したコードです。実行中の `dlopen`、共有ライブラリの TLS、任意の `PT_INTERP` は未対応です。
+`exec` のたびに iOS 実行バックエンドが Scarlet の `LoaderContext` で `DT_NEEDED` をたどり、そのタスクの VFS で `/lib/<名前>` を開きます。ファイル内容に対応する署名済みオブジェクトを選び、そのプロセスのアドレスで GOT と PLT の再配置を解決します。RELRO の保護とメインの TLS 初期化を終えた後、依存順にコンストラクタを実行してプログラムに入ります。同じライブラリ名でも、ゲスト側のファイルを別の登録済みバージョンに差し替えれば、次の `exec` はそちらを選びます。既に動いているプロセスは各自のマッピングを保持します。
+
+対象は 16 KiB ページ配置で x18 を予約したコードと、`PT_INTERP=/bin/scarlet-ld` の PIE です。リンク処理はホスト側で行います。ゲスト内の常駐インタプリタ、実行中の `dlopen`、共有ライブラリの TLS は未対応です。
+
+Simulator で同じ実行ファイルを使ってライブラリの A 版・B 版、依存ファイルの欠落、カタログ未登録の ELF を確認できます。検証は一時アプリと専用のゲストディスクを使用します。
+
+```sh
+app=$(SCARLET_IOS_TEST_LIBRARIES=1 projects/aarch64-user-ios/build.sh iphonesimulator)
+python3 projects/aarch64-user-ios/tests/runtime_link.py "$app"
+```
 
 ## ネイティブの init をパッケージ化
 

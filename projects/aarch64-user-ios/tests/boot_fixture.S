@@ -28,6 +28,37 @@ _scarlet_boot_start:
     bl scarlet_boot_pid
     cmp x0, #1
     b.ne .Lfail
+    // Fork a process with a separately mapped DSO. Its relocated GOT must
+    // address the child's private data while leaving the parent's state intact.
+    mov x0, #0
+    mov x1, #0
+    mov x2, #0
+    mov x3, #0
+    mov x4, #0
+    mov x8, #2 // Clone
+    svc #0
+    tbnz x0, #63, .Lfail
+    cbnz x0, .Lwait_child
+    bl scarlet_boot_clear_syscall
+    mov x0, #43
+    mov x8, #1 // Exit
+    svc #0
+    b .Lfail
+.Lwait_child:
+    mov x19, x0
+    sub sp, sp, #16
+    mov x1, sp
+    mov x2, #0
+    mov x8, #5 // Waitpid
+    svc #0
+    ldr w9, [sp], #16
+    cmp x0, x19
+    b.ne .Lfail
+    cmp w9, #43
+    b.ne .Lfail
+    bl scarlet_boot_pid
+    cmp x0, #1
+    b.ne .Lfail
     mov x8, #1304 // EnvironmentCurrent
     svc #0
     tbnz x0, #63, .Lfail
