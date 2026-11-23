@@ -54,6 +54,12 @@ app="$out/$app_name.app"
 mkdir -p "$app"
 if ! $probe; then
     cp "$project/bsp/PrivacyInfo.xcprivacy" "$app/"
+    network_manifest=$(python3 "$project/tools/prepare_network_frameworks.py" \
+        --sdk "$sdk" --build-dir "$build_root/native-network")
+    network_dir=$(dirname "$network_manifest")
+    mkdir "$app/Frameworks"
+    cp -R "$network_dir/Frameworks/." "$app/Frameworks/"
+    cp -R "$network_dir/Resources/." "$app/"
 fi
 
 build_fixture() {
@@ -171,6 +177,10 @@ for directory, name, kind, ident in bundles:
                 "UIApplicationSupportsMultipleScenes": False,
             },
         )
+        if (Path(app) / "Frameworks/ScarletSlirp.framework").is_dir():
+            info["NSLocalNetworkUsageDescription"] = (
+                "Allows Scarlet apps to connect to devices on your local network."
+            )
     (Path(directory) / "Info.plist").write_bytes(plistlib.dumps(info))
 
 profile_path = Path(build) / "profile.plist"

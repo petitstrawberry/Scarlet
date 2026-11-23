@@ -199,6 +199,7 @@ fn boot(
         return Err(io::Error::other("Empty Scarlet initramfs"));
     }
     let root = RootImage::open(root)?;
+    crate::network::configure(bundle);
     // A native-resolution desktop shares guest RAM with applications and
     // their compositor buffers.
     let ram_mib = if display.width != 0 && display.height != 0 {

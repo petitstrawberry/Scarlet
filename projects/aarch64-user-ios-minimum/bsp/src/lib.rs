@@ -7,6 +7,7 @@ mod boot;
 mod buttons;
 mod display;
 mod metal;
+mod network;
 #[allow(dead_code)]
 #[path = "../../../shared/hosted/root_image.rs"]
 mod root_image;

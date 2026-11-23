@@ -68,6 +68,7 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", libs.display());
     }
     println!("cargo:rustc-link-arg-bin=scarlet=-Wl,-rpath,/usr/lib/swift");
+    println!("cargo:rustc-link-arg-bin=scarlet=-Wl,-rpath,@executable_path/Frameworks");
     println!("cargo:rustc-link-arg-bin=scarlet={}", object.display());
     for framework in [
         "SwiftUI",
