@@ -16,6 +16,12 @@ projects/aarch64-user-ios-desktop/tools/scarlet_ios.sh image --release --locked
 projects/aarch64-user-ios-desktop/tools/scarlet_ios.sh run --release --locked -- --display --tablet
 ```
 
+The shared Apple BSP currently pins SGFX's WGPU backend at
+`c373416e8dc3d86e7ff1bc397d6b5383aa093409`, which provides shared color-target
+and sampled-image bindings. GitHub currently does not serve that revision.
+The SDK's project-local Cargo Git cache needs the revision from a trusted
+local SGFX checkout. Both Apple BSPs use this same pin.
+
 `--tablet` enables tablet mode on an iPhone Simulator; iPad selects it naturally.
 The runner installs on the booted Simulator. To package for a device, use
 `image --target aarch64-apple-ios --release --locked` with the existing

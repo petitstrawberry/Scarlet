@@ -521,7 +521,7 @@ type = "path"
 path = "../aarch64-user-ios-minimum/tools/build_fixture.sh"
 
 [sections.rootfs]
-hash = "sha256:7d7b39e9d0b6ab6b384981b83a29d27f2aa0eacd450fb5ce004fc431cee30484"
+hash = "sha256:676785df9972e208e6ea87af06c9751e0f380820bcd233352c293ddb862835eb"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1137,7 +1137,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "sws"
 to = "/bin/sws"
-hash = "sha256:5355e04f179457b1c15482b3725863317a8b646b8833bf55c9fd80235e64640b"
+hash = "sha256:57936f77dada533ad3f35fbf2ba626b927ff3727f453e6a4fba13ecb0c050b59"
 
 [sections.rootfs.layers.source]
 type = "path"
