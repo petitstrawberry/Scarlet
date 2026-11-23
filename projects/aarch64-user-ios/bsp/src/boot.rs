@@ -4,6 +4,10 @@ use scarlet::{
         Device,
         manager::{DeviceManager, DriverPriority},
     },
+    fs::{
+        FileSystemError, FileSystemErrorKind, FileSystemOperations, FileType,
+        drivers::ext2::Ext2FileSystem,
+    },
     hosted,
 };
 use scarlet_hosted_runtime::signed_image::Image;
@@ -28,6 +32,56 @@ thread_local! {
     static TERMINAL: RefCell<Option<HostTerminal>> = const { RefCell::new(None) };
 }
 
+// Earlier root images contain only the writable data directories. Install the
+// distribution paths on that volume before the guest mounts it. Existing
+// account configuration and installed binaries belong to the guest.
+fn prepare_distribution(block: Arc<RootBlock>) -> Result<(), FileSystemError> {
+    let fs = Ext2FileSystem::new(block)?;
+    let root = fs.root_node();
+    let missing = |name: &str| match fs.lookup(&root, &name.into()) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind == FileSystemErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    };
+    if !missing("bin")? {
+        return Ok(());
+    }
+    if missing("etc")? {
+        // Publish the complete factory configuration in one directory rename.
+        // A previous attempt may have stopped before publication.
+        let stage = ".scarlet-factory-etc".to_string();
+        let dir = if missing(&stage)? {
+            fs.create(&root, &stage, FileType::Directory, 0o755)?
+        } else {
+            fs.lookup(&root, &stage)?
+        };
+        let name = "scarlet-users".to_string();
+        let node = match fs.lookup(&dir, &name) {
+            Ok(node) => node,
+            Err(error) if error.kind == FileSystemErrorKind::NotFound => {
+                fs.create(&dir, &name, FileType::RegularFile, 0o600)?
+            }
+            Err(error) => return Err(error),
+        };
+        let file = fs.open(&node, 2)?;
+        let record = b"root:0:0::\n";
+        let io_error =
+            || FileSystemError::new(FileSystemErrorKind::IoError, "Cannot seed console accounts");
+        if file.write_at(0, record).ok() != Some(record.len()) {
+            return Err(io_error());
+        }
+        file.sync().map_err(|_| io_error())?;
+        fs.rename(&root, &stage, &root, &"etc".into())?;
+    }
+    fs.create(
+        &root,
+        &"bin".into(),
+        FileType::SymbolicLink("/old_root/bin".into()),
+        0o777,
+    )?;
+    Ok(())
+}
+
 fn populate(manager: &DeviceManager, priority: DriverPriority) {
     if priority != DriverPriority::Core {
         return;
@@ -46,7 +100,15 @@ fn populate(manager: &DeviceManager, priority: DriverPriority) {
     if let Some(image) = ROOT.take() {
         match RootBlock::attach(image, 0, 16) {
             Ok(block) => {
-                manager.register_device_with_name(block.name().into(), Arc::new(block));
+                let block = Arc::new(block);
+                if let Err(error) = prepare_distribution(block.clone()) {
+                    log(
+                        callback,
+                        &format!("SCARLET_BOOT_FAIL: root setup: {error:?}"),
+                    );
+                    return;
+                }
+                manager.register_device_with_name(block.name().into(), block);
             }
             Err(error) => log(
                 callback,
@@ -77,8 +139,15 @@ fn boot(
     callback: Log,
     screen: Log,
     boot_check: bool,
+    login: bool,
 ) -> io::Result<()> {
-    for name in ["ScarletInit", "ScarletBootCheck", "ScarletShell"] {
+    for name in [
+        "ScarletInit",
+        "ScarletBootCheck",
+        "Scarlet_sh",
+        "Scarlet_login",
+        "Scarlet_ps",
+    ] {
         let path = bundle
             .join("Frameworks")
             .join(format!("{name}.framework/{name}"));
@@ -123,8 +192,10 @@ fn boot(
         &initramfs,
         if boot_check {
             "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/boot-check"
+        } else if login {
+            "root=/dev/hostroot rootfstype=ext2 init.exec=/bin/login"
         } else {
-            "root=/dev/hostroot rootfstype=ext2 init.exec=/old_root/bin/sh"
+            "root=/dev/hostroot rootfstype=ext2 init.exec=/bin/sh"
         },
         DeviceSource::Hosted(populate),
     )
@@ -157,6 +228,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     bundle: *const c_char,
     root: *const c_char,
     boot_check: bool,
+    login: bool,
     callback: Log,
     screen: Log,
 ) {
@@ -166,7 +238,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     let root = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(root) }.to_bytes(),
     ));
-    if let Err(error) = boot(bundle, root, callback, screen, boot_check) {
+    if let Err(error) = boot(bundle, root, callback, screen, boot_check, login) {
         log(callback, &format!("SCARLET_BOOT_FAIL: {error}"));
     }
 }

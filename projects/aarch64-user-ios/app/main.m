@@ -3,7 +3,7 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
-extern void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck,
+extern void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login,
     void (*log)(const char *), void (*screen)(const char *));
 extern bool scarlet_ios_console_send(const void *bytes, size_t length);
 extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
@@ -21,9 +21,12 @@ static void show_line(const char *line) {
 }
 
 #ifndef SCARLET_EXECUTION_PROBE
+static UITextField *consoleInput;
+
 static void show_screen(const char *text) {
     NSString *snapshot = [NSString stringWithUTF8String:text];
     dispatch_async(dispatch_get_main_queue(), ^{
+        consoleInput.secureTextEntry = [snapshot hasSuffix:@"Password: "];
         output.text = snapshot;
         [output scrollRangeToVisible:NSMakeRange(snapshot.length, 0)];
     });
@@ -74,6 +77,9 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
         controller.view = [UIView new];
         controller.view.backgroundColor = UIColor.systemBackgroundColor;
         UITextField *input = [UITextField new];
+        consoleInput = input;
+        input.smartQuotesType = UITextSmartQuotesTypeNo;
+        input.smartDashesType = UITextSmartDashesTypeNo;
         input.borderStyle = UITextBorderStyleRoundedRect;
         input.placeholder = @"TTY input";
         input.accessibilityIdentifier = @"scarlet-console-input";
@@ -126,7 +132,8 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
                     return;
                 }
                 scarlet_ios_boot(bundle.bundlePath.fileSystemRepresentation, root.fileSystemRepresentation,
-                    [NSProcessInfo.processInfo.arguments containsObject:@"--boot-check"], show_line, show_screen);
+                    [NSProcessInfo.processInfo.arguments containsObject:@"--boot-check"],
+                    [NSProcessInfo.processInfo.arguments containsObject:@"--login"], show_line, show_screen);
             }
         });
 #endif
