@@ -199,8 +199,9 @@ fn boot(
         return Err(io::Error::other("Empty Scarlet initramfs"));
     }
     let root = RootImage::open(root)?;
+    // The scheduler derives its default task budget from usable guest RAM.
     let platform =
-        hosted::prepare(hosted::DEFAULT_VCPUS, 64 * 1024 * 1024).map_err(io::Error::other)?;
+        hosted::prepare(hosted::DEFAULT_VCPUS, 256 * 1024 * 1024).map_err(io::Error::other)?;
     let (guest, host) = UnixStream::pair()?;
     let mut writer = host.try_clone()?;
     let (send, receive) = mpsc::sync_channel::<Vec<u8>>(16);
