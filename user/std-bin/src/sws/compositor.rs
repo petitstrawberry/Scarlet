@@ -311,19 +311,16 @@ fn layout_overview_cards(
     };
     let maximum_card_width = scale_length(if compact { 176 } else { 620 });
     let preferred_pitch = target_width.saturating_add(gap).max(1);
-    // The rail is a full-width horizontal ScrollView. Choose a pitch whose
-    // snap points put the next card centre close to either viewport edge. A
-    // clipped neighbour therefore remains legible without manufacturing
-    // special one-off rectangles at the sides.
+    // Use the available width to limit the initial thumbnail size.
     let maximum_edge_steps = if compact { 5 } else { 3 };
     let edge_steps = ((u64::from(region_width).saturating_add(u64::from(preferred_pitch)))
         / u64::from(preferred_pitch.saturating_mul(2).max(1)))
     .clamp(1, maximum_edge_steps) as u32;
-    let pitch = (region_width / edge_steps.saturating_mul(2).max(1)).max(1);
-    let effective_gap = gap.min(pitch.saturating_sub(1));
+    let slot_width = (region_width / edge_steps.saturating_mul(2).max(1)).max(1);
+    let effective_gap = gap.min(slot_width.saturating_sub(1));
     let mut card_width = target_width
         .min(maximum_card_width)
-        .min(pitch.saturating_sub(effective_gap).max(1))
+        .min(slot_width.saturating_sub(effective_gap).max(1))
         .min(region_width.max(1));
     let mut card_height = ((u64::from(card_width) * u64::from(work_height.max(1)))
         / u64::from(work_width.max(1))) as u32;
@@ -338,6 +335,9 @@ fn layout_overview_cards(
     card_width = card_width.max(1);
     card_height = card_height.max(1);
 
+    // Height fitting can leave a thumbnail much narrower than its initial
+    // slot. Pack the finished cards so the visible gap stays consistent.
+    let pitch = card_width.saturating_add(effective_gap);
     let row_y = region_y.saturating_add(
         region_height
             .saturating_sub(card_height)
@@ -851,6 +851,39 @@ mod touch_modality_tests {
     }
 
     #[test]
+    fn compact_rails_pack_portrait_cards_after_height_fitting() {
+        let workspace_ids = [1, 2, 0];
+        for (tablet, presentation) in [
+            (true, sws_protocol::workspace::ShellPresentation::Home),
+            (false, sws_protocol::workspace::ShellPresentation::Overview),
+        ] {
+            let cards = layout_overview_cards(
+                (0, 120, 1206, 2067),
+                tablet,
+                3000,
+                presentation,
+                &workspace_ids,
+                2,
+            );
+
+            assert_eq!(
+                cards.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                workspace_ids
+            );
+            let middle = cards[1].1;
+            assert!((middle.0 + (middle.2 / 2) as i32 - 603).abs() <= 1);
+            for pair in cards.windows(2) {
+                let left = pair[0].1;
+                let right = pair[1].1;
+                assert_eq!(right.0 - (left.0 + left.2 as i32), 24);
+            }
+            assert!(cards.first().unwrap().1.0 >= 0);
+            let last = cards.last().unwrap().1;
+            assert!(last.0 + last.2 as i32 <= 1206);
+        }
+    }
+
+    #[test]
     fn overview_window_tracks_the_active_workspace_at_row_edges() {
         let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let first = layout_overview_cards(
@@ -871,11 +904,11 @@ mod touch_modality_tests {
         );
         assert_eq!(
             first.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
         assert_eq!(
             last.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![5, 6, 7, 8, 9, 10, 11, 12]
+            vec![4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
     }
 
@@ -883,7 +916,7 @@ mod touch_modality_tests {
     fn overview_keeps_one_neighbor_peeking_at_each_viewport_edge() {
         let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let cards = layout_overview_cards(
-            (0, 32, 1366, 736),
+            (0, 32, 1366, 840),
             false,
             1000,
             sws_protocol::workspace::ShellPresentation::Overview,
@@ -893,7 +926,7 @@ mod touch_modality_tests {
 
         assert_eq!(
             cards.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![3, 4, 5, 6, 7, 8, 9, 10, 11]
+            vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
         let left = cards.first().expect("left neighbor").1;
         let right = cards.last().expect("right neighbor").1;
@@ -911,7 +944,7 @@ mod touch_modality_tests {
 
     #[test]
     fn overview_scrolls_the_creation_card_into_the_final_viewport() {
-        let ids = [1, 2, 3, 4, 0];
+        let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0];
         let first = layout_overview_cards(
             (0, 32, 640, 736),
             false,
@@ -926,17 +959,15 @@ mod touch_modality_tests {
             1000,
             sws_protocol::workspace::ShellPresentation::Overview,
             &ids,
-            4,
+            12,
         );
 
-        assert_eq!(
-            first.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4]
-        );
-        assert_eq!(
-            last.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![2, 3, 4, 0]
-        );
+        assert_eq!(first.first().map(|(id, _)| *id), Some(1));
+        assert!(!first.iter().any(|(id, _)| *id == 0));
+        assert!(last.iter().any(|(id, _)| *id == 12));
+        let (id, (x, _, width, _)) = last.last().unwrap();
+        assert_eq!(*id, 0);
+        assert!(*x >= 0 && *x + *width as i32 <= 640);
     }
 
     #[test]
