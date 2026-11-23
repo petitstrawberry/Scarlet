@@ -74,15 +74,23 @@ impl Presenter {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or("no Metal surface configuration for the Scarlet window")?;
         let capabilities = surface.get_capabilities(&adapter);
-        if let Some(format) = capabilities.formats.iter().copied().find(TextureFormat::is_srgb)
+        if let Some(format) = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(TextureFormat::is_srgb)
         {
             config.format = format;
         }
         // The scanout stores BGRA bytes. An opaque, format-matched drawable can
         // display them directly, including framebuffers whose alpha is unused.
-        if matches!(config.format, TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb)
-            && capabilities.usages.contains(TextureUsages::COPY_DST)
-            && capabilities.alpha_modes.contains(&CompositeAlphaMode::Opaque)
+        if matches!(
+            config.format,
+            TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb
+        ) && capabilities.usages.contains(TextureUsages::COPY_DST)
+            && capabilities
+                .alpha_modes
+                .contains(&CompositeAlphaMode::Opaque)
         {
             config.alpha_mode = CompositeAlphaMode::Opaque;
             config.usage |= TextureUsages::COPY_DST;
@@ -113,7 +121,13 @@ impl Presenter {
             cache: None,
         });
         let (texture, bindings) = Self::scanout(&device, &pipeline, config.format, width, height);
-        let (gpu, endpoint) = super::gpu::WindowGpu::start(device.clone(), queue.clone(), texture.clone(), wake)?;
+        let (gpu, endpoint) = super::gpu::WindowGpu::start(
+            device.clone(),
+            queue.clone(),
+            texture.clone(),
+            crate::gpu::config(),
+            wake,
+        )?;
         Ok((
             Self {
                 gpu,
@@ -140,33 +154,7 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> (Texture, BindGroup) {
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("Scarlet scanout"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: if format.is_srgb() {
-                TextureFormat::Bgra8UnormSrgb
-            } else {
-                TextureFormat::Bgra8Unorm
-            },
-            usage: TextureUsages::COPY_SRC
-                | TextureUsages::COPY_DST
-                | TextureUsages::TEXTURE_BINDING
-                | TextureUsages::RENDER_ATTACHMENT,
-            // SGFX presents write the original BGRA bytes. Display sampling
-            // still uses the default sRGB view when the surface is sRGB.
-            view_formats: if format.is_srgb() {
-                &[TextureFormat::Bgra8Unorm]
-            } else {
-                &[]
-            },
-        });
+        let texture = crate::gpu::create_scanout(device, format, width, height);
         let view = texture.create_view(&TextureViewDescriptor::default());
         let sampler = device.create_sampler(&SamplerDescriptor {
             mag_filter: FilterMode::Linear,
@@ -232,55 +220,13 @@ impl Presenter {
     }
 
     pub(super) fn upload(&mut self, pixels: &[u8], damage: DisplayRegion) -> Result<(), String> {
-        let (width, height) = self.scanout_size();
-        let stride = width * 4;
-        if pixels.len() != (stride * height) as usize
-            || damage
-                .x
-                .checked_add(damage.width)
-                .is_none_or(|end| end > width)
-            || damage
-                .y
-                .checked_add(damage.height)
-                .is_none_or(|end| end > height)
-        {
-            return Err("Invalid scanout damage".into());
-        }
-        let damage = if self.have_frame {
-            damage
-        } else {
-            DisplayRegion::new(0, 0, width, height)
-        };
-        if damage.width == 0 || damage.height == 0 {
-            return Ok(());
-        }
-        let start = (damage.y * stride + damage.x * 4) as usize;
-        let len = ((damage.height - 1) * stride + damage.width * 4) as usize;
-        self.queue.write_texture(
-            TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: Origin3d {
-                    x: damage.x,
-                    y: damage.y,
-                    z: 0,
-                },
-                aspect: TextureAspect::All,
-            },
-            &pixels[start..start + len],
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(stride),
-                rows_per_image: None,
-            },
-            Extent3d {
-                width: damage.width,
-                height: damage.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.have_frame = true;
-        Ok(())
+        crate::gpu::upload_scanout(
+            &self.queue,
+            &self.texture,
+            &mut self.have_frame,
+            pixels,
+            damage,
+        )
     }
 
     pub(super) fn request_draw(&mut self, size: PhysicalSize<u32>) -> Result<(), String> {

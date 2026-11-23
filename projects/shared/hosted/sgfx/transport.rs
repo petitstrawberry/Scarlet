@@ -14,7 +14,6 @@ use std::{
     },
 };
 
-const IRQ: u32 = 22;
 const CAPACITY: usize = 32;
 pub(super) type ResultBytes = Result<Vec<u8>, &'static str>;
 
@@ -47,12 +46,14 @@ enum Reply {
     Done(u64, ResultBytes),
     Closed,
 }
-#[derive(Default)]
-pub(super) struct Inbox(Mutex<VecDeque<Reply>>);
+pub(super) struct Inbox {
+    replies: Mutex<VecDeque<Reply>>,
+    irq: u32,
+}
 impl Inbox {
     fn post(&self, reply: Reply) {
-        self.0.lock().unwrap().push_back(reply);
-        let _ = scarlet::hosted::raise_external_interrupt(0, IRQ);
+        self.replies.lock().unwrap().push_back(reply);
+        let _ = scarlet::hosted::raise_external_interrupt(0, self.irq);
     }
     pub fn done(&self, id: u64, result: ResultBytes) {
         if id != 0 {
@@ -144,13 +145,16 @@ pub(super) struct Driver {
 pub struct Endpoint(pub(super) Arc<Driver>);
 static ACTIVE: OnceLock<Endpoint> = OnceLock::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
-struct Irq(Arc<Waker>);
+struct Irq {
+    ready: Arc<Waker>,
+    id: u32,
+}
 impl InterruptSource for Irq {
     fn interrupt_id(&self) -> Option<u32> {
-        Some(IRQ)
+        Some(self.id)
     }
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
-        self.0.wake_one();
+        self.ready.wake_one();
         Ok(InterruptClaim::Handled)
     }
 }
@@ -159,7 +163,7 @@ fn completions() {
     let d = &ACTIVE.get().unwrap().0;
     let task = scarlet::task::mytask().unwrap();
     loop {
-        let reply = d.inbox.0.lock().unwrap().pop_front();
+        let reply = d.inbox.replies.lock().unwrap().pop_front();
         match reply {
             Some(Reply::Done(id, result)) => {
                 let owner = d.admission.lock().pending.remove(&id);
@@ -184,7 +188,7 @@ fn completions() {
                 d.worker.clone().wait_result_until_owned(
                     task.get_id(),
                     task.get_trapframe(),
-                    || !d.inbox.0.lock().unwrap().is_empty(),
+                    || !d.inbox.replies.lock().unwrap().is_empty(),
                 );
             }
         }
@@ -192,11 +196,15 @@ fn completions() {
 }
 impl Endpoint {
     pub(super) fn pair(
+        irq: u32,
         presentation: bool,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> (Self, mpsc::Receiver<Request>, Arc<Inbox>) {
         let (tx, rx) = mpsc::channel();
-        let inbox = Arc::new(Inbox::default());
+        let inbox = Arc::new(Inbox {
+            replies: Mutex::default(),
+            irq,
+        });
         let endpoint = Self(Arc::new(Driver {
             tx,
             inbox: inbox.clone(),
@@ -212,12 +220,16 @@ impl Endpoint {
     }
     pub fn register(&self) -> Result<(), &'static str> {
         let controller = InterruptManager::global();
-        let source: Arc<dyn InterruptSource> = Arc::new(Irq(self.0.worker.clone()));
+        let irq = self.0.inbox.irq;
+        let source: Arc<dyn InterruptSource> = Arc::new(Irq {
+            ready: self.0.worker.clone(),
+            id: self.0.inbox.irq,
+        });
         controller
-            .register_interrupt_source(IRQ, source.clone())
+            .register_interrupt_source(irq, source.clone())
             .map_err(|_| "Cannot register SGFX IRQ")?;
-        if controller.enable_external_interrupt(IRQ, 0).is_err() {
-            controller.unregister_interrupt_source(IRQ, &source);
+        if controller.enable_external_interrupt(irq, 0).is_err() {
+            controller.unregister_interrupt_source(irq, &source);
             return Err("Cannot enable SGFX IRQ");
         }
         ACTIVE

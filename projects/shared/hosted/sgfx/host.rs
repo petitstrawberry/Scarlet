@@ -1,6 +1,6 @@
 //! The SGFX execution thread owns the device context, its images and its sessions.
 use super::{
-    Endpoint,
+    Config, Endpoint,
     scale::ScanoutScaler,
     session::{ResourceRead, Session},
     transport::{Command, Inbox, Rect, Request, ResultBytes},
@@ -15,6 +15,7 @@ pub(super) type Images = BTreeMap<u64, Arc<sgfx::Image>>;
 type Retirement = (u64, ResultBytes, Option<wgpu::Maintain>);
 
 pub struct Host {
+    config: Config,
     gpu: sgfx::Context,
     scaler: std::cell::OnceCell<ScanoutScaler>,
     images: Images,
@@ -29,18 +30,19 @@ impl Host {
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
+        config: Config,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(Self, Endpoint), String> {
-        Self::open(device, queue, wake, true)
+        Self::open(device, queue, config, wake, true)
     }
     fn open(
         device: wgpu::Device,
         queue: wgpu::Queue,
+        config: Config,
         wake: impl Fn() + Send + Sync + 'static,
         presentation: bool,
     ) -> Result<(Self, Endpoint), String> {
-        crate::latency_trace::init();
-        let (endpoint, requests, inbox) = Endpoint::pair(presentation, wake);
+        let (endpoint, requests, inbox) = Endpoint::pair(config.irq, presentation, wake);
         let (retirement, pending) = mpsc::channel();
         let fence_device = device.clone();
         let retirement_thread = std::thread::Builder::new()
@@ -49,6 +51,7 @@ impl Host {
             .map_err(|error| error.to_string())?;
         Ok((
             Self {
+                config,
                 gpu: sgfx::Device::new(device, queue).create_context(),
                 scaler: Default::default(),
                 images: Images::new(),
@@ -60,40 +63,52 @@ impl Host {
             endpoint,
         ))
     }
-    /// Process one event-loop turn. Successful presents have retired the
-    /// source read on this device's queue before their replies are published.
+    /// Process one event-loop turn. True means a present was submitted, not
+    /// completed. Replies retire the source read after queue completion.
     pub fn dispatch(&mut self, scanout: &wgpu::Texture) -> bool {
         // Each request has one corresponding wake on the host's owning thread.
-        self.requests.as_ref().unwrap().try_recv().is_ok_and(|request| {
-            self.handle(request, Some(scanout))
-        })
+        self.requests
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .is_ok_and(|request| self.handle(request, Some(scanout)))
     }
     fn handle(&mut self, request: Request, scanout: Option<&wgpu::Texture>) -> bool {
-        crate::latency_trace::gpu_receive(request.id, || {
-            let (event, w, h) = match &request.command {
-                Command::Execute { words, .. } => return Some((
-                    "gpu_execute_receive",
-                    words.first().copied().unwrap_or(0),
-                    std::mem::size_of_val(words.as_slice()) as u64,
-                )),
-                Command::CreateImage(_, w, h) => ("gpu_create_receive", *w, *h),
-                Command::Present(_, r) => ("gpu_present_receive", r.width, r.height),
-                Command::Upload(_, r, _) => ("gpu_upload_receive", r.width, r.height),
-                Command::Readback(_, r) => ("gpu_readback_receive", r.width, r.height),
-                _ => return None,
-            };
-            Some((event, u64::from(w), u64::from(h)))
-        });
+        if let Some(trace) = self.config.trace {
+            let fields = (|| {
+                let (event, w, h) = match &request.command {
+                    Command::Execute { words, .. } => {
+                        return Some((
+                            "gpu_execute_receive",
+                            words.first().copied().unwrap_or(0),
+                            std::mem::size_of_val(words.as_slice()) as u64,
+                        ));
+                    }
+                    Command::CreateImage(_, w, h) => ("gpu_create_receive", *w, *h),
+                    Command::Present(_, r) => ("gpu_present_receive", r.width, r.height),
+                    Command::Upload(_, r, _) => ("gpu_upload_receive", r.width, r.height),
+                    Command::Readback(_, r) => ("gpu_readback_receive", r.width, r.height),
+                    _ => return None,
+                };
+                Some((event, u64::from(w), u64::from(h)))
+            })();
+            trace(request.id, fields);
+        }
         let present = matches!(request.command, Command::Present(..));
         let mut wait = None;
         let result = self.execute(request.command, scanout, &mut wait);
         let presented = present && result.is_ok();
-        self.retirement.as_ref().unwrap().send((request.id, result, wait))
+        self.retirement
+            .as_ref()
+            .unwrap()
+            .send((request.id, result, wait))
             .expect("Metal completion thread stopped before shutdown");
         presented
     }
     fn execute(
-        &mut self, command: Command, scanout: Option<&wgpu::Texture>,
+        &mut self,
+        command: Command,
+        scanout: Option<&wgpu::Texture>,
         wait: &mut Option<wgpu::Maintain>,
     ) -> ResultBytes {
         match command {
@@ -122,10 +137,16 @@ impl Host {
                 // conservative fence for recordings (including partial failures)
                 // and for an empty ordered checkpoint. These metadata and packet
                 // assembly opcodes cannot submit work on the pinned backend.
-                if !matches!(words.first().copied(), Some(
-                    super::wire::START | super::wire::APPEND | super::wire::SNAPSHOT
-                    | super::wire::MAP | super::wire::UNMAP
-                )) {
+                if !matches!(
+                    words.first().copied(),
+                    Some(
+                        super::wire::START
+                            | super::wire::APPEND
+                            | super::wire::SNAPSHOT
+                            | super::wire::MAP
+                            | super::wire::UNMAP
+                    )
+                ) {
                     *wait = Some(wgpu::Maintain::Wait);
                 }
                 let session = self.sessions.get_mut(&queue).ok_or("Unknown SGFX queue")?;
@@ -160,10 +181,14 @@ impl Host {
                         target,
                     )? {
                         ResourceRead::Texture(src) => {
-                            let mut encoder = self.gpu.raw_device()
+                            let mut encoder = self
+                                .gpu
+                                .raw_device()
                                 .create_command_encoder(&Default::default());
                             encoder.copy_texture_to_texture(
-                                src.as_image_copy(), target.as_image_copy(), target.size(),
+                                src.as_image_copy(),
+                                target.as_image_copy(),
+                                target.size(),
                             );
                             let index = self.gpu.raw_queue().submit([encoder.finish()]);
                             *wait = Some(wgpu::Maintain::WaitForSubmissionIndex(index));
@@ -373,6 +398,7 @@ impl Drop for Host {
 }
 /// In headless mode the main thread remains the Metal owner while the BSP boots.
 pub fn run_offscreen(
+    config: Config,
     boot: impl FnOnce(Option<Endpoint>) -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -389,6 +415,7 @@ pub fn run_offscreen(
     let (mut host, endpoint) = Host::open(
         device,
         queue,
+        config,
         move || {
             let _ = wake.send(());
         },

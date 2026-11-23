@@ -43,7 +43,8 @@ fn guest_controls_render_and_read_back_from_metal() {
         thread::sleep(Duration::from_secs(30));
         process::exit(2);
     });
-    gpu::run_offscreen(|endpoint| {
+    // Exercise routing independently of the macOS display's default IRQ 22.
+    gpu::run_offscreen_configured(gpu::Config { irq: 23, trace: None }, |endpoint| {
         let mut platform = hosted::prepare(2, 128 << 20)?;
         let init = task::new_user_task("init".into(), 0);
         init.init();
