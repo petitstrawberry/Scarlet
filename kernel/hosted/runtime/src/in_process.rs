@@ -221,6 +221,11 @@ impl SignedText {
         self.bounds.iter().any(|range| range.contains(&pc))
     }
 
+    /// Whether an address can be used as a guest callback entry point.
+    pub fn contains_guest_instruction(&self, pc: u64) -> bool {
+        pc & 3 == 0 && self.contains(pc) && !link_range().contains(&pc)
+    }
+
     pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
         let messages = (&raw const scarlet_loader_messages_begin).addr()
             ..(&raw const scarlet_loader_messages_end).addr();

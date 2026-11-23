@@ -2538,6 +2538,18 @@ impl VirtualMemoryManager {
             .translate_with_access(&transaction, vaddr, op, false)
     }
 
+    /// Check a user callback against this address space's executable mappings.
+    pub(crate) fn is_user_instruction_address(&self, vaddr: usize) -> bool {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(allowed) = self.hosted_image().signed_instruction(vaddr) {
+            return allowed;
+        }
+        self.legacy_mapping_transaction().is_some_and(|transaction| {
+            self.translate_with_access(&transaction, vaddr, AccessOp::Instruction, true)
+                .is_some()
+        })
+    }
+
     fn translate_with_access(
         &self,
         transaction: &MappingTransaction<'_>,

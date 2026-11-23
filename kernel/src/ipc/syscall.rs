@@ -990,13 +990,8 @@ pub fn sys_event_handler_register_native_with_restorer(trapframe: &mut Trapframe
     if content_type > 3
         || handler_addr == 0
         || restorer_addr == 0
-        || task
-            .vm_manager
-            .translate_to_phys_with_access(
-                restorer_addr,
-                crate::object::capability::memory_mapping::AccessOp::Instruction,
-            )
-            .is_none()
+        || !task.vm_manager.is_user_instruction_address(handler_addr)
+        || !task.vm_manager.is_user_instruction_address(restorer_addr)
     {
         trapframe.increment_pc_next(&task);
         return usize::MAX;
