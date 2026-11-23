@@ -1,6 +1,15 @@
 .section .rodata
 .Lroot_path:
     .asciz "/var/lib/scarlet/boot-check"
+.Llate_library:
+    .asciz "/old_root/lib/libboot-check-alt.so"
+.Llate_symbol:
+    .asciz "scarlet_boot_pid"
+.Lmissing_library:
+    .asciz "/lib/scarlet-missing.so"
+.Ldlopen_pass:
+    .ascii "SCARLET_DLOPEN_PASS\n"
+.set .Ldlopen_size, . - .Ldlopen_pass
 .Lroot_byte:
     .byte 0x53
 .Lroot_written:
@@ -59,6 +68,48 @@ _scarlet_boot_start:
     bl scarlet_boot_pid
     cmp x0, #1
     b.ne .Lfail
+    // This entry has no DT_NEEDED edge to the alternate DSO. Loading it
+    // exercises the native loader exports provided by the hosted address space.
+    adr x0, .Llate_library
+    mov x1, #258 // RTLD_NOW | RTLD_GLOBAL
+    bl dlopen
+    cbz x0, .Lfail
+    mov x21, x0
+    adr x1, .Llate_symbol
+    bl dlsym
+    cbz x0, .Lfail
+    mov x22, x0
+    blr x22
+    cmp x0, #1
+    b.ne .Lfail
+    mov x0, x21
+    bl dlclose
+    cbnz x0, .Lfail
+    mov x0, x21
+    adr x1, .Llate_symbol
+    bl dlsym
+    cbnz x0, .Lfail
+    bl dlerror
+    cbz x0, .Lfail
+    ldrb w9, [x0]
+    cbz w9, .Lfail
+    bl dlerror
+    cbnz x0, .Lfail
+    adr x0, .Lmissing_library
+    mov x1, #258
+    bl dlopen
+    cbnz x0, .Lfail
+    bl dlerror
+    cbz x0, .Lfail
+    // Closing a handle leaves already-returned functions callable.
+    blr x22
+    cmp x0, #1
+    b.ne .Lfail
+    mov x0, #1
+    adr x1, .Ldlopen_pass
+    mov x2, #.Ldlopen_size
+    mov x8, #201 // StreamWrite
+    svc #0
     mov x8, #1304 // EnvironmentCurrent
     svc #0
     tbnz x0, #63, .Lfail

@@ -2,6 +2,8 @@
 
 use crate::{
     arch::Trapframe,
+    fs::{VfsManager, vfs_v2::core::VfsFileObject},
+    library::std::usercopy::copy_to_user,
     object::{KernelObject, capability::FileObject},
     task::{
         Task,
@@ -64,14 +66,61 @@ fn executable_digest(file: &dyn FileObject) -> Result<String, &'static str> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn library_digest(task: &Task, name: &str) -> Result<String, &'static str> {
-    let vfs = task.get_vfs().ok_or("Missing dependency filesystem")?;
+fn library_digest(vfs: Option<&VfsManager>, name: &str) -> Result<String, &'static str> {
+    let vfs = vfs.ok_or("Missing dependency filesystem")?;
+    let path = if name.contains('/') {
+        name.into()
+    } else {
+        format!("/lib/{name}")
+    };
     let object = vfs
-        .open_executable(&format!("/lib/{name}"))
+        .open_executable(&path)
         .map_err(|_| "Cannot open shared library")?;
     let file = object.as_file().ok_or("Invalid shared library")?;
     file.check_image_execution()?;
     executable_digest(file)
+}
+
+fn file_path(vfs: &VfsManager, file: &dyn FileObject) -> Option<String> {
+    let file = file.as_any().downcast_ref::<VfsFileObject>()?;
+    Some(vfs.build_absolute_path(file.get_vfs_entry(), file.get_mount_point()))
+}
+
+pub(super) fn resolve_library(
+    vfs: Option<&VfsManager>,
+    requester: Option<&str>,
+    name: &str,
+) -> std::io::Result<(String, Arc<Image>)> {
+    use std::io::Error;
+
+    let vfs = vfs.ok_or_else(|| Error::other("Missing dependency filesystem"))?;
+    let object = if name.contains('/') {
+        vfs.open_executable(name)
+    } else {
+        let adjacent = requester
+            .filter(|path| path.starts_with('/'))
+            .and_then(|path| path.rsplit_once('/'))
+            .and_then(|(parent, _)| vfs.open_executable(&format!("{parent}/{name}")).ok());
+        match adjacent {
+            Some(object) => Ok(object),
+            None => vfs.open_executable(&format!("/lib/{name}")),
+        }
+    }
+    .map_err(|_| Error::other("Cannot open shared library"))?;
+    let file = object
+        .as_file()
+        .ok_or_else(|| Error::other("Invalid shared library"))?;
+    file.check_image_execution().map_err(Error::other)?;
+    let identity =
+        file_path(vfs, file).ok_or_else(|| Error::other("Missing guest library pathname"))?;
+    let digest = executable_digest(file).map_err(Error::other)?;
+    let image = CATALOG
+        .lock()
+        .unwrap()
+        .get(&digest)
+        .cloned()
+        .ok_or_else(|| Error::other("Shared library is absent from the signed iOS catalog"))?;
+    Ok((identity, image))
 }
 
 /// Build the new stack and execution state in the executor's unpublished Task.
@@ -92,22 +141,19 @@ pub(crate) fn prepare(
         .get(&digest)
         .cloned()
         .ok_or("Executable is absent from the signed iOS catalog")?;
+    let vfs = task.get_vfs();
     for (name, expected) in image.dependencies() {
-        if library_digest(task, name)? != *expected {
+        if library_digest(vfs.as_deref(), name)? != *expected {
             return Err("Dependency differs from its signed iOS image");
         }
     }
+    let path = vfs
+        .as_deref()
+        .and_then(|vfs| file_path(vfs, file))
+        .unwrap_or_else(|| String::from("<main>"));
     let instance = image
-        .instantiate_with(|name| {
-            let digest = library_digest(task, name).map_err(std::io::Error::other)?;
-            CATALOG
-                .lock()
-                .unwrap()
-                .get(&digest)
-                .cloned()
-                .ok_or_else(|| {
-                    std::io::Error::other("Shared library is absent from the signed iOS catalog")
-                })
+        .instantiate_with(path, move |requester, name| {
+            resolve_library(vfs.as_deref(), requester, name)
         })
         .map_err(|error| {
             std::eprintln!("[hosted] signed image {digest}: {error}");
@@ -147,6 +193,10 @@ pub(crate) fn prepare(
         .set_guest_page_size(result.page_size);
     let (sp, argv_ptr) =
         setup_native_exec_stack(task, object, argv, envp, instance.stack_top(), &result)?;
+    if let Some(slot) = instance.environ_slot() {
+        let envp = argv_ptr + (argv.len() + 1) * size_of::<usize>();
+        copy_to_user(task, slot, &envp.to_ne_bytes()).map_err(|_| "Cannot initialize environ")?;
+    }
     *task.name.write() = argv.first().copied().unwrap_or("Unnamed Task").into();
     task.text_size
         .store(instance.text_size(), Ordering::Relaxed);

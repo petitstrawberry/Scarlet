@@ -2031,8 +2031,16 @@ impl Task {
     /// The size of the task in bytes.
     pub fn get_size(&self) -> usize {
         self.stack_size.load(Ordering::SeqCst)
-            + self.text_size.load(Ordering::SeqCst)
+            + self.text_size_bytes()
             + self.data_size.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn text_size_bytes(&self) -> usize {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(bytes) = self.vm_manager.hosted_image().signed_text_size() {
+            return bytes;
+        }
+        self.text_size.load(Ordering::SeqCst)
     }
 
     /// Get the program break (NOT work in Kernel task)
@@ -2044,7 +2052,7 @@ impl Task {
         // Otherwise fallback to legacy size-based calculation for compatibility
         let brk = self.brk.load(Ordering::SeqCst);
         if brk == usize::MAX {
-            self.text_size.load(Ordering::SeqCst) + self.data_size.load(Ordering::SeqCst)
+            self.text_size_bytes() + self.data_size.load(Ordering::SeqCst)
         } else {
             brk
         }
@@ -3129,9 +3137,12 @@ impl Task {
         child
             .data_size
             .store(self.data_size.load(Ordering::SeqCst), Ordering::SeqCst);
-        child
-            .text_size
-            .store(self.text_size.load(Ordering::SeqCst), Ordering::SeqCst);
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        let text_size = child.vm_manager.hosted_image().signed_text_size()
+            .unwrap_or_else(|| self.text_size.load(Ordering::SeqCst));
+        #[cfg(not(all(feature = "hosted", target_os = "ios")))]
+        let text_size = self.text_size.load(Ordering::SeqCst);
+        child.text_size.store(text_size, Ordering::SeqCst);
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;

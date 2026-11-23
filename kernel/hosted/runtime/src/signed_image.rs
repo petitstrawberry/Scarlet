@@ -3,12 +3,14 @@
 mod fork;
 mod link;
 mod manifest;
+pub(crate) use link::Namespace;
+pub use link::{LoadedLibrary, ObjectId};
 
 use fork::Backing;
 
 use crate::in_process::SignedText;
 use manifest::{Access, Kind, Manifest};
-use scarlet_abi::tls::NativeTlsHeader;
+use scarlet_abi::tls::{NATIVE_TLS_MAPPING_SIZE, NativeTlsHeader};
 use std::{
     ffi::{CStr, CString, c_void},
     fs::File,
@@ -27,6 +29,10 @@ use std::{
 };
 
 const PAGE: usize = 16384;
+// The initial TLS page stays mapped for the process lifetime. Its padding is
+// outside the native thread ABI and supplies one address-space-owned word.
+const ENVIRON_OFFSET: usize = PAGE - size_of::<usize>();
+const _: () = assert!(NATIVE_TLS_MAPPING_SIZE <= ENVIRON_OFFSET);
 const STACK_SIZE: usize = 4 * PAGE;
 const HEAP_CAPACITY: usize = 8 * 1024 * 1024;
 // TLS, heap reservation, a stack guard, then the stack.
@@ -174,6 +180,10 @@ impl Instance {
         self.lease.base + self.lease.image.manifest.span
     }
 
+    pub fn environ_slot(&self) -> Option<usize> {
+        self.text.namespace().map(|_| self.tls() + ENVIRON_OFFSET)
+    }
+
     pub fn stack_top(&self) -> usize {
         self.constructors.unwrap_or(self.tls() + MUTABLE_TAIL)
     }
@@ -252,6 +262,14 @@ impl Lease {
             .filter(|segment| segment.access == Access::ReadWrite)
             .map(|segment| segment.pages().len())
             .sum()
+    }
+
+    pub(crate) fn committed_data_size(&self) -> usize {
+        self.writable_image_size() + self.heap_bytes.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn executable_image_size(&self) -> usize {
+        self.image.manifest.rx_pages().map(|range| range.len()).sum()
     }
 
     pub(crate) fn resize_heap(&self, address: usize, limit: usize) -> io::Result<usize> {
@@ -415,39 +433,21 @@ impl Image {
         let lease = self.0.acquire()?;
         self.0.initialize_segments(lease.base)?;
         self.0.finish_instance(lease.base)?;
-        Instance::from_modules(vec![lease], Vec::new())
+        Instance::from_modules(vec![lease], Vec::new(), None)
     }
 }
 
 impl Instance {
-    fn from_modules(leases: Vec<Arc<Lease>>, mut constructors: Vec<usize>) -> io::Result<Self> {
+    fn from_modules(
+        leases: Vec<Arc<Lease>>,
+        mut constructors: Vec<usize>,
+        namespace: Option<Namespace>,
+    ) -> io::Result<Self> {
         let lease = leases
             .first()
             .ok_or_else(|| io::Error::other("Missing main executable"))?
             .clone();
-        let mut ranges = Vec::new();
-        let mut patches = Vec::new();
-        let mut text_bytes = 0;
-        let mut writable_bytes = 0;
-        for module in &leases {
-            let base = module.base;
-            writable_bytes += module.writable_image_size();
-            for range in module.image.manifest.rx_pages() {
-                text_bytes += range.len();
-                ranges.push((base + range.start) as u64..(base + range.end) as u64);
-            }
-            patches.extend(
-                module
-                    .image
-                    .manifest
-                    .patches
-                    .iter()
-                    .map(|&(pc, patch)| ((base + pc) as u64, patch)),
-            );
-        }
-        ranges.sort_unstable_by_key(|range| range.start);
-        // Each lease pins its own immutable signed RX ranges.
-        let mut text = unsafe { SignedText::from_ranges(ranges, patches)? };
+        let (text, text_bytes, writable_bytes) = linked_text(leases, namespace)?;
         let constructors = if constructors.is_empty() {
             None
         } else {
@@ -469,15 +469,48 @@ impl Instance {
             };
             Some(address)
         };
-        text.retain_mappings(leases);
         Ok(Self {
-            text: Arc::new(text),
+            text,
             lease,
             constructors,
             text_bytes,
             writable_bytes,
         })
     }
+}
+
+fn linked_text(
+    leases: Vec<Arc<Lease>>,
+    namespace: Option<Namespace>,
+) -> io::Result<(Arc<SignedText>, usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut patches = Vec::new();
+    let mut text_bytes = 0;
+    let mut writable_bytes = 0;
+    for module in &leases {
+        let base = module.base;
+        writable_bytes += module.writable_image_size();
+        for range in module.image.manifest.rx_pages() {
+            text_bytes += range.len();
+            ranges.push((base + range.start) as u64..(base + range.end) as u64);
+        }
+        patches.extend(
+            module
+                .image
+                .manifest
+                .patches
+                .iter()
+                .map(|&(pc, patch)| ((base + pc) as u64, patch)),
+        );
+    }
+    if namespace.is_some() {
+        SignedText::include_link_gate(&mut ranges, &mut patches);
+    }
+    ranges.sort_unstable_by_key(|range| range.start);
+    // Each lease pins its own immutable signed RX ranges.
+    let mut text = unsafe { SignedText::from_ranges(ranges, patches)? };
+    text.retain_mappings(leases, namespace);
+    Ok((Arc::new(text), text_bytes, writable_bytes))
 }
 
 impl Inner {

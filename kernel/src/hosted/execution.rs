@@ -304,7 +304,7 @@ impl Image {
     }
 
     #[cfg(not(target_os = "ios"))]
-    fn run(self: &Arc<Self>, task: &Task, tf: &mut Trapframe) -> io::Result<bool> {
+    fn run(self: &Arc<Self>, task: &Task, tf: &mut Trapframe) -> io::Result<GuestRun> {
         let mut endpoint = task.hosted_thread.0.lock().unwrap().take();
         let running = {
             let vm = &task.vm_manager;
@@ -377,7 +377,7 @@ impl Image {
                         stop.exclusive.as_ref(),
                         stop.fault_instruction,
                     ) {
-                        data_access::Result::Done => return Ok(true),
+                        data_access::Result::Done => return Ok(GuestRun::Resume),
                         data_access::Result::Fault(denied) => tf.far_el1 = denied as u64,
                         data_access::Result::Unsupported(word) => {
                             return Err(io::Error::other(alloc::format!(
@@ -389,7 +389,7 @@ impl Image {
                 }
             }
         }
-        Ok(guest.interrupted)
+        Ok(GuestRun::from_stop(&guest))
     }
 }
 
@@ -624,6 +624,23 @@ fn store_stop(task: &Task, tf: &mut Trapframe, guest: &GuestStop) {
     vcpu.fpu.fpsr = u64::from(regs.fpsr);
 }
 
+enum GuestRun {
+    Trap,
+    Resume,
+    #[cfg(target_os = "ios")]
+    RetryLoader,
+}
+
+impl GuestRun {
+    fn from_stop(stop: &GuestStop) -> Self {
+        if stop.interrupted {
+            Self::Resume
+        } else {
+            Self::Trap
+        }
+    }
+}
+
 pub fn enter(tf: &mut Trapframe) -> ! {
     crate::arch::interrupt::enable_interrupts();
     loop {
@@ -637,19 +654,28 @@ pub fn enter(tf: &mut Trapframe) -> ! {
                 panic!("No owned user Task on vCPU {cpu}, current={id:?} owner={owner:?}, guest pc={:#x}",tf.elr)
             });
             let result = task.vm_manager.hosted_image().run(&task, tf);
-            if matches!(result, Ok(true)) {
-                continue;
-            }
-            if let Err(error) = result {
-                crate::println!(
-                    "[hosted] Task {} stopped at {:#x}: {}",
-                    task.get_id(),
-                    tf.elr,
-                    error
-                );
-                task.exit_group(139);
-                scheduler::schedule(tf);
-                continue;
+            match result {
+                Ok(GuestRun::Resume) => continue,
+                Ok(GuestRun::Trap) => {}
+                #[cfg(target_os = "ios")]
+                Ok(GuestRun::RetryLoader) => {
+                    // The execution lease has been dropped. The blocked stack
+                    // must not own any mapping that teardown needs to reclaim.
+                    tf.elr -= 4;
+                    task.sleep(tf, 1_000_000);
+                    continue;
+                }
+                Err(error) => {
+                    crate::println!(
+                        "[hosted] Task {} stopped at {:#x}: {}",
+                        task.get_id(),
+                        tf.elr,
+                        error
+                    );
+                    task.exit_group(139);
+                    scheduler::schedule(tf);
+                    continue;
+                }
             }
         }
         static TRACE: std::sync::LazyLock<bool> =

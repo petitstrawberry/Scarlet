@@ -21,6 +21,7 @@ case "${destination##*/}" in
     boot-check)
         "$clang" -target aarch64-none-elf -c "$source/boot_fixture.S" -o "$work/object.o"
         ld.lld -pie "$@" --dynamic-linker=/bin/scarlet-ld -e _scarlet_boot_start \
+            --export-dynamic --unresolved-symbols=ignore-all \
             "$work/object.o" "$(dirname "$destination")/../lib/libboot-check.so" -o "$destination"
         ;;
     *) echo "Unknown boot fixture: $destination" >&2; exit 2 ;;

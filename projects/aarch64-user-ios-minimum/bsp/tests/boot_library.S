@@ -14,6 +14,27 @@ scarlet_boot_pid_syscall:
 #endif
 .type initialize_syscall,%function
 initialize_syscall:
+#ifdef SCARLET_ALTERNATE_LIBRARY
+    stp x19, x30, [sp, #-16]!
+    adr x0, self_path
+    mov x1, #0x102 // RTLD_NOW | RTLD_GLOBAL
+    bl dlopen
+    cbz x0, 1f
+    mov x19, x0
+    adr x1, self_symbol
+    bl dlsym
+    cbz x0, 1f
+    mov x0, x19
+    bl dlclose
+    cbnz x0, 1f
+    mov x0, #1
+    adr x1, reentry_message
+    mov x2, #reentry_size
+    mov x8, #201
+    svc #0
+1:
+    ldp x19, x30, [sp], #16
+#endif
     mov x0, #1
     adr x1, version_message
     mov x2, #version_size
@@ -45,6 +66,15 @@ version_message:
     .ascii "SCARLET_LIBRARY_A\n"
 #endif
 .set version_size, . - version_message
+#ifdef SCARLET_ALTERNATE_LIBRARY
+self_path:
+    .asciz "/old_root/lib/libboot-check-alt.so"
+self_symbol:
+    .asciz "scarlet_boot_pid"
+reentry_message:
+    .ascii "SCARLET_DLOPEN_REENTER_PASS\n"
+.set reentry_size, . - reentry_message
+#endif
 
 .text
 .globl scarlet_boot_clear_syscall

@@ -19,6 +19,8 @@ pub struct GuestStop {
     pub far: u64,
     pub tls: u64,
     pub interrupted: bool,
+    #[cfg(target_os = "ios")]
+    pub link: Option<crate::in_process::LinkOperation>,
 }
 
 pub struct Exception {

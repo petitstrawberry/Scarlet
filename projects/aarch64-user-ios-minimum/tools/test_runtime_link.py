@@ -50,7 +50,7 @@ def exercise(app, device):
         subprocess.run(["codesign", "--force", "--sign", "-", copy], check=True)
         sim("install", device, str(copy))
         try:
-            boot(device, ident, tmp / "a.log", ["SCARLET_LIBRARY_A", "SCARLET_BOOT_PASS"])
+            boot(device, ident, tmp / "a.log", ["SCARLET_LIBRARY_A", "SCARLET_LIBRARY_B", "SCARLET_DLOPEN_REENTER_PASS", "SCARLET_DLOPEN_PASS", "SCARLET_BOOT_PASS"])
             data = Path(sim("get_app_container", device, ident, "data"))
             disk = data / "Library/Application Support/scarlet-root.ext2"
 
@@ -63,7 +63,7 @@ def exercise(app, device):
             # Only the guest /lib lookup changes across these execs. The host
             # application, executable ELF, and frameworks stay installed once.
             edit("rm /lib\nmkdir /lib\nsymlink /lib/libboot-check.so /old_root/lib/libboot-check-alt.so")
-            boot(device, ident, tmp / "b.log", ["SCARLET_LIBRARY_B", "SCARLET_BOOT_PASS"])
+            boot(device, ident, tmp / "b.log", ["SCARLET_LIBRARY_B", "SCARLET_DLOPEN_REENTER_PASS", "SCARLET_DLOPEN_PASS", "SCARLET_BOOT_PASS"])
             edit("rm /lib/libboot-check.so")
             boot(device, ident, tmp / "missing.log", ["Cannot open shared library"])
             # A byte-distinct ELF with the same code is absent from the catalog.

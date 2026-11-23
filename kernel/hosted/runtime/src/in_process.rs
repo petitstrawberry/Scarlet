@@ -24,6 +24,7 @@ use std::{
 const ENTER_BRK: u16 = 0x5600;
 const READ_TLS_BRK: u16 = 0x5400;
 const WRITE_TLS_BRK: u16 = 0x5500;
+const LINK_BRK: u16 = 0x5700;
 const HOST: u8 = 0;
 const ENTERING: u8 = 1;
 const GUEST: u8 = 2;
@@ -42,6 +43,72 @@ pub enum Patch {
     Syscall(u16),
     ReadTls(u8),
     WriteTls(u8),
+    Link(LinkOperation),
+}
+
+#[derive(Clone, Copy)]
+pub enum LinkOperation {
+    Open,
+    Continue,
+    Symbol,
+    Close,
+    Error,
+}
+
+#[derive(Clone, Copy)]
+pub enum LinkError {
+    Open,
+    Symbol,
+    Handle,
+    Flags,
+    Incomplete,
+}
+
+core::arch::global_asm!(include_str!("in_process_link.S"));
+
+unsafe extern "C" {
+    static scarlet_loader_gate_begin: u8;
+    static scarlet_loader_gate_end: u8;
+    static scarlet_loader_messages_begin: u8;
+    static scarlet_loader_messages_end: u8;
+    static scarlet_loader_open: u8;
+    static scarlet_loader_open_trap: u8;
+    static scarlet_loader_continue: u8;
+    static scarlet_loader_symbol: u8;
+    static scarlet_loader_close: u8;
+    static scarlet_loader_error: u8;
+    static scarlet_loader_error_open: u8;
+    static scarlet_loader_error_symbol: u8;
+    static scarlet_loader_error_handle: u8;
+    static scarlet_loader_error_flags: u8;
+    static scarlet_loader_error_incomplete: u8;
+}
+
+fn link_range() -> Range<u64> {
+    (&raw const scarlet_loader_gate_begin).addr() as u64
+        ..(&raw const scarlet_loader_gate_end).addr() as u64
+}
+
+pub(crate) fn link_exports() -> [(&'static str, usize); 4] {
+    [
+        ("dlopen", (&raw const scarlet_loader_open).addr()),
+        ("dlsym", (&raw const scarlet_loader_symbol).addr()),
+        ("dlclose", (&raw const scarlet_loader_close).addr()),
+        ("dlerror", (&raw const scarlet_loader_error).addr()),
+    ]
+}
+
+impl LinkError {
+    pub fn guest_address(self) -> usize {
+        match self {
+            Self::Open => &raw const scarlet_loader_error_open,
+            Self::Symbol => &raw const scarlet_loader_error_symbol,
+            Self::Handle => &raw const scarlet_loader_error_handle,
+            Self::Flags => &raw const scarlet_loader_error_flags,
+            Self::Incomplete => &raw const scarlet_loader_error_incomplete,
+        }
+        .addr()
+    }
 }
 
 impl Patch {
@@ -62,6 +129,7 @@ impl Patch {
             Self::Syscall(_) => SYSCALL_BRK,
             Self::ReadTls(_) => READ_TLS_BRK,
             Self::WriteTls(_) => WRITE_TLS_BRK,
+            Self::Link(_) => LINK_BRK,
         }
     }
 }
@@ -70,6 +138,7 @@ pub struct SignedText {
     bounds: Arc<[Range<u64>]>,
     patches: Arc<BTreeMap<u64, Patch>>,
     leases: Vec<Arc<crate::signed_image::Lease>>,
+    namespace: Option<crate::signed_image::Namespace>,
 }
 
 impl SignedText {
@@ -122,11 +191,30 @@ impl SignedText {
             bounds: bounds.into(),
             patches: Arc::new(sites),
             leases: Vec::new(),
+            namespace: None,
         })
     }
 
-    pub(crate) fn retain_mappings(&mut self, leases: Vec<Arc<crate::signed_image::Lease>>) {
+    pub(crate) fn retain_mappings(
+        &mut self,
+        leases: Vec<Arc<crate::signed_image::Lease>>,
+        namespace: Option<crate::signed_image::Namespace>,
+    ) {
         self.leases = leases;
+        self.namespace = namespace;
+    }
+
+    pub(crate) fn include_link_gate(ranges: &mut Vec<Range<u64>>, patches: &mut Vec<(u64, Patch)>) {
+        ranges.push(link_range());
+        for (site, operation) in [
+            (&raw const scarlet_loader_open_trap, LinkOperation::Open),
+            (&raw const scarlet_loader_continue, LinkOperation::Continue),
+            (&raw const scarlet_loader_symbol, LinkOperation::Symbol),
+            (&raw const scarlet_loader_close, LinkOperation::Close),
+            (&raw const scarlet_loader_error, LinkOperation::Error),
+        ] {
+            patches.push((site.addr() as u64, Patch::Link(operation)));
+        }
     }
 
     pub fn contains(&self, pc: u64) -> bool {
@@ -134,9 +222,22 @@ impl SignedText {
     }
 
     pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
+        let messages = (&raw const scarlet_loader_messages_begin).addr()
+            ..(&raw const scarlet_loader_messages_end).addr();
+        if !write && self.namespace.is_some() && messages.contains(&address) {
+            return Some(messages);
+        }
         self.leases
             .iter()
             .find_map(|lease| lease.user_bounds(address, write))
+    }
+
+    pub(crate) fn namespace(&self) -> Option<&crate::signed_image::Namespace> {
+        self.namespace.as_ref()
+    }
+
+    pub(crate) fn leases(&self) -> &[Arc<crate::signed_image::Lease>] {
+        &self.leases
     }
 
     /// Duplicate private pages while the guest is parked under its VM transaction.
@@ -147,14 +248,17 @@ impl SignedText {
         if self.leases.is_empty() {
             return Err(io::Error::other("Missing image lease"));
         }
+        let leases = self
+            .leases
+            .iter()
+            .map(|lease| lease.fork())
+            .collect::<io::Result<Vec<_>>>()?;
+        let namespace = self.namespace.as_ref().map(|ns| ns.rebind(leases.clone()));
         Ok(Arc::new(Self {
             bounds: self.bounds.clone(),
             patches: self.patches.clone(),
-            leases: self
-                .leases
-                .iter()
-                .map(|lease| lease.fork())
-                .collect::<io::Result<_>>()?,
+            leases,
+            namespace,
         }))
     }
 
@@ -163,6 +267,20 @@ impl SignedText {
             .iter()
             .find(|lease| lease.owns_address(address))
             .map_or(address, |lease| lease.kernel_alias(address))
+    }
+
+    pub fn committed_data_size(&self) -> usize {
+        self.leases
+            .iter()
+            .map(|lease| lease.committed_data_size())
+            .sum()
+    }
+
+    pub fn committed_text_size(&self) -> usize {
+        self.leases()
+            .iter()
+            .map(|module| module.executable_image_size())
+            .sum()
     }
 
     /// # Safety
@@ -382,6 +500,7 @@ impl Control {
                     esr: 0,
                     far: 0,
                     interrupted: true,
+                    link: None,
                 };
             }
             if let Some(patch) = request.text.patches.get(&registers.pc)
@@ -399,6 +518,7 @@ impl Control {
                             esr: trap.esr,
                             far: 0,
                             interrupted: false,
+                            link: None,
                         };
                     }
                     Patch::ReadTls(register) => {
@@ -408,6 +528,17 @@ impl Control {
                     }
                     Patch::WriteTls(register) => {
                         tls = registers.x.get(usize::from(register)).copied().unwrap_or(0);
+                    }
+                    Patch::Link(operation) => {
+                        registers.pc += 4;
+                        return GuestStop {
+                            registers,
+                            tls,
+                            esr: 0,
+                            far: 0,
+                            interrupted: false,
+                            link: Some(operation),
+                        };
                     }
                 }
                 registers.pc += 4;
@@ -421,6 +552,7 @@ impl Control {
                 esr: exception.esr.into(),
                 far: exception.far,
                 interrupted: false,
+                link: None,
             };
         }
     }

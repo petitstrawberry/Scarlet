@@ -11,13 +11,14 @@ extern crate alloc;
 
 use alloc::{
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
 use core::fmt;
 
-mod elf;
 pub mod aot;
+mod elf;
 use elf::{Parsed, Symbol};
 
 pub const PAGE_SIZE: usize = 4096;
@@ -114,10 +115,11 @@ pub trait Platform {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjectId(usize);
 
+#[derive(Clone)]
 struct Object {
     page_size: usize,
     identity: String,
-    parsed: Parsed,
+    parsed: Arc<Parsed>,
     bias: usize,
     owned_mapping: Option<(usize, usize)>,
     dependencies: Vec<ObjectId>,
@@ -141,6 +143,21 @@ impl<P: Platform> LoaderContext<P> {
             machine,
             objects: Vec::new(),
             exports: Vec::new(),
+        }
+    }
+    /// Copy the loader namespace for identical virtual addresses in a new
+    /// platform. The caller supplies the backing and its ownership separately.
+    ///
+    /// # Safety
+    /// All existing images and platform exports must resolve to the same
+    /// addresses on `platform`. It must implement the correct backing and
+    /// protection for each of those mappings.
+    pub unsafe fn copy_namespace(&self, platform: P) -> Self {
+        Self {
+            platform,
+            machine: self.machine,
+            objects: self.objects.clone(),
+            exports: self.exports.clone(),
         }
     }
     pub fn platform(&self) -> &P {
@@ -346,7 +363,7 @@ impl<P: Platform> LoaderContext<P> {
         self.objects.push(Object {
             page_size,
             identity: file.identity,
-            parsed,
+            parsed: Arc::new(parsed),
             bias,
             owned_mapping,
             dependencies: Vec::new(),
