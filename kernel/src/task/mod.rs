@@ -2860,10 +2860,6 @@ impl Task {
         flags: CloneFlags,
         after_snapshot: impl FnOnce(),
     ) -> Result<Task, &'static str> {
-        #[cfg(all(feature = "hosted", target_os = "ios"))]
-        if self.task_type == TaskType::User && !flags.is_set(CloneFlagsDef::Vm) {
-            return Err("iOS process creation requires EnvironmentSpawn");
-        }
         crate::breadcrumb::drop(
             crate::breadcrumb::CLONE_ENTER,
             self.registered_id().unwrap_or(0) as u64,
@@ -2894,6 +2890,11 @@ impl Task {
                     let asid = alloc_virtual_address_space();
                     child.vm_manager.set_asid(asid);
                     child.vm_manager.inherit_layout(&self.vm_manager);
+                    #[cfg(all(feature = "hosted", target_os = "ios"))]
+                    {
+                        let _transaction = self.vm_manager.mapping_transaction();
+                        self.vm_manager.hosted_image().fork_into(&child)?;
+                    }
                 } else {
                     // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
                     child.vm_manager = self.vm_manager.clone();

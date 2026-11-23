@@ -405,10 +405,6 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
-    #[cfg(all(feature = "hosted", target_os = "ios"))]
-    if !clone_flags.is_set(CloneFlagsDef::Vm) {
-        return usize::MAX;
-    }
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.lock().store(trapframe);
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer

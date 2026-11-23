@@ -1,6 +1,9 @@
 //! File-backed signed text with per-instance mutable pages on iOS.
 
+mod fork;
 mod manifest;
+
+use fork::Backing;
 
 use crate::in_process::SignedText;
 use manifest::{Access, Manifest};
@@ -17,7 +20,7 @@ use std::{
     path::Path,
     ptr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -191,10 +194,26 @@ impl Instance {
 }
 
 pub(crate) struct Lease {
+    window: Arc<Window>,
+    backing: OnceLock<Backing>,
+    heap_bytes: AtomicUsize,
+}
+
+// Fork siblings retain the original numeric addresses for all guest pointers.
+// Only one sibling can execute on the iOS carrier at a time.
+pub(crate) struct Window {
+    resident: Mutex<Option<usize>>,
     image: Arc<Inner>,
     slot: usize,
     base: usize,
-    heap_bytes: AtomicUsize,
+}
+
+impl std::ops::Deref for Lease {
+    type Target = Window;
+
+    fn deref(&self) -> &Window {
+        &self.window
+    }
 }
 
 impl Lease {
@@ -228,16 +247,20 @@ impl Lease {
             ));
         }
         let previous = self.heap_bytes.load(Ordering::Acquire);
+        let base = self.backing.get().map_or(self.base, |backing| backing.base);
+        if base != self.base && rounded != previous {
+            *self.resident.lock().unwrap() = None;
+        }
         if rounded > previous {
             map_at(
-                self.base,
+                base,
                 start + previous..start + rounded,
                 libc::PROT_READ | libc::PROT_WRITE,
                 None,
             )?;
         } else if rounded < previous {
             map_at(
-                self.base,
+                base,
                 start + rounded..start + previous,
                 libc::PROT_NONE,
                 None,
@@ -286,7 +309,7 @@ impl Lease {
     }
 }
 
-impl Drop for Lease {
+impl Drop for Window {
     fn drop(&mut self) {
         let mut pool = self.image.pool.lock().unwrap();
         let slot = &mut pool.slots[self.slot];
@@ -398,9 +421,13 @@ impl Inner {
         };
         pool.slots[slot].state = State::Live;
         Ok(Arc::new(Lease {
-            image: self.clone(),
-            slot,
-            base: pool.slots[slot].base,
+            window: Arc::new(Window {
+                image: self.clone(),
+                slot,
+                base: pool.slots[slot].base,
+                resident: Mutex::new(None),
+            }),
+            backing: OnceLock::new(),
             heap_bytes: AtomicUsize::new(0),
         }))
     }

@@ -68,7 +68,7 @@ impl Patch {
 
 pub struct SignedText {
     bounds: Range<u64>,
-    patches: BTreeMap<u64, Patch>,
+    patches: Arc<BTreeMap<u64, Patch>>,
     lease: Option<Arc<crate::signed_image::Lease>>,
 }
 
@@ -107,7 +107,7 @@ impl SignedText {
         }
         Ok(Self {
             bounds,
-            patches: sites,
+            patches: Arc::new(sites),
             lease: None,
         })
     }
@@ -122,6 +122,37 @@ impl SignedText {
 
     pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
         self.lease.as_ref()?.user_bounds(address, write)
+    }
+
+    /// Duplicate private pages while the guest is parked under its VM transaction.
+    ///
+    /// # Safety
+    /// The caller must exclude guest execution and concurrent address-space changes.
+    pub unsafe fn fork(&self) -> io::Result<Arc<Self>> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Missing image lease"))?;
+        Ok(Arc::new(Self {
+            bounds: self.bounds.clone(),
+            patches: self.patches.clone(),
+            lease: Some(lease.fork()?),
+        }))
+    }
+
+    pub fn kernel_alias(&self, address: usize) -> usize {
+        self.lease
+            .as_ref()
+            .map_or(address, |lease| lease.kernel_alias(address))
+    }
+
+    /// # Safety
+    /// The sole carrier must be parked until activation completes.
+    pub unsafe fn activate(&self) -> io::Result<()> {
+        if let Some(lease) = &self.lease {
+            lease.activate()?;
+        }
+        Ok(())
     }
 
     /// # Safety

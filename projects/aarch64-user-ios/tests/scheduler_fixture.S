@@ -218,11 +218,39 @@ Lscarlet_scheduler_check:
     b.ne Lscarlet_scheduler_fail
 
     cbnz x21, Lscarlet_scheduler_ok
-    // A VM-copying clone fails before allocating or publishing a child.
+    // Fork preserves guest addresses while isolating stack, data, heap and TLS.
+    sub sp, sp, #16
+    str x27, [sp]
+    mov x1, #0
+    mov x2, #0
+    mov x3, #0
+    mov x4, #0
     mov x0, #0
     mov x8, #2
     svc #0
-    cmn x0, #1
+    tbnz x0, #63, Lscarlet_scheduler_fail
+    cbz x0, Lscarlet_fork_child
+    mov x25, x0
+    add x1, sp, #8
+    mov x2, #0
+    mov x8, #5
+    svc #0
+    cmp x0, x25
+    b.ne Lscarlet_scheduler_fail
+    ldr w12, [sp, #8]
+    cmp w12, #43
+    b.ne Lscarlet_scheduler_fail
+    ldr x12, [sp]
+    cmp x12, x27
+    b.ne Lscarlet_scheduler_fail
+    add sp, sp, #16
+    ldr x12, [x26]
+    cbnz x12, Lscarlet_scheduler_fail
+    ldr x12, [x28]
+    cmp x12, #41
+    b.ne Lscarlet_scheduler_fail
+    ldr x12, [x23, #16]
+    cmp x12, #74
     b.ne Lscarlet_scheduler_fail
 
     mov x8, #1304
@@ -279,6 +307,16 @@ Lscarlet_scheduler_spawn_args:
     cmp x26, #4
     b.lo Lscarlet_scheduler_spawn
     add sp, sp, #96
+
+    b Lscarlet_scheduler_ok
+Lscarlet_fork_child:
+    str xzr, [sp]
+    str x27, [x26]
+    str xzr, [x28]
+    str xzr, [x23, #16]
+    mov x0, #43
+    mov x8, #1
+    svc #0
 
 Lscarlet_scheduler_ok:
     mov x0, #0

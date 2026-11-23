@@ -74,6 +74,27 @@ pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()>
 }
 
 impl Image {
+    pub(crate) fn fork_into(&self, child: &Task) -> Result<(), &'static str> {
+        self.quiesce();
+        let local = self.local.lock().unwrap();
+        let local = local.as_ref().ok_or("Missing signed parent image")?;
+        // The caller owns the parent's mapping transaction and the child is unpublished.
+        let text = unsafe { local.text.fork() }.map_err(|error| {
+            std::eprintln!("Cannot fork signed guest pages: {error}");
+            "Cannot fork signed guest pages"
+        })?;
+        install_signed_text(child, text).map_err(|_| "Cannot attach forked signed image")
+    }
+
+    pub(crate) fn signed_alias(&self, address: usize, write: bool) -> Option<Option<usize>> {
+        let local = self.local.lock().unwrap();
+        let text = &local.as_ref()?.text;
+        Some(
+            text.user_bounds(address, write)
+                .map(|_| text.kernel_alias(address)),
+        )
+    }
+
     pub(crate) fn has_signed_mapping(&self) -> bool {
         self.local.lock().unwrap().is_some()
     }
@@ -140,6 +161,8 @@ impl Image {
             let generation = scheduler::get_task_pool()
                 .task_generation(id)
                 .expect("Running Task") as u64;
+            // Under iOS UP the previous carrier request has acknowledged its stop.
+            unsafe { image.text.activate()? };
             let permit = image
                 .gate
                 .issue(TaskId { id, generation }, 0)

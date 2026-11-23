@@ -155,10 +155,10 @@ impl MappingTransaction<'_> {
 
     pub(crate) fn read_alias(&self, address: usize) -> Option<usize> {
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        if let Some(bounds) = self.vm.hosted_image().signed_bounds(address, false) {
-            bounds?;
+        if let Some(alias) = self.vm.hosted_image().signed_alias(address, false) {
+            let alias = alias?;
             self.prepare_fault().ok()?;
-            return Some(address);
+            return Some(alias);
         }
         self.vm
             .translate_with_access(self, address, AccessOp::Load, true)
@@ -167,10 +167,10 @@ impl MappingTransaction<'_> {
 
     pub(crate) fn write_alias(&self, address: usize) -> Option<usize> {
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        if let Some(bounds) = self.vm.hosted_image().signed_bounds(address, true) {
-            bounds?;
+        if let Some(alias) = self.vm.hosted_image().signed_alias(address, true) {
+            let alias = alias?;
             self.prepare_fault().ok()?;
-            return Some(address);
+            return Some(alias);
         }
         self.vm
             .translate_with_access(self, address, AccessOp::Store, false)
