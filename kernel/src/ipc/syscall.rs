@@ -523,7 +523,15 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
     }
 
     // Create the shared memory object
-    let shmem = match SharedMemory::new(size, permissions) {
+    #[cfg(feature = "hosted")]
+    let shmem = SharedMemory::new_with_granule(
+        size,
+        permissions,
+        task.vm_manager.user_mapping_page_size(),
+    );
+    #[cfg(not(feature = "hosted"))]
+    let shmem = SharedMemory::new(size, permissions);
+    let shmem = match shmem {
         Ok(shmem) => shmem,
         Err(_) => return usize::MAX,
     };

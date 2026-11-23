@@ -249,6 +249,16 @@ impl VirtualMemoryManager {
         self.inner.read().execution.clone()
     }
 
+    /// The mapping granule advertised to the current native image.
+    pub(crate) fn user_mapping_page_size(&self) -> usize {
+        #[cfg(feature = "hosted")]
+        {
+            crate::vm::execution_page_size().min(self.hosted_image().guest_page_size())
+        }
+        #[cfg(not(feature = "hosted"))]
+        PAGE_SIZE
+    }
+
     pub(crate) fn is_exclusive(&self) -> bool {
         Arc::strong_count(&self.inner) == 1
     }
