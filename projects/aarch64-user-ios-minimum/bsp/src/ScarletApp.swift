@@ -174,7 +174,9 @@ private struct DesktopTabInput: UIViewRepresentable {
 
     final class KeyView: UIView {
         var active = false {
-            didSet { updateFocus() }
+            didSet {
+                if active != oldValue { updateFocus() }
+            }
         }
 
         override var canBecomeFirstResponder: Bool { active }
@@ -185,14 +187,23 @@ private struct DesktopTabInput: UIViewRepresentable {
         }
 
         private func updateFocus() {
-            if active && window != nil {
-                if !isFirstResponder { becomeFirstResponder() }
-            } else if isFirstResponder {
-                resignFirstResponder()
+            // Changing responders can invalidate SwiftUI's focus state.
+            // Apply it after the current view update, using the latest selection.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.active && self.window != nil {
+                    if !self.isFirstResponder { self.becomeFirstResponder() }
+                } else if self.isFirstResponder {
+                    self.resignFirstResponder()
+                }
             }
         }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            guard active else {
+                super.pressesBegan(presses, with: event)
+                return
+            }
             var unhandled = presses
             for press in presses {
                 guard let key = press.key, key.keyCode == .keyboardTab,
