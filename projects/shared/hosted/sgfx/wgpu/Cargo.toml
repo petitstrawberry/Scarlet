@@ -1,0 +1,26 @@
+[package]
+name = "sgfx-backend-wgpu"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/petitstrawberry/sgfx"
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+raw-window-handle = "0.6"
+sgfx-core = { git = "https://github.com/petitstrawberry/sgfx", rev = "3a6a987aaa5284056d4b1dcb0cd45326d30b3fe1", default-features = false }
+wgpu = { version = "24", features = ["spirv", "naga-ir"] }
+naga = { version = "24", features = ["spv-in", "wgsl-in"] }
+
+[lib]
+name = "sgfx_backend_wgpu"
+path = "src/lib.rs"
+
+[dev-dependencies]
+sgfx-core = { git = "https://github.com/petitstrawberry/sgfx", rev = "3a6a987aaa5284056d4b1dcb0cd45326d30b3fe1", default-features = false, features = ["backend-abi"] }
+naga = { version = "24", features = ["wgsl-in", "spv-out"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+web-time = "1"

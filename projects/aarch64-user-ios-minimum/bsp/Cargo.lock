@@ -1014,7 +1014,6 @@ source = "git+https://github.com/petitstrawberry/sgfx?rev=040dbb5cf42b75489504e1
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=c373416e8dc3d86e7ff1bc397d6b5383aa093409#c373416e8dc3d86e7ff1bc397d6b5383aa093409"
 dependencies = [
  "bytemuck",
  "naga",

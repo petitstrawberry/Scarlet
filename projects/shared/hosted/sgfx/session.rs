@@ -357,6 +357,8 @@ impl Session {
                     self.resources.map_image(texture.id(), image)
                 } else if usage.contains(TextureUsage::RENDER_ATTACHMENT) {
                     self.resources.map_color_target(texture.id(), image)
+                } else if usage.contains(TextureUsage::COPY_DST) {
+                    self.resources.map_sampled_transfer_image(texture.id(), image)
                 } else {
                     self.resources.import_sampled_image(texture.id(), image)
                 }
