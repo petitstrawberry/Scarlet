@@ -26,4 +26,17 @@ SCARLET_IOS_GUEST_SYSROOT=$(python3 "$project/tools/prepare_guest_sysroot.py")
 export SCARLET_IOS_GUEST_SYSROOT
 export RUSTC_WRAPPER="$project/tools/guest_rustc.sh"
 
+# Source-owned C/C++ builds use the SDK's native compiler entries. Apply the
+# same register reservation as the Rust toolchain without changing the recipes.
+export CFLAGS_aarch64_unknown_scarlet="${CFLAGS_aarch64_unknown_scarlet:+$CFLAGS_aarch64_unknown_scarlet }-ffixed-x18"
+export CXXFLAGS_aarch64_unknown_scarlet="${CXXFLAGS_aarch64_unknown_scarlet:+$CXXFLAGS_aarch64_unknown_scarlet }-ffixed-x18"
+if [ -n "${SCARLET_NATIVE_CC:-}" ]; then
+    export SCARLET_IOS_NATIVE_CC="$SCARLET_NATIVE_CC"
+    export SCARLET_NATIVE_CC="$project/tools/guest_cc.sh"
+fi
+if [ -n "${SCARLET_NATIVE_CXX:-}" ]; then
+    export SCARLET_IOS_NATIVE_CXX="$SCARLET_NATIVE_CXX"
+    export SCARLET_NATIVE_CXX="$project/tools/guest_cxx.sh"
+fi
+
 exec cargo scarlet "$operation" --project "$project" "$@"
