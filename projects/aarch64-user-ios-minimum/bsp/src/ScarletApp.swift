@@ -152,16 +152,6 @@ private struct DesktopView: View {
                 .frame(width: 1, height: 1)
                 .accessibilityHidden(true)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack {
-                Spacer()
-                Button("Tab") { scarlet_ios_desktop_tab() }
-                    .frame(minHeight: 44)
-                    .accessibilityLabel("Send Tab to Desktop")
-            }
-            .padding(.horizontal)
-            .background(.bar)
-        }
     }
 }
 
