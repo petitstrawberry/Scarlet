@@ -1,17 +1,35 @@
 """Select Scarlet ELF objects from the SDK's staged filesystems."""
 
 import hashlib
+import argparse
+import json
 import os
 from pathlib import Path
 import struct
 import sys
 
 
-def catalog(roots):
+def catalog(roots, exclusions=None):
+    exclusions = exclusions or {}
+    excluded = set()
     seen = set()
     for root in roots:
+        if not root.is_dir():
+            raise ValueError(f"Missing staged filesystem: {root}")
         for source in sorted(root.rglob("*")):
             if source.is_symlink() or not source.is_file():
+                continue
+            key = f"{root.name}/{source.relative_to(root).as_posix()}"
+            if key in exclusions:
+                policy = exclusions[key]
+                hasher = hashlib.sha256()
+                with source.open("rb") as fd:
+                    for block in iter(lambda: fd.read(65536), b""):
+                        hasher.update(block)
+                if hasher.hexdigest() != policy["sha256"] or not policy["reason"]:
+                    raise ValueError(f"Catalog exclusion needs review: {key}")
+                excluded.add(key)
+                print(f"Excluded from signed catalog: {key}: {policy['reason']}", file=sys.stderr)
                 continue
             with source.open("rb") as fd:
                 header = fd.read(64)
@@ -50,7 +68,14 @@ def catalog(roots):
             mode = "--pie" if interp else "" if entry else "--dso"
             for field in (mode, digest, source):
                 sys.stdout.buffer.write(os.fsencode(field) + b"\0")
+    if missing := exclusions.keys() - excluded:
+        raise ValueError(f"Catalog exclusions are absent from staging: {sorted(missing)}")
 
 
 if __name__ == "__main__":
-    catalog([Path(root) for root in sys.argv[1:]])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--exclusions", type=Path)
+    parser.add_argument("roots", type=Path, nargs="+")
+    args = parser.parse_args()
+    exclusions = json.loads(args.exclusions.read_text()) if args.exclusions else None
+    catalog(args.roots, exclusions)

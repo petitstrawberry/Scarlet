@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-project=$(cd "$(dirname "$0")/.." && pwd)
+shared=$(cd "$(dirname "$0")/.." && pwd)
+project=${SCARLET_PROJECT_DIR:-${SCARLET_IOS_PROJECT:-$shared}}
+export SCARLET_IOS_PROJECT="$project"
 case "$SCARLET_TARGET_TRIPLE" in
     aarch64-apple-ios-sim) sdk=iphonesimulator ;;
     aarch64-apple-ios) sdk=iphoneos ;;
@@ -9,5 +11,5 @@ case "$SCARLET_TARGET_TRIPLE" in
 esac
 
 path="$project/.scarlet/images/$sdk-$SCARLET_PROFILE.app-path"
-"$project/tools/build_app.sh" "$sdk" "$project/.scarlet/images/$sdk" > "$path.tmp"
+"$shared/tools/build_app.sh" "$sdk" "$project/.scarlet/images/$sdk" > "$path.tmp"
 mv "$path.tmp" "$path"

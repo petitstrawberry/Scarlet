@@ -2,6 +2,7 @@
 set -euo pipefail
 
 project=$(cd "$(dirname "$0")/.." && pwd)
+image_project=${SCARLET_IOS_PROJECT:-$project}
 repo=$(git -C "$project" rev-parse --show-toplevel)
 probe_src="$project/bsp/tests/native-execution"
 sdk=${1:-iphonesimulator}
@@ -46,7 +47,7 @@ if $probe; then
     default_id=org.scarletos.ios-p0
 else
     app_name=Scarlet
-    display_name=Scarlet
+    display_name=${SCARLET_IOS_DISPLAY_NAME:-Scarlet}
     default_id=org.scarletos.ios
 fi
 app="$out/$app_name.app"
@@ -87,10 +88,16 @@ else
     build_fixture scheduler_fixture _scarlet_scheduler_start "$app/scheduler.elf"
     package_guest "$app/scheduler.elf" ScarletGuest
 
-    staging="$project/.scarlet/staging"
-    artifacts="$project/.scarlet/images"
-    executable="$project/bsp/target/$rust_target/${SCARLET_PROFILE:-release}/scarlet"
-    python3 "$project/tools/catalog_objects.py" "$staging/initramfs" "$staging/rootfs" > "$out/catalog"
+    staging="$image_project/.scarlet/staging"
+    initramfs=$(python3 "$project/tools/image_config.py" "$image_project" initramfs)
+    rootfs=$(python3 "$project/tools/image_config.py" "$image_project" rootfs)
+    executable=$(python3 "$project/tools/image_config.py" "$image_project" executable \
+        "$rust_target" "${SCARLET_PROFILE:-release}")
+    catalog_options=("$staging/initramfs" "$staging/rootfs")
+    if [[ -f "$image_project/ios-catalog-exclusions.json" ]]; then
+        catalog_options+=(--exclusions "$image_project/ios-catalog-exclusions.json")
+    fi
+    python3 "$project/tools/catalog_objects.py" "${catalog_options[@]}" > "$out/catalog"
     while IFS= read -r -d '' mode && IFS= read -r -d '' digest && IFS= read -r -d '' elf; do
         if [[ -n "$mode" ]]; then
             package_guest "$elf" "ScarletImage$digest" "$mode"
@@ -98,8 +105,8 @@ else
             package_guest "$elf" "ScarletImage$digest"
         fi
     done < "$out/catalog"
-    cp "$artifacts/initramfs-aarch64-user-ios-minimum.cpio" "$app/initramfs.cpio"
-    cp "$artifacts/rootfs-aarch64-user-ios-minimum.ext2" "$app/root.ext2"
+    cp "$initramfs" "$app/initramfs.cpio"
+    cp "$rootfs" "$app/root.ext2"
     cp "$executable" "$app/$app_name"
 fi
 bundle_id=${BUNDLE_ID:-"$default_id"}
@@ -131,6 +138,7 @@ fi
 
 python3 - "$app" "$bundle_id" "$platform" "$out" "$app_name" "$display_name" <<'PY'
 from pathlib import Path
+import os
 import plistlib
 import sys
 
@@ -153,6 +161,7 @@ for directory, name, kind, ident in bundles:
         info.update(
             CFBundleDisplayName=display_name,
             CFBundleDevelopmentRegion="en",
+            ScarletDefaultDisplay=os.environ.get("SCARLET_IOS_DEFAULT_DISPLAY", "0") == "1",
             UIDeviceFamily=[1, 2],
             UILaunchScreen={},
             UIApplicationSceneManifest={
