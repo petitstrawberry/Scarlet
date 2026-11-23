@@ -15,6 +15,7 @@ private struct ScarletRootView: View {
     private let session = ScarletSession.shared
     @State private var tab: SessionTab = .desktop
     @State private var fullScreen = false
+    @State private var resizing = false
     @Environment(\.scenePhase) private var scenePhase
 
     private enum SessionTab { case desktop, console }
@@ -25,25 +26,10 @@ private struct ScarletRootView: View {
             .onAppear { session.start() }
         #else
         if session.displayEnabled {
-            Group {
-                if fullScreen {
-                    desktop
-                } else {
-                    TabView(selection: $tab) {
-                        desktop
-                            .tabItem { Label("Desktop", systemImage: "display") }
-                            .tag(SessionTab.desktop)
-                        TerminalView(console: session.console, acceptsInput: true)
-                            .tabItem { Label("Console", systemImage: "terminal") }
-                            .tag(SessionTab.console)
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-                scarlet_ios_metal_set_active(false)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-                scarlet_ios_metal_set_active(true)
+            if #available(iOS 26.0, *) {
+                displaySession.onInteractiveResizeChange { resizing = $0 }
+            } else {
+                displaySession
             }
         } else {
             TerminalView(console: session.console, acceptsInput: !session.schedulerCheck)
@@ -53,9 +39,32 @@ private struct ScarletRootView: View {
     }
 
     #if !SCARLET_EXECUTION_PROBE
+    private var displaySession: some View {
+        Group {
+            if fullScreen {
+                desktop
+            } else {
+                TabView(selection: $tab) {
+                    desktop
+                        .tabItem { Label("Desktop", systemImage: "display") }
+                        .tag(SessionTab.desktop)
+                    TerminalView(console: session.console, acceptsInput: true)
+                        .tabItem { Label("Console", systemImage: "terminal") }
+                        .tag(SessionTab.console)
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            scarlet_ios_metal_set_active(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            scarlet_ios_metal_set_active(true)
+        }
+    }
+
     private var desktop: some View {
         DesktopView(display: session.display, active: tab == .desktop && scenePhase == .active,
-                    resize: session.resize)
+                    resizing: resizing, resize: session.resize)
             .overlay(alignment: .topTrailing) {
                 Button {
                     fullScreen.toggle()
@@ -106,9 +115,7 @@ private final class ScarletSession {
 
     func resize(_ viewport: DesktopViewport) {
         if !started { display.openMetal(viewport) }
-        if display.metalLayer.isHidden {
-            if display.viewport != viewport { display.viewport = viewport }
-        } else {
+        if !display.metalLayer.isHidden {
             scarlet_ios_metal_viewport(UInt32(viewport.pixels.width), UInt32(viewport.pixels.height))
         }
         scarlet_ios_set_display_size(viewport.width, viewport.height)
@@ -172,22 +179,19 @@ private func receiveDamage() {
 private struct DesktopView: View {
     @ObservedObject var display: DesktopDisplay
     let active: Bool
+    let resizing: Bool
     let resize: (DesktopViewport) -> Void
 
     var body: some View {
         ZStack {
             Color.black
-            if let frame = display.frame {
-                Image(decorative: display.viewport?.cropped(frame) ?? frame, scale: 1)
-                    .resizable()
-                    .interpolation(.none)
-            }
-        }
-        .clipped()
-        .overlay {
-            DesktopTouchCapture(active: active, metalLayer: display.metalLayer, resize: resize)
+            DesktopTouchCapture(
+                active: active, resizing: resizing, metalLayer: display.metalLayer,
+                image: display.frame, resize: resize
+            )
                 .accessibilityHidden(true)
         }
+        .clipped()
         .background {
             Color.black.ignoresSafeArea(.container).allowsHitTesting(false)
         }
@@ -260,7 +264,6 @@ private struct DesktopTabInput: UIViewRepresentable {
 @MainActor
 private final class DesktopDisplay: ObservableObject {
     @Published private(set) var frame: CGImage?
-    @Published var viewport: DesktopViewport?
     let metalLayer = CAMetalLayer()
     private var generation: UInt64 = 0
     private let colors = CGColorSpaceCreateDeviceRGB()

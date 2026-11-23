@@ -29,25 +29,55 @@ struct DesktopViewport: Equatable {
 
 struct DesktopTouchCapture: UIViewRepresentable {
     let active: Bool
+    let resizing: Bool
     let metalLayer: CAMetalLayer
+    let image: CGImage?
     let resize: (DesktopViewport) -> Void
 
-    func makeUIView(context: Context) -> TouchView {
-        let view = TouchView()
-        view.isMultipleTouchEnabled = true
-        view.metalLayer = metalLayer
-        view.active = active
-        view.resize = resize
+    func makeUIView(context: Context) -> ClipView {
+        let view = ClipView(frame: .zero)
+        view.touch.metalLayer = metalLayer
         return view
     }
 
-    func updateUIView(_ view: TouchView, context: Context) {
-        view.active = active
-        view.resize = resize
+    func updateUIView(_ view: ClipView, context: Context) {
+        view.touch.resize = resize
+        view.touch.resizing = resizing
+        view.touch.active = active
+        view.touch.setImage(image)
     }
 
-    static func dismantleUIView(_ view: TouchView, coordinator: ()) {
-        view.active = false
+    static func dismantleUIView(_ view: ClipView, coordinator: ()) {
+        view.touch.active = false
+    }
+
+    final class ClipView: UIView {
+        let touch = TouchView()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            touch.isMultipleTouchEnabled = true
+            touch.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(touch)
+            let guide: UILayoutGuide
+            if #available(iOS 26.0, *) {
+                guide = layoutGuide(for: .safeArea(cornerAdaptation: .vertical))
+            } else {
+                guide = safeAreaLayoutGuide
+            }
+            NSLayoutConstraint.activate([
+                touch.topAnchor.constraint(equalTo: guide.topAnchor),
+                touch.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+                touch.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
+                touch.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+            ])
+        }
+
+        required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
+
+        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            touch.frame.contains(point) && super.point(inside: point, with: event)
+        }
     }
 
     final class TouchView: UIView {
@@ -57,6 +87,12 @@ struct DesktopTouchCapture: UIViewRepresentable {
         private var nextID: Int32 = 0
         var resize: ((DesktopViewport) -> Void)?
         var metalLayer: CAMetalLayer?
+        var resizing = false {
+            didSet {
+                guard oldValue != resizing else { return }
+                if resizing { releaseContacts() } else { publishViewport() }
+            }
+        }
         var active = false {
             didSet {
                 guard oldValue != active else { return }
@@ -64,9 +100,13 @@ struct DesktopTouchCapture: UIViewRepresentable {
             }
         }
         private var viewport: DesktopViewport?
+        private var publishedViewport: DesktopViewport?
+        private var viewportScheduled = false
+        private var image: CGImage?
+        private let imageLayer = CALayer()
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            guard viewport != nil else { return }
+            guard !resizing, let viewport, viewport == publishedViewport else { return }
             var changed = false
             for touch in touches where touch.type == .direct || touch.type == .pencil {
                 guard let slot = owners.firstIndex(of: nil) else { break }
@@ -113,9 +153,6 @@ struct DesktopTouchCapture: UIViewRepresentable {
                 detach()
                 return
             }
-            guard size != viewport else { return }
-            releaseContacts()
-            viewport = size
             if let metalLayer {
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
@@ -124,14 +161,48 @@ struct DesktopTouchCapture: UIViewRepresentable {
                 metalLayer.frame = bounds
                 CATransaction.commit()
             }
+            if size != viewport {
+                releaseContacts()
+                viewport = size
+                updateImageLayer()
+            }
+            publishViewport()
+        }
+
+        private func publishViewport() {
+            guard active, !resizing, !viewportScheduled, viewport != publishedViewport else { return }
+            viewportScheduled = true
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.viewport == size, self.window != nil else { return }
+                guard let self else { return }
+                self.viewportScheduled = false
+                guard self.active, !self.resizing, self.window != nil,
+                      let size = self.viewport, size != self.publishedViewport else { return }
+                self.publishedViewport = size
                 self.resize?(size)
             }
         }
 
+        func setImage(_ image: CGImage?) {
+            guard self.image !== image else { return }
+            self.image = image
+            updateImageLayer()
+        }
+
+        private func updateImageLayer() {
+            guard image != nil || imageLayer.superlayer != nil else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if imageLayer.superlayer == nil { layer.insertSublayer(imageLayer, at: 0) }
+            imageLayer.frame = bounds
+            imageLayer.magnificationFilter = .nearest
+            imageLayer.minificationFilter = .nearest
+            imageLayer.contents = image.map { viewport?.cropped($0) ?? $0 }
+            CATransaction.commit()
+        }
+
         private func detach() {
             viewport = nil
+            publishedViewport = nil
             releaseContacts()
             if let metalLayer, metalLayer.superlayer === layer {
                 metalLayer.removeFromSuperlayer()
