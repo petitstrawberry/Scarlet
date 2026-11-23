@@ -106,30 +106,26 @@ struct DesktopTouchCapture: UIViewRepresentable {
         private let imageLayer = CALayer()
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            guard !resizing, let viewport, viewport == publishedViewport else { return }
-            var changed = false
+            guard active, !resizing, let viewport, viewport == publishedViewport else { return }
+            var timestamp: TimeInterval?
             for touch in touches where touch.type == .direct || touch.type == .pencil {
                 guard let slot = owners.firstIndex(of: nil) else { break }
                 owners[slot] = ObjectIdentifier(touch)
                 contacts[slot].id = nextID
                 nextID = nextID == Int32.max ? 0 : nextID + 1
                 update(touch, at: slot)
-                changed = true
+                timestamp = max(timestamp ?? touch.timestamp, touch.timestamp)
             }
-            if changed { publish() }
+            if let timestamp { publish(at: timestamp) }
         }
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-            var changed = false
-            for touch in touches {
-                guard let slot = owners.firstIndex(of: ObjectIdentifier(touch)) else { continue }
-                update(touch, at: slot)
-                changed = true
-            }
-            if changed { publish() }
+            publishMotion(touches, with: event)
         }
 
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            // The lift can include motion since the last move callback.
+            publishMotion(touches, with: event)
             remove(touches, cancelled: false)
         }
 
@@ -216,14 +212,35 @@ struct DesktopTouchCapture: UIViewRepresentable {
             publish(cancelled: true)
         }
 
+        private func publishMotion(_ touches: Set<UITouch>, with event: UIEvent?) {
+            // One finger drives the tablet navigation gesture. A multitouch
+            // callback stays one atomic frame so history cannot multiply its
+            // event-queue footprint by the number of contacts.
+            let singleContact = owners.lazy.compactMap { $0 }.prefix(2).count == 1
+            var timestamp: TimeInterval?
+            for touch in touches {
+                guard let slot = owners.firstIndex(of: ObjectIdentifier(touch)) else { continue }
+                if singleContact, let samples = event?.coalescedTouches(for: touch), !samples.isEmpty {
+                    for sample in samples {
+                        update(sample, at: slot)
+                        publish(at: sample.timestamp)
+                    }
+                    return
+                }
+                update(touch, at: slot)
+                timestamp = max(timestamp ?? touch.timestamp, touch.timestamp)
+            }
+            if let timestamp { publish(at: timestamp) }
+        }
+
         private func remove(_ touches: Set<UITouch>, cancelled: Bool) {
-            var changed = false
+            var timestamp: TimeInterval?
             for touch in touches {
                 guard let slot = owners.firstIndex(of: ObjectIdentifier(touch)) else { continue }
                 release(slot)
-                changed = true
+                timestamp = max(timestamp ?? touch.timestamp, touch.timestamp)
             }
-            if changed { publish(cancelled: cancelled) }
+            if let timestamp { publish(at: timestamp, cancelled: cancelled) }
         }
 
         private func release(_ slot: Int) {
@@ -250,9 +267,11 @@ struct DesktopTouchCapture: UIViewRepresentable {
             return Int32((normalized * CGFloat(SCARLET_IOS_TOUCH_MAX)).rounded())
         }
 
-        private func publish(cancelled: Bool = false) {
+        private func publish(at timestamp: TimeInterval? = nil, cancelled: Bool = false) {
+            let now = ProcessInfo.processInfo.systemUptime
+            let ageNS = UInt64(max(0, now - (timestamp ?? now)) * 1_000_000_000)
             contacts.withUnsafeBufferPointer {
-                scarlet_ios_touch($0.baseAddress, $0.count, cancelled)
+                scarlet_ios_touch($0.baseAddress, $0.count, cancelled, ageNS)
             }
         }
     }

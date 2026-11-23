@@ -392,6 +392,11 @@ impl EventDevice {
     /// Callers may pass a complete frame ending in `SYN_REPORT` so no reader
     /// can observe a partial frame before the producer has finished it.
     pub fn push_events(&self, events: &[(u16, u16, i32)]) {
+        self.push_events_at(crate::time::current_time_ns(), events);
+    }
+
+    /// Publish a frame sampled at an earlier time on the kernel monotonic clock.
+    pub fn push_events_at(&self, time: u64, events: &[(u16, u16, i32)]) {
         if events.is_empty() {
             return;
         }
@@ -407,7 +412,6 @@ impl EventDevice {
             }
         }
 
-        let time = crate::time::current_time_ns();
         {
             let mut q = self.queue.lock();
             for &(type_, code, value) in events {

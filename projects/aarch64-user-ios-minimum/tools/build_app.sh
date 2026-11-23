@@ -52,6 +52,9 @@ else
 fi
 app="$out/$app_name.app"
 mkdir -p "$app"
+if ! $probe; then
+    cp "$project/bsp/PrivacyInfo.xcprivacy" "$app/"
+fi
 
 build_fixture() {
     local source=$1 entry=$2 elf=$3

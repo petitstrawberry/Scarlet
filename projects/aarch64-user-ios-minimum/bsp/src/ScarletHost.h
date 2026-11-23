@@ -29,7 +29,8 @@ typedef struct {
     int32_t y;
 } ScarletTouchContact;
 
-void scarlet_ios_touch(const ScarletTouchContact *contacts, size_t count, bool cancelled);
+void scarlet_ios_touch(const ScarletTouchContact *contacts, size_t count, bool cancelled,
+                       uint64_t sample_age_ns);
 void scarlet_ios_desktop_tab(void);
 typedef struct {
     uint32_t width;

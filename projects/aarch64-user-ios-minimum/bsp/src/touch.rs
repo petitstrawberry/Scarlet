@@ -46,6 +46,12 @@ type Contacts = [Contact; TOUCH_SLOTS];
 struct Frame {
     contacts: Contacts,
     reset: bool,
+    time_ns: u64,
+}
+
+struct PublishedFrame {
+    contacts: Contacts,
+    time_ns: u64,
 }
 
 static TOUCH: OnceLock<Arc<TouchInterrupt>> = OnceLock::new();
@@ -53,7 +59,7 @@ static TOUCH: OnceLock<Arc<TouchInterrupt>> = OnceLock::new();
 struct TouchInterrupt {
     device: Arc<EventDevice>,
     pending: Mutex<VecDeque<Frame>>,
-    previous: IrqSpinLock<Contacts>,
+    previous: IrqSpinLock<PublishedFrame>,
 }
 
 pub fn register(devices: &DeviceManager) -> Result<(), &'static str> {
@@ -68,7 +74,10 @@ pub fn register(devices: &DeviceManager) -> Result<(), &'static str> {
     let input = Arc::new(TouchInterrupt {
         device: device.clone(),
         pending: Mutex::new(VecDeque::with_capacity(PENDING_FRAMES)),
-        previous: IrqSpinLock::new([Contact::INACTIVE; TOUCH_SLOTS]),
+        previous: IrqSpinLock::new(PublishedFrame {
+            contacts: [Contact::INACTIVE; TOUCH_SLOTS],
+            time_ns: 0,
+        }),
     });
 
     let interrupts = InterruptManager::global();
@@ -118,7 +127,7 @@ impl TouchInterrupt {
 
     fn report(&self, frame: Frame) {
         let mut previous = self.previous.lock();
-        if !frame.reset && *previous == frame.contacts {
+        if !frame.reset && previous.contacts == frame.contacts {
             return;
         }
         let mut events = [SYNC; TOUCH_SLOTS * 4 + 3];
@@ -126,9 +135,9 @@ impl TouchInterrupt {
         if frame.reset {
             events[0] = (EV_SYN, SYN_DROPPED, 0);
             next = 2;
-            *previous = [Contact::INACTIVE; TOUCH_SLOTS];
+            previous.contacts = [Contact::INACTIVE; TOUCH_SLOTS];
         }
-        for (slot, (point, last)) in frame.contacts.iter().zip(previous.iter()).enumerate() {
+        for (slot, (point, last)) in frame.contacts.iter().zip(&previous.contacts).enumerate() {
             if point.id < 0 && last.id < 0 {
                 continue;
             }
@@ -141,12 +150,15 @@ impl TouchInterrupt {
                 next += 2;
             }
         }
-        *previous = frame.contacts;
+        // Keep frame order if conversion between clock samples rounds slightly.
+        let time_ns = previous.time_ns.max(frame.time_ns);
+        previous.contacts = frame.contacts;
+        previous.time_ns = time_ns;
         drop(previous);
         if next == 2 && frame.reset {
-            self.device.push_events(&events[..next]);
+            self.device.push_events_at(time_ns, &events[..next]);
         } else {
-            self.device.push_events(&events[..=next]);
+            self.device.push_events_at(time_ns, &events[..=next]);
         }
     }
 }
@@ -188,11 +200,15 @@ pub unsafe extern "C" fn scarlet_ios_touch(
     contacts: *const Contact,
     count: usize,
     cancelled: bool,
+    sample_age_ns: u64,
 ) {
     let Some(touch) = TOUCH.get() else { return };
     if contacts.is_null() || count != TOUCH_SLOTS {
         return;
     }
+    // The hosted clock is the same monotonic clock used by guest input readers,
+    // and this read is safe on the UIKit thread without a logical CPU binding.
+    let time_ns = scarlet::arch::aarch64::timer::get_time().saturating_sub(sample_age_ns);
     let contacts = unsafe { std::slice::from_raw_parts(contacts, count) };
     let mut points = [Contact::INACTIVE; TOUCH_SLOTS];
     for (point, contact) in points.iter_mut().zip(contacts) {
@@ -207,5 +223,6 @@ pub unsafe extern "C" fn scarlet_ios_touch(
     touch.queue(Frame {
         contacts: points,
         reset: cancelled,
+        time_ns,
     });
 }
