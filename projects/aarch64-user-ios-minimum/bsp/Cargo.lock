@@ -339,7 +339,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet-aarch64-user-ios-bsp"
+name = "scarlet-aarch64-user-ios-minimum-bsp"
 version = "0.1.0"
 dependencies = [
  "libc",

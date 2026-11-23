@@ -1,13 +1,13 @@
 # Scarlet on iOS
 
-`bsp/` に iOS のホスト起動コード、`app/` に UIKit のエントリポイント、`tests/` に実行検証用のコードを置きます。
+`bsp/` に iOS のホスト起動コード、`bsp/src/main.m` に UIKit のエントリポイント、`bsp/tests/` に実行検証用のコードを置きます。
 
 ## Simulator で Scarlet を起動
 
 Apple Silicon Mac の Scarlet 開発シェルで、リポジトリのルートから実行します。Simulator を起動しておきます。
 
 ```sh
-app=$(projects/aarch64-user-ios/build.sh iphonesimulator)
+app=$(projects/aarch64-user-ios-minimum/tools/build_app.sh iphonesimulator)
 env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl install booted "$app"
 env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
   --terminate-running-process --console booted org.scarletos.ios
@@ -51,8 +51,8 @@ Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージ
 Simulator で同じ実行ファイルを使ってライブラリの A 版・B 版、依存ファイルの欠落、カタログ未登録の ELF を確認できます。検証は一時アプリと専用のゲストディスクを使用します。
 
 ```sh
-app=$(SCARLET_IOS_TEST_LIBRARIES=1 projects/aarch64-user-ios/build.sh iphonesimulator)
-python3 projects/aarch64-user-ios/tests/runtime_link.py "$app"
+app=$(SCARLET_IOS_TEST_LIBRARIES=1 projects/aarch64-user-ios-minimum/tools/build_app.sh iphonesimulator)
+python3 projects/aarch64-user-ios-minimum/tools/test_runtime_link.py "$app"
 ```
 
 ## ネイティブの init をパッケージ化
@@ -73,7 +73,7 @@ cargo run --locked --manifest-path tools/ios-aot/Cargo.toml \
 
 ## 署名済みコードの再配置を検証
 
-`tests/native-execution/` は iOS 実機で署名済み AArch64 コードの再配置と実行を確認する独立した検証です。位置独立のアセンブリを Mach-O フレームワークとしてビルドし、dyld で読み込んだファイルの RX セグメントを 2 つの仮想アドレスに配置します。それぞれに独立した DATA、BSS、関数ポインタ、TLS、ヒープ、ガード付きスタックを用意します。
+`bsp/tests/native-execution/` は iOS 実機で署名済み AArch64 コードの再配置と実行を確認する独立した検証です。位置独立のアセンブリを Mach-O フレームワークとしてビルドし、dyld で読み込んだファイルの RX セグメントを 2 つの仮想アドレスに配置します。それぞれに独立した DATA、BSS、関数ポインタ、TLS、ヒープ、ガード付きスタックを用意します。
 
 検証は 1 本の carrier pthread で実行します。BRK とタイマーによる停止から復帰し、x0–x30、SP、PC、NZCV、Q0–Q31、FPCR、FPSR の保持を確認します。x18 はゲストの保存状態で仮想化し、物理レジスタは Darwin に明け渡します。2 つのゲストを交互に 32 回実行し、各タイマー区間でゲストのループが進み、切替中のゲスト VM 操作がゼロであることを確認します。その後、可変ページを解放して同じ RX 枠を使う起動を 64 回繰り返します。
 
@@ -86,7 +86,7 @@ Apple Silicon Mac、Xcode、ペアリング済みの iOS 端末、開発用署�
 ```sh
 app=$(PROVISIONING_PROFILE=/path/to/profile.mobileprovision \
       SIGNING_IDENTITY="Apple Development: Your Name (IDENTIFIER)" \
-      projects/aarch64-user-ios/build.sh iphoneos --probe)
+      projects/aarch64-user-ios-minimum/tools/build_app.sh iphoneos --probe)
 
 env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun devicectl device install app --device "$device" "$app"
 env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun devicectl device process launch --device "$device" \
@@ -100,10 +100,10 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun devicectl device process launch -
 ### ローカルでの検証
 
 ```sh
-out=$(projects/aarch64-user-ios/build.sh macosx)
+out=$(projects/aarch64-user-ios-minimum/tools/build_app.sh macosx)
 "$out/scarlet-execution-probe" "$out/ScarletFixture.dylib"
 
-app=$(projects/aarch64-user-ios/build.sh iphonesimulator --probe)
+app=$(projects/aarch64-user-ios-minimum/tools/build_app.sh iphonesimulator --probe)
 env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl install booted "$app"
 env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
   --terminate-running-process --console booted org.scarletos.ios-p0

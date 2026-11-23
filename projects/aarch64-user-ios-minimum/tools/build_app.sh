@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-project=$(cd "$(dirname "$0")" && pwd)
+project=$(cd "$(dirname "$0")/.." && pwd)
 repo=$(git -C "$project" rev-parse --show-toplevel)
-probe_src="$project/tests/native-execution"
+probe_src="$project/bsp/tests/native-execution"
 sdk=${1:-iphonesimulator}
 if [[ $# -gt 0 ]]; then shift; fi
 probe=false
@@ -55,7 +55,7 @@ link_flags=(-framework UIKit -framework Foundation)
 
 build_fixture() {
     local source=$1 entry=$2 elf=$3
-    "$clang" -target aarch64-none-elf -c "$project/tests/$source.S" -o "$out/$source.o"
+    "$clang" -target aarch64-none-elf -c "$project/bsp/tests/$source.S" -o "$out/$source.o"
     ld.lld -pie --no-dynamic-linker -z max-page-size=16384 -z separate-loadable-segments \
         -e "$entry" "$out/$source.o" -o "$elf"
     # Mark the freestanding ELF with Scarlet's OS ABI.
@@ -112,9 +112,9 @@ else
         package_guest "$root/bin/$binary" "$framework" --pie
     done
     elf_flags=(-z max-page-size=16384 -z separate-loadable-segments)
-    "$clang" -target aarch64-none-elf -c "$project/tests/boot_library.S" -o "$out/boot_library.o"
+    "$clang" -target aarch64-none-elf -c "$project/bsp/tests/boot_library.S" -o "$out/boot_library.o"
     ld.lld -shared "${elf_flags[@]}" -soname libboot-check.so "$out/boot_library.o" -o "$root/lib/libboot-check.so"
-    "$clang" -target aarch64-none-elf -c "$project/tests/boot_fixture.S" -o "$out/boot_fixture.o"
+    "$clang" -target aarch64-none-elf -c "$project/bsp/tests/boot_fixture.S" -o "$out/boot_fixture.o"
     ld.lld -pie "${elf_flags[@]}" --dynamic-linker=/bin/scarlet-ld -e _scarlet_boot_start \
         "$out/boot_fixture.o" -L"$root/lib" -lboot-check -o "$root/bin/boot-check"
     for elf in "$root/bin/boot-check" "$root/lib/libboot-check.so"; do
@@ -123,7 +123,7 @@ else
     package_guest "$root/lib/libboot-check.so" ScarletBootLibrary --dso
     if [[ "${SCARLET_IOS_TEST_LIBRARIES:-0}" == 1 ]]; then
         "$clang" -DSCARLET_ALTERNATE_LIBRARY -target aarch64-none-elf -c \
-            "$project/tests/boot_library.S" -o "$out/boot_library_alt.o"
+            "$project/bsp/tests/boot_library.S" -o "$out/boot_library_alt.o"
         ld.lld -shared "${elf_flags[@]}" -soname libboot-check.so "$out/boot_library_alt.o" -o "$root/lib/libboot-check-alt.so"
         printf '\123' | dd of="$root/lib/libboot-check-alt.so" bs=1 seek=7 conv=notrunc 2>/dev/null
         package_guest "$root/lib/libboot-check-alt.so" ScarletBootLibraryAlt --dso
@@ -142,11 +142,11 @@ else
         cargo build --locked --release -Zbuild-std=std,panic_abort \
         --manifest-path "$project/bsp/Cargo.toml" --target "$rust_target" \
         --target-dir "$build_root/rust" >&2
-    implementation=("$build_root/rust/$rust_target/release/libscarlet_aarch64_user_ios_bsp.a")
+    implementation=("$build_root/rust/$rust_target/release/libscarlet_aarch64_user_ios_minimum_bsp.a")
     link_flags+=(-Wl,-dead_strip -framework Security -framework CoreFoundation)
 fi
 bundle_id=${BUNDLE_ID:-"$default_id"}
-"$clang" "${flags[@]}" -fobjc-arc "$project/app/main.m" "${implementation[@]}" \
+"$clang" "${flags[@]}" -fobjc-arc "$project/bsp/src/main.m" "${implementation[@]}" \
     "${link_flags[@]}" -o "$app/$app_name"
 
 entitlements="$out/entitlements.plist"
