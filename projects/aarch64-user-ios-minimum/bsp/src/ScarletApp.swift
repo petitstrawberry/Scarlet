@@ -129,6 +129,10 @@ private struct DesktopView: View {
                 Image(decorative: frame, scale: 1)
                     .resizable()
                     .scaledToFit()
+                    .overlay {
+                        DesktopTouchCapture(width: frame.width, height: frame.height)
+                            .accessibilityHidden(true)
+                    }
             }
         }
         .accessibilityElement()

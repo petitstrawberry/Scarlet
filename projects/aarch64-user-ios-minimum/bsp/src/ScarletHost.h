@@ -21,6 +21,14 @@ typedef struct {
 } ScarletTerminalState;
 typedef void (*ScarletScreen)(const char *text, ScarletTerminalState state);
 
+#define SCARLET_IOS_TOUCH_SLOTS 16
+typedef struct {
+    int32_t id;
+    int32_t x;
+    int32_t y;
+} ScarletTouchContact;
+
+void scarlet_ios_touch(const ScarletTouchContact *contacts, size_t count, bool cancelled);
 bool scarlet_ios_copy_frame(void *buffer, size_t length);
 bool scarlet_ios_console_send(const void *bytes, size_t length);
 void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login, bool shell,

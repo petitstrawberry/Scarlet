@@ -20,7 +20,7 @@ Console の画面をタップするとキーボードで操作できます。入
 
 単独起動の確認には `--login` または `--shell` を使えます。初期のコンソールアカウントは `root`、パスワードは空です。シェルで `exit` すると次のログインを受け付けます。
 
-起動引数に `--display` を渡すと Scarlet のフレームバッファを表示する Desktop 画面が開きます。Console タブでゲストの端末に切り替えられます。iPad ではゲストのタブレットスイッチがオンになり、iPhone の Simulator では `--tablet` で同じ状態を検証できます。
+起動引数に `--display` を渡すと Scarlet のフレームバッファを表示する Desktop 画面が開きます。表示領域のタッチはゲストの `/dev/touchscreen0` に届きます。Console タブでゲストの端末に切り替えられます。iPad ではゲストのタブレットスイッチがオンになり、iPhone の Simulator では `--tablet` で同じ状態を検証できます。
 
 `/bin` と `/lib` は現在のアプリに同梱した initramfs を参照します。初期ディスクのリンクは `rootfs/` で定義し、コンソールアカウントは SDK の `console-root` で作成します。`--boot-check` では検証用の共有ライブラリを呼び出し、ext2 のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。成功時には `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` に続いて `SCARLET_BOOT_PASS` が表示されます。
 

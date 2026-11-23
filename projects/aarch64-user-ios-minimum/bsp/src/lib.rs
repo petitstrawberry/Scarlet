@@ -11,6 +11,7 @@ mod root_image;
 #[allow(dead_code)]
 #[path = "../../../shared/hosted/terminal.rs"]
 mod terminal;
+mod touch;
 
 use scarlet::{
     abi::{AbiRegistry, scarlet::ScarletAbi},
