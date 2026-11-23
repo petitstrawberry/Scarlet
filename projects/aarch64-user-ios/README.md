@@ -15,11 +15,11 @@ env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun simctl launch \
 
 初回起動時にアプリは同梱の ext2 イメージを Application Support の `scarlet-root.ext2` にコピーします。以降の起動では同じファイルを `/dev/hostroot` として使います。
 
-通常起動では Scarlet の共通ブート処理が同梱 initramfs をマウントします。Rust 製の `/init` が PID 1 で起動し、`/dev/tty0` を初期化してルートを ext2 に切り替えます。その後、`EnvironmentExec` で現在のアプリと一緒に署名された `/old_root/bin/boot-check` に切り替わります。検証プログラムはルート内のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。結果は `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` と `SCARLET_BOOT_PASS` で、UIKit の画面とホストのコンソールに表示されます。
+通常起動では Rust 製の `/init` が PID 1 で `/dev/tty0` を初期化し、ext2 へのルート切り替え後に `/bin/sh` を起動します。UIKit の `TTY input` 欄に `ps -l` と入力して Return を押すと、ゲストのプロセス一覧が表示されます。端末画面は UTF-8 とカーソル制御を処理し、改行前のプロンプトも表示します。
 
-`TTY input` 欄から送信すると、`/dev/tty0` を通ってゲストの標準入力に届きます。boot-check は読み取った行を `guest: ` に続けて標準出力に返します。
+`--login` を起動引数に加えると、既存の `/bin/login` が端末を取得し、認証後に `fork` と `exec` でシェルを起動します。初期のコンソールアカウントは `root`、パスワードは空です。シェルで `exit` すると次のログインを受け付けます。
 
-ビルドでは `/init` と検証用 AArch64 PIE の ELF を `tools/ios-aot` で Mach-O フレームワークに変換して署名します。Scarlet は署名済みの RX を異なるアドレスへファイルマップし、インスタンスごとに DATA、BSS、GOT、静的 TLS、スタックを初期化します。同じ枠を再利用するときは RX を保持し、可変ページを作り直します。
+`/bin` と `/lib` は現在のアプリに同梱した initramfs を参照します。初期ディスクには BSP がリンクと権限 0600 の `/etc/scarlet-users` を用意します。`--boot-check` では検証用の共有ライブラリを呼び出し、ext2 のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。成功時には `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` に続いて `SCARLET_BOOT_PASS` が表示されます。
 
 ## スケジューラとプロセス起動の回帰検証
 
@@ -36,7 +36,15 @@ Scarlet の exec は、VFS から読んだ ELF の SHA-256 で同梱イメージ
 
 `brk` と `sbrk` はインスタンスごとに予約した最大 8 MiB の範囲で、必要な 16 KiB ページを割り当てます。検証では縮小後の範囲への usercopy が拒否され、再拡張したページがゼロで初期化されることを確認します。
 
-現在の AOT 入力は 16 KiB ページで分離された 1 個の RX セグメントを持つ自己完結の PIE です。再配置は `R_AARCH64_RELATIVE` に対応します。動的インタープリタ、依存ライブラリ、初期化関数テーブルには追加のローダー処理が必要です。
+`Clone` による `fork` は同じゲストアドレスで親子を再開します。最初の fork でカーネル用の別名マッピングを確保し、子には Darwin のコピーオンライトで非実行ページを複製します。同じ実行アドレスを使う親子が交替するときに、そのプロセスのページを割り当て直します。子のスタック、ヒープ、DATA、TLS への書き込みが親に見えず、親が `Waitpid` で子の終了コードを読めることを検証します。子がパイプを読み待つ間に親が再開し、データを渡すケースも含みます。
+
+現行の `sh` では、パイプライン内の組み込みコマンドの出力が端末に出る場合があります。シェルはパイプ端に標準出力の役割を設定しますが、組み込みの `echo` は引き続きハンドル 1 に書き込みます。
+
+## 動的 ELF のパッケージ化
+
+`tools/ios-aot` は静的 PIE のほか、`--lib-dir DIRECTORY` を指定すると `PT_INTERP=/bin/scarlet-ld` の Scarlet AArch64 PIE を処理します。パッケージ時に Scarlet の ELF ローダーと同じ `LoaderContext` を使い、`DT_NEEDED` を再帰的に読み、シンボルと再配置を解決します。検証用の `boot-check` は PLT 経由で `libboot-check.so` を呼び、同ライブラリは GOT 経由でデータを参照します。
+
+exec 時は元の実行ファイルと依存する各 `/lib` ファイルの SHA-256 を照合し、署名済み RX とインスタンスごとの可変ページを配置します。依存ライブラリの初期化関数を呼んでから元のエントリに入ります。対象は 16 KiB のページ境界に合う配置と x18 を予約したコードです。実行中の `dlopen`、共有ライブラリの TLS、任意の `PT_INTERP` は未対応です。
 
 ## ネイティブの init をパッケージ化
 

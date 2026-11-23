@@ -26,7 +26,12 @@ static UITextField *consoleInput;
 static void show_screen(const char *text) {
     NSString *snapshot = [NSString stringWithUTF8String:text];
     dispatch_async(dispatch_get_main_queue(), ^{
-        consoleInput.secureTextEntry = [snapshot hasSuffix:@"Password: "];
+        NSString *trimmed = [snapshot stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL secure = [trimmed hasSuffix:@"Password:"];
+        if (consoleInput.secureTextEntry != secure) {
+            consoleInput.secureTextEntry = secure;
+        }
         output.text = snapshot;
         [output scrollRangeToVisible:NSMakeRange(snapshot.length, 0)];
     });
