@@ -11,3 +11,4 @@ yaxpeax-arm = { version = "0.5", default-features = false }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
+scarlet-loader-core = { path = "../../../user/lib/scarlet-loader-core" }

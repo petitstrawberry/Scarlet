@@ -69,7 +69,7 @@ impl Patch {
 pub struct SignedText {
     bounds: Arc<[Range<u64>]>,
     patches: Arc<BTreeMap<u64, Patch>>,
-    lease: Option<Arc<crate::signed_image::Lease>>,
+    leases: Vec<Arc<crate::signed_image::Lease>>,
 }
 
 impl SignedText {
@@ -121,12 +121,12 @@ impl SignedText {
         Ok(Self {
             bounds: bounds.into(),
             patches: Arc::new(sites),
-            lease: None,
+            leases: Vec::new(),
         })
     }
 
-    pub(crate) fn retain_mapping(&mut self, lease: Arc<crate::signed_image::Lease>) {
-        self.lease = Some(lease);
+    pub(crate) fn retain_mappings(&mut self, leases: Vec<Arc<crate::signed_image::Lease>>) {
+        self.leases = leases;
     }
 
     pub fn contains(&self, pc: u64) -> bool {
@@ -134,7 +134,9 @@ impl SignedText {
     }
 
     pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
-        self.lease.as_ref()?.user_bounds(address, write)
+        self.leases
+            .iter()
+            .find_map(|lease| lease.user_bounds(address, write))
     }
 
     /// Duplicate private pages while the guest is parked under its VM transaction.
@@ -142,27 +144,31 @@ impl SignedText {
     /// # Safety
     /// The caller must exclude guest execution and concurrent address-space changes.
     pub unsafe fn fork(&self) -> io::Result<Arc<Self>> {
-        let lease = self
-            .lease
-            .as_ref()
-            .ok_or_else(|| io::Error::other("Missing image lease"))?;
+        if self.leases.is_empty() {
+            return Err(io::Error::other("Missing image lease"));
+        }
         Ok(Arc::new(Self {
             bounds: self.bounds.clone(),
             patches: self.patches.clone(),
-            lease: Some(lease.fork()?),
+            leases: self
+                .leases
+                .iter()
+                .map(|lease| lease.fork())
+                .collect::<io::Result<_>>()?,
         }))
     }
 
     pub fn kernel_alias(&self, address: usize) -> usize {
-        self.lease
-            .as_ref()
+        self.leases
+            .iter()
+            .find(|lease| lease.owns_address(address))
             .map_or(address, |lease| lease.kernel_alias(address))
     }
 
     /// # Safety
     /// The sole carrier must be parked until activation completes.
     pub unsafe fn activate(&self) -> io::Result<()> {
-        if let Some(lease) = &self.lease {
+        for lease in &self.leases {
             lease.activate()?;
         }
         Ok(())
@@ -172,10 +178,18 @@ impl SignedText {
     /// The caller must exclude concurrent changes, guest execution and
     /// asynchronous consumers of the pages being retired.
     pub unsafe fn resize_heap(&self, address: usize, limit: usize) -> io::Result<usize> {
-        self.lease
-            .as_ref()
-            .ok_or_else(|| io::Error::other("Signed text has no heap lease"))?
-            .resize_heap(address, limit)
+        let (main, libraries) = self
+            .leases
+            .split_first()
+            .ok_or_else(|| io::Error::other("Signed text has no heap lease"))?;
+        let library_data = libraries
+            .iter()
+            .map(|module| module.writable_image_size())
+            .sum::<usize>();
+        let main_limit = limit
+            .checked_sub(library_data)
+            .ok_or_else(|| io::Error::other("Shared library data exceeds process limit"))?;
+        Ok(library_data + main.resize_heap(address, main_limit)?)
     }
 }
 

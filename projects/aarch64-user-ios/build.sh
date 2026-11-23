@@ -65,6 +65,7 @@ build_fixture() {
 package_guest() {
     local elf=$1 name=$2
     shift 2
+    printf '%s\n' "$name" >> "$app/guest-images"
     local image="$out/images/$name" framework="$app/Frameworks/$name.framework"
     mkdir -p "$image" "$framework"
     cargo run --quiet --locked --manifest-path "$repo/tools/ios-aot/Cargo.toml" \
@@ -108,7 +109,7 @@ else
             login) framework=ScarletLogin ;;
             ps) framework=ScarletPs ;;
         esac
-        package_guest "$root/bin/$binary" "$framework" --lib-dir "$root/lib"
+        package_guest "$root/bin/$binary" "$framework" --pie
     done
     elf_flags=(-z max-page-size=16384 -z separate-loadable-segments)
     "$clang" -target aarch64-none-elf -c "$project/tests/boot_library.S" -o "$out/boot_library.o"
@@ -119,8 +120,16 @@ else
     for elf in "$root/bin/boot-check" "$root/lib/libboot-check.so"; do
         printf '\123' | dd of="$elf" bs=1 seek=7 conv=notrunc 2>/dev/null
     done
+    package_guest "$root/lib/libboot-check.so" ScarletBootLibrary --dso
+    if [[ "${SCARLET_IOS_TEST_LIBRARIES:-0}" == 1 ]]; then
+        "$clang" -DSCARLET_ALTERNATE_LIBRARY -target aarch64-none-elf -c \
+            "$project/tests/boot_library.S" -o "$out/boot_library_alt.o"
+        ld.lld -shared "${elf_flags[@]}" -soname libboot-check.so "$out/boot_library_alt.o" -o "$root/lib/libboot-check-alt.so"
+        printf '\123' | dd of="$root/lib/libboot-check-alt.so" bs=1 seek=7 conv=notrunc 2>/dev/null
+        package_guest "$root/lib/libboot-check-alt.so" ScarletBootLibraryAlt --dso
+    fi
     package_guest "$root/init" ScarletInit
-    package_guest "$root/bin/boot-check" ScarletBootCheck --lib-dir "$root/lib"
+    package_guest "$root/bin/boot-check" ScarletBootCheck --pie
     (
         cd "$root"
         printf '%s\n' bin bin/* dev init lib lib/* mnt mnt/newroot |

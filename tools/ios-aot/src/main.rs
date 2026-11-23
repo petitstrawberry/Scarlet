@@ -1,6 +1,6 @@
 //! Package Scarlet AArch64 ELF code and its relocations for signed iOS execution.
 
-mod linked;
+mod dynamic;
 
 use scarlet_loader_core::aot::{self, Layout, Segment};
 use sha2::{Digest, Sha256};
@@ -22,6 +22,7 @@ const WRAPPER: &str = r#"
 .globl _scarlet_aot_rx
 _scarlet_aot_rx:
 .incbin "rx.bin"
+// DYNAMIC_STARTUP
 .globl _scarlet_aot_rx_end
 _scarlet_aot_rx_end:
 
@@ -43,19 +44,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input = args.next().map(PathBuf::from);
     let output = args.next().map(PathBuf::from);
     let (Some(input), Some(output)) = (input, output) else {
-        return Err(io::Error::other("usage: scarlet-ios-aot INPUT.elf OUTPUT_DIRECTORY [--lib-dir DIRECTORY]").into());
+        return Err(io::Error::other(
+            "usage: scarlet-ios-aot INPUT.elf OUTPUT_DIRECTORY [--pie|--dso]",
+        )
+        .into());
     };
     if let Some(option) = args.next() {
-        if option != "--lib-dir" {
-            return Err(io::Error::other("Expected --lib-dir DIRECTORY").into());
-        }
-        let directory = args
-            .next()
-            .ok_or_else(|| io::Error::other("Missing library directory"))?;
+        let main = if option == "--pie" {
+            true
+        } else if option == "--dso" {
+            false
+        } else {
+            return Err(io::Error::other("Expected --pie or --dso").into());
+        };
         if args.next().is_some() {
             return Err(io::Error::other("Unexpected extra arguments").into());
         }
-        return linked::package(&input, &output, Path::new(&directory));
+        return dynamic::package(&input, &output, main);
     }
     let bytes = fs::read(&input)?;
     let layout = aot::inspect_aarch64_pie(&bytes, PAGE)?;
@@ -215,7 +220,7 @@ fn package(
         bytes,
         instructions,
     )?;
-    write_payload(output, &rx, &payload, &manifest)
+    write_payload(output, &rx, &payload, &manifest, false)
 }
 
 fn append_text(
@@ -251,11 +256,20 @@ fn write_payload(
     rx: &[u8],
     payload: &[u8],
     manifest: &str,
+    dynamic_startup: bool,
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(output)?;
     fs::write(output.join("rx.bin"), rx)?;
     fs::write(output.join("data.bin"), payload)?;
     fs::write(output.join("manifest"), manifest)?;
-    fs::write(output.join("image.S"), WRAPPER)?;
+    let startup = if dynamic_startup {
+        include_str!("startup.S")
+    } else {
+        ""
+    };
+    fs::write(
+        output.join("image.S"),
+        WRAPPER.replace("// DYNAMIC_STARTUP", startup),
+    )?;
     Ok(())
 }

@@ -1,12 +1,13 @@
 //! File-backed signed text with per-instance mutable pages on iOS.
 
 mod fork;
+mod link;
 mod manifest;
 
 use fork::Backing;
 
 use crate::in_process::SignedText;
-use manifest::{Access, Manifest};
+use manifest::{Access, Kind, Manifest};
 use scarlet_abi::tls::NativeTlsHeader;
 use std::{
     ffi::{CStr, CString, c_void},
@@ -133,6 +134,9 @@ struct Inner {
 pub struct Image(Arc<Inner>);
 
 pub struct Instance {
+    constructors: Option<usize>,
+    text_bytes: usize,
+    writable_bytes: usize,
     text: Arc<SignedText>,
     lease: Arc<Lease>,
 }
@@ -155,7 +159,15 @@ impl Instance {
 
     pub fn startup(&self) -> usize {
         let manifest = &self.lease.image.manifest;
+        if manifest.kind == Kind::Pie && self.constructors.is_none() {
+            return self.entry();
+        }
         self.lease.base + manifest.startup.unwrap_or(manifest.entry)
+    }
+
+    /// Address of the signed startup stub's constructor list, when required.
+    pub fn constructor_list(&self) -> usize {
+        self.constructors.unwrap_or(0)
     }
 
     pub fn tls(&self) -> usize {
@@ -163,7 +175,7 @@ impl Instance {
     }
 
     pub fn stack_top(&self) -> usize {
-        self.tls() + MUTABLE_TAIL
+        self.constructors.unwrap_or(self.tls() + MUTABLE_TAIL)
     }
 
     pub fn heap_start(&self) -> usize {
@@ -175,16 +187,11 @@ impl Instance {
     }
 
     pub fn text_size(&self) -> usize {
-        self.lease
-            .image
-            .manifest
-            .rx_pages()
-            .map(|pages| pages.len())
-            .sum()
+        self.text_bytes
     }
 
     pub fn writable_size(&self) -> usize {
-        self.lease.writable_image_size()
+        self.writable_bytes
     }
 
     pub fn program_headers(&self) -> Option<(usize, usize)> {
@@ -227,11 +234,17 @@ impl std::ops::Deref for Lease {
 }
 
 impl Lease {
+    pub(crate) fn owns_address(&self, address: usize) -> bool {
+        address
+            .checked_sub(self.base)
+            .is_some_and(|offset| offset < self.image.reservation_size())
+    }
+
     fn heap_offset(&self) -> usize {
         self.image.manifest.span + PAGE
     }
 
-    fn writable_image_size(&self) -> usize {
+    pub(crate) fn writable_image_size(&self) -> usize {
         self.image
             .manifest
             .segments
@@ -290,7 +303,10 @@ impl Lease {
             heap..heap + self.heap_bytes.load(Ordering::Acquire),
             end + STACK_OFFSET..end + MUTABLE_TAIL,
         ];
-        let pages = if let Some(bounds) = tail.into_iter().find(|bounds| bounds.contains(&offset)) {
+        let pages = if let Some(bounds) = tail
+            .into_iter()
+            .find(|bounds| manifest.kind != Kind::Dso && bounds.contains(&offset))
+        {
             bounds
         } else {
             let (segment, mut bounds) = manifest.segments.iter().find_map(|segment| {
@@ -323,7 +339,7 @@ impl Drop for Window {
     fn drop(&mut self) {
         let mut pool = self.image.pool.lock().unwrap();
         let slot = &mut pool.slots[self.slot];
-        let total = self.image.manifest.span + MUTABLE_TAIL;
+        let total = self.image.reservation_size();
         let reset = self
             .image
             .manifest
@@ -393,31 +409,87 @@ impl Image {
     }
 
     pub fn instantiate(&self) -> io::Result<Instance> {
-        let inner = &self.0;
-        let lease = inner.acquire()?;
-        let base = lease.base;
-        let manifest = &inner.manifest;
-        let tls = base + manifest.span;
-        inner.initialize(base, tls)?;
-        let ranges = manifest
-            .rx_pages()
-            .map(|rx| (base + rx.start) as u64..(base + rx.end) as u64)
-            .collect();
-        let patches = manifest
-            .patches
-            .iter()
-            .map(|&(pc, patch)| ((base + pc) as u64, patch));
-        // SAFETY: This lease pins the exact immutable file-backed RX range.
+        if self.0.manifest.kind != Kind::Static {
+            return Err(io::Error::other("Dynamic ELF needs a process link context"));
+        }
+        let lease = self.0.acquire()?;
+        self.0.initialize_segments(lease.base)?;
+        self.0.finish_instance(lease.base)?;
+        Instance::from_modules(vec![lease], Vec::new())
+    }
+}
+
+impl Instance {
+    fn from_modules(leases: Vec<Arc<Lease>>, mut constructors: Vec<usize>) -> io::Result<Self> {
+        let lease = leases
+            .first()
+            .ok_or_else(|| io::Error::other("Missing main executable"))?
+            .clone();
+        let mut ranges = Vec::new();
+        let mut patches = Vec::new();
+        let mut text_bytes = 0;
+        let mut writable_bytes = 0;
+        for module in &leases {
+            let base = module.base;
+            writable_bytes += module.writable_image_size();
+            for range in module.image.manifest.rx_pages() {
+                text_bytes += range.len();
+                ranges.push((base + range.start) as u64..(base + range.end) as u64);
+            }
+            patches.extend(
+                module
+                    .image
+                    .manifest
+                    .patches
+                    .iter()
+                    .map(|&(pc, patch)| ((base + pc) as u64, patch)),
+            );
+        }
+        ranges.sort_unstable_by_key(|range| range.start);
+        // Each lease pins its own immutable signed RX ranges.
         let mut text = unsafe { SignedText::from_ranges(ranges, patches)? };
-        text.retain_mapping(lease.clone());
-        Ok(Instance {
+        let constructors = if constructors.is_empty() {
+            None
+        } else {
+            constructors.extend([0, lease.base + lease.image.manifest.entry]);
+            let bytes = (constructors.len() * size_of::<usize>()).next_multiple_of(16);
+            if bytes >= STACK_SIZE {
+                return Err(io::Error::other(
+                    "Constructor list exceeds the process stack",
+                ));
+            }
+            let address = lease.base + lease.image.reservation_size() - bytes;
+            // The unpublished main owns the writable stack and no guest has run.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    constructors.as_ptr(),
+                    ptr::with_exposed_provenance_mut(address),
+                    constructors.len(),
+                )
+            };
+            Some(address)
+        };
+        text.retain_mappings(leases);
+        Ok(Self {
             text: Arc::new(text),
             lease,
+            constructors,
+            text_bytes,
+            writable_bytes,
         })
     }
 }
 
 impl Inner {
+    fn reservation_size(&self) -> usize {
+        self.manifest.span
+            + if self.manifest.kind == Kind::Dso {
+                0
+            } else {
+                MUTABLE_TAIL
+            }
+    }
+
     fn acquire(self: &Arc<Self>) -> io::Result<Arc<Lease>> {
         let mut pool = self.pool.lock().unwrap();
         let slot = if let Some(slot) = pool.slots.iter().position(|slot| slot.state == State::Idle)
@@ -449,7 +521,7 @@ impl Inner {
     }
 
     fn reserve(&self) -> io::Result<usize> {
-        let size = self.manifest.span + MUTABLE_TAIL;
+        let size = self.reservation_size();
         RESERVED
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(size).filter(|&used| used <= MAX_RESERVED)
@@ -494,7 +566,7 @@ impl Inner {
         Ok(base_address)
     }
 
-    fn initialize(&self, base: usize, tls: usize) -> io::Result<()> {
+    fn initialize_segments(&self, base: usize) -> io::Result<()> {
         let manifest = &self.manifest;
         let rw = libc::PROT_READ | libc::PROT_WRITE;
         for segment in &manifest.segments {
@@ -510,6 +582,11 @@ impl Inner {
             let location = ptr::with_exposed_provenance_mut::<usize>(base + destination);
             unsafe { location.write(base + value) };
         }
+        Ok(())
+    }
+
+    fn finish_instance(&self, base: usize) -> io::Result<()> {
+        let manifest = &self.manifest;
         for segment in &manifest.segments {
             if segment.access == Access::ReadOnly {
                 protect(base, segment.pages(), libc::PROT_READ)?;
@@ -518,7 +595,12 @@ impl Inner {
         for relro in &manifest.relro {
             protect(base, relro.clone(), libc::PROT_READ)?;
         }
+        if manifest.kind == Kind::Dso {
+            return Ok(());
+        }
         let end = manifest.span;
+        let rw = libc::PROT_READ | libc::PROT_WRITE;
+        let tls = base + end;
         map_at(base, end..end + PAGE, rw, None)?;
         map_at(base, end + STACK_OFFSET..end + MUTABLE_TAIL, rw, None)?;
         unsafe {

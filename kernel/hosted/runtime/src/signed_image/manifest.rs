@@ -26,7 +26,7 @@ impl Segment {
         align_down(self.address)..align_up(self.address + self.size)
     }
 
-    fn contains(&self, address: usize, length: usize) -> bool {
+    pub(super) fn contains(&self, address: usize, length: usize) -> bool {
         address >= self.address
             && address
                 .checked_add(length)
@@ -41,7 +41,15 @@ pub(super) struct Tls {
     pub memory_size: usize,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub(super) enum Kind {
+    Static,
+    Pie,
+    Dso,
+}
+
 pub(super) struct Manifest {
+    pub kind: Kind,
     pub hash: String,
     pub span: usize,
     pub entry: usize,
@@ -83,9 +91,10 @@ fn range(start: usize, len: usize) -> io::Result<Range<usize>> {
 impl Manifest {
     pub fn parse(manifest: &str, data_size: usize, rx_size: usize) -> io::Result<Self> {
         let mut lines = manifest.lines();
+        let version = lines.next();
         if !matches!(
-            lines.next(),
-            Some("scarlet-ios-image 1" | "scarlet-ios-image 2")
+            version,
+            Some("scarlet-ios-image 1" | "scarlet-ios-image 2" | "scarlet-ios-image 3")
         ) || lines.next() != Some("abi scarlet")
         {
             return Err(invalid("Unsupported signed image version or ABI"));
@@ -105,7 +114,17 @@ impl Manifest {
         if span == 0 || span > MAX_SPAN || !span.is_multiple_of(PAGE) || !entry.is_multiple_of(4) {
             return Err(invalid("Invalid image span or entry alignment"));
         }
+        let kind = if version == Some("scarlet-ios-image 3") {
+            match header("kind ")? {
+                "pie" => Kind::Pie,
+                "dso" => Kind::Dso,
+                _ => return Err(invalid("Invalid ELF object kind")),
+            }
+        } else {
+            Kind::Static
+        };
         let mut result = Self {
+            kind,
             hash: hash.into(),
             span,
             entry,
@@ -233,7 +252,11 @@ impl Manifest {
             })
         };
         if self.rx_pages().map(|pages| pages.len()).sum::<usize>() != rx_size
-            || !file_bounds(self.entry)
+            || (self.kind != Kind::Dso && !file_bounds(self.entry))
+            || (self.kind == Kind::Pie && self.startup.is_none())
+            || (self.kind == Kind::Dso && (self.startup.is_some() || self.tls.is_some()))
+            || (self.kind != Kind::Static
+                && (!self.relocs.is_empty() || !self.dependencies.is_empty()))
             || self
                 .startup
                 .is_some_and(|pc| !pc.is_multiple_of(4) || !file_bounds(pc))

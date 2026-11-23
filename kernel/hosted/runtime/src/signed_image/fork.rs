@@ -1,5 +1,5 @@
 //! Stable kernel aliases for same-address fork siblings on the single iOS carrier.
-use super::{Lease, MAX_RESERVED, MUTABLE_TAIL, RESERVED};
+use super::{Lease, MAX_RESERVED, RESERVED};
 use std::{
     io, ptr,
     sync::{
@@ -72,7 +72,7 @@ impl Lease {
         for range in self
             .image
             .manifest
-            .non_executable_ranges(self.image.manifest.span + MUTABLE_TAIL)
+            .non_executable_ranges(self.image.reservation_size())
         {
             let mut destination = target + range.start;
             let mut current = 0;
@@ -101,7 +101,7 @@ impl Lease {
     }
 
     pub(crate) fn fork(&self) -> io::Result<Arc<Self>> {
-        let size = self.image.manifest.span + MUTABLE_TAIL;
+        let size = self.image.reservation_size();
         let mut resident = self.resident.lock().unwrap();
         let parent = if let Some(parent) = self.backing.get() {
             parent

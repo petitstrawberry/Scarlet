@@ -1575,6 +1575,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "scarlet-abi",
+ "scarlet-loader-core",
  "yaxpeax-arch",
  "yaxpeax-arm",
 ]
@@ -1582,6 +1583,13 @@ dependencies = [
 [[package]]
 name = "scarlet-hosted-sgfx-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "scarlet-loader-core"
+version = "0.1.0"
+dependencies = [
+ "scarlet-abi",
+]
 
 [[package]]
 name = "scarlet-module-prototype"

@@ -149,13 +149,11 @@ fn boot(
     boot_check: bool,
     login: bool,
 ) -> io::Result<()> {
-    for name in [
-        "ScarletInit",
-        "ScarletBootCheck",
-        "ScarletShell",
-        "ScarletLogin",
-        "ScarletPs",
-    ] {
+    let catalog = std::fs::read_to_string(bundle.join("guest-images"))?;
+    for name in catalog.lines() {
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(io::Error::other("Invalid bundle image name"));
+        }
         let path = bundle
             .join("Frameworks")
             .join(format!("{name}.framework/{name}"));

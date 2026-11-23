@@ -64,6 +64,16 @@ fn executable_digest(file: &dyn FileObject) -> Result<String, &'static str> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn library_digest(task: &Task, name: &str) -> Result<String, &'static str> {
+    let vfs = task.get_vfs().ok_or("Missing dependency filesystem")?;
+    let object = vfs
+        .open_executable(&format!("/lib/{name}"))
+        .map_err(|_| "Cannot open shared library")?;
+    let file = object.as_file().ok_or("Invalid shared library")?;
+    file.check_image_execution()?;
+    executable_digest(file)
+}
+
 /// Build the new stack and execution state in the executor's unpublished Task.
 /// TransparentExecutor owns the commit and retires the old lease after it.
 pub(crate) fn prepare(
@@ -83,20 +93,26 @@ pub(crate) fn prepare(
         .cloned()
         .ok_or("Executable is absent from the signed iOS catalog")?;
     for (name, expected) in image.dependencies() {
-        let vfs = task.get_vfs().ok_or("Missing dependency filesystem")?;
-        let dependency = vfs
-            .open_executable(&format!("/lib/{name}"))
-            .map_err(|_| "Cannot open signed dependency")?;
-        let file = dependency.as_file().ok_or("Invalid signed dependency")?;
-        file.check_image_execution()?;
-        if executable_digest(file)? != *expected {
+        if library_digest(task, name)? != *expected {
             return Err("Dependency differs from its signed iOS image");
         }
     }
-    let instance = image.instantiate().map_err(|error| {
-        std::eprintln!("[hosted] signed image {digest}: {error}");
-        "Cannot instantiate signed iOS image"
-    })?;
+    let instance = image
+        .instantiate_with(|name| {
+            let digest = library_digest(task, name).map_err(std::io::Error::other)?;
+            CATALOG
+                .lock()
+                .unwrap()
+                .get(&digest)
+                .cloned()
+                .ok_or_else(|| {
+                    std::io::Error::other("Shared library is absent from the signed iOS catalog")
+                })
+        })
+        .map_err(|error| {
+            std::eprintln!("[hosted] signed image {digest}: {error}");
+            "Cannot instantiate signed iOS image"
+        })?;
     let (phdr, phnum) = instance
         .program_headers()
         .ok_or("Signed image has no mapped ELF headers")?;
@@ -147,6 +163,7 @@ pub(crate) fn prepare(
     vcpu.set_sp(sp);
     vcpu.iregs.reg[0] = argv.len();
     vcpu.iregs.reg[1] = argv_ptr;
+    vcpu.iregs.reg[2] = instance.constructor_list();
     vcpu.switch(tf);
     Ok(result.tls)
 }
