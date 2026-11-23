@@ -13,32 +13,59 @@ struct ScarletApp: App {
 private struct ScarletRootView: View {
     private let session = ScarletSession.shared
     @State private var tab: SessionTab = .desktop
+    @State private var fullScreen = false
 
     private enum SessionTab { case desktop, console }
 
     var body: some View {
-        GeometryReader { geometry in
-            Group {
-                #if SCARLET_EXECUTION_PROBE
-                TerminalView(console: session.console, acceptsInput: false)
-                #else
-                if session.displayEnabled {
-                    TabView(selection: $tab) {
-                        DesktopView(display: session.display, active: tab == .desktop)
-                            .tabItem { Label("Desktop", systemImage: "display") }
-                            .tag(SessionTab.desktop)
-                        TerminalView(console: session.console, acceptsInput: true)
-                            .tabItem { Label("Console", systemImage: "terminal") }
-                            .tag(SessionTab.console)
-                    }
-                } else {
-                    TerminalView(console: session.console, acceptsInput: !session.schedulerCheck)
+        #if SCARLET_EXECUTION_PROBE
+        TerminalView(console: session.console, acceptsInput: false)
+            .onAppear { session.start() }
+        #else
+        if session.displayEnabled {
+            if fullScreen {
+                desktop
+                    .statusBarHidden(true)
+                    .persistentSystemOverlays(.hidden)
+                    .defersSystemGestures(on: .bottom)
+            } else {
+                TabView(selection: $tab) {
+                    desktop
+                        .tabItem { Label("Desktop", systemImage: "display") }
+                        .tag(SessionTab.desktop)
+                    TerminalView(console: session.console, acceptsInput: true)
+                        .tabItem { Label("Console", systemImage: "terminal") }
+                        .tag(SessionTab.console)
                 }
-                #endif
             }
-            .onAppear { session.start(size: geometry.size) }
+        } else {
+            TerminalView(console: session.console, acceptsInput: !session.schedulerCheck)
+                .onAppear { session.start() }
         }
+        #endif
     }
+
+    #if !SCARLET_EXECUTION_PROBE
+    private var desktop: some View {
+        DesktopView(display: session.display, active: tab == .desktop,
+                    fullScreen: fullScreen, resize: session.resize)
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    fullScreen.toggle()
+                } label: {
+                    Image(systemName: fullScreen ? "arrow.down.right.and.arrow.up.left"
+                                                 : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.black.opacity(0.65), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+                .accessibilityLabel(fullScreen ? "Exit Full Screen" : "Enter Full Screen")
+            }
+    }
+    #endif
 }
 
 private func report(_ line: String) {
@@ -65,10 +92,16 @@ private final class ScarletSession {
     let display = DesktopDisplay()
     var schedulerCheck: Bool { arguments.contains("--scheduler-check") }
     var displayEnabled: Bool { !schedulerCheck && arguments.contains("--display") }
+
+    func resize(_ viewport: DesktopViewport) {
+        if display.viewport != viewport { display.viewport = viewport }
+        scarlet_ios_set_display_size(viewport.width, viewport.height)
+        start(width: viewport.width, height: viewport.height)
+    }
     #endif
 
-    func start(size: CGSize) {
-        guard !started, size.width >= 2, size.height >= 2 else { return }
+    func start(width: UInt32 = 0, height: UInt32 = 0) {
+        guard !started else { return }
         started = true
 
         #if SCARLET_EXECUTION_PROBE
@@ -90,15 +123,8 @@ private final class ScarletSession {
                 runSchedulerCheck()
             }
         } else {
-            // Keep the virtual scanout an exact number of logical pixels at
-            // the bundled Desktop's 2x output scale.
-            let width = displayEnabled ? UInt32(size.width) & ~1 : 0
-            let height = displayEnabled ? UInt32(size.height) & ~1 : 0
             let tablet = UIDevice.current.userInterfaceIdiom == .pad || arguments.contains("--tablet")
             let arguments = arguments
-            if displayEnabled {
-                display.prepare(width: Int(width), height: Int(height))
-            }
             DispatchQueue.global(qos: .userInitiated).async {
                 boot(arguments: arguments, width: width, height: height, tablet: tablet)
             }
@@ -130,20 +156,29 @@ private func receiveDamage() {
 private struct DesktopView: View {
     @ObservedObject var display: DesktopDisplay
     let active: Bool
+    let fullScreen: Bool
+    let resize: (DesktopViewport) -> Void
+
+    private var ignoredEdges: Edge.Set {
+        if fullScreen { return .all }
+        return UIDevice.current.userInterfaceIdiom == .pad ? .bottom : []
+    }
 
     var body: some View {
         ZStack {
             Color.black
             if let frame = display.frame {
-                Image(decorative: frame, scale: 1)
+                Image(decorative: display.viewport?.cropped(frame) ?? frame, scale: 1)
                     .resizable()
-                    .scaledToFit()
-                    .overlay {
-                        DesktopTouchCapture(width: frame.width, height: frame.height)
-                            .accessibilityHidden(true)
-                    }
+                    .interpolation(.none)
             }
         }
+        .clipped()
+        .overlay {
+            DesktopTouchCapture(resize: resize)
+                .accessibilityHidden(true)
+        }
+        .ignoresSafeArea(.container, edges: ignoredEdges)
         .accessibilityElement()
         .accessibilityIdentifier("scarlet-display")
         .accessibilityLabel("Scarlet display")
@@ -213,20 +248,22 @@ private struct DesktopTabInput: UIViewRepresentable {
 @MainActor
 private final class DesktopDisplay: ObservableObject {
     @Published private(set) var frame: CGImage?
-    private var width = 0
-    private var height = 0
+    @Published var viewport: DesktopViewport?
+    private var generation: UInt64 = 0
     private let colors = CGColorSpaceCreateDeviceRGB()
     private var pixels = Data()
 
-    func prepare(width: Int, height: Int) {
-        self.width = width
-        self.height = height
-        pixels = Data(count: width * height * 4)
-    }
-
     func render() {
+        let mode = scarlet_ios_frame_info()
+        guard mode.generation != 0 else { return }
+        let width = Int(mode.width)
+        let height = Int(mode.height)
+        if mode.generation != generation {
+            generation = mode.generation
+            pixels = Data(count: width * height * 4)
+        }
         guard pixels.withUnsafeMutableBytes({
-            scarlet_ios_copy_frame($0.baseAddress, $0.count)
+            scarlet_ios_copy_frame($0.baseAddress, $0.count, mode.generation)
         }) else { return }
 
         // The image provider keeps immutable pixels while the next

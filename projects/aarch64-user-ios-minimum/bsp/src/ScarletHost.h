@@ -22,6 +22,7 @@ typedef struct {
 typedef void (*ScarletScreen)(const char *text, ScarletTerminalState state);
 
 #define SCARLET_IOS_TOUCH_SLOTS 16
+#define SCARLET_IOS_TOUCH_MAX 65535
 typedef struct {
     int32_t id;
     int32_t x;
@@ -30,7 +31,15 @@ typedef struct {
 
 void scarlet_ios_touch(const ScarletTouchContact *contacts, size_t count, bool cancelled);
 void scarlet_ios_desktop_tab(void);
-bool scarlet_ios_copy_frame(void *buffer, size_t length);
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint64_t generation;
+} ScarletFrameInfo;
+
+void scarlet_ios_set_display_size(uint32_t width, uint32_t height);
+ScarletFrameInfo scarlet_ios_frame_info(void);
+bool scarlet_ios_copy_frame(void *buffer, size_t length, uint64_t generation);
 bool scarlet_ios_console_send(const void *bytes, size_t length);
 void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login, bool shell,
                       ScarletDisplayConfiguration display, ScarletLog log, ScarletScreen screen);

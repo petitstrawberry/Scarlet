@@ -23,6 +23,7 @@ use std::{
 
 const TOUCH_IRQ: InterruptId = 21;
 const TOUCH_SLOTS: usize = 16;
+const TOUCH_MAX: i32 = 65_535;
 const PENDING_FRAMES: usize = 32;
 const IRQ_BATCH: usize = 8;
 const SYNC: (u16, u16, i32) = (EV_SYN, SYN_REPORT, 0);
@@ -53,27 +54,21 @@ struct TouchInterrupt {
     device: Arc<EventDevice>,
     pending: Mutex<VecDeque<Frame>>,
     previous: IrqSpinLock<Contacts>,
-    max_x: i32,
-    max_y: i32,
 }
 
-pub fn register(devices: &DeviceManager, width: u32, height: u32) -> Result<(), &'static str> {
-    let max_x = width as i32 - 1;
-    let max_y = height as i32 - 1;
+pub fn register(devices: &DeviceManager) -> Result<(), &'static str> {
     let metadata = InputDeviceMetadata::new(
         InputDeviceKind::Touchscreen,
         INPUT_CAP_INTERNAL | INPUT_CAP_DIRECT_TOUCH,
     )
     .with_multitouch_slots(TOUCH_SLOTS)?
-    .with_absolute_axis(ABS_MT_POSITION_X, 0, max_x.max(1))?
-    .with_absolute_axis(ABS_MT_POSITION_Y, 0, max_y.max(1))?;
+    .with_absolute_axis(ABS_MT_POSITION_X, 0, TOUCH_MAX)?
+    .with_absolute_axis(ABS_MT_POSITION_Y, 0, TOUCH_MAX)?;
     let device = Arc::new(EventDevice::new_with_metadata("touchscreen", metadata));
     let input = Arc::new(TouchInterrupt {
         device: device.clone(),
         pending: Mutex::new(VecDeque::with_capacity(PENDING_FRAMES)),
         previous: IrqSpinLock::new([Contact::INACTIVE; TOUCH_SLOTS]),
-        max_x,
-        max_y,
     });
 
     let interrupts = InterruptManager::global();
@@ -204,8 +199,8 @@ pub unsafe extern "C" fn scarlet_ios_touch(
         if contact.id >= 0 {
             *point = Contact {
                 id: contact.id,
-                x: contact.x.clamp(0, touch.max_x),
-                y: contact.y.clamp(0, touch.max_y),
+                x: contact.x.clamp(0, TOUCH_MAX),
+                y: contact.y.clamp(0, TOUCH_MAX),
             };
         }
     }

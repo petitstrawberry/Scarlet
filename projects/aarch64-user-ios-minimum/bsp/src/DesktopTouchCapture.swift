@@ -2,21 +2,42 @@
 import SwiftUI
 import UIKit
 
+struct DesktopViewport: Equatable {
+    let pixels: CGSize
+    let width: UInt32
+    let height: UInt32
+
+    init?(points: CGSize, nativeScale: CGFloat) {
+        let width = (points.width * nativeScale).rounded()
+        let height = (points.height * nativeScale).rounded()
+        guard (2...4096).contains(width), (2...4096).contains(height) else { return nil }
+        pixels = CGSize(width: width, height: height)
+        // Give the guest a complete two-pixel logical cell on odd edges.
+        self.width = (UInt32(width) + 1) & ~1
+        self.height = (UInt32(height) + 1) & ~1
+    }
+
+    func cropped(_ image: CGImage) -> CGImage {
+        guard image.width == Int(width), image.height == Int(height),
+              pixels.width != CGFloat(width) || pixels.height != CGFloat(height) else {
+            return image
+        }
+        return image.cropping(to: CGRect(origin: .zero, size: pixels)) ?? image
+    }
+}
+
 struct DesktopTouchCapture: UIViewRepresentable {
-    let width: Int
-    let height: Int
+    let resize: (DesktopViewport) -> Void
 
     func makeUIView(context: Context) -> TouchView {
         let view = TouchView()
         view.isMultipleTouchEnabled = true
-        view.width = width
-        view.height = height
+        view.resize = resize
         return view
     }
 
     func updateUIView(_ view: TouchView, context: Context) {
-        view.width = width
-        view.height = height
+        view.resize = resize
     }
 
     static func dismantleUIView(_ view: TouchView, coordinator: ()) {
@@ -28,10 +49,11 @@ struct DesktopTouchCapture: UIViewRepresentable {
         private var owners = [ObjectIdentifier?](repeating: nil, count: Int(SCARLET_IOS_TOUCH_SLOTS))
         private var contacts = [ScarletTouchContact](repeating: inactive, count: Int(SCARLET_IOS_TOUCH_SLOTS))
         private var nextID: Int32 = 0
-        var width = 1
-        var height = 1
+        var resize: ((DesktopViewport) -> Void)?
+        private var viewport: DesktopViewport?
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard viewport != nil else { return }
             var changed = false
             for touch in touches where touch.type == .direct || touch.type == .pencil {
                 guard let slot = owners.firstIndex(of: nil) else { break }
@@ -64,7 +86,29 @@ struct DesktopTouchCapture: UIViewRepresentable {
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            if window == nil { releaseContacts() }
+            if window == nil {
+                viewport = nil
+                releaseContacts()
+            } else {
+                setNeedsLayout()
+            }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let screen = window?.windowScene?.screen,
+                  let size = DesktopViewport(points: bounds.size, nativeScale: screen.nativeScale) else {
+                viewport = nil
+                releaseContacts()
+                return
+            }
+            guard size != viewport else { return }
+            releaseContacts()
+            viewport = size
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.viewport == size, self.window != nil else { return }
+                self.resize?(size)
+            }
         }
 
         func releaseContacts() {
@@ -89,14 +133,22 @@ struct DesktopTouchCapture: UIViewRepresentable {
         }
 
         private func update(_ touch: UITouch, at slot: Int) {
+            guard let viewport else { return }
             let location = touch.location(in: self)
-            contacts[slot].x = Self.pixel(location.x, in: bounds.width, extent: width)
-            contacts[slot].y = Self.pixel(location.y, in: bounds.height, extent: height)
+            contacts[slot].x = Self.coordinate(
+                location.x, in: bounds.width, visiblePixels: viewport.pixels.width, scanout: viewport.width
+            )
+            contacts[slot].y = Self.coordinate(
+                location.y, in: bounds.height, visiblePixels: viewport.pixels.height, scanout: viewport.height
+            )
         }
 
-        private static func pixel(_ point: CGFloat, in length: CGFloat, extent: Int) -> Int32 {
-            let position = length > 0 ? point * CGFloat(extent) / length : 0
-            return Int32(min(max(0, position), CGFloat(extent - 1)))
+        private static func coordinate(
+            _ point: CGFloat, in length: CGFloat, visiblePixels: CGFloat, scanout: UInt32
+        ) -> Int32 {
+            let position = length > 0 ? min(max(0, point / length), 1) : 0
+            let normalized = position * visiblePixels / CGFloat(scanout)
+            return Int32((normalized * CGFloat(SCARLET_IOS_TOUCH_MAX)).rounded())
         }
 
         private func publish(cancelled: Bool = false) {
