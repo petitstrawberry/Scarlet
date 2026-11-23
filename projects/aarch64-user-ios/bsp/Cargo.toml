@@ -9,6 +9,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 libc = "0.2"
+vt100 = "0.16"
 scarlet = { path = "../../../kernel", default-features = false, features = ["hosted", "network", "user-fpu", "user-vector"] }
 scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
 scarlet-hosted-runtime = { path = "../../../kernel/hosted/runtime" }

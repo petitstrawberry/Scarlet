@@ -10,7 +10,7 @@ use scarlet_hosted_runtime::signed_image::Image;
 use std::{
     cell::RefCell,
     ffi::{CStr, OsStr, c_char},
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, Read, Write},
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::Path,
     sync::{Arc, OnceLock, mpsc},
@@ -56,20 +56,28 @@ fn populate(manager: &DeviceManager, priority: DriverPriority) {
     }
 }
 
-fn forward_console(stream: UnixStream, callback: Log) -> io::Result<()> {
-    let mut reader = BufReader::new(stream);
-    let mut line = Vec::new();
-    while (&mut reader).take(4096).read_until(b'\n', &mut line)? != 0 {
-        let message = String::from_utf8_lossy(&line)
-            .trim_end_matches(['\r', '\n'])
-            .replace('\0', "\u{fffd}");
-        log(callback, &message);
-        line.clear();
+fn forward_console(mut stream: UnixStream, screen: Log) -> io::Result<()> {
+    let mut terminal = vt100::Parser::new(24, 80, 0);
+    let mut bytes = [0; 4096];
+    loop {
+        let length = stream.read(&mut bytes)?;
+        if length == 0 {
+            return Ok(());
+        }
+        let bytes = &bytes[..length];
+        io::stderr().write_all(bytes)?;
+        terminal.process(bytes);
+        log(screen, &terminal.screen().contents());
     }
-    Ok(())
 }
 
-fn boot(bundle: &Path, root: &Path, callback: Log, boot_check: bool) -> io::Result<()> {
+fn boot(
+    bundle: &Path,
+    root: &Path,
+    callback: Log,
+    screen: Log,
+    boot_check: bool,
+) -> io::Result<()> {
     for name in ["ScarletInit", "ScarletBootCheck", "ScarletShell"] {
         let path = bundle
             .join("Frameworks")
@@ -102,7 +110,7 @@ fn boot(bundle: &Path, root: &Path, callback: Log, boot_check: bool) -> io::Resu
     thread::Builder::new()
         .name("scarlet-console-output".into())
         .spawn(move || {
-            if let Err(error) = forward_console(host, callback) {
+            if let Err(error) = forward_console(host, screen) {
                 log(callback, &format!("Cannot read Scarlet console: {error}"));
             }
         })?;
@@ -150,6 +158,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     root: *const c_char,
     boot_check: bool,
     callback: Log,
+    screen: Log,
 ) {
     let bundle = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(bundle) }.to_bytes(),
@@ -157,7 +166,7 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     let root = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(root) }.to_bytes(),
     ));
-    if let Err(error) = boot(bundle, root, callback, boot_check) {
+    if let Err(error) = boot(bundle, root, callback, screen, boot_check) {
         log(callback, &format!("SCARLET_BOOT_FAIL: {error}"));
     }
 }

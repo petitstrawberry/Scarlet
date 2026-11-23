@@ -3,7 +3,8 @@
 #ifdef SCARLET_EXECUTION_PROBE
 #import "probe.h"
 #else
-extern void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, void (*log)(const char *));
+extern void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck,
+    void (*log)(const char *), void (*screen)(const char *));
 extern bool scarlet_ios_console_send(const void *bytes, size_t length);
 extern void scarlet_ios_run(const char *image, const char *elf, void (*log)(const char *));
 #endif
@@ -20,6 +21,14 @@ static void show_line(const char *line) {
 }
 
 #ifndef SCARLET_EXECUTION_PROBE
+static void show_screen(const char *text) {
+    NSString *snapshot = [NSString stringWithUTF8String:text];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        output.text = snapshot;
+        [output scrollRangeToVisible:NSMakeRange(snapshot.length, 0)];
+    });
+}
+
 static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
     NSFileManager *manager = NSFileManager.defaultManager;
     NSURL *directory = [manager URLForDirectory:NSApplicationSupportDirectory
@@ -117,7 +126,7 @@ static NSURL *prepare_root(NSBundle *bundle, NSError **error) {
                     return;
                 }
                 scarlet_ios_boot(bundle.bundlePath.fileSystemRepresentation, root.fileSystemRepresentation,
-                    [NSProcessInfo.processInfo.arguments containsObject:@"--boot-check"], show_line);
+                    [NSProcessInfo.processInfo.arguments containsObject:@"--boot-check"], show_line, show_screen);
             }
         });
 #endif
