@@ -25,6 +25,6 @@ fn register_ethernet() {
     };
     match hosted_network::attach(0, ETHERNET_IRQ, library.clone()) {
         Ok(()) => scarlet::println!("[hosted Ethernet] eth0 connected to the native NAT"),
-        Err(error) => scarlet::println!("[hosted Ethernet] {error}"),
+        Err(error) => scarlet::println!("[hosted Ethernet] {}", error),
     }
 }
