@@ -53,6 +53,8 @@ impl BootDisplay {
     pub fn register(self, manager: &DeviceManager, stop: Option<Stop>) -> Result<(), &'static str> {
         let proxy = self.proxy.clone();
         let scanout = Scanout::new(
+            "macos-display",
+            "Scarlet macOS window",
             self.config.clone(),
             self.frames,
             Arc::new(move || {
