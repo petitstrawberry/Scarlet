@@ -1,6 +1,6 @@
 # Scarlet on iOS
 
-`bsp/` に iOS のホスト起動コード、`bsp/src/main.m` に UIKit のエントリポイント、`bsp/tests/` に実行検証用のコードを置きます。
+`bsp/` に iOS のホスト起動コード、`bsp/src/ScarletApp.swift` に SwiftUI のエントリポイント、`bsp/tests/` に実行検証用のコードを置きます。
 
 ## Simulator で Scarlet を起動
 
@@ -14,9 +14,13 @@ projects/aarch64-user-ios-minimum/tools/scarlet_ios.sh run --release --locked
 
 初回起動時にアプリは同梱の ext2 イメージを Application Support の `scarlet-root.ext2` にコピーします。以降の起動では同じファイルを `/dev/hostroot` として使います。
 
-通常起動では Rust 製の `/init` が PID 1 で `/dev/tty0` を初期化し、ext2 へのルート切り替え後に `stemd` を起動します。共通バンドルのサービス設定に従って `logd`、`sbusd`、`login` などが起動します。UIKit の `TTY input` 欄でログインし、`ps -l` を入力すると、ゲストのプロセス一覧が表示されます。端末画面は UTF-8 とカーソル制御を処理し、改行前のプロンプトも表示します。
+通常起動では Rust 製の `/init` が PID 1 で `/dev/tty0` を初期化し、ext2 へのルート切り替え後に `stemd` を起動します。共通バンドルのサービス設定に従って `logd`、`sbusd`、`login` などが起動します。
+
+Console の画面をタップするとキーボードで操作できます。入力はゲストの TTY に届き、文字の表示、行編集、履歴の呼び出しはゲスト側が処理します。画面下部の `Esc`、`Tab`、`Ctrl`、矢印キーも使えます。`Ctrl` は次の一文字に適用されます。
 
 単独起動の確認には `--login` または `--shell` を使えます。初期のコンソールアカウントは `root`、パスワードは空です。シェルで `exit` すると次のログインを受け付けます。
+
+起動引数に `--display` を渡すと Scarlet のフレームバッファを表示する Desktop 画面が開きます。Console タブでゲストの端末に切り替えられます。iPad ではゲストのタブレットスイッチがオンになり、iPhone の Simulator では `--tablet` で同じ状態を検証できます。
 
 `/bin` と `/lib` は現在のアプリに同梱した initramfs を参照します。初期ディスクのリンクは `rootfs/` で定義し、コンソールアカウントは SDK の `console-root` で作成します。`--boot-check` では検証用の共有ライブラリを呼び出し、ext2 のファイルを初回起動で作成して同期し、再起動後に値を読み戻します。成功時には `SCARLET_ROOT_WRITTEN` または `SCARLET_ROOT_REOPENED` に続いて `SCARLET_BOOT_PASS` が表示されます。
 

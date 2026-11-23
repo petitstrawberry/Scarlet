@@ -51,7 +51,6 @@ else
 fi
 app="$out/$app_name.app"
 mkdir -p "$app"
-link_flags=(-framework UIKit -framework Foundation)
 
 build_fixture() {
     local source=$1 entry=$2 elf=$3
@@ -79,7 +78,6 @@ package_guest() {
 }
 
 if $probe; then
-    flags+=(-DSCARLET_EXECUTION_PROBE -I "$probe_src")
     framework="$app/Frameworks/ScarletFixture.framework"
     mkdir -p "$framework"
     "$clang" "${flags[@]}" -dynamiclib -nostdlib \
@@ -106,8 +104,17 @@ else
 fi
 bundle_id=${BUNDLE_ID:-"$default_id"}
 if $probe; then
-    "$clang" "${flags[@]}" -fobjc-arc "$project/bsp/src/main.m" "${implementation[@]}" \
-        "${link_flags[@]}" -o "$app/$app_name"
+    objects=()
+    for source in "${implementation[@]}"; do
+        object="$out/$(basename "$source").o"
+        "$clang" "${flags[@]}" -c "$source" -o "$object"
+        objects+=("$object")
+    done
+    /usr/bin/xcrun --sdk "$sdk" swiftc -target "$target" -sdk "$sdkroot" \
+        -swift-version 6 -warnings-as-errors -O -parse-as-library -D SCARLET_EXECUTION_PROBE \
+        -import-objc-header "$probe_src/probe.h" "$project/bsp/src/ScarletApp.swift" \
+        "$project/bsp/src/TerminalView.swift" \
+        "${objects[@]}" -o "$app/$app_name"
 fi
 
 entitlements="$out/entitlements.plist"
@@ -145,15 +152,11 @@ for directory, name, kind, ident in bundles:
     if kind == "APPL":
         info.update(
             CFBundleDisplayName=display_name,
+            CFBundleDevelopmentRegion="en",
             UIDeviceFamily=[1, 2],
             UILaunchScreen={},
             UIApplicationSceneManifest={
                 "UIApplicationSupportsMultipleScenes": False,
-                "UISceneConfigurations": {
-                    "UIWindowSceneSessionRoleApplication": [
-                        {"UISceneDelegateClassName": "ProbeScene"}
-                    ]
-                },
             },
         )
     (Path(directory) / "Info.plist").write_bytes(plistlib.dumps(info))

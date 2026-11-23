@@ -4,6 +4,7 @@
 #[path = "../../../shared/hosted/block.rs"]
 mod block;
 mod boot;
+mod display;
 #[allow(dead_code)]
 #[path = "../../../shared/hosted/root_image.rs"]
 mod root_image;

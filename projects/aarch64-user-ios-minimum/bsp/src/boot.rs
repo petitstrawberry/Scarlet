@@ -13,7 +13,7 @@ use scarlet::{
 use scarlet_hosted_runtime::signed_image::Image;
 use std::{
     cell::RefCell,
-    ffi::{CStr, OsStr, c_char},
+    ffi::{CStr, CString, OsStr, c_char},
     io::{self, Read, Write},
     os::unix::{ffi::OsStrExt, net::UnixStream},
     path::Path,
@@ -21,13 +21,25 @@ use std::{
     thread,
 };
 
-use crate::{Log, block::RootBlock, log, root_image::RootImage, terminal::HostTerminal};
+use crate::{Log, block::RootBlock, display, log, root_image::RootImage, terminal::HostTerminal};
 
 const CONSOLE_INPUT_LIMIT: usize = 4096;
 static CONSOLE_INPUT: OnceLock<mpsc::SyncSender<Vec<u8>>> = OnceLock::new();
 
+#[repr(C)]
+pub struct TerminalState {
+    row: u16,
+    column: u16,
+    cursor_visible: bool,
+    application_cursor: bool,
+    bracketed_paste: bool,
+}
+
+type Screen = extern "C" fn(*const c_char, TerminalState);
+
 thread_local! {
     static CONSOLE: RefCell<Option<(UnixStream, Log)>> = const { RefCell::new(None) };
+    static DISPLAY: RefCell<Option<display::Configuration>> = const { RefCell::new(None) };
     static ROOT: RefCell<Option<RootImage>> = const { RefCell::new(None) };
     static TERMINAL: RefCell<Option<HostTerminal>> = const { RefCell::new(None) };
 }
@@ -124,10 +136,15 @@ fn populate(manager: &DeviceManager, priority: DriverPriority) {
             ),
         }
     }
+    if let Some(display) = DISPLAY.take()
+        && let Err(error) = display.register(manager)
+    {
+        log(callback, &format!("Cannot register iOS display: {error}"));
+    }
 }
 
-fn forward_console(mut stream: UnixStream, screen: Log) -> io::Result<()> {
-    let mut terminal = vt100::Parser::new(24, 80, 0);
+fn forward_console(mut stream: UnixStream, callback: Screen) -> io::Result<()> {
+    let mut terminal = vt100::Parser::new(25, 80, 0);
     let mut bytes = [0; 4096];
     loop {
         let length = stream.read(&mut bytes)?;
@@ -137,7 +154,20 @@ fn forward_console(mut stream: UnixStream, screen: Log) -> io::Result<()> {
         let bytes = &bytes[..length];
         io::stderr().write_all(bytes)?;
         terminal.process(bytes);
-        log(screen, &terminal.screen().contents());
+        let screen = terminal.screen();
+        let (_, columns) = screen.size();
+        let rows = screen.rows(0, columns).collect::<Vec<_>>().join("\n");
+        let (row, column) = screen.cursor_position();
+        let state = TerminalState {
+            row,
+            column,
+            cursor_visible: !screen.hide_cursor(),
+            application_cursor: screen.application_cursor(),
+            bracketed_paste: screen.bracketed_paste(),
+        };
+        if let Ok(rows) = CString::new(rows) {
+            callback(rows.as_ptr(), state);
+        }
     }
 }
 
@@ -145,10 +175,11 @@ fn boot(
     bundle: &Path,
     root: &Path,
     callback: Log,
-    screen: Log,
+    screen: Screen,
     boot_check: bool,
     login: bool,
     shell: bool,
+    display: display::Configuration,
 ) -> io::Result<()> {
     let catalog = std::fs::read_to_string(bundle.join("guest-images"))?;
     for name in catalog.lines() {
@@ -195,6 +226,7 @@ fn boot(
         .map_err(|_| io::Error::other("Scarlet console input is already running"))?;
     CONSOLE.set(Some((guest, callback)));
     ROOT.set(Some(root));
+    DISPLAY.set(Some(display));
     platform.boot(
         &initramfs,
         if boot_check {
@@ -210,7 +242,7 @@ fn boot(
     )
 }
 
-/// Queue bytes for the host I/O thread without blocking UIKit.
+/// Queue bytes for the host I/O thread without blocking the keyboard.
 ///
 /// # Safety
 ///
@@ -239,8 +271,9 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     boot_check: bool,
     login: bool,
     shell: bool,
+    display: display::Configuration,
     callback: Log,
-    screen: Log,
+    screen: Screen,
 ) {
     let bundle = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(bundle) }.to_bytes(),
@@ -248,7 +281,9 @@ pub unsafe extern "C" fn scarlet_ios_boot(
     let root = Path::new(OsStr::from_bytes(
         unsafe { CStr::from_ptr(root) }.to_bytes(),
     ));
-    if let Err(error) = boot(bundle, root, callback, screen, boot_check, login, shell) {
+    if let Err(error) = boot(
+        bundle, root, callback, screen, boot_check, login, shell, display,
+    ) {
         log(callback, &format!("SCARLET_BOOT_FAIL: {error}"));
     }
 }
