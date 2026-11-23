@@ -1,8 +1,14 @@
 //! Timed animations require an explicitly recognized, actually selected GPU.
 pub(super) fn backend_is_accelerated(selected_backend: &str) -> bool {
+    // The hosted SGFX driver connects to the Apple BSP's Metal device.
     matches!(
         selected_backend,
-        "wgpu" | "metal" | "scarlet-virgl" | "scarlet-adreno" | "scarlet-maxwell"
+        "wgpu"
+            | "metal"
+            | "scarlet-hosted"
+            | "scarlet-virgl"
+            | "scarlet-adreno"
+            | "scarlet-maxwell"
     )
 }
 
@@ -11,10 +17,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_gpu_backends_include_dynamically_loaded_maxwell() {
+    fn known_gpu_backends_include_hosted_metal_and_dynamically_loaded_maxwell() {
         for name in [
             "wgpu",
             "metal",
+            "scarlet-hosted",
             "scarlet-virgl",
             "scarlet-adreno",
             "scarlet-maxwell",
