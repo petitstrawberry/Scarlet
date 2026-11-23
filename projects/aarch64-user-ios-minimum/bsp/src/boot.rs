@@ -199,9 +199,10 @@ fn boot(
         return Err(io::Error::other("Empty Scarlet initramfs"));
     }
     let root = RootImage::open(root)?;
-    // Desktop runs the compositor, greeter and input panel concurrently.
+    // A native-resolution desktop shares guest RAM with applications and
+    // their compositor buffers.
     let ram_mib = if display.width != 0 && display.height != 0 {
-        1024
+        2048
     } else {
         256
     };
