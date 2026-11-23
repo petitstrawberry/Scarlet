@@ -28,7 +28,6 @@ private struct ScarletRootView: View {
             Group {
                 if fullScreen {
                     desktop
-                        .statusBarHidden(true)
                 } else {
                     TabView(selection: $tab) {
                         desktop
