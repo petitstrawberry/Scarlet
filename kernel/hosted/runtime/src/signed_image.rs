@@ -153,6 +153,11 @@ impl Instance {
         self.lease.base + self.lease.image.manifest.entry
     }
 
+    pub fn startup(&self) -> usize {
+        let manifest = &self.lease.image.manifest;
+        self.lease.base + manifest.startup.unwrap_or(manifest.entry)
+    }
+
     pub fn tls(&self) -> usize {
         self.lease.base + self.lease.image.manifest.span
     }
@@ -170,7 +175,12 @@ impl Instance {
     }
 
     pub fn text_size(&self) -> usize {
-        self.lease.image.manifest.rx_pages().len()
+        self.lease
+            .image
+            .manifest
+            .rx_pages()
+            .map(|pages| pages.len())
+            .sum()
     }
 
     pub fn writable_size(&self) -> usize {
@@ -291,7 +301,7 @@ impl Lease {
                 if segment.access != Access::ReadWrite {
                     return None;
                 }
-                if let Some(relro) = &manifest.relro {
+                for relro in &manifest.relro {
                     if relro.contains(&offset) {
                         return None;
                     }
@@ -313,13 +323,13 @@ impl Drop for Window {
     fn drop(&mut self) {
         let mut pool = self.image.pool.lock().unwrap();
         let slot = &mut pool.slots[self.slot];
-        let rx = self.image.manifest.rx_pages();
         let total = self.image.manifest.span + MUTABLE_TAIL;
-        let reset = |range| map_at(self.base, range, libc::PROT_NONE, None);
-        // Never replace the executable or return its virtual range to Darwin.
-        let before = reset(0..rx.start);
-        let after = reset(rx.end..total);
-        slot.state = if before.is_ok() && after.is_ok() {
+        let reset = self
+            .image
+            .manifest
+            .non_executable_ranges(total)
+            .try_for_each(|range| map_at(self.base, range, libc::PROT_NONE, None));
+        slot.state = if reset.is_ok() {
             State::Idle
         } else {
             State::Unavailable
@@ -378,6 +388,10 @@ impl Image {
         &self.0.manifest.hash
     }
 
+    pub fn dependencies(&self) -> &[(String, String)] {
+        &self.0.manifest.dependencies
+    }
+
     pub fn instantiate(&self) -> io::Result<Instance> {
         let inner = &self.0;
         let lease = inner.acquire()?;
@@ -385,14 +399,16 @@ impl Image {
         let manifest = &inner.manifest;
         let tls = base + manifest.span;
         inner.initialize(base, tls)?;
-        let rx = manifest.rx_pages();
+        let ranges = manifest
+            .rx_pages()
+            .map(|rx| (base + rx.start) as u64..(base + rx.end) as u64)
+            .collect();
         let patches = manifest
             .patches
             .iter()
             .map(|&(pc, patch)| ((base + pc) as u64, patch));
         // SAFETY: This lease pins the exact immutable file-backed RX range.
-        let mut text =
-            unsafe { SignedText::new((base + rx.start) as u64..(base + rx.end) as u64, patches)? };
+        let mut text = unsafe { SignedText::from_ranges(ranges, patches)? };
         text.retain_mapping(lease.clone());
         Ok(Instance {
             text: Arc::new(text),
@@ -454,18 +470,26 @@ impl Inner {
             return Err(io::Error::last_os_error());
         }
         let base_address = base.expose_provenance();
-        let rx = self.manifest.rx_pages();
-        if let Err(error) = map_at(
-            base_address,
-            rx,
-            libc::PROT_READ | libc::PROT_EXEC,
-            Some((&self.file, self.rx.start)),
-        ) {
-            unsafe { libc::munmap(base, size) };
-            RESERVED.fetch_sub(size, Ordering::Release);
-            return Err(io::Error::other(format!(
-                "mmap signed executable segment: {error}"
-            )));
+        let mut file_offset = self.rx.start;
+        for rx in self.manifest.rx_pages() {
+            let length = rx.len();
+            if let Err(error) = map_at(
+                base_address,
+                rx,
+                libc::PROT_READ | libc::PROT_EXEC,
+                Some((&self.file, file_offset)),
+            ) {
+                // Darwin may retain an already mapped signed range. Account
+                // the failed reservation permanently if any RX was installed.
+                if file_offset == self.rx.start {
+                    unsafe { libc::munmap(base, size) };
+                    RESERVED.fetch_sub(size, Ordering::Release);
+                }
+                return Err(io::Error::other(format!(
+                    "mmap signed executable segment: {error}"
+                )));
+            }
+            file_offset += length;
         }
         Ok(base_address)
     }
@@ -491,7 +515,7 @@ impl Inner {
                 protect(base, segment.pages(), libc::PROT_READ)?;
             }
         }
-        if let Some(relro) = &manifest.relro {
+        for relro in &manifest.relro {
             protect(base, relro.clone(), libc::PROT_READ)?;
         }
         let end = manifest.span;

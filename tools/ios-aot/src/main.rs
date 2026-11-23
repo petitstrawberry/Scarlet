@@ -1,4 +1,6 @@
-//! Convert a self-contained Scarlet AArch64 PIE to a signable Mach-O payload.
+//! Package Scarlet AArch64 ELF code and its relocations for signed iOS execution.
+
+mod linked;
 
 use scarlet_loader_core::aot::{self, Layout, Segment};
 use sha2::{Digest, Sha256};
@@ -40,9 +42,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
     let input = args.next().map(PathBuf::from);
     let output = args.next().map(PathBuf::from);
-    let (Some(input), Some(output), None) = (input, output, args.next()) else {
-        return Err(io::Error::other("usage: scarlet-ios-aot INPUT.elf OUTPUT_DIRECTORY").into());
+    let (Some(input), Some(output)) = (input, output) else {
+        return Err(io::Error::other("usage: scarlet-ios-aot INPUT.elf OUTPUT_DIRECTORY [--lib-dir DIRECTORY]").into());
     };
+    if let Some(option) = args.next() {
+        if option != "--lib-dir" {
+            return Err(io::Error::other("Expected --lib-dir DIRECTORY").into());
+        }
+        let directory = args
+            .next()
+            .ok_or_else(|| io::Error::other("Missing library directory"))?;
+        if args.next().is_some() {
+            return Err(io::Error::other("Unexpected extra arguments").into());
+        }
+        return linked::package(&input, &output, Path::new(&directory));
+    }
     let bytes = fs::read(&input)?;
     let layout = aot::inspect_aarch64_pie(&bytes, PAGE)?;
     if layout.address_span.len() > MAX_SPAN {
@@ -192,19 +206,52 @@ fn package(
         writeln!(manifest, "reloc {} {}", target - origin, value - origin)?;
     }
 
-    let text_page = text.vaddr & !(PAGE - 1);
-    let padding = text.vaddr - text_page;
-    let mut rx = vec![0; (padding + text.memory_size).next_multiple_of(PAGE)];
-    rx[padding..padding + text.file_size]
+    let mut rx = Vec::new();
+    append_text(
+        &mut rx,
+        &mut manifest,
+        text.vaddr - origin,
+        text,
+        bytes,
+        instructions,
+    )?;
+    write_payload(output, &rx, &payload, &manifest)
+}
+
+fn append_text(
+    rx: &mut Vec<u8>,
+    manifest: &mut String,
+    address: usize,
+    text: &Segment,
+    bytes: &[u8],
+    instructions: &BTreeSet<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let padding = address % PAGE;
+    let start = rx.len() + padding;
+    rx.resize(
+        rx.len() + (padding + text.memory_size).next_multiple_of(PAGE),
+        0,
+    );
+    rx[start..start + text.file_size]
         .copy_from_slice(&bytes[text.offset..text.offset + text.file_size]);
     for &pc in instructions {
-        let instruction = &mut rx[pc - text_page..pc - text_page + 4];
+        let offset = pc - text.vaddr;
+        let instruction = &mut rx[start + offset..start + offset + 4];
         let word = u32::from_le_bytes(instruction.try_into().unwrap());
         if let Some(breakpoint) = patch(word) {
-            writeln!(manifest, "patch {} {word:08x}", pc - origin)?;
+            writeln!(manifest, "patch {} {word:08x}", address + offset)?;
             instruction.copy_from_slice(&breakpoint.to_le_bytes());
         }
     }
+    Ok(())
+}
+
+fn write_payload(
+    output: &Path,
+    rx: &[u8],
+    payload: &[u8],
+    manifest: &str,
+) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(output)?;
     fs::write(output.join("rx.bin"), rx)?;
     fs::write(output.join("data.bin"), payload)?;

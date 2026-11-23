@@ -67,7 +67,7 @@ impl Patch {
 }
 
 pub struct SignedText {
-    bounds: Range<u64>,
+    bounds: Arc<[Range<u64>]>,
     patches: Arc<BTreeMap<u64, Patch>>,
     lease: Option<Arc<crate::signed_image::Lease>>,
 }
@@ -84,12 +84,25 @@ impl SignedText {
         bounds: Range<u64>,
         patches: impl IntoIterator<Item = (u64, Patch)>,
     ) -> io::Result<Self> {
-        if bounds.start >= bounds.end || (bounds.start | bounds.end) & 3 != 0 {
+        unsafe { Self::from_ranges(vec![bounds], patches) }
+    }
+
+    // Same mapping lifetime and instruction trust contract as new().
+    pub(crate) unsafe fn from_ranges(
+        bounds: Vec<Range<u64>>,
+        patches: impl IntoIterator<Item = (u64, Patch)>,
+    ) -> io::Result<Self> {
+        if bounds.is_empty()
+            || bounds
+                .iter()
+                .any(|range| range.start >= range.end || (range.start | range.end) & 3 != 0)
+            || bounds.windows(2).any(|pair| pair[0].end > pair[1].start)
+        {
             return Err(io::Error::other("Invalid signed text bounds"));
         }
         let mut sites = BTreeMap::new();
         for (pc, patch) in patches {
-            if !bounds.contains(&pc)
+            if !bounds.iter().any(|range| range.contains(&pc))
                 || pc & 3 != 0
                 || matches!(patch, Patch::ReadTls(reg) | Patch::WriteTls(reg) if reg > 31 || reg == 18)
             {
@@ -106,7 +119,7 @@ impl SignedText {
             }
         }
         Ok(Self {
-            bounds,
+            bounds: bounds.into(),
             patches: Arc::new(sites),
             lease: None,
         })
@@ -117,7 +130,7 @@ impl SignedText {
     }
 
     pub fn contains(&self, pc: u64) -> bool {
-        self.bounds.contains(&pc)
+        self.bounds.iter().any(|range| range.contains(&pc))
     }
 
     pub fn user_bounds(&self, address: usize, write: bool) -> Option<Range<usize>> {
@@ -302,8 +315,8 @@ impl Carrier {
 struct Frame {
     host: Registers,
     guest: Registers,
-    text_start: u64,
-    text_end: u64,
+    // The request retains this immutable table throughout signal delivery.
+    text: usize,
     serial: u64,
     interrupted: bool,
     esr: u32,
@@ -334,8 +347,7 @@ impl Control {
                 self.frame.get().write(Frame {
                     guest: registers,
                     serial: request.serial,
-                    text_start: request.text.bounds.start,
-                    text_end: request.text.bounds.end,
+                    text: Arc::as_ptr(&request.text).expose_provenance(),
                     ..Frame::default()
                 });
             }
@@ -551,7 +563,10 @@ unsafe extern "C" fn handle_signal(signal: i32, info: *mut libc::siginfo_t, raw:
             return;
         }
         if (timer && stop_requested)
-            || (!timer && ((frame.text_start..frame.text_end).contains(&pc) || instruction_fault))
+            || (!timer
+                && (unsafe {
+                    (*ptr::with_exposed_provenance::<SignedText>(frame.text)).contains(pc)
+                } || instruction_fault))
         {
             control.mode.store(EXITING, Ordering::SeqCst);
             let mut guest = Registers::capture(context);

@@ -82,6 +82,17 @@ pub(crate) fn prepare(
         .get(&digest)
         .cloned()
         .ok_or("Executable is absent from the signed iOS catalog")?;
+    for (name, expected) in image.dependencies() {
+        let vfs = task.get_vfs().ok_or("Missing dependency filesystem")?;
+        let dependency = vfs
+            .open_executable(&format!("/lib/{name}"))
+            .map_err(|_| "Cannot open signed dependency")?;
+        let file = dependency.as_file().ok_or("Invalid signed dependency")?;
+        file.check_image_execution()?;
+        if executable_digest(file)? != *expected {
+            return Err("Dependency differs from its signed iOS image");
+        }
+    }
     let instance = image.instantiate().map_err(|error| {
         std::eprintln!("[hosted] signed image {digest}: {error}");
         "Cannot instantiate signed iOS image"
@@ -128,7 +139,7 @@ pub(crate) fn prepare(
     task.stack_size
         .store(instance.stack_size(), Ordering::Relaxed);
     task.brk.store(instance.heap_start(), Ordering::SeqCst);
-    task.set_entry_point(instance.entry());
+    task.set_entry_point(instance.startup());
     let mut vcpu = task.vcpu.lock();
     vcpu.reset_iregs();
     vcpu.set_tls_pointer(instance.tls());

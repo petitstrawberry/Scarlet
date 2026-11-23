@@ -25,8 +25,7 @@
 _scarlet_boot_start:
     cmp x0, #1
     b.ne .Lfail
-    mov x8, #7 // Getpid
-    svc #0
+    bl scarlet_boot_pid
     cmp x0, #1
     b.ne .Lfail
     mov x8, #1304 // EnvironmentCurrent

@@ -67,13 +67,13 @@ impl Drop for Backing {
 
 impl Lease {
     fn mirror(&self, target: usize, source: usize, copy: bool) -> io::Result<()> {
-        let rx = self.image.manifest.rx_pages();
         // Keep signed RX in place. Remap the other ranges including their
         // inaccessible gaps so a sibling cannot inherit a longer heap.
-        for range in [0..rx.start, rx.end..self.image.manifest.span + MUTABLE_TAIL] {
-            if range.is_empty() {
-                continue;
-            }
+        for range in self
+            .image
+            .manifest
+            .non_executable_ranges(self.image.manifest.span + MUTABLE_TAIL)
+        {
             let mut destination = target + range.start;
             let mut current = 0;
             let mut maximum = 0;
@@ -138,7 +138,12 @@ impl Lease {
             return address;
         };
         let offset = address - self.base;
-        if self.image.manifest.rx_pages().contains(&offset) {
+        if self
+            .image
+            .manifest
+            .rx_pages()
+            .any(|rx| rx.contains(&offset))
+        {
             address
         } else {
             backing.base + offset

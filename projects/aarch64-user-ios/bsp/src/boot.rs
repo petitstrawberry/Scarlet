@@ -43,6 +43,14 @@ fn prepare_distribution(block: Arc<RootBlock>) -> Result<(), FileSystemError> {
         Err(error) if error.kind == FileSystemErrorKind::NotFound => Ok(true),
         Err(error) => Err(error),
     };
+    if missing("lib")? {
+        fs.create(
+            &root,
+            &"lib".into(),
+            FileType::SymbolicLink("/old_root/lib".into()),
+            0o777,
+        )?;
+    }
     if !missing("bin")? {
         return Ok(());
     }
@@ -144,9 +152,9 @@ fn boot(
     for name in [
         "ScarletInit",
         "ScarletBootCheck",
-        "Scarlet_sh",
-        "Scarlet_login",
-        "Scarlet_ps",
+        "ScarletShell",
+        "ScarletLogin",
+        "ScarletPs",
     ] {
         let path = bundle
             .join("Frameworks")

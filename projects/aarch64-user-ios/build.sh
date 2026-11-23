@@ -64,10 +64,11 @@ build_fixture() {
 
 package_guest() {
     local elf=$1 name=$2
+    shift 2
     local image="$out/images/$name" framework="$app/Frameworks/$name.framework"
     mkdir -p "$image" "$framework"
     cargo run --quiet --locked --manifest-path "$repo/tools/ios-aot/Cargo.toml" \
-        --target-dir "$build_root/rust" -- "$elf" "$image"
+        --target-dir "$build_root/rust" -- "$elf" "$image" "$@"
     (
         cd "$image"
         "$clang" "${flags[@]}" -dynamiclib -nostdlib \
@@ -95,21 +96,34 @@ else
         --no-default-features)
     RUSTFLAGS="$guest_flags" cargo build "${guest_build[@]}" --features ios-init-pie --bin init >&2
     root="$out/initramfs"
-    mkdir -p "$root"/{bin,dev,mnt/newroot}
+    mkdir -p "$root"/{bin,lib,dev,mnt/newroot}
     cp "$native/aarch64-unknown-scarlet/release/init" "$root/init"
     for binary in sh login ps; do
         RUSTFLAGS="$guest_flags" cargo rustc "${guest_build[@]}" --bin "$binary" -- \
-            -C link-arg=-pie -C link-arg=--no-dynamic-linker -C link-arg=-z \
+            -C link-arg=-pie -C link-arg=--dynamic-linker=/bin/scarlet-ld -C link-arg=-z \
             -C link-arg=max-page-size=16384 -C link-arg=-z -C link-arg=separate-loadable-segments >&2
         cp "$native/aarch64-unknown-scarlet/release/$binary" "$root/bin/$binary"
-        package_guest "$root/bin/$binary" "Scarlet_$binary"
+        case "$binary" in
+            sh) framework=ScarletShell ;;
+            login) framework=ScarletLogin ;;
+            ps) framework=ScarletPs ;;
+        esac
+        package_guest "$root/bin/$binary" "$framework" --lib-dir "$root/lib"
     done
-    build_fixture boot_fixture _scarlet_boot_start "$root/bin/boot-check"
+    elf_flags=(-z max-page-size=16384 -z separate-loadable-segments)
+    "$clang" -target aarch64-none-elf -c "$project/tests/boot_library.S" -o "$out/boot_library.o"
+    ld.lld -shared "${elf_flags[@]}" -soname libboot-check.so "$out/boot_library.o" -o "$root/lib/libboot-check.so"
+    "$clang" -target aarch64-none-elf -c "$project/tests/boot_fixture.S" -o "$out/boot_fixture.o"
+    ld.lld -pie "${elf_flags[@]}" --dynamic-linker=/bin/scarlet-ld -e _scarlet_boot_start \
+        "$out/boot_fixture.o" -L"$root/lib" -lboot-check -o "$root/bin/boot-check"
+    for elf in "$root/bin/boot-check" "$root/lib/libboot-check.so"; do
+        printf '\123' | dd of="$elf" bs=1 seek=7 conv=notrunc 2>/dev/null
+    done
     package_guest "$root/init" ScarletInit
-    package_guest "$root/bin/boot-check" ScarletBootCheck
+    package_guest "$root/bin/boot-check" ScarletBootCheck --lib-dir "$root/lib"
     (
         cd "$root"
-        printf '%s\n' bin bin/* dev init mnt mnt/newroot |
+        printf '%s\n' bin bin/* dev init lib lib/* mnt mnt/newroot |
             /usr/bin/cpio -o -H newc -R 0:0 > "$app/initramfs.cpio"
     )
     seed="$out/rootfs"

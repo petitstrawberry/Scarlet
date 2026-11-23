@@ -45,9 +45,11 @@ pub(super) struct Manifest {
     pub hash: String,
     pub span: usize,
     pub entry: usize,
+    pub startup: Option<usize>,
     pub phdr: Option<(usize, usize)>,
     pub segments: Vec<Segment>,
-    pub relro: Option<Range<usize>>,
+    pub relro: Vec<Range<usize>>,
+    pub dependencies: Vec<(String, String)>,
     pub tls: Option<Tls>,
     pub relocs: Vec<(usize, usize)>,
     pub patches: Vec<(usize, Patch)>,
@@ -81,7 +83,11 @@ fn range(start: usize, len: usize) -> io::Result<Range<usize>> {
 impl Manifest {
     pub fn parse(manifest: &str, data_size: usize, rx_size: usize) -> io::Result<Self> {
         let mut lines = manifest.lines();
-        if lines.next() != Some("scarlet-ios-image 1") || lines.next() != Some("abi scarlet") {
+        if !matches!(
+            lines.next(),
+            Some("scarlet-ios-image 1" | "scarlet-ios-image 2")
+        ) || lines.next() != Some("abi scarlet")
+        {
             return Err(invalid("Unsupported signed image version or ABI"));
         }
         let mut header = |key| {
@@ -103,9 +109,11 @@ impl Manifest {
             hash: hash.into(),
             span,
             entry,
+            startup: None,
             phdr: None,
             segments: Vec::new(),
-            relro: None,
+            relro: Vec::new(),
+            dependencies: Vec::new(),
             tls: None,
             relocs: Vec::new(),
             patches: Vec::new(),
@@ -115,6 +123,9 @@ impl Manifest {
         for line in lines {
             let items: Vec<_> = line.split_ascii_whitespace().collect();
             match items.as_slice() {
+                ["startup", pc] if result.startup.is_none() => {
+                    result.startup = Some(number(pc)?);
+                }
                 ["phdr", address, count] if result.phdr.is_none() => {
                     let (address, count) = (number(address)?, number(count)?);
                     if count == 0 || count >= u16::MAX as usize {
@@ -151,12 +162,12 @@ impl Manifest {
                         source,
                     });
                 }
-                ["relro", begin, end] if result.relro.is_none() => {
+                ["relro", begin, end] => {
                     let (begin, end) = (number(begin)?, number(end)?);
                     if begin >= end || end > span {
                         return Err(invalid("Invalid RELRO span"));
                     }
-                    result.relro = Some(align_down(begin)..align_up(end));
+                    result.relro.push(align_down(begin)..align_up(end));
                 }
                 ["tls", start, filed, size, align] if result.tls.is_none() => {
                     let (start, filed, size) = (number(start)?, number(filed)?, number(size)?);
@@ -181,6 +192,20 @@ impl Manifest {
                     }
                     result.relocs.push((target, value));
                 }
+                ["needed", name, digest] => {
+                    if name.is_empty()
+                        || !name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._-+".contains(&b))
+                        || matches!(*name, "." | "..")
+                        || digest.len() != 64
+                        || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+                        || result.dependencies.iter().any(|(seen, _)| seen == name)
+                    {
+                        return Err(invalid("Invalid signed dependency"));
+                    }
+                    result.dependencies.push(((*name).into(), (*digest).into()));
+                }
                 ["patch", pc, original] => {
                     let pc = number(pc)?;
                     let word = u32::from_str_radix(original, 16)
@@ -200,15 +225,18 @@ impl Manifest {
     }
 
     fn validate(&self, rx_size: usize) -> io::Result<()> {
-        let mut text = self.segments.iter().filter(|s| s.access == Access::Execute);
-        let rx = text
-            .next()
-            .ok_or_else(|| invalid("Missing signed RX segment"))?;
-        let file_bounds =
-            |address| rx.contains(address, 4) && address - rx.address + 4 <= rx.source.len();
-        if text.next().is_some()
-            || rx.pages().len() != rx_size
+        let file_bounds = |address| {
+            self.segments.iter().any(|rx| {
+                rx.access == Access::Execute
+                    && rx.contains(address, 4)
+                    && address - rx.address + 4 <= rx.source.len()
+            })
+        };
+        if self.rx_pages().map(|pages| pages.len()).sum::<usize>() != rx_size
             || !file_bounds(self.entry)
+            || self
+                .startup
+                .is_some_and(|pc| !pc.is_multiple_of(4) || !file_bounds(pc))
             || self
                 .patches
                 .iter()
@@ -232,7 +260,7 @@ impl Manifest {
         if self
             .phdr
             .is_some_and(|(address, count)| !file_contains(address, 56 * count))
-            || self.relro.clone().is_some_and(|relro| !covers(relro))
+            || self.relro.iter().any(|relro| !covers(relro.clone()))
             || self.relocs.iter().any(|&(target, value)| {
                 !self
                     .segments
@@ -252,11 +280,21 @@ impl Manifest {
         Ok(())
     }
 
-    pub fn rx_pages(&self) -> Range<usize> {
+    pub fn rx_pages(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         self.segments
             .iter()
-            .find(|s| s.access == Access::Execute)
-            .unwrap()
-            .pages()
+            .filter(|s| s.access == Access::Execute)
+            .map(Segment::pages)
+    }
+
+    pub fn non_executable_ranges(&self, end: usize) -> impl Iterator<Item = Range<usize>> + '_ {
+        self.rx_pages()
+            .chain(std::iter::once(end..end))
+            .scan(0, |previous, rx| {
+                let gap = *previous..rx.start;
+                *previous = rx.end;
+                Some(gap)
+            })
+            .filter(|gap| !gap.is_empty())
     }
 }
