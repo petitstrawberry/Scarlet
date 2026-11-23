@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, process::Command};
 
 const SWIFT_SOURCES: &[&str] = &[
     "src/ScarletApp.swift",
+    "src/AudioSession.swift",
     "src/TerminalView.swift",
     "src/DesktopTouchCapture.swift",
 ];
@@ -72,6 +73,8 @@ fn main() {
     println!("cargo:rustc-link-arg-bin=scarlet={}", object.display());
     for framework in [
         "SwiftUI",
+        "AVFAudio",
+        "AudioToolbox",
         "UIKit",
         "Foundation",
         "Security",

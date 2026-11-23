@@ -48,3 +48,7 @@ bool scarlet_ios_console_send(const void *bytes, size_t length);
 void scarlet_ios_boot(const char *bundle, const char *root, bool bootCheck, bool login, bool shell,
                       ScarletDisplayConfiguration display, ScarletLog log, ScarletScreen screen);
 void scarlet_ios_run(const char *image, const char *elf, ScarletLog log);
+
+void scarlet_ios_audio_prepare(void);
+void scarlet_ios_audio_pause(void);
+void scarlet_ios_audio_resume(void);

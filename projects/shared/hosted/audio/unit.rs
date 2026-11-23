@@ -5,7 +5,10 @@ use std::{
     ffi::c_void,
     mem::{MaybeUninit, size_of},
     ptr,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 type AudioUnit = *mut c_void;
@@ -87,9 +90,14 @@ unsafe extern "C" {
     fn AudioOutputUnitStop(unit: AudioUnit) -> i32;
 }
 
+struct RenderContext {
+    queue: Arc<RenderQueue>,
+    enabled: AtomicBool,
+}
+
 pub(super) struct OutputUnit {
     handle: AudioUnit,
-    queue: Arc<RenderQueue>,
+    context: Arc<RenderContext>,
     needs_stop: bool,
 }
 
@@ -101,7 +109,10 @@ impl OutputUnit {
     pub(super) fn open(queue: Arc<RenderQueue>) -> Result<Self, &'static str> {
         let description = ComponentDescription {
             component_type: u32::from_be_bytes(*b"auou"),
+            #[cfg(target_os = "macos")]
             subtype: u32::from_be_bytes(*b"def "),
+            #[cfg(target_os = "ios")]
+            subtype: u32::from_be_bytes(*b"rioc"),
             manufacturer: u32::from_be_bytes(*b"appl"),
             flags: 0,
             flags_mask: 0,
@@ -117,7 +128,10 @@ impl OutputUnit {
         )?;
         let unit = Self {
             handle,
-            queue,
+            context: Arc::new(RenderContext {
+                queue,
+                enabled: AtomicBool::new(false),
+            }),
             needs_stop: false,
         };
         let format = StreamFormat {
@@ -138,7 +152,7 @@ impl OutputUnit {
         )?;
         let callback = Callback {
             render,
-            context: Arc::as_ptr(&unit.queue).cast_mut().cast(),
+            context: Arc::as_ptr(&unit.context).cast_mut().cast(),
         };
         unit.set_property(
             PROPERTY_RENDER_CALLBACK,
@@ -172,44 +186,48 @@ impl OutputUnit {
     }
 
     pub(super) fn start(&mut self) -> Result<(), &'static str> {
-        if self.queue.enabled.load(Ordering::Acquire) {
+        if self.context.queue.enabled.load(Ordering::Acquire) {
             return Ok(());
         }
         if self.needs_stop {
             return Err("Core Audio output must be stopped before restart");
         }
         self.needs_stop = true;
-        self.queue.enabled.store(true, Ordering::Release);
+        self.context.enabled.store(true, Ordering::Release);
+        self.context.queue.enabled.store(true, Ordering::Release);
         let result = check(
             unsafe { AudioOutputUnitStart(self.handle) },
             "Cannot start Core Audio output",
         );
         if result.is_err() {
-            self.queue.enabled.store(false, Ordering::Release);
+            self.context.queue.enabled.store(false, Ordering::Release);
         }
         result
     }
 
     pub(super) fn stop(&mut self) -> Result<(), &'static str> {
-        self.queue.enabled.store(false, Ordering::Release);
-        if self.needs_stop {
+        self.context.enabled.store(false, Ordering::Release);
+        self.context.queue.enabled.store(false, Ordering::Release);
+        let result = if self.needs_stop {
             check(
                 unsafe { AudioOutputUnitStop(self.handle) },
                 "Cannot stop Core Audio output",
-            )?;
-            self.needs_stop = false;
-        }
+            )
+        } else {
+            Ok(())
+        };
+        self.needs_stop = false;
         // Taking the render flag after disabling playback synchronizes with
         // any callback that was already copying. Contenders render silence.
-        while self.queue.rendering.swap(true, Ordering::AcqRel) {
+        while self.context.queue.rendering.swap(true, Ordering::AcqRel) {
             std::thread::yield_now();
         }
-        self.queue.rendering.store(false, Ordering::Release);
-        Ok(())
+        self.context.queue.rendering.store(false, Ordering::Release);
+        result
     }
 
     fn dispose(&mut self) -> Result<(), &'static str> {
-        self.queue.enabled.store(false, Ordering::Release);
+        self.context.queue.enabled.store(false, Ordering::Release);
         let handle = std::mem::replace(&mut self.handle, ptr::null_mut());
         if handle.is_null() {
             return Ok(());
@@ -222,7 +240,7 @@ impl OutputUnit {
         if result.is_err() {
             // Disposal failure does not prove that Core Audio has dropped the
             // callback context. Retain the disabled, host-owned queue.
-            std::mem::forget(self.queue.clone());
+            std::mem::forget(self.context.clone());
         }
         result
     }
@@ -278,8 +296,8 @@ unsafe extern "C" fn render(
             return PARAM_ERROR;
         }
         let output = std::slice::from_raw_parts_mut(buffer.data.cast::<MaybeUninit<u8>>(), bytes);
-        let queue = &*context.cast::<RenderQueue>();
-        if !queue.render(output) && !flags.is_null() {
+        let context = &*context.cast::<RenderContext>();
+        if !context.queue.render_gated(output, &context.enabled) && !flags.is_null() {
             *flags |= OUTPUT_IS_SILENCE;
         }
         buffer.size = bytes as u32;

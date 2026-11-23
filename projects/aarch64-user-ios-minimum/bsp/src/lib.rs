@@ -3,6 +3,7 @@
 #[allow(dead_code)]
 #[path = "../../../shared/hosted/block.rs"]
 mod block;
+mod audio;
 mod boot;
 mod buttons;
 mod display;

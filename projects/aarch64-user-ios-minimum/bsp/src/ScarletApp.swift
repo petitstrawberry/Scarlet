@@ -146,6 +146,7 @@ private final class ScarletSession {
                 runSchedulerCheck()
             }
         } else {
+            prepareHostAudio()
             let idiom = UIDevice.current.userInterfaceIdiom
             // iPhone and iPad have direct touch and no built-in keyboard.
             let tablet = idiom == .phone || idiom == .pad || arguments.contains("--tablet")
