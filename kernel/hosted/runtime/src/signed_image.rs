@@ -33,13 +33,16 @@ const PAGE: usize = 16384;
 // outside the native thread ABI and supplies one address-space-owned word.
 const ENVIRON_OFFSET: usize = PAGE - size_of::<usize>();
 const _: () = assert!(NATIVE_TLS_MAPPING_SIZE <= ENVIRON_OFFSET);
-const STACK_SIZE: usize = 4 * PAGE;
+// Match the ordinary Scarlet executable's initial stack size.
+const STACK_SIZE: usize = 1024 * 1024;
 const HEAP_CAPACITY: usize = 8 * 1024 * 1024;
 // TLS, heap reservation, a stack guard, then the stack.
 const STACK_OFFSET: usize = PAGE + HEAP_CAPACITY + PAGE;
 const MUTABLE_TAIL: usize = STACK_OFFSET + STACK_SIZE;
 const MAX_SLOTS: usize = 8;
-const MAX_RESERVED: usize = 256 * 1024 * 1024;
+// Signed windows and fork mirrors reserve address space for future heap
+// growth. Their inaccessible gaps do not consume guest RAM.
+const MAX_RESERVED: usize = 2 * 1024 * 1024 * 1024;
 static RESERVED: AtomicUsize = AtomicUsize::new(0);
 
 struct Library {
