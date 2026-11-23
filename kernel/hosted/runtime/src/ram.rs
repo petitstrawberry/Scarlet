@@ -266,7 +266,41 @@ fn create_backing(len: libc::off_t) -> io::Result<File> {
     Ok(backing)
 }
 
-#[cfg(target_vendor = "apple")]
+#[cfg(target_os = "ios")]
+fn create_backing(len: libc::off_t) -> io::Result<File> {
+    use std::{
+        fs::OpenOptions,
+        os::unix::fs::OpenOptionsExt,
+        sync::atomic::AtomicU64,
+    };
+
+    static NEXT_ARENA: AtomicU64 = AtomicU64::new(0);
+    let temp = std::env::temp_dir();
+    let backing = loop {
+        let next = NEXT_ARENA.fetch_add(1, Ordering::Relaxed);
+        let path = temp.join(format!("scarlet-ram-{}-{next}", std::process::id()));
+        // The iOS app sandbox supplies a private temporary directory. Keep
+        // only the descriptor so frame aliases never depend on a pathname.
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                std::fs::remove_file(path)?;
+                break file;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    backing.set_len(len as u64)?;
+    Ok(backing)
+}
+
+#[cfg(all(target_vendor = "apple", not(target_os = "ios")))]
 fn create_backing(len: libc::off_t) -> io::Result<File> {
     use std::{ffi::CString, sync::atomic::AtomicU64};
 
