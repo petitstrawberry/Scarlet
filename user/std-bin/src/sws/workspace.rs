@@ -6,7 +6,10 @@ use std::{
     string::{String, ToString},
     vec::Vec,
 };
-use sws_protocol::outputs::OutputId;
+use sws_protocol::{
+    WindowingMode,
+    outputs::{OutputExperience, OutputId},
+};
 use sws_protocol::workspace::{
     MAX_WORKSPACES, ShellPresentation, TabletLayout, TransitionSpec, WorkspaceId,
     WorkspaceSnapshot, WorkspaceState, WorkspaceTransaction, validate_workspaces,
@@ -37,6 +40,33 @@ struct OutputWorkspace {
     presentation: ShellPresentation,
 }
 
+/// The presentation and placement policy committed for one output.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct OutputPolicy {
+    pub(super) tablet: bool,
+    pub(super) focused: bool,
+}
+
+impl OutputPolicy {
+    pub(super) fn resolve(
+        experience: OutputExperience,
+        internal: bool,
+        tablet_posture: bool,
+        windowing_override: Option<WindowingMode>,
+    ) -> Self {
+        let tablet = experience.tablet_experience(internal, tablet_posture);
+        let focused = match (experience, windowing_override) {
+            (OutputExperience::Auto, Some(mode)) => mode == WindowingMode::Focused,
+            _ => tablet,
+        };
+        Self { tablet, focused }
+    }
+
+    pub(super) fn uses_tablet_layout(self) -> bool {
+        self.tablet || self.focused
+    }
+}
+
 /// One partition of the session registry. Empty detached partitions retain
 /// connector identity; their workspaces have been recovered onto the primary.
 #[derive(Clone)]
@@ -49,7 +79,7 @@ struct WorkspacePartition {
 #[derive(Clone)]
 pub(super) struct OutputWorkspaces {
     generation: u32,
-    tablet_experience: bool,
+    policy: OutputPolicy,
     selection: OutputWorkspace,
     workspaces: Vec<WorkspaceSnapshot>,
     desktop_restore: Option<DesktopWorkspaceRestore>,
@@ -139,7 +169,7 @@ impl OutputWorkspaces {
     fn initial(id: WorkspaceId, auto_remove_empty: bool) -> Self {
         Self {
             generation: 1,
-            tablet_experience: false,
+            policy: OutputPolicy::default(),
             selection: OutputWorkspace {
                 active_workspace: id,
                 normal_workspace: id,
@@ -232,7 +262,11 @@ impl OutputWorkspaces {
     }
 
     pub(super) fn tablet_experience(&self) -> bool {
-        self.tablet_experience
+        self.policy.tablet
+    }
+
+    pub(super) fn policy(&self) -> OutputPolicy {
+        self.policy
     }
 
     /// Return the retained tablet layout for a workspace.
@@ -1025,7 +1059,10 @@ impl WorkspaceScope<'_> {
             active_workspace: self.state.selection.active_workspace,
             workspaces: self.state.workspaces.clone(),
         });
-        self.state.tablet_experience = true;
+        self.state.policy = OutputPolicy {
+            tablet: true,
+            focused: true,
+        };
 
         let original = self.state.workspaces.clone();
         let mut expanded = Vec::new();
@@ -1128,7 +1165,7 @@ impl WorkspaceScope<'_> {
         let Some(restore) = self.state.desktop_restore.take() else {
             return false;
         };
-        self.state.tablet_experience = false;
+        self.state.policy = OutputPolicy::default();
         let current = self.state.workspaces.clone();
         let live_window_ids = current
             .iter()
@@ -1507,29 +1544,26 @@ impl WorkspaceManager {
         Some(self.scope_at(group))
     }
 
-    /// Resolve posture for one output and change only its retained projection.
-    /// The external Auto policy stays Desktop while the chassis is folded.
-    pub(super) fn apply_output_experience(
+    /// Commit policy only after the workspace projection can accommodate it.
+    pub(super) fn apply_output_policy(
         &mut self,
         output: OutputId,
-        experience: sws_protocol::outputs::OutputExperience,
-        internal: bool,
-        tablet_posture: bool,
+        policy: OutputPolicy,
         preferred_window: Option<u32>,
     ) -> Result<bool, ApplyError> {
         let mut scope = self.output_mut(output).ok_or(ApplyError::InvalidState)?;
-        let tablet = experience.tablet_experience(internal, tablet_posture);
-        if tablet == scope.tablet_experience() {
+        if policy == scope.policy() {
             return Ok(false);
         }
-        if tablet {
+        if policy.uses_tablet_layout() && scope.state.desktop_restore.is_none() {
             scope.enter_tablet_experience(preferred_window);
-            if !scope.tablet_experience() {
+            if scope.state.desktop_restore.is_none() {
                 return Err(ApplyError::InvalidState);
             }
-        } else {
+        } else if !policy.uses_tablet_layout() {
             scope.leave_tablet_experience();
         }
+        scope.state.policy = policy;
         Ok(true)
     }
 
@@ -1594,7 +1628,8 @@ impl WorkspaceManager {
         // Merge the desktop projections first so leaving tablet mode later
         // cannot discard or resurrect migrated scenes. Stable workspace IDs
         // and membership are retained, and the primary selection stays put.
-        let tablet = self.partitions[0].state.tablet_experience;
+        let primary = self.partitions[0].output.expect("primary output attached");
+        let policy = self.partitions[0].state.policy;
         self.scope_at(group).leave_tablet_experience();
         self.primary_mut().leave_tablet_experience();
         let recovered = {
@@ -1609,9 +1644,7 @@ impl WorkspaceManager {
             primary.state.workspaces.extend(recovered);
             primary.bump_generation();
         }
-        if tablet {
-            self.primary_mut().enter_tablet_experience(None);
-        }
+        let _ = self.apply_output_policy(primary, policy, None);
         true
     }
 
@@ -1622,7 +1655,7 @@ impl WorkspaceManager {
             .map(|partition| sws_protocol::workspace::OutputWorkspaceState {
                 output_id: partition.output,
                 connector_key: partition.connector_key.clone(),
-                tablet_experience: partition.state.tablet_experience,
+                tablet_experience: partition.state.tablet_experience(),
                 state: partition.state.snapshot(),
             })
             .collect()
@@ -2092,7 +2125,6 @@ mod tests {
 
     #[test]
     fn folding_the_chassis_preserves_the_external_desktop() {
-        use sws_protocol::outputs::OutputExperience;
         let mut manager = WorkspaceManager::new();
         manager.add_scene_root(10, false, false);
         manager.add_scene_root(11, false, false);
@@ -2103,28 +2135,73 @@ mod tests {
             .add_scene_root(20, false, false);
         let external = manager.output(2).unwrap().snapshot();
         assert_eq!(
-            manager.apply_output_experience(0, OutputExperience::Auto, true, true, Some(11)),
+            manager.apply_output_policy(
+                0,
+                OutputPolicy::resolve(OutputExperience::Desktop, true, true, None),
+                Some(11),
+            ),
+            Ok(false)
+        );
+        assert!(!manager.output(0).unwrap().tablet_experience());
+        assert_eq!(manager.snapshot().workspaces[0].window_ids, [10, 11]);
+        assert_eq!(
+            manager.apply_output_policy(
+                0,
+                OutputPolicy::resolve(OutputExperience::Auto, true, true, None),
+                Some(11),
+            ),
             Ok(true)
         );
         assert_eq!(
-            manager.apply_output_experience(2, OutputExperience::Auto, false, true, None),
+            manager.apply_output_policy(
+                2,
+                OutputPolicy::resolve(OutputExperience::Auto, false, true, None),
+                None,
+            ),
             Ok(false)
         );
         assert!(manager.output(0).unwrap().tablet_experience());
         assert!(!manager.output(2).unwrap().tablet_experience());
         assert_eq!(manager.output(2).unwrap().snapshot(), external);
         assert_eq!(
-            manager.apply_output_experience(0, OutputExperience::Auto, true, false, None),
+            manager.apply_output_policy(
+                0,
+                OutputPolicy::resolve(OutputExperience::Auto, true, false, None),
+                None,
+            ),
             Ok(true)
         );
         assert_eq!(manager.snapshot().workspaces[0].window_ids, [10, 11]);
         let internal = manager.snapshot();
         assert_eq!(
-            manager.apply_output_experience(2, OutputExperience::Tablet, false, false, None),
+            manager.apply_output_policy(
+                2,
+                OutputPolicy::resolve(OutputExperience::Tablet, false, false, None),
+                None,
+            ),
             Ok(true)
         );
         assert!(manager.output(2).unwrap().tablet_experience());
         assert_eq!(manager.snapshot(), internal);
+    }
+
+    #[test]
+    fn legacy_focused_windowing_projects_existing_scenes_without_enabling_tablet_navigation() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(11, false, false);
+        let override_mode = Some(WindowingMode::Focused);
+
+        let focused = OutputPolicy::resolve(OutputExperience::Auto, true, false, override_mode);
+        assert_eq!(manager.apply_output_policy(0, focused, Some(11)), Ok(true));
+        assert!(!manager.output(0).unwrap().tablet_experience());
+        assert!(manager.output(0).unwrap().policy().focused);
+        assert_eq!(manager.snapshot().workspaces.len(), 2);
+
+        let desktop = OutputPolicy::resolve(OutputExperience::Desktop, true, true, override_mode);
+        assert_eq!(manager.apply_output_policy(0, desktop, None), Ok(true));
+        assert!(!manager.output(0).unwrap().policy().focused);
+        assert_eq!(manager.snapshot().workspaces[0].window_ids, [10, 11]);
     }
 
     #[test]

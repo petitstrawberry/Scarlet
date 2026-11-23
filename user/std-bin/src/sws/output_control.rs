@@ -151,10 +151,18 @@ impl Compositor {
             scale_milli: output.scale_milli,
             mode: output.metadata.mode,
             rect: output.logical_rect,
-            tablet: output
-                .experience
-                .tablet_experience(output.metadata.internal, self.tablet_mode),
+            tablet: self.output_uses_tablet_experience(id),
         })
+    }
+
+    pub(super) fn output_uses_tablet_experience(&self, id: u32) -> bool {
+        self.workspace_manager
+            .output(id)
+            .is_some_and(|workspace| workspace.tablet_experience())
+    }
+
+    pub(super) fn primary_uses_tablet_experience(&self) -> bool {
+        self.output_uses_tablet_experience(self.outputs.primary_id())
     }
 
     pub(super) fn notify_window_output(&self, window: u32) {
@@ -253,13 +261,13 @@ impl Compositor {
     }
 
     pub(super) fn window_uses_focused_mode(&self, id: u32) -> bool {
-        let output = self.window_output_id(id);
-        let Some(context) = self.output_context_for(output) else {
-            return false;
-        };
-        context.tablet
-            || (output == self.outputs.primary_id()
-                && self.windowing_mode == sws_protocol::WindowingMode::Focused)
+        self.output_uses_focused_mode(self.window_output_id(id))
+    }
+
+    pub(super) fn output_uses_focused_mode(&self, id: u32) -> bool {
+        self.workspace_manager
+            .output(id)
+            .is_some_and(|workspace| workspace.policy().focused)
     }
 
     pub(super) fn restore_output_configuration(&mut self) {
@@ -286,13 +294,73 @@ impl Compositor {
         if let Some(configuration) =
             super::super::config::saved_output_layout(&self.outputs.snapshot().outputs)
         {
-            if let Err(error) = self.install_output_configuration(&configuration, false) {
-                println!(
+            match self.install_output_configuration(&configuration, false) {
+                Ok(()) => return,
+                Err(error) => println!(
                     "[Compositor] Saved display layout could not be restored: {}",
                     error
-                );
+                ),
             }
         }
+        match self.refresh_output_experiences(None) {
+            Ok(true) => {
+                self.apply_workspace_presentation_policy();
+                self.publish_workspace_state();
+            }
+            Ok(false) => {}
+            Err(error) => println!("[Compositor] Cannot apply display experience: {error}"),
+        }
+    }
+
+    fn project_output_experiences(
+        &self,
+        configuration: &[OutputConfiguration],
+        preferred_window: Option<u32>,
+    ) -> Result<(super::super::workspace::WorkspaceManager, bool), u32> {
+        use super::super::workspace::OutputPolicy;
+        use sws_protocol::error_codes as errors;
+        let mut workspaces = self.workspace_manager.clone();
+        let mut changed = false;
+        for entry in configuration {
+            let output = self.outputs.get(entry.id).ok_or(errors::UNKNOWN_OUTPUT)?;
+            changed |= workspaces
+                .apply_output_policy(
+                    entry.id,
+                    OutputPolicy::resolve(
+                        entry.experience,
+                        output.metadata.internal,
+                        self.tablet_posture,
+                        self.legacy_windowing_mode
+                            .filter(|_| entry.id == self.outputs.primary_id()),
+                    ),
+                    preferred_window,
+                )
+                .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
+        }
+        Ok((workspaces, changed))
+    }
+
+    fn commit_output_experiences(&mut self, workspaces: super::super::workspace::WorkspaceManager) {
+        let previous = self.primary_uses_tablet_experience();
+        self.workspace_manager = workspaces;
+        if self.primary_uses_tablet_experience() != previous {
+            self.cancel_primary_experience_gestures();
+        }
+    }
+
+    pub(super) fn refresh_output_experiences(
+        &mut self,
+        preferred_window: Option<u32>,
+    ) -> Result<bool, u32> {
+        let configuration: Vec<_> =
+            self.outputs.iter().map(Output::configuration).collect();
+        let result = self.project_output_experiences(&configuration, preferred_window);
+        self.output_policy_pending = result.is_err();
+        let (workspaces, changed) = result?;
+        if changed {
+            self.commit_output_experiences(workspaces);
+        }
+        Ok(changed)
     }
 
     pub(super) fn install_output_configuration(
@@ -301,19 +369,8 @@ impl Compositor {
         persist: bool,
     ) -> Result<(), u32> {
         use sws_protocol::error_codes as errors;
-        let mut workspaces = self.workspace_manager.clone();
-        for entry in configuration {
-            let output = self.outputs.get(entry.id).ok_or(errors::UNKNOWN_OUTPUT)?;
-            workspaces
-                .apply_output_experience(
-                    entry.id,
-                    entry.experience,
-                    output.metadata.internal,
-                    self.tablet_mode,
-                    None,
-                )
-                .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
-        }
+        let (workspaces, experience_changed) =
+            self.project_output_experiences(configuration, None)?;
         let old = self.outputs.snapshot();
         let proposed = sws_protocol::outputs::OutputSnapshot {
             generation: old.generation,
@@ -324,8 +381,9 @@ impl Compositor {
             super::super::config::persist_outputs(&proposed)
                 .map_err(|_| errors::OUTPUT_CONFIGURATION_NOT_SAVED)?;
         }
-        self.workspace_manager = workspaces;
         self.outputs.apply_configuration(configuration);
+        self.commit_output_experiences(workspaces);
+        self.output_policy_pending = false;
         super::super::input::set_screen_size(self.screen_width(), self.screen_height());
         for entry in configuration {
             let previous = old
@@ -370,7 +428,12 @@ impl Compositor {
         self.full_redraw_needed = true;
         self.confine_cursor_to_outputs();
         self.apply_workspace_presentation_policy();
-        self.publish_outputs();
+        self.publish_window_creation_environment();
+        if experience_changed {
+            self.publish_workspace_state();
+        } else {
+            self.publish_outputs();
+        }
         Ok(())
     }
 

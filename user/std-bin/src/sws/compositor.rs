@@ -42,7 +42,7 @@ use scarlet_os::handle::capability::memory_mapping::{flags as mmap_flags, munmap
 use scarlet_os::ipc::permissions;
 use scarlet_os::poll::{POLLIN, PollHandle, poll};
 use scarlet_os::time::monotonic_time_ns;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::println;
 use std::string::String;
@@ -2539,8 +2539,9 @@ pub struct Compositor {
     current_input_frame: Option<InputDispatchContext>,
     system_touch_navigation: Option<SystemTouchNavigation>,
     input_modality: InputModality,
-    tablet_mode: bool,
-    windowing_mode: sws_protocol::WindowingMode,
+    tablet_posture: bool,
+    legacy_windowing_mode: Option<sws_protocol::WindowingMode>,
+    output_policy_pending: bool,
     workspace_manager: super::workspace::WorkspaceManager,
     /// Shell presentation observed by the previous policy application.
     overview_session_active: bool,
@@ -3165,8 +3166,11 @@ impl Compositor {
             current_input_frame: None,
             system_touch_navigation: None,
             input_modality: InputModality::default(),
-            tablet_mode: input_environment.tablet_mode(),
-            windowing_mode: input_environment.windowing_mode(),
+            tablet_posture: input_environment.tablet_mode(),
+            legacy_windowing_mode: input_environment
+                .windowing_mode_override_active()
+                .then(|| input_environment.windowing_mode()),
+            output_policy_pending: false,
             workspace_manager,
             overview_session_active: false,
             last_shell_presentation: sws_protocol::workspace::ShellPresentation::Workspace,
@@ -3354,7 +3358,7 @@ impl Compositor {
             ShellAction::RemoveWorkspace => {
                 let workspace_id = self.keyboard_workspace().active_workspace();
                 let allow_freeform_merge =
-                    self.windowing_mode == sws_protocol::WindowingMode::Freeform;
+                    !self.output_uses_focused_mode(self.keyboard_output_id());
                 if self
                     .workspace_manager
                     .remove_workspace(workspace_id, allow_freeform_merge)
@@ -3880,7 +3884,7 @@ impl Compositor {
             self.reflow_maximized_windows_to_workarea();
         }
         self.publish_window_creation_environment();
-        if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+        if self.output_uses_focused_mode(self.outputs.primary_id()) {
             self.apply_windowing_mode_policy();
         }
 
@@ -5071,7 +5075,11 @@ impl Compositor {
             self.pending_output_modes
                 .retain(|(output, _)| *output != id);
             self.detached_output_geometry.insert(id, output.rect);
+            let primary_was_tablet = self.primary_uses_tablet_experience();
             self.workspace_manager.detach_output(id);
+            if primary_was_tablet != self.primary_uses_tablet_experience() {
+                self.cancel_primary_experience_gestures();
+            }
             let primary = self.outputs.primary();
             let destination = primary.id;
             let rect = primary.rect;
@@ -7230,7 +7238,7 @@ impl Compositor {
 
     fn tablet_navigation_indicator(&self) -> Option<(i32, i32, u32, u32)> {
         if self.login_seat
-            || !self.tablet_mode
+            || !self.primary_uses_tablet_experience()
             || self.workspace_manager.presentation()
                 != sws_protocol::workspace::ShellPresentation::Workspace
         {
@@ -7315,6 +7323,7 @@ impl Compositor {
     }
 
     fn handle_tablet_navigation(&mut self, frame: &TouchFrame) -> bool {
+        let tablet = self.primary_uses_tablet_experience();
         let index = self
             .tablet_navigation
             .iter()
@@ -7338,7 +7347,7 @@ impl Compositor {
             return false;
         }
         // A captured stream must drain even if posture changes mid-gesture.
-        if !self.tablet_mode
+        if !tablet
             && index.is_none_or(|index| !self.tablet_navigation[index].1.is_captured())
         {
             return false;
@@ -7348,7 +7357,7 @@ impl Compositor {
                 .push((frame.source, tablet_navigation::Navigation::default()));
             self.tablet_navigation.len() - 1
         });
-        if !self.tablet_mode {
+        if !tablet {
             self.tablet_navigation[index].1.reset();
         }
         let contacts = frame
@@ -7390,7 +7399,7 @@ impl Compositor {
             }
             self.tablet_navigation.remove(index);
         }
-        if !self.tablet_mode || !owns_navigation {
+        if !tablet || !owns_navigation {
             return step.consumed;
         }
         self.apply_tablet_navigation_update(step.update);
@@ -7661,7 +7670,7 @@ impl Compositor {
                 }
             }
             Mode::Scroll
-                if self.tablet_mode
+                if self.primary_uses_tablet_experience()
                     && navigation.origin
                         == sws_protocol::workspace::ShellPresentation::Overview =>
             {
@@ -7723,7 +7732,7 @@ impl Compositor {
                 {
                     self.workspace_manager.remove_workspace(
                         workspace_id,
-                        self.windowing_mode == sws_protocol::WindowingMode::Freeform,
+                        !self.output_uses_focused_mode(self.outputs.primary_id()),
                     )
                 } else if self
                     .point_in_overview_add_workspace(navigation.current_x, navigation.current_y)
@@ -7846,7 +7855,7 @@ impl Compositor {
                     self.finish_system_touch_navigation(navigation);
                 }
             }
-            if self.tablet_mode
+            if self.primary_uses_tablet_experience()
                 && navigation.origin == sws_protocol::workspace::ShellPresentation::Overview
                 && (navigation.contact.mode() == tablet_cards::Mode::Scroll || cancelled)
             {
@@ -7876,7 +7885,7 @@ impl Compositor {
             sws_protocol::workspace::ShellPresentation::Home
                 | sws_protocol::workspace::ShellPresentation::Overview
         );
-        if frame.cancelled || !self.tablet_mode && !shell_navigation {
+        if frame.cancelled || !self.primary_uses_tablet_experience() && !shell_navigation {
             return None;
         }
         if self
@@ -7913,7 +7922,7 @@ impl Compositor {
         let in_workspace_region =
             shell_navigation && self.point_in_overview_workspace_region(screen_x, screen_y);
         let over_laptop_spread = overview
-            && !self.tablet_mode
+            && !self.primary_uses_tablet_experience()
             && self.overview_window_at_point(screen_x, screen_y).is_some();
         if shell_navigation && !in_workspace_region && !over_laptop_spread {
             return None;
@@ -8902,6 +8911,7 @@ impl Compositor {
         println!("[Compositor] Starting main loop (multithreaded)");
         self.poll_secondary_outputs()?;
         self.restore_output_configuration();
+        self.publish_window_creation_environment();
 
         loop {
             if let Err(error) = self.run_iteration() {
@@ -9062,14 +9072,38 @@ impl Compositor {
         Ok(())
     }
 
+    fn cancel_primary_experience_gestures(&mut self) {
+        self.overview_pan = 0.0;
+        self.overview_pan_settle = None;
+        self.pending_card_close = None;
+        self.tablet_gesture_scene = None;
+        if let Some(ref mut nav) = self.system_touch_navigation {
+            nav.contact.cancel();
+        }
+        if self.overview_window_drag.is_some_and(|drag| {
+            self.window_output_id(drag.window_id) == self.outputs.primary_id()
+        }) {
+            self.cancel_overview_window_drag();
+        }
+        self.tablet_motion = None;
+        if let Some(origin) = self.tablet_drag_origin.take() {
+            self.workspace_manager.set_presentation(origin);
+        }
+        for (_, navigation) in &mut self.tablet_navigation {
+            navigation.reset();
+        }
+    }
+
     fn apply_input_environment_snapshot(
         &mut self,
         snapshot: input_environment::Snapshot,
     ) -> Result<bool, &'static str> {
         self.lid_closed = snapshot.lid_closed();
         let windowing_mode = snapshot.windowing_mode();
-        let windowing_mode_changed = self.windowing_mode != windowing_mode;
-        let previous_windowing_mode = self.windowing_mode;
+        let legacy_windowing_mode = snapshot
+            .windowing_mode_override_active()
+            .then_some(windowing_mode);
+        let override_changed = self.legacy_windowing_mode != legacy_windowing_mode;
         let preferred_window_id = self
             .window_manager
             .get_focused_window_id()
@@ -9079,29 +9113,20 @@ impl Compositor {
                     .workspace_for_window(*window_id)
                     .is_some()
             });
-        self.windowing_mode = windowing_mode;
-        self.publish_window_creation_environment();
-        let tablet_mode = snapshot.tablet_mode();
-        let tablet_mode_changed = self.tablet_mode != tablet_mode;
+        self.legacy_windowing_mode = legacy_windowing_mode;
+        let tablet_posture = snapshot.tablet_mode();
+        let posture_changed = self.tablet_posture != tablet_posture;
+        self.tablet_posture = tablet_posture;
         let mut redraw = false;
-        if tablet_mode_changed {
-            self.tablet_mode = tablet_mode;
-            self.overview_pan = 0.0;
-            self.overview_pan_settle = None;
-            self.pending_card_close = None;
-            self.tablet_gesture_scene = None;
-            if let Some(ref mut nav) = self.system_touch_navigation {
-                nav.contact.cancel();
+        let mut experience_changed = false;
+        if posture_changed || override_changed || self.output_policy_pending {
+            match self.refresh_output_experiences(preferred_window_id) {
+                Ok(changed) => experience_changed = changed,
+                Err(error) => println!("[Compositor] Cannot apply display experience: {error}"),
             }
-            self.cancel_overview_window_drag();
-            self.tablet_motion = None;
-            if let Some(origin) = self.tablet_drag_origin.take() {
-                self.workspace_manager.set_presentation(origin);
-            }
-            for (_, navigation) in &mut self.tablet_navigation {
-                navigation.reset();
-            }
-            for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
+        }
+        if posture_changed {
+            for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_posture) {
                 match policy_event {
                     TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
                         button,
@@ -9129,29 +9154,16 @@ impl Compositor {
                 }
             }
         }
-        let mut workspace_state_changed = match (previous_windowing_mode, windowing_mode) {
-            (sws_protocol::WindowingMode::Freeform, sws_protocol::WindowingMode::Focused) => self
-                .workspace_manager
-                .enter_tablet_experience(preferred_window_id),
-            (sws_protocol::WindowingMode::Focused, sws_protocol::WindowingMode::Freeform) => {
-                self.workspace_manager.leave_tablet_experience()
-            }
-            _ => false,
-        };
-        if tablet_mode_changed && tablet_mode {
-            workspace_state_changed |= self.workspace_manager.settle_after_close(true);
-        }
-        if windowing_mode_changed {
-            redraw |= self.apply_windowing_mode_policy();
-        }
-        if workspace_state_changed {
+        self.publish_window_creation_environment();
+        if experience_changed {
+            self.apply_windowing_mode_policy();
             self.publish_workspace_state();
             redraw = true;
         }
         println!(
             "[Compositor] Input environment changed: generation={} tablet={} lid_closed={} windowing={:?} tablet_override={} windowing_override={} capabilities={:#x}",
             snapshot.generation,
-            tablet_mode,
+            tablet_posture,
             self.lid_closed,
             windowing_mode,
             snapshot.tablet_mode_override_active(),
@@ -11087,22 +11099,26 @@ impl Compositor {
             .iter()
             .map(|(window_id, _, _)| *window_id)
             .collect();
+        let affected_outputs: BTreeSet<_> = removed_ids
+            .iter()
+            .filter_map(|id| self.workspace_manager.output_for_window(*id))
+            .collect();
         let mut workspace_changed = false;
         for window_id in &removed_ids {
             workspace_changed |= self.workspace_manager.remove_window(*window_id);
         }
-        workspace_changed |= self.workspace_manager.settle_after_close(self.tablet_mode);
-        if self.tablet_mode
-            && self
-                .workspace_manager
-                .snapshot()
-                .workspaces
-                .iter()
-                .all(|w| w.window_ids.is_empty())
-        {
-            workspace_changed |= self
-                .workspace_manager
-                .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
+        for output in affected_outputs {
+            let Some(mut workspace) = self.workspace_manager.output_mut(output) else {
+                continue;
+            };
+            let policy = workspace.policy();
+            workspace_changed |= workspace.settle_after_close(policy.uses_tablet_layout());
+            if policy.tablet
+                && workspace.snapshot().workspaces.iter().all(|w| w.window_ids.is_empty())
+            {
+                workspace_changed |=
+                    workspace.set_presentation(sws_protocol::workspace::ShellPresentation::Home);
+            }
         }
         self.clear_interaction_state_for_removed_windows(&removed_ids);
         self.remove_ime_popup_windows(&removed_ids);
@@ -11157,6 +11173,12 @@ impl Compositor {
             self.add_pending_damage(*rect);
         }
         self.sync_console_session_policy()?;
+        if workspace_changed
+            && self.output_policy_pending
+            && let Ok(true) = self.refresh_output_experiences(None)
+        {
+            self.publish_window_creation_environment();
+        }
 
         if notify_client {
             for retained in retained_extension_buffers {
@@ -11363,10 +11385,9 @@ impl Compositor {
             .window_manager
             .get_window(window_id)
             .map_or(0, |window| window.output_id);
-        let tablet = self
-            .output_context_for(output_id)
-            .is_some_and(|context| context.tablet);
-        if tablet || (output_id == 0 && self.console_shell_present()) {
+        if self.output_uses_tablet_experience(output_id)
+            || self.output_uses_focused_mode(output_id)
+        {
             if !self.pending_workspace_scenes.contains(&window_id) {
                 self.pending_workspace_scenes.push(window_id);
             }
@@ -11406,11 +11427,10 @@ impl Compositor {
             .window_manager
             .get_window(window_id)
             .map_or(0, |window| window.output_id);
-        let tablet = self
-            .output_context_for(output_id)
-            .is_some_and(|context| context.tablet);
+        let focused = self.output_uses_focused_mode(output_id);
+        let tablet = self.output_uses_tablet_experience(output_id);
         if let Some(mut output) = self.workspace_manager.output_mut(output_id) {
-            output.add_scene_root(window_id, tablet, tablet);
+            output.add_scene_root(window_id, tablet || focused, focused);
         }
         if let Some(focused_window_id) = self.window_manager.get_focused_window_id()
             && self.top_level_window_id(focused_window_id) == window_id
@@ -11926,7 +11946,7 @@ impl Compositor {
             }
             changed |= self.maximize_window_from_client(window_id);
         }
-        if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+        if self.outputs.iter().any(|output| self.output_uses_focused_mode(output.id)) {
             changed |= self.apply_windowing_mode_policy();
         }
         changed
@@ -13380,7 +13400,11 @@ impl Compositor {
             self.screen_width(),
             self.screen_height(),
             self.workarea,
-            self.windowing_mode,
+            if self.output_uses_focused_mode(self.outputs.primary_id()) {
+                sws_protocol::WindowingMode::Focused
+            } else {
+                sws_protocol::WindowingMode::Freeform
+            },
         );
     }
 
@@ -13547,9 +13571,7 @@ impl Compositor {
                     workarea,
                     placement,
                     activated,
-                    focused: context.tablet
-                        || (output == self.outputs.primary_id()
-                            && self.windowing_mode == sws_protocol::WindowingMode::Focused),
+                    focused: self.output_uses_focused_mode(output),
                     client_scale_milli: requested
                         .map_or(self.output_scale_milli(), |context| context.scale_milli),
                 });
@@ -14458,12 +14480,18 @@ impl Compositor {
                             .is_none()
                     {
                         self.discard_pending_workspace_scene(window_id);
-                        self.workspace_manager.add_scene_root(
-                            window_id,
-                            self.tablet_mode || self.console_shell_present(),
-                            self.windowing_mode == sws_protocol::WindowingMode::Focused,
-                        );
-                        true
+                        let output = self.window_output_id(window_id);
+                        if let Some(mut workspace) = self.workspace_manager.output_mut(output) {
+                            let policy = workspace.policy();
+                            workspace.add_scene_root(
+                                window_id,
+                                policy.uses_tablet_layout(),
+                                policy.focused,
+                            );
+                            true
+                        } else {
+                            false
+                        }
                     } else {
                         self.discard_pending_workspace_scene(window_id);
                         false
@@ -14510,7 +14538,7 @@ impl Compositor {
                     .window_manager
                     .set_window_size_limits(window_id, min_width, min_height, max_width, max_height)
                 {
-                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                    if self.window_uses_focused_mode(window_id) {
                         self.apply_focused_policy_to_window(window_id);
                     }
                     self.full_redraw_needed = true;
@@ -14960,7 +14988,7 @@ impl Compositor {
                 };
                 if self.window_manager.set_window_type(window_id, wtype) {
                     self.sync_console_session_policy()?;
-                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                    if self.window_uses_focused_mode(window_id) {
                         self.apply_focused_policy_to_window(window_id);
                     }
                     // Re-raise to update Z-order based on window type
@@ -15620,7 +15648,7 @@ impl Compositor {
                 self.window_manager.set_workarea(x, y, width, height);
                 self.publish_window_creation_environment();
                 self.reflow_maximized_windows_to_workarea();
-                if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                if self.output_uses_focused_mode(self.outputs.primary_id()) {
                     self.apply_windowing_mode_policy();
                 }
                 self.full_redraw_needed = true;
@@ -15638,7 +15666,7 @@ impl Compositor {
                     .window_manager
                     .set_window_resizable(window_id, resizable)
                 {
-                    if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                    if self.window_uses_focused_mode(window_id) {
                         self.apply_focused_policy_to_window(window_id);
                     }
                 }
