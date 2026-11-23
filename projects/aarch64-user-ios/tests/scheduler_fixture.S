@@ -219,8 +219,12 @@ Lscarlet_scheduler_check:
 
     cbnz x21, Lscarlet_scheduler_ok
     // Fork preserves guest addresses while isolating stack, data, heap and TLS.
-    sub sp, sp, #16
+    sub sp, sp, #32
     str x27, [sp]
+    add x0, sp, #16
+    mov x8, #600 // Pipe
+    svc #0
+    cbnz x0, Lscarlet_scheduler_fail
     mov x1, #0
     mov x2, #0
     mov x3, #0
@@ -231,6 +235,18 @@ Lscarlet_scheduler_check:
     tbnz x0, #63, Lscarlet_scheduler_fail
     cbz x0, Lscarlet_fork_child
     mov x25, x0
+    // A blocked child must let its parent resume before exec or exit.
+    mov x0, #0x100000
+    mov x8, #20 // Sleep
+    svc #0
+    ldr w0, [sp, #20]
+    mov x1, sp
+    mov x2, #8
+    mov x8, #201 // StreamWrite
+    svc #0
+    cmp x0, #8
+    b.ne Lscarlet_scheduler_fail
+    mov x0, x25
     add x1, sp, #8
     mov x2, #0
     mov x8, #5
@@ -243,7 +259,13 @@ Lscarlet_scheduler_check:
     ldr x12, [sp]
     cmp x12, x27
     b.ne Lscarlet_scheduler_fail
-    add sp, sp, #16
+    ldp w0, w22, [sp, #16]
+    mov x8, #102
+    svc #0
+    mov w0, w22
+    mov x8, #102
+    svc #0
+    add sp, sp, #32
     ldr x12, [x26]
     cbnz x12, Lscarlet_scheduler_fail
     ldr x12, [x28]
@@ -310,6 +332,16 @@ Lscarlet_scheduler_spawn_args:
 
     b Lscarlet_scheduler_ok
 Lscarlet_fork_child:
+    ldr w0, [sp, #16]
+    add x1, sp, #24
+    mov x2, #8
+    mov x8, #200 // StreamRead
+    svc #0
+    cmp x0, #8
+    b.ne Lscarlet_scheduler_fail
+    ldr x12, [sp, #24]
+    cmp x12, x27
+    b.ne Lscarlet_scheduler_fail
     str xzr, [sp]
     str x27, [x26]
     str xzr, [x28]
