@@ -223,11 +223,14 @@ impl Image {
         }
     }
 
-    pub(crate) fn inherit_code(&self, source: &Self) {
-        self.set_guest_page_size(source.guest_page_size());
-        let code = source.code.lock().unwrap().clone();
-        *self.code.lock().unwrap() = code;
-        *self.file_code.lock().unwrap() = source.file_code.lock().unwrap().clone();
+    pub(crate) fn fork_into(&self, child: &crate::vm::manager::VirtualMemoryManager) -> Result<(), &'static str> {
+        let image = child.hosted_image();
+        image.set_guest_page_size(self.guest_page_size());
+        *image.code.lock().unwrap() = self.code.lock().unwrap().clone();
+        *image.file_code.lock().unwrap() = self.file_code.lock().unwrap().clone();
+        #[cfg(target_os = "ios")]
+        self.fork_signed_into(child)?;
+        Ok(())
     }
 
     pub(crate) fn retain_file_code(&self, map: &crate::vm::vmem::VirtualMemoryMap) {

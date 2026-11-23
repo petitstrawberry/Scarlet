@@ -457,9 +457,11 @@ impl VirtualMemoryManager {
     /// Pin a fork snapshot while the current mappings and their allocation
     /// registry are protected together. A later unmap may remove the parent
     /// VMA, but cannot release backing retained by this snapshot.
-    pub(crate) fn fork_snapshot(&self) -> Result<Vec<VirtualMemoryMap>, &'static str> {
+    pub(crate) fn fork_snapshot(&self, _child: &Self) -> Result<Vec<VirtualMemoryMap>, &'static str> {
         use crate::object::capability::memory_mapping::anon_owner::ForkCowPageOwner;
         let _transaction = self.mapping_update();
+        #[cfg(feature = "hosted")]
+        self.hosted_image().fork_into(_child)?;
         // Match fault/relocation publication: page tables precede metadata.
         // Keep this guard until writable parent PTEs have been revoked, so a
         // second fork cannot publish a child before the first revocation.
@@ -2591,8 +2593,6 @@ impl VirtualMemoryManager {
     }
     /// Fork keeps the exact placement; exec samples on its unpublished image.
     pub(crate) fn inherit_layout(&self, source: &Self) {
-        #[cfg(feature = "hosted")]
-        self.hosted_image().inherit_code(&source.hosted_image());
         let (placement, anchor, base) = {
             let parent = source.inner.read();
             (parent.placement, parent.mmap_anchor, parent.mmap_base)

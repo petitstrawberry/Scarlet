@@ -2890,11 +2890,6 @@ impl Task {
                     let asid = alloc_virtual_address_space();
                     child.vm_manager.set_asid(asid);
                     child.vm_manager.inherit_layout(&self.vm_manager);
-                    #[cfg(all(feature = "hosted", target_os = "ios"))]
-                    {
-                        let _transaction = self.vm_manager.mapping_transaction();
-                        self.vm_manager.hosted_image().fork_into(&child)?;
-                    }
                 } else {
                     // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
                     child.vm_manager = self.vm_manager.clone();
@@ -2909,7 +2904,7 @@ impl Task {
 
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child without cloning lists
-            let memmaps = self.vm_manager.fork_snapshot()?;
+            let memmaps = self.vm_manager.fork_snapshot(&child.vm_manager)?;
             after_snapshot();
             for mmap in memmaps {
                 if mmap

@@ -1,7 +1,7 @@
 //! One carrier for every signed image on hosted iOS.
 
 use super::{Image, load_registers, store_stop};
-use crate::{arch::Trapframe, sched::scheduler, task::Task};
+use crate::{arch::Trapframe, sched::scheduler, task::Task, vm::manager::VirtualMemoryManager};
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 use scarlet_hosted_runtime::{
@@ -46,11 +46,15 @@ impl InterruptTarget {
 /// Admit an already registered signed image before publishing its first Task.
 /// The loader owns all of its mappings, including the writable stack.
 pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()> {
+    install_mapping(&task.vm_manager, text)
+}
+
+fn install_mapping(vm: &VirtualMemoryManager, text: Arc<SignedText>) -> io::Result<()> {
     let carrier = CARRIER
         .get()
         .ok_or_else(|| io::Error::other("iOS guest carrier unavailable"))?;
-    let _transaction = task.vm_manager.mapping_transaction();
-    let image = task.vm_manager.hosted_image();
+    let _transaction = vm.mapping_transaction();
+    let image = vm.hosted_image();
     let mut local = image.local.lock().unwrap();
     if local.is_some() {
         return Err(io::Error::other("Address space already has signed text"));
@@ -62,7 +66,7 @@ pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()>
         })
         .map_err(|_| io::Error::other("Image generation exhausted"))?;
     let id = WorkerId {
-        address_space: task.vm_manager.get_asid() as usize,
+        address_space: vm.get_asid() as usize,
         image_generation: generation,
     };
     *local = Some(Arc::new(LocalImage {
@@ -74,16 +78,15 @@ pub fn install_signed_text(task: &Task, text: Arc<SignedText>) -> io::Result<()>
 }
 
 impl Image {
-    pub(crate) fn fork_into(&self, child: &Task) -> Result<(), &'static str> {
-        self.quiesce();
+    pub(super) fn fork_signed_into(&self, child: &VirtualMemoryManager) -> Result<(), &'static str> {
         let local = self.local.lock().unwrap();
-        let local = local.as_ref().ok_or("Missing signed parent image")?;
+        let Some(local) = local.as_ref() else { return Ok(()) };
         // The caller owns the parent's mapping transaction and the child is unpublished.
         let text = unsafe { local.text.fork() }.map_err(|error| {
             std::eprintln!("Cannot fork signed guest pages: {error}");
             "Cannot fork signed guest pages"
         })?;
-        install_signed_text(child, text).map_err(|_| "Cannot attach forked signed image")
+        install_mapping(child, text).map_err(|_| "Cannot attach forked signed image")
     }
 
     pub(crate) fn signed_alias(&self, address: usize, write: bool) -> Option<Option<usize>> {
