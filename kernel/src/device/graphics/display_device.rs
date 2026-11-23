@@ -106,12 +106,19 @@ pub struct DisplayInfo {
     pub format: u32,
     /// Page-aligned size of the mappable display backing store.
     pub buffer_len: u32,
+    // Explicitly initialize the existing ABI padding before copying to userspace.
+    reserved: u32,
     /// Opaque identifier for the current mappable backing store.
     ///
     /// This value changes when the display surface's mapped backing changes,
     /// even if `buffer_len` remains the same.
     pub backing_id: u64,
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<DisplayInfo>() == 32);
+    assert!(core::mem::offset_of!(DisplayInfo, backing_id) == 24);
+};
 
 /// Region argument for DISPLAY_PRESENT_REGION.
 #[repr(C)]
@@ -527,35 +534,20 @@ impl DisplayCharDevice {
             stride: backing.config.stride,
             format: Self::display_format(backing.config.format),
             buffer_len: backing.size as u32,
+            reserved: 0,
             backing_id: backing.physical_addr,
         })
     }
 
-    fn translated_ptr(arg: usize) -> Result<usize, &'static str> {
-        if arg == 0 {
-            return Err("Invalid argument pointer");
-        }
-
-        if let Some(current_task) = crate::task::mytask() {
-            current_task
-                .vm_manager
-                .translate_to_kva(arg)
-                .ok_or("Invalid user pointer - not mapped")
-        } else {
-            Ok(arg)
-        }
-    }
-
     fn handle_get_info(&self, arg: usize) -> Result<i32, &'static str> {
-        let target_ptr = Self::translated_ptr(arg)?;
         let info = self.current_display_info()?;
-
-        // SAFETY: target_ptr is either a translated user pointer or a kernel
-        // pointer supplied by in-kernel tests.
-        unsafe {
-            core::ptr::write(target_ptr as *mut DisplayInfo, info);
-        }
-
+        // SAFETY: DisplayInfo contains only initialized integer fields and no padding.
+        Self::write_argument(arg, unsafe {
+            core::slice::from_raw_parts(
+                (&info as *const DisplayInfo).cast::<u8>(),
+                core::mem::size_of::<DisplayInfo>(),
+            )
+        })?;
         Ok(0)
     }
 
@@ -744,11 +736,15 @@ impl DisplayCharDevice {
     }
 
     fn handle_present_region(&self, arg: usize) -> Result<i32, &'static str> {
-        let target_ptr = Self::translated_ptr(arg)?;
-
-        // SAFETY: target_ptr is either a translated user pointer or a kernel
-        // pointer supplied by in-kernel tests.
-        let region = unsafe { core::ptr::read(target_ptr as *const DisplayPresentRegion) };
+        let mut region = DisplayPresentRegion::default();
+        // SAFETY: DisplayPresentRegion has no padding and every integer bit
+        // pattern in the supplied bytes is valid.
+        Self::read_argument(arg, unsafe {
+            core::slice::from_raw_parts_mut(
+                (&mut region as *mut DisplayPresentRegion).cast::<u8>(),
+                core::mem::size_of::<DisplayPresentRegion>(),
+            )
+        })?;
 
         self.present_region(DisplayRegion::new(
             region.x,
@@ -760,7 +756,6 @@ impl DisplayCharDevice {
     }
 
     fn handle_get_swapchain(&self, arg: usize) -> Result<i32, &'static str> {
-        let target_ptr = Self::translated_ptr(arg)?;
         let device = self
             .device_manager()
             .get_device(self.fb_resource.source_device_id)
@@ -792,8 +787,14 @@ impl DisplayCharDevice {
             reserved: 0,
             first_buffer_offset: buffer_len,
         };
-        // SAFETY: target_ptr is a translated caller-provided output pointer.
-        unsafe { core::ptr::write(target_ptr as *mut DisplaySwapchainInfo, info) };
+        // SAFETY: Four u32 fields followed by a usize have no padding on
+        // supported targets, and each field has been initialized.
+        Self::write_argument(arg, unsafe {
+            core::slice::from_raw_parts(
+                (&info as *const DisplaySwapchainInfo).cast::<u8>(),
+                core::mem::size_of::<DisplaySwapchainInfo>(),
+            )
+        })?;
         Ok(0)
     }
 
