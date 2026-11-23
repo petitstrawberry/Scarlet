@@ -129,20 +129,6 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
-    #[cfg(all(feature = "hosted", target_os = "ios"))]
-    if let Some(result) = task.vm_manager.change_signed_anonymous(|memory| {
-        const SUPPORTED: usize = MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED;
-        if flags & MAP_ANONYMOUS == 0 || flags & !SUPPORTED != 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
-        }
-        let fixed = (flags & MAP_FIXED != 0).then_some(vaddr);
-        // SAFETY: change_signed_anonymous holds the mapping transaction and
-        // acknowledges all carrier stops before invoking this closure.
-        unsafe { memory.map(fixed, length, prot) }
-    }) {
-        return result.unwrap_or(usize::MAX);
-    }
-
     // Round up length to page boundary
     let Some(aligned_length) = length.checked_next_multiple_of(PAGE_SIZE) else {
         return usize::MAX;
@@ -450,13 +436,6 @@ fn protect_user_memory(
     length: usize,
     prot: usize,
 ) -> Result<(), &'static str> {
-    #[cfg(all(feature = "hosted", target_os = "ios"))]
-    if let Some(result) = task.vm_manager.change_signed_anonymous(|memory| {
-        // SAFETY: this VM is parked and its mappings are exclusively borrowed.
-        unsafe { memory.protect(address, length, prot) }
-    }) {
-        return result;
-    }
     if length == 0 {
         return Err("Memory protection length is zero");
     }
@@ -491,14 +470,6 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop if munmap fails
     trapframe.increment_pc_next(&task);
-
-    #[cfg(all(feature = "hosted", target_os = "ios"))]
-    if let Some(result) = task.vm_manager.change_signed_anonymous(|memory| {
-        // SAFETY: this VM is parked and its mappings are exclusively borrowed.
-        unsafe { memory.unmap(vaddr, length) }
-    }) {
-        return result.map_or(usize::MAX, |()| 0);
-    }
 
     // Input validation
     if length == 0 || vaddr % PAGE_SIZE != 0 {

@@ -222,33 +222,15 @@ struct InnerVmm {
 impl VirtualMemoryManager {
     #[cfg(all(feature = "hosted", target_os = "ios"))]
     pub(crate) fn resize_signed_heap(&self, address: usize, limit: usize) -> Option<Result<usize, &'static str>> {
-        self.change_signed_memory(|image| {
-            // All usercopy on this address space holds the VM transaction.
-            unsafe { image.resize_heap(address, limit) }
-        })
-    }
-
-    #[cfg(all(feature = "hosted", target_os = "ios"))]
-    pub(crate) fn change_signed_anonymous<T>(
-        &self,
-        operation: impl FnOnce(
-            &mut scarlet_hosted_runtime::anonymous::AnonymousMappings,
-        ) -> std::io::Result<T>,
-    ) -> Option<Result<T, &'static str>> {
-        self.change_signed_memory(|image| image.change_anonymous(operation))
-    }
-
-    #[cfg(all(feature = "hosted", target_os = "ios"))]
-    fn change_signed_memory<T>(
-        &self,
-        operation: impl FnOnce(&crate::hosted::execution::Image) -> Result<T, &'static str>,
-    ) -> Option<Result<T, &'static str>> {
         let mapping = self.mapping_transaction();
         let image = self.hosted_image();
         if !image.has_signed_mapping() {
             return None;
         }
-        Some(mapping.prepare_fault().and_then(|()| operation(&image)))
+        Some(mapping.prepare_fault().and_then(|()| {
+            // All usercopy on this address space holds this same transaction.
+            unsafe { image.resize_heap(address, limit) }
+        }))
     }
 
     /// All metadata writers invalidate hosted admission, including COW commits,
