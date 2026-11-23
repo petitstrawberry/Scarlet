@@ -29,8 +29,6 @@ private struct ScarletRootView: View {
                 if fullScreen {
                     desktop
                         .statusBarHidden(true)
-                        .persistentSystemOverlays(.hidden)
-                        .defersSystemGestures(on: .bottom)
                 } else {
                     TabView(selection: $tab) {
                         desktop
@@ -58,7 +56,7 @@ private struct ScarletRootView: View {
     #if !SCARLET_EXECUTION_PROBE
     private var desktop: some View {
         DesktopView(display: session.display, active: tab == .desktop && scenePhase == .active,
-                    fullScreen: fullScreen, resize: session.resize)
+                    resize: session.resize)
             .overlay(alignment: .topTrailing) {
                 Button {
                     fullScreen.toggle()
@@ -175,13 +173,7 @@ private func receiveDamage() {
 private struct DesktopView: View {
     @ObservedObject var display: DesktopDisplay
     let active: Bool
-    let fullScreen: Bool
     let resize: (DesktopViewport) -> Void
-
-    private var ignoredEdges: Edge.Set {
-        if fullScreen { return .all }
-        return UIDevice.current.userInterfaceIdiom == .pad ? .bottom : []
-    }
 
     var body: some View {
         ZStack {
@@ -197,7 +189,9 @@ private struct DesktopView: View {
             DesktopTouchCapture(active: active, metalLayer: display.metalLayer, resize: resize)
                 .accessibilityHidden(true)
         }
-        .ignoresSafeArea(.container, edges: ignoredEdges)
+        .background {
+            Color.black.ignoresSafeArea(.container).allowsHitTesting(false)
+        }
         .accessibilityElement()
         .accessibilityIdentifier("scarlet-display")
         .accessibilityLabel("Scarlet display")
