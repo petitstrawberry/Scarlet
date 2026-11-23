@@ -6,7 +6,7 @@ pub mod elf_loader;
 mod group_exit;
 pub mod namespace;
 pub mod process_scope;
-pub(crate) use group_exit::device_transaction;
+pub(crate) use group_exit::{KernelTransaction, kernel_transaction};
 pub mod reclaim_preference;
 pub mod resource_group;
 pub mod syscall;
@@ -3463,8 +3463,8 @@ impl Task {
             }
             return;
         }
-        // A sibling can be asleep in the display or EC driver with a hardware
-        // mutex on its kernel stack. Let it retire the transaction before
+        // A sibling can be asleep with a kernel or driver guard on its stack.
+        // Let it retire the transaction before
         // closing shared handles or discarding that stack.
         self.group_exit.wait_for_transactions();
         self.begin_exit();

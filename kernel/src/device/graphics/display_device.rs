@@ -552,7 +552,7 @@ impl DisplayCharDevice {
     }
 
     fn handle_get_brightness(&self) -> Result<i32, &'static str> {
-        let _transaction = crate::task::device_transaction()?;
+        let _transaction = crate::task::kernel_transaction()?;
         let device = self.source_graphics_device()?;
         let brightness = device
             .as_graphics_device()
@@ -565,7 +565,7 @@ impl DisplayCharDevice {
     }
 
     fn handle_set_brightness(&self, arg: usize) -> Result<i32, &'static str> {
-        let _transaction = crate::task::device_transaction()?;
+        let _transaction = crate::task::kernel_transaction()?;
         if arg > 100 {
             return Err("Display brightness must be in the range 0..=100");
         }
@@ -799,7 +799,7 @@ impl DisplayCharDevice {
     }
 
     fn handle_present_buffer(&self, arg: usize) -> Result<i32, &'static str> {
-        let _transaction = crate::task::device_transaction()?;
+        let _transaction = crate::task::kernel_transaction()?;
         if arg == 0 {
             return Err("Invalid display present pointer");
         }
@@ -956,7 +956,7 @@ impl DisplayCharDevice {
         if let Some(completion) = completion {
             completion.wait()?;
         } else {
-            let _transaction = crate::task::device_transaction()?;
+            let _transaction = crate::task::kernel_transaction()?;
             let (_image_owner, device, resource, region, options) =
                 legacy.expect("legacy presentation");
             device
@@ -1014,7 +1014,7 @@ impl DisplayCharDevice {
         if let Some(completion) = completion {
             completion.wait()
         } else {
-            let _transaction = crate::task::device_transaction()?;
+            let _transaction = crate::task::kernel_transaction()?;
             legacy
                 .expect("legacy framebuffer presentation")
                 .as_graphics_device()
