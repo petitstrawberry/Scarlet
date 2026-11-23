@@ -9,7 +9,8 @@ use scarlet::{
         Device, DeviceType,
         graphics::{
             FramebufferConfig, GpuDisplayResource, GpuPresentOptions, GraphicsDevice, PixelFormat,
-            PresentationOwners, PresentationWait, output::DisplayRegion,
+            PresentationOwners, PresentationWait,
+            output::{ConnectorInfo, ConnectorKind, DisplayRegion},
         },
         input::{
             event_device::{EventDevice, INPUT_CAP_INTERNAL, InputDeviceKind, InputDeviceMetadata},
@@ -138,6 +139,22 @@ impl GraphicsDevice for Output {
 
     fn get_display_name(&self) -> &'static str {
         LABEL
+    }
+
+    fn connectors(&self) -> Vec<ConnectorInfo> {
+        let scanout = self.snapshot();
+        // This is the guest's built-in panel, paired with the iOS touch
+        // and posture devices. Host windows do not create guest connectors.
+        vec![ConnectorInfo {
+            index: 0,
+            name: self.get_display_name().into(),
+            kind: ConnectorKind::Internal,
+            connected: true,
+            width: scanout.config.width,
+            height: scanout.config.height,
+            refresh_mhz: 0,
+            physical_size_mm: None,
+        }]
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {
