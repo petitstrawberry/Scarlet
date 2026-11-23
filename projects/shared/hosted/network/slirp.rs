@@ -10,6 +10,7 @@ use std::{
         fd::AsRawFd,
         unix::{ffi::OsStrExt, net::UnixStream},
     },
+    path::{Path, PathBuf},
     ptr::{self, NonNull},
     sync::{Arc, atomic::Ordering, mpsc},
     time::Instant,
@@ -247,14 +248,11 @@ struct Nat {
 }
 
 impl Nat {
-    fn new(context: Box<Context>) -> Result<Self, String> {
-        let path = std::env::var_os("SCARLET_HOSTED_SLIRP")
-            .or_else(|| option_env!("SCARLET_HOSTED_SLIRP").map(Into::into))
-            .unwrap_or_else(|| "libslirp.0.dylib".into());
-        let path = CString::new(path.as_bytes()).map_err(|_| "Invalid libslirp path")?;
-        let library = Library::open(&path).map_err(|error| {
-            format!("Cannot load libslirp ({}): {error}", path.to_string_lossy())
-        })?;
+    fn new(path: &Path, context: Box<Context>) -> Result<Self, String> {
+        let native_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "Invalid libslirp path")?;
+        let library = Library::open(&native_path)
+            .map_err(|error| format!("Cannot load libslirp ({}): {error}", path.display()))?;
         // Names and signatures match the version 1 libslirp ABI.
         let new: unsafe extern "C" fn(*const Config, *const Callbacks, *mut c_void) -> Slirp =
             unsafe { std::mem::transmute(library.symbol(c"slirp_new")?) };
@@ -356,6 +354,7 @@ impl Drop for Nat {
 }
 
 pub(super) fn start(
+    library: PathBuf,
     carrier: Arc<Carrier>,
     tx: mpsc::Receiver<DevicePacket>,
     rx: mpsc::SyncSender<DevicePacket>,
@@ -371,7 +370,7 @@ pub(super) fn start(
                 pending: Cell::new(false),
                 start: Instant::now(),
             });
-            let mut nat = match Nat::new(context) {
+            let mut nat = match Nat::new(&library, context) {
                 Ok(nat) => nat,
                 Err(error) => {
                     let _ = ready.send(Err(error));
