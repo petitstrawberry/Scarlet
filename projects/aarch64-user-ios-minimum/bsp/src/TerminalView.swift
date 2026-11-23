@@ -198,7 +198,10 @@ struct TerminalView: View {
     private var keyBar: some View {
         HStack(spacing: 2) {
             Button("Esc") { console.send("\u{1b}") }
-            Button("Tab") { console.send("\t") }
+            Button("Tab") {
+                if let input { input.sendTab() }
+                else { console.send("\t") }
+            }
             Button("Ctrl") {
                 control.toggle()
                 input?.becomeFirstResponder()
@@ -334,15 +337,43 @@ private final class TerminalKeyInput: UITextField, UITextFieldDelegate {
     }
 
     func sendPaste(_ text: String) {
+        commitInput()
+        console?.paste(text)
+    }
+
+    func sendTab() {
+        commitInput()
+        console?.send("\t")
+    }
+
+    private func commitInput() {
         if markedTextRange != nil { unmarkText() }
         editingChanged()
-        console?.paste(text)
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard markedTextRange == nil else {
+            super.pressesBegan(presses, with: event)
+            return
+        }
+        var unhandled = presses
+        for press in presses {
+            guard let key = press.key, key.keyCode == .keyboardTab,
+                  key.modifierFlags.intersection([.command, .alternate, .control, .shift]).isEmpty else {
+                continue
+            }
+            sendTab()
+            unhandled.remove(press)
+        }
+        if !unhandled.isEmpty {
+            super.pressesBegan(unhandled, with: event)
+        }
     }
 
     override var keyCommands: [UIKeyCommand]? {
         guard markedTextRange == nil else { return nil }
         let keys = [
-            UIKeyCommand.inputEscape, "\t", UIKeyCommand.inputUpArrow, UIKeyCommand.inputDownArrow,
+            UIKeyCommand.inputEscape, UIKeyCommand.inputUpArrow, UIKeyCommand.inputDownArrow,
             UIKeyCommand.inputLeftArrow, UIKeyCommand.inputRightArrow, UIKeyCommand.inputHome,
             UIKeyCommand.inputEnd, UIKeyCommand.inputDelete
         ]
