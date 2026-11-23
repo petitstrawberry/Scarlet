@@ -2107,7 +2107,7 @@ impl VirtualMemoryManager {
                         } else {
                             (page_vaddr, PAGE_SIZE)
                         };
-                        let allocate = || {
+                        let allocate = |size: usize| {
                             #[cfg(feature = "hosted")]
                             {
                                 ContiguousPages::new_for_user_range(size / PAGE_SIZE, base)
@@ -2121,13 +2121,11 @@ impl VirtualMemoryManager {
                         };
                         let prefetched = if zero_group && access.op == AccessOp::Store {
                             let span = self.sequential_zero_span(&memory_map, base, granule);
-                            (span > size)
-                                .then(|| ContiguousPages::new_aligned(span / PAGE_SIZE, granule))
-                                .flatten()
+                            (span > size).then(|| allocate(span)).flatten()
                         } else {
                             None
                         };
-                        let new_alloc = match prefetched.or_else(allocate) {
+                        let new_alloc = match prefetched.or_else(|| allocate(size)) {
                             Some(allocation) => allocation,
                             None if allow_reclaim => {
                                 // No owner/VMM lock is held here. Reclamation
@@ -2135,7 +2133,7 @@ impl VirtualMemoryManager {
                                 let _pressure = crate::mem::pressure::begin_reclaim();
                                 crate::mem::page_cache::PageCacheManager::global()
                                     .reclaim_clean_pages(64);
-                                allocate()
+                                allocate(size)
                                     .ok_or("Failed to allocate page for private mapping COW")?
                             }
                             None => return Err("Failed to allocate page for private mapping COW"),
