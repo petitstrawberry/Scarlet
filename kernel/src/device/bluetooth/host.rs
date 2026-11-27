@@ -230,7 +230,7 @@ pub(super) struct Host {
 }
 
 impl Host {
-    pub fn new(shared: Arc<Shared>) -> Self {
+    pub fn new(shared: Arc<Shared>, fast_connectable: bool) -> Self {
         let notify = shared.clone();
         Self {
             wake: Arc::new(move || {
@@ -239,7 +239,7 @@ impl Host {
             }),
             repoll: false,
             shared,
-            classic: Classic::new(),
+            classic: Classic::with_fast_connectable(fast_connectable),
             controller: ControllerInfo::default(),
             links: Vec::new(),
             buffers: AclBuffers::default(),

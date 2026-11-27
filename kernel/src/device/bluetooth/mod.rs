@@ -21,6 +21,11 @@ use host::Host;
 /// the supplied waker after publishing bytes. receive drains queued bytes
 /// without waiting and send writes one complete H4 packet or reports failure.
 pub trait H4Transport: Send + Sync {
+    /// Opt this controller into shorter BR/EDR page scan intervals for bonded reconnects.
+    fn fast_connectable(&self) -> bool {
+        false
+    }
+
     fn start(&self, wake: Arc<Waker>) -> Result<(), &'static str>;
     fn receive(&self, buffer: &mut [u8]) -> Result<usize, &'static str>;
     fn rx_pending(&self) -> bool;
@@ -86,7 +91,7 @@ fn worker() {
 fn serve(controller: &Controller) -> Result<(), &'static str> {
     let transport = &*controller.transport;
     let shared = &controller.shared;
-    let mut host = Host::new(shared.clone());
+    let mut host = Host::new(shared.clone(), transport.fast_connectable());
     let mut rx = Decoder::default();
     let mut buffer = [0u8; 512];
     let task = crate::task::mytask().ok_or("missing adapter task")?;

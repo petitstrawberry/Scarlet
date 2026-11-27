@@ -199,6 +199,108 @@ fn initialization_falls_back_for_inquiry_mode_and_fails_on_mandatory_command_err
     assert!(h.poll().is_none());
 }
 
+const INTERLACED_FEATURES: &[u8] = &[0, 0x20, 0, 0, 0x20, 0, 0, 0, 0];
+
+fn page_scan_setup(enabled: bool, features: &[u8]) -> Host {
+    let mut h = Host {
+        sm: Classic::with_fast_connectable(enabled),
+        now: 0,
+    };
+    h.init(features);
+    h.complete(INQUIRY_MODE, 1, &[0]);
+    h
+}
+
+fn expect_ready_with_scan_off(h: &mut Host) {
+    assert!(matches!(h.poll(), Some(Action::Ready(_))));
+    assert!(h.poll().is_none());
+    assert_eq!(h.sm.next_deadline_ms(), None);
+}
+
+#[test]
+fn fast_page_scan_preserves_window_before_ready_and_bond_gates_enable() {
+    let mut h = page_scan_setup(true, INTERLACED_FEATURES);
+    assert!(h.cmd(READ_PAGE_SCAN_ACTIVITY).params().is_empty());
+    h.complete(READ_PAGE_SCAN_ACTIVITY, 1, &[0, 0, 8, 0x17, 0]);
+    assert_eq!(h.cmd(WRITE_PAGE_SCAN_ACTIVITY).params(), &[0, 1, 0x17, 0]);
+    h.complete(WRITE_PAGE_SCAN_ACTIVITY, 1, &[0]);
+    assert_eq!(h.cmd(WRITE_PAGE_SCAN_TYPE).params(), &[1]);
+    assert!(h.poll().is_none());
+    h.complete(WRITE_PAGE_SCAN_TYPE, 1, &[0]);
+    expect_ready_with_scan_off(&mut h);
+    for enabled in [true, false, true] {
+        h.sm.accept_saved = enabled;
+        assert_eq!(
+            h.cmd(WRITE_SCAN_ENABLE).params(),
+            &[if enabled { 2 } else { 0 }]
+        );
+        h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
+        assert!(h.poll().is_none());
+    }
+}
+
+#[test]
+fn fast_page_scan_is_opt_in_and_interlaced_type_requires_feature_29() {
+    expect_ready_with_scan_off(&mut page_scan_setup(false, INTERLACED_FEATURES));
+    expect_ready_with_scan_off(&mut page_scan_setup(true, &[0x01])); // Unknown local features.
+    let mut h = page_scan_setup(true, &[0, 0x20, 0, 0, 0x10, 0x20, 0, 0, 0]);
+    h.cmd(READ_PAGE_SCAN_ACTIVITY);
+    h.complete(READ_PAGE_SCAN_ACTIVITY, 1, &[0, 0, 8, 0x12, 0]);
+    assert_eq!(h.cmd(WRITE_PAGE_SCAN_ACTIVITY).params(), &[0, 1, 0x12, 0]);
+    h.complete(WRITE_PAGE_SCAN_ACTIVITY, 1, &[0]);
+    expect_ready_with_scan_off(&mut h);
+}
+
+#[test]
+fn invalid_page_scan_activity_skips_all_writes() {
+    for report in [
+        &[0, 0, 8][..],         // Truncated success.
+        &[0, 0, 8, 0x10, 0],    // Below minimum window.
+        &[0, 0, 8, 0x81, 0],    // Two windows cannot fit in 0x0100 slots.
+        &[0, 0x12, 0, 0x13, 0], // Window exceeds reported interval.
+        &[0, 1, 8, 0x12, 0],    // Odd interval.
+        &[0, 0, 0x11, 0x12, 0], // Outside specified interval range.
+        &[0x01],                // Read command unsupported.
+    ] {
+        let mut h = page_scan_setup(true, INTERLACED_FEATURES);
+        h.cmd(READ_PAGE_SCAN_ACTIVITY);
+        h.complete(READ_PAGE_SCAN_ACTIVITY, 1, report);
+        expect_ready_with_scan_off(&mut h);
+    }
+}
+
+#[test]
+fn rejected_scan_settings_restore_only_changed_activity_once() {
+    for restore_status in [0, 0x0c] {
+        let mut h = page_scan_setup(true, INTERLACED_FEATURES);
+        h.cmd(READ_PAGE_SCAN_ACTIVITY);
+        h.complete(READ_PAGE_SCAN_ACTIVITY, 1, &[0, 0x20, 4, 0x19, 0]);
+        h.cmd(WRITE_PAGE_SCAN_ACTIVITY);
+        h.complete(WRITE_PAGE_SCAN_ACTIVITY, 1, &[0]);
+        h.cmd(WRITE_PAGE_SCAN_TYPE);
+        h.complete(WRITE_PAGE_SCAN_TYPE, 1, &[0x11]);
+        assert_eq!(
+            h.cmd(WRITE_PAGE_SCAN_ACTIVITY).params(),
+            &[0x20, 4, 0x19, 0]
+        );
+        h.complete(WRITE_PAGE_SCAN_ACTIVITY, 1, &[restore_status]);
+        expect_ready_with_scan_off(&mut h);
+    }
+    let mut h = page_scan_setup(true, INTERLACED_FEATURES);
+    h.cmd(READ_PAGE_SCAN_ACTIVITY);
+    h.complete(READ_PAGE_SCAN_ACTIVITY, 1, &[0, 0, 8, 0x12, 0]);
+    h.cmd(WRITE_PAGE_SCAN_ACTIVITY);
+    h.complete(WRITE_PAGE_SCAN_ACTIVITY, 1, &[0x01]);
+    expect_ready_with_scan_off(&mut h);
+
+    let mut h = page_scan_setup(true, INTERLACED_FEATURES);
+    h.cmd(READ_PAGE_SCAN_ACTIVITY);
+    h.complete(READ_PAGE_SCAN_ACTIVITY, 1, &[0, 0, 1, 0x80, 0]);
+    h.cmd(WRITE_PAGE_SCAN_TYPE); // Activity already correct.
+    h.complete(WRITE_PAGE_SCAN_TYPE, 1, &[0x01]);
+    expect_ready_with_scan_off(&mut h);
+}
+
 #[test]
 fn command_credits_are_absolute_and_timeouts_cover_stalled_commands_and_credits() {
     let mut h = Host::new();

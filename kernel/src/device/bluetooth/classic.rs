@@ -169,11 +169,16 @@ const NO_OOB: u16 = 0x0433;
 const NO_IO: u16 = 0x0434;
 const EVENT_MASK: u16 = 0x0c01;
 const WRITE_SCAN_ENABLE: u16 = 0x0c1a;
+const READ_PAGE_SCAN_ACTIVITY: u16 = 0x0c1b;
+const WRITE_PAGE_SCAN_ACTIVITY: u16 = 0x0c1c;
+const WRITE_PAGE_SCAN_TYPE: u16 = 0x0c47;
+const FAST_PAGE_INTERVAL: u16 = 0x0100; // 160 ms.
 const RESET: u16 = 0x0c03;
 const INQUIRY_MODE: u16 = 0x0c45;
 const SSP_MODE: u16 = 0x0c56;
 const LOCAL_FEATURES: u16 = 0x1003;
 const LMP_ROLE_SWITCH: u8 = 1 << 5; // LMP features page 0, octet 0.
+const LMP_INTERLACED_PAGE_SCAN: u8 = 1 << 5; // Page 0, octet 3.
 const BUFFER_SIZE: u16 = 0x1005;
 const LOCAL_ADDR: u16 = 0x1009;
 
@@ -343,6 +348,55 @@ impl Link {
     }
 }
 
+#[derive(Default)]
+struct FastPageScan {
+    interlaced: bool,
+    restore_activity: Option<[u8; 4]>,
+}
+
+impl FastPageScan {
+    /// Advance the optional initialization commands without enabling page scan.
+    fn next(&mut self, opcode: u16, result: &[u8]) -> Option<Command> {
+        match opcode {
+            READ_PAGE_SCAN_ACTIVITY => {
+                let [0, il, ih, wl, wh] = *result else {
+                    return None;
+                };
+                let interval = u16::from_le_bytes([il, ih]);
+                let window = u16::from_le_bytes([wl, wh]);
+                // Interlaced scanning uses two consecutive windows per interval.
+                let max_window = if self.interlaced {
+                    FAST_PAGE_INTERVAL / 2
+                } else {
+                    FAST_PAGE_INTERVAL
+                };
+                if !(0x0012..=0x1000).contains(&interval)
+                    || interval & 1 != 0
+                    || !(0x0011..=max_window.min(interval)).contains(&window)
+                {
+                    return None;
+                }
+                if interval != FAST_PAGE_INTERVAL {
+                    self.restore_activity = self.interlaced.then_some([il, ih, wl, wh]);
+                    let [lo, hi] = FAST_PAGE_INTERVAL.to_le_bytes();
+                    return Some(Command::new(WRITE_PAGE_SCAN_ACTIVITY, &[lo, hi, wl, wh]));
+                }
+            }
+            WRITE_PAGE_SCAN_ACTIVITY if result == [0] && self.restore_activity.is_some() => {}
+            WRITE_PAGE_SCAN_TYPE if result[0] != 0 => {
+                // Restore the original activity if the controller rejected interlaced scan.
+                return self
+                    .restore_activity
+                    .take()
+                    .map(|old| Command::new(WRITE_PAGE_SCAN_ACTIVITY, &old));
+            }
+            _ => return None,
+        }
+        self.interlaced
+            .then(|| Command::new(WRITE_PAGE_SCAN_TYPE, &[1]))
+    }
+}
+
 pub struct Classic {
     ready: bool,
     fault: bool,
@@ -350,6 +404,7 @@ pub struct Classic {
     info: ControllerInfo,
     inquiry_mode: u8,
     role_switch: bool,
+    fast_page_scan: Option<FastPageScan>,
     page_scan: bool,
     pub(super) accept_saved: bool,
     credits: u8,
@@ -370,6 +425,10 @@ pub struct Classic {
 
 impl Classic {
     pub fn new() -> Self {
+        Self::with_fast_connectable(false)
+    }
+
+    pub(super) fn with_fast_connectable(enabled: bool) -> Self {
         let mut commands = Queue::new();
         commands.push(Queued {
             command: Command::new(RESET, &[]),
@@ -382,6 +441,7 @@ impl Classic {
             info: ControllerInfo::default(),
             inquiry_mode: 2,
             role_switch: false,
+            fast_page_scan: enabled.then(FastPageScan::default),
             page_scan: false,
             accept_saved: false,
             credits: 1,
@@ -1318,9 +1378,26 @@ impl Classic {
     }
 
     fn init_ack(&mut self, opcode: u16, result: &[u8]) {
+        if matches!(
+            opcode,
+            READ_PAGE_SCAN_ACTIVITY | WRITE_PAGE_SCAN_ACTIVITY | WRITE_PAGE_SCAN_TYPE
+        ) {
+            if let Some(next) = self
+                .fast_page_scan
+                .as_mut()
+                .and_then(|scan| scan.next(opcode, result))
+            {
+                self.enqueue(Owner::Init, next);
+            } else {
+                self.fast_page_scan = None;
+                self.finish_init();
+            }
+            return;
+        }
         let status = result[0];
         if status != 0 {
             if opcode == LOCAL_FEATURES && matches!(status, 0x01 | 0x11) {
+                self.fast_page_scan = None;
                 // Legacy controller: retain the default peripheral role preference.
                 self.enqueue(Owner::Init, Command::new(BUFFER_SIZE, &[]));
             } else if opcode == INQUIRY_MODE && matches!(status, 0x01 | 0x11 | 0x12) {
@@ -1330,7 +1407,7 @@ impl Classic {
                     self.enqueue(Owner::Init, Command::new(INQUIRY_MODE, &[1]));
                 } else {
                     self.inquiry_mode = 0; // Reset default.
-                    self.initialized();
+                    self.finish_init();
                 }
             } else {
                 self.fail(Reason::Hci(status));
@@ -1345,6 +1422,9 @@ impl Classic {
             }
             LOCAL_FEATURES => {
                 self.role_switch = result[1] & LMP_ROLE_SWITCH != 0;
+                if let Some(scan) = &mut self.fast_page_scan {
+                    scan.interlaced = result[4] & LMP_INTERLACED_PAGE_SCAN != 0;
+                }
                 Command::new(BUFFER_SIZE, &[])
             }
             BUFFER_SIZE => {
@@ -1366,7 +1446,7 @@ impl Classic {
             EVENT_MASK => Command::new(SSP_MODE, &[1]),
             SSP_MODE => Command::new(INQUIRY_MODE, &[self.inquiry_mode]),
             INQUIRY_MODE => {
-                self.initialized();
+                self.finish_init();
                 return;
             }
             _ => return,
@@ -1374,7 +1454,11 @@ impl Classic {
         self.enqueue(Owner::Init, next);
     }
 
-    fn initialized(&mut self) {
+    fn finish_init(&mut self) {
+        if self.fast_page_scan.is_some() {
+            self.enqueue(Owner::Init, Command::new(READ_PAGE_SCAN_ACTIVITY, &[]));
+            return;
+        }
         self.ready = true;
         self.emit(Action::Ready(self.info));
     }
