@@ -5,9 +5,16 @@ compile_error!(
     "Settings visual fixtures are host-only; use the production Settings app on Scarlet"
 );
 
+extern crate alloc;
+use bluetooth_fixture as scarlet_bluetooth;
+#[path = "../../user/bin/src/settings_bluetooth.rs"]
+mod settings_bluetooth;
+
 use scarlet_desktop_config::{BackgroundStyle, ClockFormat, StatusItemId, StatusPreferences};
 use scarlet_ui::{NavigationLink, State, hstack, navigation, prelude::*, vstack};
 use scarlet_ui_macros::View;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::thread;
 #[path = "../../user/bin/src/settings_views.rs"]
 mod settings_views;
 use settings_views::*;
@@ -85,6 +92,8 @@ fn system_description() -> (String, String, String, String) {
 #[allow(dead_code)]
 #[derive(Clone, View)]
 struct SettingsApp {
+    bluetooth: State<settings_bluetooth::Panel>,
+    bluetooth_index: State<usize>,
     background_style_index: State<usize>,
     background_preset_index: State<usize>,
     background_status: State<String>,
@@ -129,7 +138,9 @@ struct SettingsApp {
 }
 impl SettingsApp {
     fn fixture(empty: bool) -> Self {
+        scarlet_bluetooth::initialize(empty);
         let app = Self::default();
+        app.bluetooth_index.set(usize::MAX);
         app.red_value.set(40.0);
         app.green_value.set(40.0);
         app.blue_value.set(50.0);

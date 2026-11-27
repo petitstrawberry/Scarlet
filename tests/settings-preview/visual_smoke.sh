@@ -38,7 +38,7 @@ capture() {
     return 1
 }
 capture appearance
-for item in 'display 95' 'cursor 135' 'audio 175' 'input 215' 'status 255' 'about 295'; do
+for item in 'display 95' 'audio 135' 'network 175' 'bluetooth 215' 'input 255' 'status 295' 'about 335'; do
     read -r name y <<< "$item"
     xdotool mousemove --window "$window" 60 "$y" click 1
     capture "$name"
@@ -48,11 +48,11 @@ capture about-minimum
 xdotool mousemove --window "$window" 60 55 click 1
 xdotool mousemove --window "$window" 730 480 click --repeat 30 --delay 30 5
 capture appearance-bottom
-xdotool mousemove --window "$window" 60 255 click 1
+xdotool mousemove --window "$window" 60 295 click 1
 xdotool mousemove --window "$window" 730 480 click --repeat 30 --delay 30 5
 capture status-bottom
 xdotool windowsize "$window" 1060 760
-xdotool mousemove --window "$window" 60 175 click 1
+xdotool mousemove --window "$window" 60 135 click 1
 capture audio-large
 if [[ ${3:-} != --empty ]]; then
     xdotool windowsize "$window" 800 634

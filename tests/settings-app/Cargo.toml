@@ -7,10 +7,12 @@ publish = false
 [workspace]
 
 [dependencies]
+libm = { version = "0.2", default-features = false }
+scarlet-bluetooth = { path = "../../user/bluetooth" }
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5" }
-scarlet-std = { path = "../../user/lib/std" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "f34c25e335ae77d2fc3bceb999421e95c56c1618", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "f34c25e335ae77d2fc3bceb999421e95c56c1618" }
+scarlet-std = { path = "../../user/lib/std", features = ["alloc_debug"] }
 scarlet-os = { path = "../../user/lib/scarlet-os" }
 framebuffer = { path = "../../user/lib/framebuffer" }
 sbus = { path = "../../user/lib/sbus" }

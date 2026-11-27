@@ -1,5 +1,13 @@
 # Settings view fixture
 
+Run the focused Bluetooth check from the repository root:
+
+```sh
+cargo test --locked --manifest-path tests/settings-preview/Cargo.toml --lib
+```
+
+It exercises the production Settings Bluetooth worker with an in-memory adapter. The fixture starts with one disconnected, bonded gamepad. Scanning also discovers a keyboard. The check covers reconnecting before a scan, pairing, selection after the list reorders, and an unavailable adapter. The full Winit preview still needs Display and Network fixture fields to compile.
+
 This host-only validation program imports the production `user/bin/src/settings_views.rs` module. It exercises the same navigation, layout and controls through Winit, with a permanent fixture banner. Its model and callbacks keep changes in memory; it does not import native audio, display, SWS, SBUS, filesystem persistence or time-zone services. This is visual/interaction evidence, not a native Settings runtime test.
 
 ```sh

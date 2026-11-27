@@ -59,6 +59,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "bcrypt"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e65938ed058ef47d92cf8b346cc76ef48984572ade631927e9937b5ffc7662c7"
+dependencies = [
+ "base64",
+ "blowfish",
+ "getrandom",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -95,6 +114,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
 
 [[package]]
+name = "blowfish"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e412e2cd0f2b2d93e02543ceae7917b3c70331573df19ee046bcbc35e45e87d7"
+dependencies = [
+ "byteorder",
+ "cipher",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +150,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -131,6 +166,16 @@ name = "cfg_aliases"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+
+[[package]]
+name = "cipher"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
+dependencies = [
+ "crypto-common",
+ "inout",
+]
 
 [[package]]
 name = "codespan-reporting"
@@ -176,6 +221,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
 dependencies = [
  "libm",
+]
+
+[[package]]
+name = "crypto-common"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+dependencies = [
+ "generic-array",
+ "typenum",
 ]
 
 [[package]]
@@ -270,6 +325,27 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "generic-array"
+version = "0.14.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+dependencies = [
+ "typenum",
+ "version_check",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "wasi",
 ]
 
 [[package]]
@@ -403,6 +479,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "inout"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
+name = "itoa"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
 name = "jni-sys"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,6 +611,12 @@ checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "metal"
@@ -786,6 +883,31 @@ name = "scarlet-abi"
 version = "1.0.0"
 
 [[package]]
+name = "scarlet-accounts"
+version = "1.0.0"
+dependencies = [
+ "bcrypt",
+ "getrandom",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-sys",
+ "zeroize",
+]
+
+[[package]]
+name = "scarlet-bluetooth"
+version = "0.1.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-accounts",
+ "scarlet-os",
+ "scarlet-sys",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "scarlet-desktop-config"
 version = "1.0.0"
 dependencies = [
@@ -814,7 +936,7 @@ dependencies = [
 [[package]]
 name = "scarlet-scroll-motion"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "libm",
 ]
@@ -824,10 +946,12 @@ name = "scarlet-settings-app-checks"
 version = "0.1.0"
 dependencies = [
  "framebuffer",
+ "libm",
  "sas-client",
  "sas-protocol",
  "sbus",
  "sbus-client",
+ "scarlet-bluetooth",
  "scarlet-desktop-config",
  "scarlet-os",
  "scarlet-std",
@@ -860,7 +984,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -869,7 +993,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.2",
@@ -892,7 +1016,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "svgtypes",
 ]
@@ -900,7 +1024,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -910,7 +1034,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "sbus-client",
  "scarlet-desktop-config",
@@ -925,7 +1049,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=1a442db8b2786f9031689b7d7fb78fd49d407ca5#1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=f34c25e335ae77d2fc3bceb999421e95c56c1618#f34c25e335ae77d2fc3bceb999421e95c56c1618"
 dependencies = [
  "libm",
  "scarlet-ui-core",
@@ -946,6 +1070,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
+name = "serde"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -963,6 +1097,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -1098,6 +1245,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
 name = "svgtypes"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1230,6 +1383,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
 name = "unicode-bidi-mirroring"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1288,6 +1447,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasm-bindgen"
@@ -1638,6 +1803,12 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zune-core"
