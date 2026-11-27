@@ -126,7 +126,7 @@ pub const DISPLAY_MAX_DAMAGE_RECTS: usize = 32;
 
 /// Display surface information.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Width in pixels.
     pub width: u32,
@@ -1410,6 +1410,46 @@ impl DisplaySurface {
         })
     }
 
+    /// Present one opaque black frame on this connector. The compositor drains
+    /// earlier presents first and resumes scanout with a full frame on enable.
+    pub fn present_black_frame(&mut self, width: u32, height: u32) -> HandleResult<()> {
+        self.refresh_mapping()?;
+        let info = self.get_info()?;
+        let bpp = Self::display_bytes_per_pixel(info.format) as u64;
+        let row_bytes = u64::from(width) * bpp;
+        if width == 0
+            || height == 0
+            || (width, height) != (info.width, info.height)
+            || bpp == 0
+            || row_bytes > u64::from(info.stride)
+            || u64::from(height - 1) * u64::from(info.stride) + row_bytes
+                > u64::from(info.buffer_len)
+            || self.mapped_buffer.is_some() && self.mapped_backing_id != info.backing_id
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.cached_info = Some(info);
+        let mut line = alloc::vec::Vec::new();
+        line.try_reserve_exact(width as usize)
+            .map_err(|_| HandleError::OutOfResources)?;
+        line.resize(width as usize, [0u8, 0, 0, 255]);
+        let row = line.as_flattened();
+        // A failed write can already have modified a directly scanned buffer.
+        self.swapchain_presented_at.fill(None);
+        for damage in &mut self.swapchain_pending_damage {
+            damage.clear();
+        }
+        for y in 0..height {
+            self.write_bgra_strided(0, y, width, 1, row, row.len())?;
+        }
+        if self.get_info()? != info {
+            return Err(HandleError::InvalidParameter);
+        }
+        self.present()?;
+        self.swapchain_presented_at.fill(None);
+        Ok(())
+    }
+
     /// Present the whole display surface.
     ///
     /// # Returns
@@ -1729,12 +1769,7 @@ impl DisplaySurface {
                         );
                     }
                 } else {
-                    self.file
-                        .seek(SeekFrom::Start(dst_off as u64))
-                        .map_err(|_| HandleError::SystemError(-1))?;
-                    self.file
-                        .write(&self.scratch_line[..line_bytes])
-                        .map_err(|_| HandleError::SystemError(-1))?;
+                    Self::write_row(&mut self.file, dst_off, &self.scratch_line[..line_bytes])?;
                 }
             }
 
@@ -1785,12 +1820,7 @@ impl DisplaySurface {
                         );
                     }
                 } else {
-                    self.file
-                        .seek(SeekFrom::Start(dst_off as u64))
-                        .map_err(|_| HandleError::SystemError(-1))?;
-                    self.file
-                        .write(&self.scratch_line[..line_bytes])
-                        .map_err(|_| HandleError::SystemError(-1))?;
+                    Self::write_row(&mut self.file, dst_off, &self.scratch_line[..line_bytes])?;
                 }
             }
 
@@ -1820,15 +1850,25 @@ impl DisplaySurface {
                     .saturating_mul(line_length)
                     .saturating_add(x as usize * dst_bytes_per_pixel);
                 let src_off = row.saturating_mul(src_stride_bytes);
-                self.file
-                    .seek(SeekFrom::Start(dst_off as u64))
-                    .map_err(|_| HandleError::SystemError(-1))?;
-                self.file
-                    .write(&data[src_off..src_off + src_line_bytes])
-                    .map_err(|_| HandleError::SystemError(-1))?;
+                Self::write_row(&mut self.file, dst_off, &data[src_off..src_off + src_line_bytes])?;
             }
         }
 
+        Ok(())
+    }
+
+    fn write_row(file: &mut File, offset: usize, mut bytes: &[u8]) -> HandleResult<()> {
+        file.seek(SeekFrom::Start(offset as u64))
+            .map_err(|_| HandleError::SystemError(-1))?;
+        while !bytes.is_empty() {
+            let count = file
+                .write(bytes)
+                .map_err(|_| HandleError::SystemError(-1))?;
+            if count == 0 || count > bytes.len() {
+                return Err(HandleError::SystemError(-1));
+            }
+            bytes = &bytes[count..];
+        }
         Ok(())
     }
 }

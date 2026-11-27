@@ -117,9 +117,7 @@ pub use sws_protocol::workspace::{
     WorkspaceSnapshot, WorkspaceState, WorkspaceTransaction,
 };
 pub use sws_protocol::{CursorIcon, SgfxDamageRect};
-pub use sws_protocol::{
-    WindowGeometry, WindowGeometryInsets, WindowSizeLimits, WindowingMode, window_state,
-};
+pub use sws_protocol::{WindowGeometry, WindowGeometryInsets, WindowSizeLimits, window_state};
 
 /// Transient relationship policy flags for child windows.
 ///

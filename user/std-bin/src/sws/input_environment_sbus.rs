@@ -35,15 +35,13 @@ fn sbus_arguments(snapshot: Snapshot) -> Vec<Argument> {
     ]
 }
 
-/// Queue the latest SBus mirror signal after an authoritative change.
-///
-/// # Arguments
-///
-/// * `snapshot` - New full snapshot to publish.
-pub fn queue_state_changed(snapshot: Snapshot) {
-    *PENDING_SBUS_SIGNAL
+/// Coalesce changes from device readers and the compositor to the latest
+/// primary-output projection, in the order they acquire the signal slot.
+pub fn queue_state_changed() {
+    let mut pending = PENDING_SBUS_SIGNAL
         .lock()
-        .expect("SWS input-environment signal mutex poisoned") = Some(snapshot);
+        .expect("SWS input-environment signal mutex poisoned");
+    *pending = Some(input_environment::snapshot());
 }
 
 struct MethodCall {
@@ -237,7 +235,7 @@ mod tests {
             .lock()
             .expect("input-environment test mutex poisoned");
         let expected = input_environment::snapshot();
-        queue_state_changed(expected);
+        queue_state_changed();
         let mut transport = FakeTransport {
             incoming: Some(MethodCall {
                 path: SBUS_PATH.into(),

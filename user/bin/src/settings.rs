@@ -9,6 +9,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
+mod settings_display_editor;
 mod settings_displays;
 mod settings_network;
 mod settings_support;
@@ -964,6 +965,7 @@ fn save_timezone(zone: &str) -> core::result::Result<(), TimezoneCommitError> {
 struct SettingsApp {
     display_editor: State<settings_displays::Editor>,
     display_output_index: State<usize>,
+    display_role_index: State<usize>,
     display_scale_index: State<usize>,
     display_experience_index: State<usize>,
     display_resolution_index: State<usize>,
@@ -1065,6 +1067,7 @@ impl SettingsApp {
         let app = Self {
             display_editor: State::new(StateId::new(120), settings_displays::Editor::new()),
             display_output_index: State::new(StateId::new(121), 0),
+            display_role_index: State::new(StateId::new(125), 0),
             display_scale_index: State::new(StateId::new(122), 0),
             display_experience_index: State::new(StateId::new(123), 0),
             display_resolution_index: State::new(StateId::new(124), 0),
@@ -1653,6 +1656,9 @@ impl Application for SettingsApp {
             if let Some(config) = editor.draft.iter().find(|config| config.id == output.id) {
                 if self.display_output_index.get() != editor.selected {
                     self.display_output_index.set(editor.selected);
+                }
+                if self.display_role_index.get() != config.role as usize {
+                    self.display_role_index.set(config.role as usize);
                 }
                 let scale_index = settings_displays::SCALES
                     .iter()

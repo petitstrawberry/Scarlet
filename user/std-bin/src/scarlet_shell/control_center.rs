@@ -144,8 +144,8 @@ pub struct SystemSnapshot {
 pub struct InputEnvironmentSnapshot {
     /// Whether SWS supplied an input-environment sample.
     pub available: bool,
-    /// Whether SWS currently requests tablet presentation.
-    pub tablet_mode: Option<bool>,
+    /// Convertible posture reported by the physical tablet switch.
+    pub hardware_tablet_mode: Option<bool>,
     /// Whether touch input is present, when known.
     pub touch_present: Option<bool>,
     /// Whether a physical keyboard is present, when known.
@@ -188,7 +188,7 @@ impl ControlCenterSnapshot {
             },
             input_environment: InputEnvironmentSnapshot {
                 available: false,
-                tablet_mode: None,
+                hardware_tablet_mode: None,
                 touch_present: None,
                 keyboard_present: None,
                 pointer_present: None,
@@ -1431,10 +1431,12 @@ fn system_label(snapshot: &SystemSnapshot) -> String {
 fn input_label(snapshot: &InputEnvironmentSnapshot) -> &'static str {
     if !snapshot.available {
         "Input unavailable"
-    } else if snapshot.tablet_mode == Some(true) {
-        "Tablet"
     } else {
-        "Laptop"
+        match snapshot.hardware_tablet_mode {
+            Some(true) => "Tablet",
+            Some(false) => "Laptop",
+            None => "Posture unknown",
+        }
     }
 }
 
@@ -1607,7 +1609,7 @@ mod tests {
                 },
                 input_environment: InputEnvironmentSnapshot {
                     available: false,
-                    tablet_mode: None,
+                    hardware_tablet_mode: None,
                     touch_present: None,
                     keyboard_present: None,
                     pointer_present: None,

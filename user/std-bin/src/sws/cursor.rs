@@ -789,81 +789,32 @@ impl Cursor {
         (self.hotspot_x, self.hotspot_y)
     }
 
-    /// Draw the cursor into a BGRA buffer with optional clipping.
-    ///
-    /// Straight-alpha source pixels are composited over the destination using
-    /// source-over blending.
-    ///
-    /// # Arguments
-    ///
-    /// * `buffer` - Destination pixel buffer.
-    /// * `screen_width` - Destination width in pixels.
-    /// * `screen_height` - Destination height in pixels.
-    /// * `bytes_per_pixel` - Destination bytes per pixel; values below four are ignored.
-    /// * `stride` - Destination row stride in bytes.
-    /// * `clip_rect` - Optional clip rectangle in global coordinates.
-    /// * `origin` - Global position of the buffer's top-left pixel.
-    pub fn draw_to_buffer_direct_clipped(
+    /// Blend the current sprite into the damaged native pixel rectangle.
+    /// Destination coordinates already include the projected cursor hotspot.
+    pub(super) fn draw_projected(
         &self,
         buffer: &mut [u8],
-        screen_width: u32,
-        screen_height: u32,
-        bytes_per_pixel: u32,
         stride: u32,
-        clip_rect: Option<(i32, i32, u32, u32)>,
-        origin: (i32, i32),
+        destination: (i32, i32, u32, u32),
+        damage: (u32, u32, u32, u32),
     ) {
-        if bytes_per_pixel < 4 {
-            return;
-        }
-
-        let (cursor_x, cursor_y) = self.draw_position();
-        let clip = clip_rect
-            .map(|(x, y, w, h)| (x, y, x.saturating_add(w as i32), y.saturating_add(h as i32)));
-        let bgra = self.bgra_pixels();
-
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let source_offset = ((y as usize * self.width as usize) + x as usize) * 4;
-                let source = [
-                    bgra[source_offset],
-                    bgra[source_offset + 1],
-                    bgra[source_offset + 2],
-                    bgra[source_offset + 3],
-                ];
-                if source[3] == 0 {
-                    continue;
-                }
-
-                let global_x = cursor_x.saturating_add(x as i32);
-                let global_y = cursor_y.saturating_add(y as i32);
-                if let Some((clip_x0, clip_y0, clip_x1, clip_y1)) = clip
-                    && (global_x < clip_x0
-                        || global_x >= clip_x1
-                        || global_y < clip_y0
-                        || global_y >= clip_y1)
-                {
-                    continue;
-                }
-                let screen_x = global_x.saturating_sub(origin.0);
-                let screen_y = global_y.saturating_sub(origin.1);
-                if screen_x < 0
-                    || screen_x >= screen_width as i32
-                    || screen_y < 0
-                    || screen_y >= screen_height as i32
-                {
-                    continue;
-                }
-
-                let destination_offset = (screen_y as usize)
-                    .saturating_mul(stride as usize)
-                    .saturating_add((screen_x as usize).saturating_mul(bytes_per_pixel as usize));
-                if destination_offset + 4 <= buffer.len() {
-                    blend_straight_bgra(
-                        &mut buffer[destination_offset..destination_offset + 4],
-                        source,
-                    );
-                }
+        let (cx, cy, width, height) = destination;
+        let (dx, dy, dw, dh) = damage;
+        let left = i64::from(cx).max(i64::from(dx));
+        let top = i64::from(cy).max(i64::from(dy));
+        let right = (i64::from(cx) + i64::from(width)).min(i64::from(dx) + i64::from(dw));
+        let bottom = (i64::from(cy) + i64::from(height)).min(i64::from(dy) + i64::from(dh));
+        let pixels = self.bgra_pixels();
+        for y in top..bottom {
+            let sy = ((y - i64::from(cy)) * i64::from(self.height) / i64::from(height)) as usize;
+            for x in left..right {
+                let sx = ((x - i64::from(cx)) * i64::from(self.width) / i64::from(width)) as usize;
+                let src = (sy * self.width as usize + sx) * 4;
+                let dst = y as usize * stride as usize + x as usize * 4;
+                blend_straight_bgra(
+                    &mut buffer[dst..dst + 4],
+                    pixels[src..src + 4].try_into().unwrap(),
+                );
             }
         }
     }
@@ -924,6 +875,26 @@ mod tests {
         let mut destination = [0, 0, 0, 255];
         blend_straight_bgra(&mut destination, [255, 255, 255, 128]);
         assert_eq!(destination, [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn projected_cursor_clips_at_scanout_edges_and_preserves_undamaged_pixels() {
+        let cursor = Cursor::from_source(
+            CursorPixels {
+                width: 2,
+                height: 1,
+                bgra: vec![10, 20, 30, 255, 200, 180, 160, 128],
+            },
+            1000,
+            0,
+            0,
+        )
+        .unwrap();
+        let mut frame = [0, 0, 0, 255].repeat(4 * 2);
+        cursor.draw_projected(&mut frame, 16, (-1, 0, 4, 2), (0, 1, 2, 1));
+        assert_eq!(&frame[..16], &[0, 0, 0, 255].repeat(4));
+        assert_eq!(&frame[16..24], &[10, 20, 30, 255, 100, 90, 80, 255]);
+        assert_eq!(&frame[24..], &[0, 0, 0, 255].repeat(2));
     }
 
     #[test]

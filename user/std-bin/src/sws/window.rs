@@ -1130,11 +1130,17 @@ impl Window {
         if self.fullscreen {
             return self.surface_geometry();
         }
+        self.decorated_geometry(self.surface_geometry())
+    }
+
+    fn decorated_geometry(
+        &self,
+        (x, y, scene_width, scene_height): (i32, i32, u32, u32),
+    ) -> (i32, i32, u32, u32) {
         let insets = self.window_geometry_insets;
-        let (_, _, scene_width, scene_height) = self.surface_geometry();
         (
-            self.x.saturating_add(self.scene_length(insets.left) as i32),
-            self.y.saturating_add(self.scene_length(insets.top) as i32),
+            x.saturating_add(self.scene_length(insets.left) as i32),
+            y.saturating_add(self.scene_length(insets.top) as i32),
             scene_width
                 .saturating_sub(self.scene_length(insets.horizontal()))
                 .max(1),
@@ -1325,7 +1331,12 @@ impl Window {
         }
         if active {
             if !self.workspace_layout_managed {
-                let desktop_geometry = self.window_geometry();
+                // Fullscreen owns the live surface until the client exits it.
+                // Keep the previous desktop rectangle across an Experience change.
+                let desktop_geometry = self.decorated_geometry(
+                    self.fullscreen_restore_geometry
+                        .unwrap_or_else(|| self.surface_geometry()),
+                );
                 self.workspace_restore_geometry
                     .get_or_insert(desktop_geometry);
                 self.workspace_layout_managed = true;
@@ -3351,6 +3362,26 @@ mod tests {
         window.note_native_backing_replaced();
         assert!(window.complete_native_policy_frame((800, 600), None));
         assert_eq!(window.presentation_geometry(), old);
+    }
+
+    #[test]
+    fn tablet_entry_during_fullscreen_preserves_desktop_restore_geometry() {
+        let mut window = super::Window::new(1, 150, 60, 640, 360);
+        window.window_geometry_insets = sws_protocol::WindowGeometryInsets {
+            left: 4,
+            top: 12,
+            right: 4,
+            bottom: 4,
+        };
+        let desktop = window.window_geometry();
+        window.fullscreen_restore_geometry = Some(window.surface_geometry());
+        window.fullscreen = true;
+        window.x = -1920;
+        window.y = 0;
+        window.set_scene_extent(1920, 1080);
+        assert!(window.set_tablet_managed(true));
+        assert_eq!(window.workspace_restore_geometry, Some(desktop));
+        assert_eq!(window.window_geometry(), (-1920, 0, 1920, 1080));
     }
 
     #[test]

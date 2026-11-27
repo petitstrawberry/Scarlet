@@ -251,11 +251,11 @@ fn display_page(app: SettingsApp) -> impl View + Clone {
     let brightness_app = app.clone();
     let editor = app.display_editor.get();
     let modes = editor.selected_modes();
-    let selected_output = editor
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.outputs.get(editor.selected))
-        .map(|output| output.id);
+    use sws_protocol::outputs::{OutputExperience, OutputRole};
+    let config = editor.selected_config();
+    let selected_id = config.map(|c| c.id);
+    let editable = editor.editable();
+    let desktop_controls = editable && config.is_some_and(|c| c.role == OutputRole::Extend);
     let mode_labels = modes
         .iter()
         .map(|mode| {
@@ -279,24 +279,51 @@ fn display_page(app: SettingsApp) -> impl View + Clone {
         ), "Brightness", 14.0),
         settings_section(with_feedback(vstack! {
             settings_displays::canvas(app.display_editor.clone()),
-            settings_row(Select::new(editor.snapshot.as_ref().map(|snapshot| snapshot.outputs.iter().enumerate().map(|(index, output)| format!("{}. {}", index + 1, output.name)).collect()).unwrap_or_default(), app.display_output_index.clone()).width(300.0)
-                .on_change({ let editor = app.display_editor.clone(); move |index| editor.update(|state| state.selected = index) }), "Display"),
+            settings_row(Select::new(editor.output_labels(), app.display_output_index.clone())
+                .width(300.0).enabled(editable && selected_id.is_some()).placeholder("No display connected")
+                .on_change({ let editor = app.display_editor.clone(); move |index| editor.update(|state| {
+                    if state.editable() && state.snapshot.as_ref().is_some_and(|s| index < s.outputs.len()) {
+                        state.selected = index;
+                    }
+                }) }), "Display"),
+            with_feedback(settings_row(Select::new(vec!["Extend desktop".into(), editor.mirror_option(), "Disable display".into()], app.display_role_index.clone())
+                .width(300.0).enabled(editor.can_change_role())
+                .on_change({ let editor = app.display_editor.clone(); move |index| {
+                    if let (Some(id), Some(role)) = (selected_id, [OutputRole::Extend, OutputRole::Mirror, OutputRole::Disabled].get(index)) {
+                        editor.update(|state| state.set_role(id, *role));
+                    }
+                } }), "Display mode"), editor.role_hint()),
             settings_row(Select::new(mode_labels, app.display_resolution_index.clone())
                 .width(300.0)
-                .enabled(modes.len() > 1 && !editor.applying)
+                .enabled(editable && modes.len() > 1 && config.is_some_and(|c| c.role != OutputRole::Disabled))
                 .on_change(move |index| {
-                    if let (Some(id), Some(&mode)) = (selected_output, modes.get(index)) {
-                        settings_displays::resolution(&resolution_editor, id, mode);
+                    if let (Some(id), Some(&mode)) = (selected_id, modes.get(index)) {
+                        resolution_editor.update(|state| state.set_resolution(id, mode));
                     }
                 }), "Resolution"),
             settings_row(Select::new(settings_displays::SCALES.iter().map(|scale| format!("{}%", scale / 10)).collect(), app.display_scale_index.clone()).width(240.0)
-                .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::scale(&editor, index) }), "Display scale"),
+                .enabled(desktop_controls)
+                .on_change({ let editor = app.display_editor.clone(); move |index| {
+                    if let (Some(id), Some(&scale)) = (selected_id, settings_displays::SCALES.get(index)) {
+                        editor.update(|state| state.set_scale(id, scale));
+                    }
+                } }), "Display scale"),
             settings_row(settings_note(editor.logical_size_label()), "Logical size"),
             settings_row(Select::new(vec![String::from("Automatic"), String::from("Desktop"), String::from("Tablet")], app.display_experience_index.clone()).width(240.0)
-                .on_change({ let editor = app.display_editor.clone(); move |index| settings_displays::experience(&editor, index) }), "Experience"),
-            Button::new(if editor.applying { "Applying…" } else { "Apply" })
-                .enabled(editor.dirty && !editor.applying)
-                .on_click(move || settings_displays::apply(&apply_editor)),
+                .enabled(desktop_controls)
+                .on_change({ let editor = app.display_editor.clone(); move |index| {
+                    if let (Some(id), Some(&experience)) = (selected_id, [OutputExperience::Auto, OutputExperience::Desktop, OutputExperience::Tablet].get(index)) {
+                        editor.update(|state| state.set_experience(id, experience));
+                    }
+                } }), "Experience"),
+            hstack! {
+                Button::new(if editor.applying { "Applying…" } else { "Apply" })
+                    .enabled(editor.can_apply())
+                    .on_click(move || settings_displays::apply(&apply_editor)),
+                Button::new("Revert")
+                    .enabled(editable && editor.dirty)
+                    .on_click({ let editor = app.display_editor.clone(); move || editor.update(|state| state.revert()) }),
+            }.spacing(8.0),
         }.spacing(12.0).alignment(Alignment::Leading), editor.status), "Displays", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
