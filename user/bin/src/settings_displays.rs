@@ -1,351 +1,11 @@
 //! Local display-layout editor. Dragging never sends live layout transactions.
+pub(super) use super::settings_display_editor::{Editor, SCALES};
+use super::settings_display_editor::{HEIGHT, WIDTH};
 use super::*;
 use scarlet_ui::event::{Event, MouseButton, MouseEvent, TouchDragAxis, TouchGesture, TouchPhase};
 use std::cell::Cell;
 use std::rc::Rc;
-use sws_protocol::outputs::{
-    self as outputs, OutputConfiguration, OutputExperience, OutputSnapshot,
-};
-
-pub(super) const SCALES: &[u32] = &[1000, 1250, 1500, 1750, 2000, 2500, 3000];
-const WIDTH: f32 = 544.0;
-const HEIGHT: f32 = 220.0;
-
-// Thresholds are preview points, independent of monitor resolution and zoom.
-const SNAP_DISTANCE: f32 = 7.0;
-const SNAP_RELEASE: f32 = 11.0;
-#[derive(Clone, Copy)]
-struct AxisSnap {
-    position: i32,
-    guide: i32,
-}
-
-fn snap_axis(
-    value: i32,
-    extent: u32,
-    neighbours: impl Iterator<Item = (i32, u32)>,
-    zoom: f32,
-    held: Option<AxisSnap>,
-) -> Option<AxisSnap> {
-    let mut best: Option<(bool, f32, AxisSnap)> = None;
-    for (origin, length) in neighbours {
-        let start = i64::from(origin);
-        let end = start + i64::from(length);
-        for (position, guide) in [
-            (start - i64::from(extent), start),
-            (end, end),
-            (start, start),
-            (end - i64::from(extent), end),
-            (
-                start + (i64::from(length) - i64::from(extent)) / 2,
-                start + i64::from(length) / 2,
-            ),
-        ] {
-            let (Ok(position), Ok(guide)) = (i32::try_from(position), i32::try_from(guide)) else {
-                continue;
-            };
-            let retained =
-                held.is_some_and(|snap| snap.position == position && snap.guide == guide);
-            let distance = ((i64::from(value) - i64::from(position)).abs() as f32) * zoom;
-            if distance
-                > if retained {
-                    SNAP_RELEASE
-                } else {
-                    SNAP_DISTANCE
-                }
-            {
-                continue;
-            }
-            if best.as_ref().is_none_or(|(old_retained, old_distance, _)| {
-                (retained && !old_retained) || retained == *old_retained && distance < *old_distance
-            }) {
-                best = Some((retained, distance, AxisSnap { position, guide }));
-            }
-        }
-    }
-    best.map(|(_, _, snap)| snap)
-}
-
-#[derive(Clone)]
-pub(super) struct Editor {
-    pub snapshot: Option<OutputSnapshot>,
-    pub draft: Vec<OutputConfiguration>,
-    pub selected: usize,
-    pub status: String,
-    pub dirty: bool,
-    pub modes: Vec<(u32, Vec<outputs::OutputMode>)>,
-    mode_draft: Vec<(u32, outputs::OutputMode)>,
-    pub applying: bool,
-    // View callbacks are replaced on rebuild; contact ownership must outlive them.
-    touch_contact: Option<(u32, u64)>,
-    drag_snap: (Option<AxisSnap>, Option<AxisSnap>),
-    drag_before: Option<Vec<OutputConfiguration>>,
-    drag: Option<(u32, i32, i32, i32, i32, (f32, f32, f32))>,
-}
-impl Default for Editor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl Editor {
-    pub fn new() -> Self {
-        Self {
-            snapshot: None,
-            draft: Vec::new(),
-            selected: 0,
-            status: String::from("Loading displays…"),
-            dirty: false,
-            modes: Vec::new(),
-            mode_draft: Vec::new(),
-            applying: false,
-            drag: None,
-            drag_before: None,
-            drag_snap: (None, None),
-            touch_contact: None,
-        }
-    }
-    fn adopt(&mut self, snapshot: OutputSnapshot) {
-        let selected_id = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.outputs.get(self.selected))
-            .map(|output| output.monitor_key.clone());
-        self.selected = selected_id
-            .and_then(|key| {
-                snapshot
-                    .outputs
-                    .iter()
-                    .position(|output| output.monitor_key == key)
-            })
-            .unwrap_or(0);
-        self.mode_draft.clear();
-        self.draft = snapshot.configuration.clone();
-        self.snapshot = Some(snapshot);
-        self.dirty = false;
-        self.drag = None;
-        self.drag_before = None;
-        self.drag_snap = (None, None);
-        self.touch_contact = None;
-    }
-    pub fn selected_modes(&self) -> Vec<outputs::OutputMode> {
-        let Some(output) = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.outputs.get(self.selected))
-        else {
-            return Vec::new();
-        };
-        self.modes
-            .iter()
-            .find(|(id, _)| *id == output.id)
-            .map(|(_, modes)| modes.clone())
-            .unwrap_or_else(|| vec![output.mode])
-    }
-    pub fn selected_mode_index(&self) -> usize {
-        let Some(output) = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.outputs.get(self.selected))
-        else {
-            return 0;
-        };
-        let mode = self
-            .mode_draft
-            .iter()
-            .find(|(id, _)| *id == output.id)
-            .map_or(output.mode, |(_, mode)| *mode);
-        self.selected_modes()
-            .iter()
-            .position(|candidate| *candidate == mode)
-            .unwrap_or(usize::MAX)
-    }
-    fn preview_mode(&self, output: &outputs::OutputDescriptor) -> outputs::OutputMode {
-        self.mode_draft
-            .iter()
-            .find(|(id, _)| *id == output.id)
-            .map_or(output.mode, |(_, mode)| *mode)
-    }
-    pub fn logical_size_label(&self) -> String {
-        let Some(output) = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.outputs.get(self.selected))
-        else {
-            return "—".into();
-        };
-        self.draft
-            .iter()
-            .find(|config| config.id == output.id)
-            .and_then(|config| {
-                self.preview_mode(output)
-                    .logical_size(config.scale_milli)
-                    .ok()
-            })
-            .map_or_else(|| "—".into(), |(w, h)| format!("{w} × {h}"))
-    }
-    fn geometry(&self, viewport_width: f32) -> Option<(f32, f32, f32)> {
-        // Keep the preview coordinate system fixed while the pointer moves.
-        // Re-fitting to the moving card would move it away from the drag anchor.
-        if let Some((_, _, _, _, _, geometry)) = self.drag {
-            return Some(geometry);
-        }
-        let snapshot = self.snapshot.as_ref()?;
-        let mut left = 0i64;
-        let mut top = 0i64;
-        let mut right = 1i64;
-        let mut bottom = 1i64;
-        for config in &self.draft {
-            let output = snapshot
-                .outputs
-                .iter()
-                .find(|output| output.id == config.id)?;
-            let (width, height) = self
-                .preview_mode(output)
-                .logical_size(config.scale_milli)
-                .ok()?;
-            left = left.min(i64::from(config.x));
-            top = top.min(i64::from(config.y));
-            right = right.max(i64::from(config.x) + i64::from(width));
-            bottom = bottom.max(i64::from(config.y) + i64::from(height));
-        }
-        let zoom = ((viewport_width - 48.0) / (right - left) as f32)
-            .min((HEIGHT - 48.0) / (bottom - top) as f32)
-            .max(0.001);
-        Some((
-            (viewport_width - (right - left) as f32 * zoom) * 0.5 - left as f32 * zoom,
-            (HEIGHT - (bottom - top) as f32 * zoom) * 0.5 - top as f32 * zoom,
-            zoom,
-        ))
-    }
-    fn card(&self, index: usize, viewport_width: f32) -> Option<(f32, f32, f32, f32)> {
-        let snapshot = self.snapshot.as_ref()?;
-        let output = snapshot.outputs.get(index)?;
-        let config = self.draft.iter().find(|config| config.id == output.id)?;
-        let (width, height) = self
-            .preview_mode(output)
-            .logical_size(config.scale_milli)
-            .ok()?;
-        let (x, y, zoom) = self.geometry(viewport_width)?;
-        Some((
-            x + config.x as f32 * zoom,
-            y + config.y as f32 * zoom,
-            width as f32 * zoom,
-            height as f32 * zoom,
-        ))
-    }
-    fn move_preview(&mut self, id: u32, desired: (i32, i32), zoom: f32) {
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let Some(moving) = self.draft.iter().find(|config| config.id == id) else {
-            return;
-        };
-        let Some(output) = snapshot.outputs.iter().find(|output| output.id == id) else {
-            return;
-        };
-        let Ok((width, height)) = self.preview_mode(output).logical_size(moving.scale_milli) else {
-            return;
-        };
-        let neighbours: Vec<_> = self
-            .draft
-            .iter()
-            .filter(|config| config.id != id)
-            .filter_map(|config| {
-                let output = snapshot
-                    .outputs
-                    .iter()
-                    .find(|output| output.id == config.id)?;
-                let (w, h) = self
-                    .preview_mode(output)
-                    .logical_size(config.scale_milli)
-                    .ok()?;
-                Some((config.x, config.y, w, h))
-            })
-            .collect();
-        let nearby = |a: i32, length: u32, b: i32, other_length: u32| {
-            let gap = (i64::from(a) - i64::from(b) - i64::from(other_length))
-                .max(i64::from(b) - i64::from(a) - i64::from(length))
-                .max(0);
-            gap as f32 * zoom <= SNAP_RELEASE
-        };
-        let x_snap = snap_axis(
-            desired.0,
-            width,
-            neighbours
-                .iter()
-                .filter(|(_, y, _, h)| nearby(desired.1, height, *y, *h))
-                .map(|(x, _, w, _)| (*x, *w)),
-            zoom,
-            self.drag_snap.0,
-        );
-        let y_snap = snap_axis(
-            desired.1,
-            height,
-            neighbours
-                .iter()
-                .filter(|(x, _, w, _)| nearby(desired.0, width, *x, *w))
-                .map(|(_, y, _, h)| (*y, *h)),
-            zoom,
-            self.drag_snap.1,
-        );
-        // Do not pull the preview into another monitor. Keep free dragging
-        // possible through occupied space; final topology validation is on drop.
-        let nonoverlapping = |x: i32, y: i32| {
-            neighbours.iter().all(|&(ox, oy, w, h)| {
-                i64::from(x) >= i64::from(ox) + i64::from(w)
-                    || i64::from(ox) >= i64::from(x) + i64::from(width)
-                    || i64::from(y) >= i64::from(oy) + i64::from(h)
-                    || i64::from(oy) >= i64::from(y) + i64::from(height)
-            })
-        };
-        let mut position = desired;
-        self.drag_snap = (None, None);
-        for (sx, sy) in [(x_snap, y_snap), (x_snap, None), (None, y_snap)] {
-            let x = sx.map_or(desired.0, |snap| snap.position);
-            let y = sy.map_or(desired.1, |snap| snap.position);
-            if (sx.is_some() || sy.is_some()) && nonoverlapping(x, y) {
-                position = (x, y);
-                self.drag_snap = (sx, sy);
-                break;
-            }
-        }
-        if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) {
-            config.x = position.0;
-            config.y = position.1;
-        }
-    }
-    fn settle(&mut self, id: u32) {
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let Some(current) = self.draft.iter().find(|config| config.id == id).copied() else {
-            return;
-        };
-        let mut projected = snapshot.outputs.clone();
-        for output in &mut projected {
-            output.mode = self.preview_mode(output);
-        }
-        match outputs::snapped_position(&projected, &self.draft, id, (current.x, current.y)) {
-            Ok((x, y)) => {
-                if let Some(config) = self.draft.iter_mut().find(|config| config.id == id) {
-                    config.x = x;
-                    config.y = y;
-                }
-                if let Ok(canonical) = outputs::canonical_layout(&projected, &self.draft) {
-                    self.draft = canonical;
-                }
-                self.dirty = !self.mode_draft.is_empty() || self.draft != snapshot.configuration;
-                self.status.clear();
-            }
-            Err(_) => {
-                self.draft = snapshot.configuration.clone();
-                self.dirty = !self.mode_draft.is_empty();
-                self.status =
-                    String::from("Displays must touch at an edge or corner without overlapping.");
-            }
-        }
-    }
-}
+use sws_protocol::outputs::{self as outputs, OutputSnapshot};
 
 fn mode_catalog(
     connection: &Connection,
@@ -364,30 +24,6 @@ fn mode_catalog(
         })
         .collect()
 }
-pub(super) fn resolution(state: &State<Editor>, id: u32, mode: outputs::OutputMode) {
-    state.update(|editor| {
-        if editor.applying {
-            return;
-        }
-        let Some(output) = editor
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
-            .filter(|output| output.id == id)
-        else {
-            return;
-        };
-        if !editor.selected_modes().contains(&mode) {
-            return;
-        }
-        editor.mode_draft.retain(|(output, _)| *output != id);
-        if mode != output.mode {
-            editor.mode_draft.push((id, mode));
-        }
-        editor.settle(id);
-    });
-}
-
 pub(super) fn watch(state: State<Editor>) {
     thread::spawn(move || {
         loop {
@@ -401,9 +37,13 @@ pub(super) fn watch(state: State<Editor>) {
                 });
                 return;
             };
+            let supports_roles = connection
+                .get_capabilities()
+                .is_ok_and(|c| c.supports_output_roles());
             let modes = mode_catalog(&connection, &snapshot);
             state.update(|editor| {
                 editor.adopt(snapshot);
+                editor.supports_roles = supports_roles;
                 editor.modes = modes;
                 editor.status.clear();
             });
@@ -420,32 +60,25 @@ pub(super) fn watch(state: State<Editor>) {
                         snapshot,
                     )) = event
                     {
-                        if state.get().applying
-                            || state
-                                .get()
-                                .snapshot
-                                .as_ref()
-                                .is_some_and(|old| old.generation >= snapshot.generation)
+                        if state
+                            .get()
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|old| old.generation > snapshot.generation)
                         {
                             continue;
                         }
                         let modes = mode_catalog(&connection, &snapshot);
                         state.update(|editor| {
-                            if editor.applying {
+                            if editor
+                                .snapshot
+                                .as_ref()
+                                .is_some_and(|old| old.generation > snapshot.generation)
+                            {
                                 return;
                             }
-                            // A sensor-driven experience transition advances the
-                            // generation without changing the editable preferences.
-                            if editor.snapshot.as_ref().is_some_and(|old| {
-                                old.outputs == snapshot.outputs
-                                    && old.configuration == snapshot.configuration
-                            }) {
-                                editor.snapshot = Some(snapshot);
-                            } else {
-                                editor.adopt(snapshot);
-                            }
+                            editor.observe(snapshot);
                             editor.modes = modes;
-                            editor.status.clear();
                         });
                     }
                 }
@@ -491,11 +124,11 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                     );
                 }
             }
-            let count = editor
-                .snapshot
-                .as_ref()
-                .map_or(0, |snapshot| snapshot.outputs.len());
-            for index in 0..count {
+            let Some(snapshot) = &editor.snapshot else {
+                return;
+            };
+            let selected = editor.selected_desktop();
+            for (index, output) in snapshot.outputs.iter().enumerate() {
                 let Some((x, y, w, h)) = editor.card(index, viewport_width) else {
                     continue;
                 };
@@ -505,7 +138,7 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                     (w * scale) as u32,
                     (h * scale) as u32,
                 );
-                let color = if index == editor.selected {
+                let color = if Some(output.id) == selected {
                     Color::rgb(44, 116, 220)
                 } else {
                     Color::rgb(91, 101, 118)
@@ -518,12 +151,17 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                     h.saturating_sub(4),
                     color,
                 );
-                canvas.draw_text_sized(
-                    x + (w / 2) as i32 - (5.0 * scale) as i32,
-                    y + (h / 2) as i32 - (9.0 * scale) as i32,
-                    &format!("{}", index + 1),
+                let label = editor.card_label(index);
+                let font_size = 18.0 * scale;
+                let (tw, th) = scarlet_ui::measure_text_sized(&label, font_size);
+                canvas.draw_text_sized_clipped(
+                    x + (w as i32 - tw as i32) / 2,
+                    y + (h as i32 - th as i32) / 2,
+                    &label,
                     Color::WHITE,
-                    18.0 * scale,
+                    font_size,
+                    Rect::from_xywh(x as f32, y as f32, w as f32, h as f32),
+                    0.0,
                 );
             }
         }),
@@ -609,6 +247,9 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
                         let geometry = editor.geometry(viewport_width).unwrap();
                         state.update(|editor| {
                             editor.selected = index;
+                            if !editor.has_other_desktop(id) {
+                                return;
+                            }
                             editor.touch_contact = touch_contact;
                             editor.drag_snap = (None, None);
                             editor.drag_before = Some(editor.draft.clone());
@@ -666,18 +307,11 @@ pub(super) fn canvas(state: State<Editor>) -> impl View + Clone {
 }
 
 pub(super) fn apply(state: &State<Editor>) {
-    let editor = state.get();
-    if editor.applying {
-        return;
-    }
-    let Some(original) = editor.snapshot else {
-        return;
-    };
+    let mut pending = None;
+    state.update(|editor| pending = editor.begin_apply());
+    let Some(changes) = pending else { return };
+    let original = changes.original;
     let state = state.clone();
-    state.update(|editor| {
-        editor.applying = true;
-        editor.status.clear();
-    });
     thread::spawn(move || {
         let result = (|| -> core::result::Result<OutputSnapshot, String> {
             let connection = Connection::connect_default().map_err(|e| format!("{e:?}"))?;
@@ -686,7 +320,7 @@ pub(super) fn apply(state: &State<Editor>) {
             if live.generation != original.generation {
                 return Err("Displays changed before applying".into());
             }
-            for (id, mode) in &editor.mode_draft {
+            for (id, mode) in &changes.modes {
                 connection
                     .set_output_mode(*id, *mode)
                     .map_err(|e| format!("{e:?}"))?;
@@ -694,8 +328,8 @@ pub(super) fn apply(state: &State<Editor>) {
             // The driver acknowledges a request before the new timing is live.
             // Validate layout against the confirmed modes, including fractional scales.
             let start = scarlet_os::time::monotonic_time_ns();
-            while !editor
-                .mode_draft
+            while !changes
+                .modes
                 .iter()
                 .all(|(id, mode)| live.outputs.iter().any(|o| o.id == *id && o.mode == *mode))
             {
@@ -706,9 +340,11 @@ pub(super) fn apply(state: &State<Editor>) {
                 live = read()?;
                 if live.outputs.len() != original.outputs.len()
                     || !original.outputs.iter().all(|old| {
-                        live.outputs
-                            .iter()
-                            .any(|o| o.id == old.id && o.monitor_key == old.monitor_key)
+                        live.outputs.iter().any(|o| {
+                            o.id == old.id
+                                && o.connector_key == old.connector_key
+                                && o.monitor_key == old.monitor_key
+                        })
                     })
                 {
                     return Err("Connected displays changed".into());
@@ -718,6 +354,7 @@ pub(super) fn apply(state: &State<Editor>) {
                 if !original.configuration.iter().all(|old| {
                     live.configuration.iter().any(|current| {
                         current.id == old.id
+                            && current.role == old.role
                             && current.experience == old.experience
                             && current.scale_milli == old.scale_milli
                     })
@@ -728,7 +365,7 @@ pub(super) fn apply(state: &State<Editor>) {
             connection
                 .configure_outputs(outputs::OutputTransaction {
                     base_generation: live.generation,
-                    configuration: editor.draft,
+                    configuration: changes.configuration,
                 })
                 .map_err(|e| format!("{e:?}"))
         })();
@@ -739,58 +376,6 @@ pub(super) fn apply(state: &State<Editor>) {
         let snapshot = result
             .ok()
             .or_else(|| Connection::connect_default().ok()?.outputs().ok());
-        state.update(|editor| {
-            if let Some(snapshot) = snapshot {
-                editor.adopt(snapshot);
-            }
-            editor.applying = false;
-            editor.status = status;
-        });
-    });
-}
-
-pub(super) fn scale(state: &State<Editor>, index: usize) {
-    if state.get().applying {
-        return;
-    }
-    let Some(scale) = SCALES.get(index).copied() else {
-        return;
-    };
-    state.update(|editor| {
-        let Some(id) = editor
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
-            .map(|output| output.id)
-        else {
-            return;
-        };
-        if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) {
-            config.scale_milli = scale;
-        }
-        editor.settle(id);
-    });
-}
-pub(super) fn experience(state: &State<Editor>, index: usize) {
-    if state.get().applying {
-        return;
-    }
-    state.update(|editor| {
-        let Some(id) = editor
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.outputs.get(editor.selected))
-            .map(|output| output.id)
-        else {
-            return;
-        };
-        if let Some(config) = editor.draft.iter_mut().find(|config| config.id == id) {
-            config.experience = match index {
-                1 => OutputExperience::Desktop,
-                2 => OutputExperience::Tablet,
-                _ => OutputExperience::Auto,
-            };
-            editor.dirty = true;
-        }
+        state.update(|editor| editor.finish_apply(snapshot, status));
     });
 }

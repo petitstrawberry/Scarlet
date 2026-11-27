@@ -173,6 +173,18 @@ impl<R: Send + 'static> PresentationQueue<R> {
         }
     }
 
+    /// Wait until every accepted flip has finished on the physical display.
+    pub(super) fn drain(&mut self) -> Result<(), &'static str> {
+        while self.progress.completed < self.progress.submitted {
+            let result = self
+                .retired
+                .recv()
+                .map_err(|_| "Display presentation stopped")?;
+            self.progress.retire(result?)?;
+        }
+        Ok(())
+    }
+
     /// An image last presented at N is writable only after a later completed
     /// flip. Queue admission and that image's own flip are not retirement.
     pub(super) fn ready(&mut self, last_present: Option<u64>) -> Result<bool, &'static str> {
@@ -333,6 +345,27 @@ mod display_completion_tests {
         if let Some(sender) = WAKE.lock().unwrap().as_ref() {
             let _ = sender.send(());
         }
+    }
+
+    #[test]
+    fn drain_before_disable_finishes_the_armed_and_queued_flips() {
+        let (finish, flips) = mpsc::channel();
+        let mut queue = PresentationQueue::<()>::with_presenter(
+            CompletionWake::default(),
+            false,
+            move |slot, _| {
+                assert_eq!(flips.recv().unwrap(), slot);
+                Ok(())
+            },
+        )
+        .unwrap();
+        queue.present(1, 0, None).unwrap();
+        queue.present(2, 1, None).unwrap();
+        finish.send(0).unwrap();
+        finish.send(1).unwrap();
+        queue.drain().unwrap();
+        assert_eq!(queue.progress.completed, 2);
+        assert!(queue.ready(Some(1)).unwrap());
     }
 
     #[test]

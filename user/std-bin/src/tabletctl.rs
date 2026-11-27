@@ -17,7 +17,7 @@ use sws_protocol::outputs::{
     about = "Inspect posture and configure display experience"
 )]
 struct Cli {
-    /// Display ID. Defaults to the built-in display, then the primary display.
+    /// Display ID. Defaults to the active desktop, preferring a built-in display.
     #[arg(long, global = true, value_name = "ID")]
     output: Option<u32>,
     #[command(subcommand)]
@@ -83,12 +83,9 @@ fn target(snapshot: &OutputSnapshot, requested: Option<u32>) -> Result<&OutputDe
             .find(|output| output.id == id)
             .ok_or_else(|| format!("output {id} is disconnected or unknown"));
     }
-    snapshot
-        .outputs
-        .iter()
-        .find(|output| output.internal)
-        .or_else(|| snapshot.outputs.iter().find(|output| output.primary))
-        .ok_or_else(|| "no built-in or primary display is available".into())
+    sws_protocol::outputs::extended_primary(&snapshot.outputs, &snapshot.configuration)
+        .and_then(|id| snapshot.outputs.iter().find(|output| output.id == id))
+        .ok_or_else(|| "no active desktop display is available".into())
 }
 
 fn transaction(
@@ -252,7 +249,7 @@ mod tests {
     use super::*;
     use sws_protocol::{
         input_environment_known_flags as known, input_environment_state_flags as state,
-        outputs::{OutputConfiguration, OutputMode},
+        outputs::{OutputConfiguration, OutputMode, OutputRole},
     };
 
     fn display(id: u32, internal: bool, primary: bool) -> OutputDescriptor {
@@ -285,6 +282,7 @@ mod tests {
                     x: -1280,
                     y: 17,
                     scale_milli: 1500,
+                    role: OutputRole::Extend,
                     experience: OutputExperience::Auto,
                 },
                 OutputConfiguration {
@@ -292,6 +290,7 @@ mod tests {
                     x: 0,
                     y: 0,
                     scale_milli: 1250,
+                    role: OutputRole::Extend,
                     experience: OutputExperience::Tablet,
                 },
             ],
@@ -330,6 +329,9 @@ mod tests {
     fn defaults_to_internal_then_primary_and_rejects_an_unknown_id() {
         let mut snapshot = displays();
         assert_eq!(target(&snapshot, None).unwrap().id, 3);
+        snapshot.configuration[0].role = OutputRole::Disabled;
+        assert_eq!(target(&snapshot, None).unwrap().id, 8);
+        snapshot.configuration[0].role = OutputRole::Extend;
         snapshot.outputs[1].internal = false;
         assert_eq!(target(&snapshot, None).unwrap().id, 8);
         assert!(target(&snapshot, Some(42)).is_err());

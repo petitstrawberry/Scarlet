@@ -1,21 +1,21 @@
 //! Output-scoped session control; all mutations run on the compositor thread.
 use super::*;
 use sws_protocol::outputs::{
-    OutputConfiguration, OutputContext, OutputDescriptor, OutputEvent, OutputRequest,
+    OutputConfiguration, OutputContext, OutputDescriptor, OutputEvent, OutputRequest, OutputRole,
 };
 
 impl Compositor {
     pub(super) fn pointer_output_id(&self, x: i32, y: i32) -> u32 {
         self.outputs
             .output_at(x, y)
-            .map_or(self.outputs.primary_id(), |output| output.id)
+            .map_or(self.outputs.desktop_primary().id, |output| output.id)
     }
 
     pub(super) fn keyboard_output_id(&self) -> u32 {
         self.window_manager
             .get_focused_window_id()
             .and_then(|id| self.window_manager.get_window(id))
-            .filter(|window| self.outputs.get(window.output_id).is_some())
+            .filter(|window| self.outputs.desktop(window.output_id).is_some())
             .map_or_else(
                 || self.pointer_output_id(self.cursor.x, self.cursor.y),
                 |window| window.output_id,
@@ -61,13 +61,17 @@ impl Compositor {
             if let Some(w) = self.window_manager.get_window_mut(id) {
                 if old_output != output {
                     if w.fullscreen
-                        && let Some(source) = self.outputs.get(old_output)
+                        && let Some(source) = self
+                            .outputs
+                            .get(old_output)
+                            .map(|o| o.rect)
+                            .or_else(|| self.detached_output_geometry.get(&old_output).copied())
                     {
                         // Translate the saved desktop rectangle along with its
                         // owner before configuring the new fullscreen bounds.
                         w.translate_output(
-                            bounds.x.saturating_sub(source.rect.x),
-                            bounds.y.saturating_sub(source.rect.y),
+                            bounds.x.saturating_sub(source.x),
+                            bounds.y.saturating_sub(source.y),
                         );
                     }
                     w.last_frame_submission_counter = Some(counter);
@@ -124,7 +128,7 @@ impl Compositor {
         // scale stable during the drag avoids reallocating on every crossing.
         let Some((output, area)) = self
             .outputs
-            .iter()
+            .desktops()
             .map(|output| {
                 let r = output.rect;
                 let width = (i64::from(x) + i64::from(width))
@@ -169,7 +173,7 @@ impl Compositor {
     }
 
     pub(super) fn output_context_for(&self, id: u32) -> Option<OutputContext> {
-        let output = self.outputs.get(id)?;
+        let output = self.outputs.desktop(id)?;
         Some(OutputContext {
             id,
             scale_milli: output.scale_milli,
@@ -216,13 +220,16 @@ impl Compositor {
     pub(super) fn publish_outputs(&self) {
         let contexts = self
             .outputs
-            .iter()
+            .desktops()
             .filter_map(|output| self.output_context_for(output.id))
             .collect::<Vec<_>>();
         super::super::ipc::refresh_output_contexts(&contexts);
         super::super::ipc::publish_output_event(OutputEvent::Snapshot(self.outputs.snapshot()));
         for state in self.workspace_manager.session_snapshot() {
-            if let Some(output) = state.output_id {
+            if let Some(output) = state
+                .output_id
+                .filter(|id| self.outputs.desktop(*id).is_some())
+            {
                 super::super::ipc::publish_output_event(OutputEvent::Workspace {
                     output,
                     state: state.state,
@@ -243,7 +250,7 @@ impl Compositor {
                 client,
                 sws_protocol::server_msg::OUTPUT_CONTROL,
                 request,
-                sws_protocol::outputs::encode_event(&event),
+                super::super::ipc::output_event_payload(client, &event),
             ),
             Err(code) => send_response_to_client(
                 client,
@@ -259,7 +266,7 @@ impl Compositor {
         let output = self
             .outputs
             .get(id)
-            .unwrap_or_else(|| self.outputs.primary());
+            .unwrap_or_else(|| self.outputs.desktop_primary());
         output.workarea.unwrap_or((
             output.rect.x,
             output.rect.y,
@@ -271,7 +278,7 @@ impl Compositor {
     pub(super) fn window_output_id(&self, id: u32) -> u32 {
         self.window_manager
             .get_window(id)
-            .map_or(self.outputs.primary_id(), |window| window.output_id)
+            .map_or(self.outputs.desktop_primary().id, |window| window.output_id)
     }
 
     /// The wire environment is per connection. A provider follows its editor;
@@ -301,8 +308,8 @@ impl Compositor {
             .map(|w| w.output_id)
             .or(bound.map(|c| c.id))
             .or_else(|| owned().map(|w| w.output_id))
-            .filter(|id| self.outputs.get(*id).is_some())
-            .unwrap_or(self.outputs.primary_id());
+            .filter(|id| self.outputs.desktop(*id).is_some())
+            .unwrap_or(self.outputs.desktop_primary().id);
         super::super::ipc::project_client_input_environment(client, id);
     }
 
@@ -323,7 +330,7 @@ impl Compositor {
     ) {
         let outputs = self
             .outputs
-            .iter()
+            .desktops()
             .map(|output| input_environment::OutputPolicy {
                 id: output.id,
                 experience: output.experience,
@@ -346,7 +353,7 @@ impl Compositor {
             .window_manager
             .get_focused_window_id()
             .map(|id| self.top_level_window_id(id));
-        for output in self.outputs.iter() {
+        for output in self.outputs.desktops() {
             match self.workspace_manager.apply_output_experience(
                 output.id,
                 output.experience,
@@ -370,7 +377,8 @@ impl Compositor {
         request: u8,
         tablet: Option<bool>,
     ) {
-        let id = input_environment::client_output(client).unwrap_or(self.outputs.primary_id());
+        let id =
+            input_environment::client_output(client).unwrap_or(self.outputs.desktop_primary().id);
         let experience = input_environment::legacy_experience(tablet);
         let mut configuration = self.outputs.snapshot().configuration;
         let result = match configuration.iter_mut().find(|entry| entry.id == id) {
@@ -431,6 +439,106 @@ impl Compositor {
         }
     }
 
+    /// A physical disconnect, replacement or modeset can precede the hotplug poll.
+    /// Check the entire topology, including the desktop that is meant to stay lit.
+    fn check_live_output_topology(&self) -> Result<(), u32> {
+        let stale = sws_protocol::error_codes::STALE_OUTPUT_GENERATION;
+        for output in self.outputs.iter() {
+            let display = &output.target.display;
+            let backing = display.get_info().map_err(|_| stale)?;
+            if !Self::live_output_matches(&output.metadata, backing, display.get_output_info().ok())
+            {
+                return Err(stale);
+            }
+        }
+        for endpoint in self
+            .secondary_endpoints
+            .iter()
+            .filter(|e| e.output.is_none())
+        {
+            if endpoint
+                .control
+                .get_output_info()
+                .is_ok_and(|info| info.is_connected())
+            {
+                return Err(stale);
+            }
+        }
+        Ok(())
+    }
+
+    fn live_output_matches(
+        expected: &OutputDescriptor,
+        backing: framebuffer::DisplayInfo,
+        connector: Option<framebuffer::DisplayOutputInfo>,
+    ) -> bool {
+        let mode = expected.mode;
+        if (backing.width, backing.height) != (mode.pixel_width, mode.pixel_height) {
+            return false;
+        }
+        // Legacy endpoints have only a session ID and a retained display handle.
+        // Use that handle's live native extent when connector metadata is absent.
+        let session_key = expected.connector_key == format!("session:output{}", expected.id);
+        let Some(info) = connector else {
+            return session_key && expected.monitor_key.is_empty();
+        };
+        info.is_connected()
+            && (info.width == 0 || info.width == mode.pixel_width)
+            && (info.height == 0 || info.height == mode.pixel_height)
+            && (mode.refresh_millihz == 0 || info.refresh_mhz == mode.refresh_millihz)
+            && (session_key || info.connector_key().as_ref() == Some(&expected.connector_key))
+            && info.monitor_key().unwrap_or("") == expected.monitor_key
+    }
+
+    fn blank_output(&mut self, id: OutputId) -> Result<(), u32> {
+        use sws_protocol::error_codes as errors;
+        self.check_live_output_topology()?;
+        self.drain_output_presents(id)
+            .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
+        self.check_live_output_topology()?;
+        let output = self.outputs.get_mut(id).ok_or(errors::UNKNOWN_OUTPUT)?;
+        // Arm rollback before the first write. A live framebuffer can change even
+        // if its present fails. Until commit, the renderer still owns the old role
+        // and will repaint its entire source or mirror on the next frame.
+        self.full_redraw_needed = true;
+        output.target.full_redraw = true;
+        output.target.presented_damage.clear();
+        output.target.deferred_gpu_damage = None;
+        let mode = output.metadata.mode;
+        if output
+            .target
+            .display
+            .present_black_frame(mode.pixel_width, mode.pixel_height)
+            .is_err()
+        {
+            self.check_live_output_topology()?;
+            return Err(errors::INVALID_OUTPUT_CONFIGURATION);
+        }
+        Ok(())
+    }
+
+    /// Reapply scanout policy after hotplug or backing replacement. OutputSet
+    /// has already promoted a surviving desktop if the last one was unplugged.
+    pub(super) fn sync_enabled_outputs(&mut self) -> Result<(), &'static str> {
+        self.full_redraw_needed = true;
+        let mut disabled = Vec::new();
+        for output in self.outputs.iter_mut() {
+            output.target.full_redraw = true;
+            output.target.presented_damage.clear();
+            output.target.deferred_gpu_damage = None;
+            if output.role == OutputRole::Disabled {
+                disabled.push(output.id);
+            }
+        }
+        let mut result = Ok(());
+        for id in disabled {
+            if self.blank_output(id).is_err() {
+                result = Err("Could not blank a disabled output after hotplug");
+            }
+        }
+        result
+    }
+
     pub(super) fn install_output_configuration(
         &mut self,
         configuration: &[OutputConfiguration],
@@ -438,7 +546,7 @@ impl Compositor {
     ) -> Result<(), u32> {
         use sws_protocol::error_codes as errors;
         let folded = input_environment::snapshot().hardware_tablet_mode();
-        let was_tablet = self.output_is_tablet(self.outputs.primary_id());
+        let was_tablet = self.output_is_tablet(self.outputs.desktop_primary().id);
         let focused = self
             .window_manager
             .get_focused_window_id()
@@ -446,7 +554,10 @@ impl Compositor {
         let mut workspaces = self.workspace_manager.clone();
         // Restore desktop groups first so freed workspace IDs count toward
         // tablet expansion within the same atomic transaction.
-        let mut ordered: Vec<_> = configuration.iter().collect();
+        let mut ordered: Vec<_> = configuration
+            .iter()
+            .filter(|entry| entry.role == OutputRole::Extend)
+            .collect();
         ordered.sort_by_key(|entry| {
             self.outputs.get(entry.id).is_some_and(|o| {
                 entry
@@ -467,23 +578,69 @@ impl Compositor {
                 .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
         }
         let old = self.outputs.snapshot();
+        let destination = sws_protocol::outputs::extended_primary(&old.outputs, configuration)
+            .ok_or(errors::INVALID_OUTPUT_CONFIGURATION)?;
+        for entry in configuration
+            .iter()
+            .filter(|entry| entry.role != OutputRole::Extend)
+        {
+            if self.outputs.desktop(entry.id).is_some() {
+                workspaces
+                    .stage_desktop_demotion(entry.id, destination)
+                    .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
+            }
+        }
         let proposed = sws_protocol::outputs::OutputSnapshot {
             generation: old.generation,
             outputs: old.outputs.clone(),
             configuration: configuration.to_vec(),
         };
+        let mut roles_changed = false;
+        for entry in configuration {
+            let previous = self.outputs.get(entry.id).ok_or(errors::UNKNOWN_OUTPUT)?;
+            if entry.role != previous.role {
+                roles_changed = true;
+                if entry.role == OutputRole::Disabled {
+                    self.blank_output(entry.id)?;
+                }
+            }
+        }
+        if roles_changed {
+            self.check_live_output_topology()?;
+        }
         if persist {
             super::super::config::persist_outputs(&proposed)
                 .map_err(|_| errors::OUTPUT_CONFIGURATION_NOT_SAVED)?;
         }
+        if configuration.iter().any(|entry| {
+            entry.id == self.outputs.primary_id() && entry.role != self.outputs.primary().role
+        }) {
+            self.cancel_primary_experience_gestures();
+            let sources: Vec<_> = self
+                .direct_touch_grabs
+                .iter()
+                .map(|grab| grab.source)
+                .collect();
+            for source in sources {
+                self.handle_direct_touch_frame(TouchFrame::cancel(
+                    source,
+                    super::super::input::TouchSurface::Touchscreen,
+                ));
+            }
+        }
         self.workspace_manager = workspaces;
         self.outputs.apply_configuration(configuration);
+        let desktop = self.outputs.desktop_primary().id;
+        self.workspace_manager.set_desktop_primary(desktop);
         self.experience_retry_pending = false;
-        if was_tablet != self.output_is_tablet(self.outputs.primary_id()) {
+        if was_tablet != self.output_is_tablet(self.outputs.desktop_primary().id) {
             self.cancel_primary_experience_gestures();
         }
         self.publish_input_environment(None, None);
-        super::super::input::set_screen_size(self.screen_width(), self.screen_height());
+        super::super::input::set_screen_size(
+            self.touch_desktop().width(),
+            self.touch_desktop().height(),
+        );
         for entry in configuration {
             let previous = old
                 .configuration
@@ -518,11 +675,23 @@ impl Compositor {
                 self.notify_window_output(window);
             }
         }
-        self.workarea = self.outputs.primary().workarea;
-        if let Some(area) = self.workarea {
-            self.window_manager
-                .set_workarea(area.0, area.1, area.2, area.3);
+        if roles_changed {
+            for entry in configuration
+                .iter()
+                .filter(|entry| entry.role != OutputRole::Extend)
+            {
+                let previous_bounds = self.outputs.get(entry.id).unwrap().rect;
+                self.relocate_output_applications(entry.id, previous_bounds);
+            }
+            if let Some(gpu) = self.gpu_compositor.as_mut() {
+                gpu.outputs_changed();
+            }
+            for output in self.outputs.iter_mut() {
+                output.target.full_redraw = true;
+                output.target.presented_damage.clear();
+            }
         }
+        self.update_desktop_workarea();
         self.publish_window_creation_environment();
         self.reflow_maximized_windows_to_workarea();
         self.full_redraw_needed = true;
@@ -533,6 +702,66 @@ impl Compositor {
         Ok(())
     }
 
+    pub(super) fn update_desktop_workarea(&mut self) {
+        let desktop = self.outputs.desktop_primary();
+        self.workarea = desktop.workarea;
+        let area = self.output_workarea(desktop.id);
+        self.window_manager
+            .set_workarea(area.0, area.1, area.2, area.3);
+    }
+
+    /// Keep each application and its transient surfaces together when a display
+    /// leaves the desktop. The shell manages its connector-bound surfaces.
+    pub(super) fn relocate_output_applications(&mut self, source: OutputId, old: OutputRect) {
+        let desktop = self.outputs.desktop_primary();
+        let destination = desktop.id;
+        let bounds = desktop.rect;
+        let roots = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .filter(|window| {
+                window.parent.is_none()
+                    && matches!(
+                        window.window_type,
+                        WindowType::Normal | WindowType::AlwaysOnTop
+                    )
+                    && !is_shell_app_id(window.app_id.as_deref().unwrap_or(b""))
+                    && window.output_id == source
+            })
+            .map(|window| window.id)
+            .collect::<Vec<_>>();
+        for root in roots {
+            let group = self
+                .window_manager
+                .get_windows()
+                .iter()
+                .filter(|w| self.top_level_window_id(w.id) == root)
+                .map(|w| w.id)
+                .collect::<Vec<_>>();
+            let Some(window) = self.window_manager.get_window(root) else {
+                continue;
+            };
+            let (x, y, width, height) = window.surface_geometry();
+            let place = |value: i32, origin: i32, start: i32, span: u32, extent: u32| {
+                start.saturating_add(value.saturating_sub(origin).clamp(
+                    0,
+                    i32::try_from(span.saturating_sub(extent)).unwrap_or(i32::MAX),
+                ))
+            };
+            let dx = place(x, old.x, bounds.x, bounds.width, width).saturating_sub(x);
+            let dy = place(y, old.y, bounds.y, bounds.height, height).saturating_sub(y);
+            for id in group {
+                if let Some(w) = self.window_manager.get_window_mut(id)
+                    && !w.fullscreen
+                {
+                    w.translate_output(dx, dy);
+                }
+            }
+            self.bind_window_output(root, destination);
+        }
+    }
+
     fn execute_output_control(
         &mut self,
         client: usize,
@@ -540,7 +769,9 @@ impl Compositor {
     ) -> Result<OutputEvent, u32> {
         use sws_protocol::error_codes as errors;
         match command {
-            OutputRequest::Get => Ok(OutputEvent::Snapshot(self.outputs.snapshot())),
+            OutputRequest::Get | OutputRequest::GetLegacy => {
+                Ok(OutputEvent::Snapshot(self.outputs.snapshot()))
+            }
             OutputRequest::GetBacklight | OutputRequest::SetBacklight(_) => {
                 Err(errors::BACKLIGHT_UNAVAILABLE)
             }
@@ -586,7 +817,7 @@ impl Compositor {
                 let id = if requested == u32::MAX {
                     self.outputs
                         .output_at(self.cursor.x, self.cursor.y)
-                        .map_or(self.outputs.primary_id(), |output| output.id)
+                        .map_or(self.outputs.desktop_primary().id, |output| output.id)
                 } else {
                     requested
                 };
@@ -594,6 +825,16 @@ impl Compositor {
                 super::super::ipc::set_client_output_context(client, context);
                 self.project_client_environment(client);
                 Ok(OutputEvent::Context(context))
+            }
+            OutputRequest::ApplyLegacy(transaction) => {
+                let snapshot = self.outputs.snapshot();
+                if transaction.base_generation != snapshot.generation {
+                    return Err(errors::STALE_OUTPUT_GENERATION);
+                }
+                let full = transaction
+                    .merge_legacy(&snapshot)
+                    .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
+                self.execute_output_control(client, OutputRequest::Apply(full))
             }
             OutputRequest::Apply(transaction) => {
                 let configuration = self.outputs.validated_configuration(&transaction).map_err(
@@ -610,6 +851,7 @@ impl Compositor {
                 Ok(OutputEvent::Snapshot(self.outputs.snapshot()))
             }
             OutputRequest::Workspace(output) => {
+                self.outputs.desktop(output).ok_or(errors::UNKNOWN_OUTPUT)?;
                 let state = self
                     .workspace_manager
                     .output(output)
@@ -624,6 +866,7 @@ impl Compositor {
                 if !super::super::ipc::is_system_shell_client(client) {
                     return Err(errors::SYSTEM_SHELL_REQUIRED);
                 }
+                self.outputs.desktop(output).ok_or(errors::UNKNOWN_OUTPUT)?;
                 let live = self
                     .live_workspace_window_ids()
                     .into_iter()
@@ -683,7 +926,7 @@ impl Compositor {
                     return Err(errors::INVALID_OUTPUT_CONFIGURATION);
                 }
                 self.outputs.get_mut(output).unwrap().workarea = Some(area);
-                if output == self.outputs.primary_id() {
+                if output == self.outputs.desktop_primary().id {
                     self.workarea = Some(area);
                     self.window_manager
                         .set_workarea(area.0, area.1, area.2, area.3);
@@ -751,5 +994,61 @@ pub(super) fn describe_output(
         }),
         physical_width_mm: info.as_ref().map_or(0, |info| info.physical_width_mm),
         physical_height_mm: info.as_ref().map_or(0, |info| info.physical_height_mm),
+    }
+}
+
+#[cfg(test)]
+mod output_liveness_tests {
+    use super::*;
+    use framebuffer::{DISPLAY_OUTPUT_FLAG_CONNECTED, DisplayInfo, DisplayOutputInfo};
+
+    #[test]
+    fn legacy_display_uses_its_live_framebuffer_extent() {
+        let descriptor = describe_output(0, None, 800, 600, true);
+        let mut backing = DisplayInfo {
+            width: 800,
+            height: 600,
+            ..DisplayInfo::default()
+        };
+        assert!(Compositor::live_output_matches(&descriptor, backing, None));
+        backing.width = 1024;
+        assert!(!Compositor::live_output_matches(&descriptor, backing, None));
+    }
+
+    #[test]
+    fn unplug_and_same_mode_monitor_replacement_invalidate_the_transaction() {
+        // SAFETY: this kernel record consists entirely of integers and byte arrays.
+        let mut info: DisplayOutputInfo = unsafe { core::mem::zeroed() };
+        info.size = core::mem::size_of::<DisplayOutputInfo>() as u32;
+        info.flags = DISPLAY_OUTPUT_FLAG_CONNECTED;
+        info.width = 960;
+        info.height = 540;
+        info.device_key[0] = b'd';
+        info.monitor_key[0] = b'a';
+        let descriptor = describe_output(1, Some(info), info.width, info.height, false);
+        let backing = DisplayInfo {
+            width: info.width,
+            height: info.height,
+            ..DisplayInfo::default()
+        };
+        assert!(Compositor::live_output_matches(
+            &descriptor,
+            backing,
+            Some(info)
+        ));
+        assert!(!Compositor::live_output_matches(&descriptor, backing, None));
+        info.monitor_key[0] = b'b';
+        assert!(!Compositor::live_output_matches(
+            &descriptor,
+            backing,
+            Some(info)
+        ));
+        info.monitor_key[0] = b'a';
+        info.flags = 0;
+        assert!(!Compositor::live_output_matches(
+            &descriptor,
+            backing,
+            Some(info)
+        ));
     }
 }

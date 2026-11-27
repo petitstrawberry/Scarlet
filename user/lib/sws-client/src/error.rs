@@ -34,6 +34,8 @@ pub enum Error {
     InvalidResponse,
     /// The connected server does not advertise input-environment support.
     InputEnvironmentUnsupported,
+    /// The server can configure extended desktops only.
+    OutputRolesUnsupported,
     /// The connected server does not allow system-wide mode overrides.
     SystemModeOverrideUnsupported,
     /// The connected server does not implement exclusive workspace-shell control.
@@ -80,6 +82,7 @@ impl Error {
             Error::ReceiveBufferTooSmall { .. } => "receive buffer is too small",
             Error::InvalidResponse => "invalid server response",
             Error::InputEnvironmentUnsupported => "input environment is not supported",
+            Error::OutputRolesUnsupported => "server supports extended displays only",
             Error::SystemModeOverrideUnsupported => "system mode overrides are not supported",
             Error::WorkspaceShellUnsupported => "workspace shell control is not supported",
             Error::ClipboardUnsupported => "text clipboard is not supported",

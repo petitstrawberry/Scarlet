@@ -114,18 +114,16 @@ fn reconcile_outputs(
     background: &BackgroundState,
 ) {
     surfaces.retain(|entry| {
-        if outputs
-            .outputs
-            .iter()
-            .any(|output| output.id == entry.output)
-        {
+        if super::multi_output::is_desktop(outputs, entry.output) {
             return true;
         }
         let _ = conn.destroy_surface(entry.surface);
         false
     });
     for output in &outputs.outputs {
-        if conn.output_context(output.id).is_err() {
+        if !super::multi_output::is_desktop(outputs, output.id)
+            || conn.output_context(output.id).is_err()
+        {
             continue;
         }
         let extent = (output.mode.pixel_width, output.mode.pixel_height);
@@ -180,7 +178,10 @@ pub fn run() {
             while let Some(event) = conn.poll_event() {
                 match event {
                     Event::Output(sws_protocol::outputs::OutputEvent::Snapshot(next))
-                        if next.generation != outputs.generation =>
+                        if super::multi_output::newer_generation(
+                            next.generation,
+                            outputs.generation,
+                        ) =>
                     {
                         reconcile_outputs(&mut conn, &next, &mut surfaces, &background);
                         outputs = next;

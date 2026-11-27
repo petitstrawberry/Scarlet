@@ -719,7 +719,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::TEXT_INPUT_DISMISS
         | protocol::capabilities::SURFACE_SCENES
         | protocol::capabilities::TEXT_CLIPBOARD
-        | protocol::capabilities::FULL_APP_MENUS;
+        | protocol::capabilities::FULL_APP_MENUS
+        | protocol::capabilities::OUTPUT_ROLES;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE
             | protocol::capabilities::EXTENSION_GPU_BUFFERS;
@@ -913,7 +914,24 @@ fn control_backlight(percent: Option<u8>) -> Result<u8, u32> {
     })
 }
 
-static OUTPUT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+// Connections opt into the role-aware wire format with Get or Apply.
+static OUTPUT_SUBSCRIBERS: Mutex<BTreeMap<usize, bool>> = Mutex::new(BTreeMap::new());
+
+pub(super) fn output_event_payload(
+    client: usize,
+    event: &protocol::outputs::OutputEvent,
+) -> Vec<u8> {
+    if OUTPUT_SUBSCRIBERS
+        .lock()
+        .expect("output subscribers")
+        .get(&client)
+        == Some(&true)
+    {
+        protocol::outputs::encode_event(event)
+    } else {
+        protocol::outputs::encode_legacy_event(event)
+    }
+}
 static OUTPUT_CONTEXTS: Mutex<BTreeMap<usize, protocol::outputs::OutputContext>> =
     Mutex::new(BTreeMap::new());
 pub(super) fn client_output_context(client: usize) -> Option<protocol::outputs::OutputContext> {
@@ -949,14 +967,19 @@ pub(super) fn publish_output_event(event: protocol::outputs::OutputEvent) {
         .lock()
         .expect("output subscribers")
         .iter()
-        .copied()
+        .map(|(&client, &roles)| (client, roles))
         .collect();
     let payload = protocol::outputs::encode_event(&event);
-    for client in clients {
+    let legacy = protocol::outputs::encode_legacy_event(&event);
+    for (client, roles) in clients {
         send_message_to_client(
             client,
             protocol::server_msg::OUTPUT_CONTROL,
-            payload.clone(),
+            if roles {
+                payload.clone()
+            } else {
+                legacy.clone()
+            },
         );
     }
 }
@@ -4416,10 +4439,14 @@ fn client_thread_main(
                     Ok(OutputRequest::GetBacklight) => None,
                     Ok(OutputRequest::SetBacklight(percent)) => Some(percent),
                     Ok(command) => {
+                        let modern =
+                            matches!(command, OutputRequest::Get | OutputRequest::Apply(_));
                         OUTPUT_SUBSCRIBERS
                             .lock()
                             .expect("output subscribers")
-                            .insert(client_id);
+                            .entry(client_id)
+                            .and_modify(|roles| *roles |= modern)
+                            .or_insert(modern);
                         push_ipc_event(IpcEvent::OutputControl {
                             client_id,
                             request_id,

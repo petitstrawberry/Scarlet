@@ -71,6 +71,8 @@ pub mod capabilities {
     pub const OUTPUT_MANAGEMENT: u64 = 1 << 21;
     /// The desktop compositor brokers backlight reads and writes.
     pub const BACKLIGHT_CONTROL: u64 = 1 << 22;
+    /// Role-aware output snapshots and transactions (output requests 11 and 12).
+    pub const OUTPUT_ROLES: u64 = 1 << 23;
     /// Shared SGFX images may be registered and committed without CPU copies.
     pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
     /// Focused windows may capture raw relative pointer motion.

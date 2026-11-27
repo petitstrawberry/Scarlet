@@ -63,6 +63,29 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// Whether output transactions can set mirror and disabled roles.
+    pub const fn supports_output_roles(self) -> bool {
+        self.capabilities & protocol::capabilities::OUTPUT_ROLES != 0
+    }
+
+    fn configure_outputs_request(
+        self,
+        transaction: protocol::outputs::OutputTransaction,
+    ) -> Result<protocol::outputs::OutputRequest, Error> {
+        use protocol::outputs::{OutputRequest, OutputRole};
+        if self.supports_output_roles() {
+            return Ok(OutputRequest::Apply(transaction));
+        }
+        if transaction
+            .configuration
+            .iter()
+            .any(|c| c.role != OutputRole::Extend)
+        {
+            return Err(Error::OutputRolesUnsupported);
+        }
+        Ok(OutputRequest::ApplyLegacy(transaction))
+    }
+
     /// Whether the server supports explicit pointer lock and relative motion.
     ///
     /// # Returns
@@ -3423,6 +3446,49 @@ mod pointer_lock_tests {
     use super::*;
 
     #[test]
+    fn output_role_negotiation_preserves_explicit_role_changes() {
+        use protocol::outputs::{
+            OutputConfiguration, OutputExperience, OutputRequest, OutputRole, OutputTransaction,
+        };
+        let mut server = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: protocol::capabilities::OUTPUT_MANAGEMENT,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        let mut tx = OutputTransaction {
+            base_generation: 1,
+            configuration: vec![OutputConfiguration {
+                id: 7,
+                x: 0,
+                y: 0,
+                scale_milli: 1000,
+                experience: OutputExperience::Auto,
+                role: OutputRole::Extend,
+            }],
+        };
+        assert_eq!(
+            server.configure_outputs_request(tx.clone()),
+            Ok(OutputRequest::ApplyLegacy(tx.clone()))
+        );
+        for role in [OutputRole::Mirror, OutputRole::Disabled] {
+            tx.configuration[0].role = role;
+            assert_eq!(
+                server.configure_outputs_request(tx.clone()),
+                Err(Error::OutputRolesUnsupported)
+            );
+        }
+        server.capabilities |= protocol::capabilities::OUTPUT_ROLES;
+        for role in [OutputRole::Extend, OutputRole::Mirror, OutputRole::Disabled] {
+            tx.configuration[0].role = role;
+            assert_eq!(
+                server.configure_outputs_request(tx.clone()),
+                Ok(OutputRequest::Apply(tx.clone()))
+            );
+        }
+    }
+
+    #[test]
     fn scene_releases_remain_available_to_the_resource_owner() {
         let event = Event::SceneBufferReleased {
             buffer_id: 7,
@@ -3779,8 +3845,15 @@ impl Connection {
     }
 
     pub fn outputs(&self) -> Result<protocol::outputs::OutputSnapshot, Error> {
-        match self.output_request(protocol::outputs::OutputRequest::Get)? {
-            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
+        use protocol::outputs::OutputRequest;
+        let request = if self.get_capabilities()?.supports_output_roles() {
+            OutputRequest::Get
+        } else {
+            OutputRequest::GetLegacy
+        };
+        match self.output_request(request)? {
+            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot),
+            _ => Err(Error::InvalidResponse),
         }
     }
     pub fn output_modes(&self, output: u32) -> Result<Vec<protocol::outputs::OutputMode>, Error> {
@@ -3792,9 +3865,16 @@ impl Connection {
     pub fn set_output_mode(&self, output: u32, mode: protocol::outputs::OutputMode) -> Result<(), Error> {
         self.output_request(protocol::outputs::OutputRequest::SetMode { output, mode }).map(|_| ())
     }
-    pub fn configure_outputs(&self, transaction: protocol::outputs::OutputTransaction) -> Result<protocol::outputs::OutputSnapshot, Error> {
-        match self.output_request(protocol::outputs::OutputRequest::Apply(transaction))? {
-            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
+    pub fn configure_outputs(
+        &self,
+        transaction: protocol::outputs::OutputTransaction,
+    ) -> Result<protocol::outputs::OutputSnapshot, Error> {
+        let request = self
+            .get_capabilities()?
+            .configure_outputs_request(transaction)?;
+        match self.output_request(request)? {
+            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot),
+            _ => Err(Error::InvalidResponse),
         }
     }
     pub fn output_context(&self, output: u32) -> Result<protocol::outputs::OutputContext, Error> {

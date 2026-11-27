@@ -2,7 +2,7 @@
 //!
 //! SWS drives connected outputs through an [`OutputSet`]. Scanout surfaces,
 //! backing stores, present history and presentation clocks live on each
-//! [`Output`]; the primary retains legacy screen-size and shell policy APIs.
+//! [`Output`]. Only extended outputs contribute space to the desktop.
 //! See `docs/graphics/multi-display.md`.
 //!
 //! Output rectangles are expressed in the compositor's global coordinate
@@ -14,7 +14,7 @@
 
 use sws_protocol::outputs::{
     self as protocol, OutputConfiguration, OutputDescriptor, OutputExperience, OutputMode,
-    OutputSnapshot, OutputTransaction,
+    OutputRole, OutputSnapshot, OutputTransaction,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,17 @@ impl OutputRect {
         i64::from(self.y) + i64::from(self.height)
     }
 
+    fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Self::new(
+            x,
+            y,
+            (self.right().max(other.right()) - i64::from(x)) as u32,
+            (self.bottom().max(other.bottom()) - i64::from(y)) as u32,
+        )
+    }
+
     /// Whether a global point lies inside this rectangle.
     ///
     /// # Arguments
@@ -124,8 +135,8 @@ impl OutputRect {
         if self.width == 0 || self.height == 0 {
             return None;
         }
-        let max_x = (self.right() - 1) as i32;
-        let max_y = (self.bottom() - 1) as i32;
+        let max_x = (self.right() - 1).min(i64::from(i32::MAX)) as i32;
+        let max_y = (self.bottom() - 1).min(i64::from(i32::MAX)) as i32;
         Some((x.clamp(self.x, max_x), y.clamp(self.y, max_y)))
     }
 }
@@ -191,11 +202,12 @@ pub(super) struct Output<T> {
     /// Firmware/bus device and connector identity. A `session:` prefix marks
     /// old drivers without a persistent hardware identity.
     pub(super) metadata: OutputDescriptor,
+    /// Configured extension placement, retained while mirroring or disabled.
     pub(super) logical_rect: protocol::LogicalRect,
+    pub(super) role: OutputRole,
     pub(super) experience: OutputExperience,
     pub(super) workarea: Option<(i32, i32, u32, u32)>,
-    /// Placement in global compositor coordinates. `width`/`height` are the
-    /// output's current pixel size.
+    /// Extension rectangle in compositor coordinates (two units per logical pixel).
     pub(super) rect: OutputRect,
     /// Preferred client buffer scale in thousandths.
     pub(super) scale_milli: u32,
@@ -250,6 +262,7 @@ impl<T> Output<T> {
                 height: (u64::from(rect.height) * 1000).div_ceil(u64::from(scale_milli.max(1)))
                     as u32,
             },
+            role: OutputRole::Extend,
             experience: OutputExperience::Auto,
             workarea: None,
             rect: OutputRect::new(
@@ -298,6 +311,7 @@ impl<T> Output<T> {
             y: self.logical_rect.y,
             scale_milli: self.scale_milli,
             experience: self.experience,
+            role: self.role,
         }
     }
 
@@ -312,7 +326,7 @@ impl<T> Output<T> {
     }
 }
 
-/// All outputs driven by the compositor. Always contains a primary output.
+/// All physical outputs. Always contains the hardware primary and at least one desktop.
 pub(super) struct OutputSet<T> {
     outputs: Vec<Output<T>>,
     primary: OutputId,
@@ -330,7 +344,8 @@ impl<T> OutputSet<T> {
     /// # Returns
     ///
     /// A one-output set.
-    pub(super) fn single(primary: Output<T>) -> Self {
+    pub(super) fn single(mut primary: Output<T>) -> Self {
+        primary.role = OutputRole::Extend;
         let id = primary.id;
         Self {
             outputs: vec![primary],
@@ -364,6 +379,65 @@ impl<T> OutputSet<T> {
         protocol::canonical_layout(&self.snapshot().outputs, &transaction.configuration)
             .map_err(|_| ConfigurationError::Invalid)
     }
+
+    /// Repair the final live layout if hotplug removed a bridge between desktops.
+    /// Keep the anchor and every desktop still connected to it in place. Snap
+    /// the nearest remaining desktop to that group until all are connected.
+    pub(super) fn layout_after_hotplug(
+        &self,
+    ) -> Result<Option<Vec<OutputConfiguration>>, protocol::LayoutError> {
+        let snapshot = self.snapshot();
+        match protocol::validate_layout(&snapshot.outputs, &snapshot.configuration) {
+            Ok(_) => return Ok(None),
+            Err(protocol::LayoutError::Disconnected | protocol::LayoutError::Overlap) => {}
+            Err(error) => return Err(error),
+        }
+
+        let anchor = self
+            .desktop(self.primary)
+            .unwrap_or_else(|| self.desktop_primary());
+        let mut layout = snapshot.configuration;
+        let mut pending = Vec::new();
+        for (index, entry) in layout.iter_mut().enumerate() {
+            if entry.role == OutputRole::Extend && entry.id != anchor.id {
+                // The snapper considers only extended entries. Bring these
+                // desktops into the candidate layout one at a time.
+                entry.role = OutputRole::Disabled;
+                pending.push(index);
+            }
+        }
+        while !pending.is_empty() {
+            let mut best = None;
+            for (slot, &index) in pending.iter().enumerate() {
+                let entry = layout[index];
+                layout[index].role = OutputRole::Extend;
+                let position = protocol::snapped_position(
+                    &snapshot.outputs,
+                    &layout,
+                    entry.id,
+                    (entry.x, entry.y),
+                );
+                layout[index].role = OutputRole::Disabled;
+                if let Ok((x, y)) = position {
+                    let dx = i128::from(x) - i128::from(entry.x);
+                    let dy = i128::from(y) - i128::from(entry.y);
+                    let candidate = (dx * dx + dy * dy, slot, x, y);
+                    if best.is_none_or(|previous| candidate < previous) {
+                        best = Some(candidate);
+                    }
+                    if dx == 0 && dy == 0 {
+                        break;
+                    }
+                }
+            }
+            let (_, slot, x, y) = best.ok_or(protocol::LayoutError::Disconnected)?;
+            let entry = &mut layout[pending.remove(slot)];
+            (entry.x, entry.y, entry.role) = (x, y, OutputRole::Extend);
+        }
+        protocol::validate_layout(&snapshot.outputs, &layout)?;
+        Ok(Some(layout))
+    }
+
     /// Recompute a connected layout for a hardware mode change. Keep the
     /// placement where possible, then try snapping the resized output.
     pub(super) fn layout_for_mode(
@@ -396,25 +470,39 @@ impl<T> OutputSet<T> {
                 .unwrap();
             entry.x = x;
             entry.y = y;
-            if let Ok(layout) = protocol::canonical_layout(&snapshot.outputs, &configuration) {
+            if let Ok(mut layout) = protocol::canonical_layout(&snapshot.outputs, &configuration) {
+                // Snapping the hardware primary rebases the desktop. The
+                // modeset only moved active neighbors relative to that primary.
+                for parked in layout
+                    .iter_mut()
+                    .filter(|entry| entry.role != OutputRole::Extend)
+                {
+                    let rect = self.get(parked.id).unwrap().logical_rect;
+                    (parked.x, parked.y) = (rect.x, rect.y);
+                }
                 return Ok(layout);
             }
         }
-        // Reconnect a layout that can no longer fit by putting the primary at
-        // the origin and arranging the remaining outputs to its right.
-        let mut x = 0i32;
+        // Reconnect desktops that can no longer fit. Keep parked positions.
+        let anchor = self
+            .desktop(self.primary)
+            .unwrap_or_else(|| self.desktop_primary());
+        let mut x = anchor.logical_rect.x;
         for output in snapshot
             .outputs
             .iter()
-            .filter(|o| o.primary)
-            .chain(snapshot.outputs.iter().filter(|o| !o.primary))
+            .filter(|o| o.id == anchor.id)
+            .chain(snapshot.outputs.iter().filter(|o| o.id != anchor.id))
         {
             let entry = configuration
                 .iter_mut()
                 .find(|entry| entry.id == output.id)
                 .unwrap();
+            if entry.role != OutputRole::Extend {
+                continue;
+            }
             entry.x = x;
-            entry.y = 0;
+            entry.y = anchor.logical_rect.y;
             let (width, _) = output.mode.logical_size(entry.scale_milli)?;
             let width =
                 i32::try_from(width).map_err(|_| protocol::LayoutError::CoordinatesOverflow)?;
@@ -468,6 +556,7 @@ impl<T> OutputSet<T> {
             );
             output.scale_milli = entry.scale_milli;
             output.experience = entry.experience;
+            output.role = entry.role;
         }
         self.bump_generation();
     }
@@ -485,8 +574,7 @@ impl<T> OutputSet<T> {
             .expect("output set always contains its primary output")
     }
 
-    /// The primary output: the target of legacy whole-screen semantics such
-    /// as `SCREEN_SIZE` and unqualified fullscreen.
+    /// The hardware primary, including when it mirrors another desktop or is disabled.
     pub(super) fn primary(&self) -> &Output<T> {
         &self.outputs[self.primary_index()]
     }
@@ -528,6 +616,28 @@ impl<T> OutputSet<T> {
         self.outputs.iter()
     }
 
+    /// Outputs that own desktop space, in physical enumeration order.
+    pub(super) fn desktops(&self) -> impl Iterator<Item = &Output<T>> {
+        self.iter()
+            .filter(|output| output.role == OutputRole::Extend)
+    }
+
+    /// Look up a desktop by ID for window, workspace and input routing.
+    pub(super) fn desktop(&self, id: OutputId) -> Option<&Output<T>> {
+        self.desktops().find(|output| output.id == id)
+    }
+
+    fn desktop_preference(&self, output: &Output<T>) -> (bool, bool) {
+        (!output.metadata.internal, output.id != self.primary)
+    }
+
+    /// Preferred extended built-in, hardware primary, or first remaining desktop.
+    pub(super) fn desktop_primary(&self) -> &Output<T> {
+        self.desktops()
+            .min_by_key(|output| self.desktop_preference(output))
+            .expect("output set always contains an extended desktop")
+    }
+
     /// Identifier of the primary output.
     pub(super) fn primary_id(&self) -> OutputId {
         self.primary
@@ -551,7 +661,8 @@ impl<T> OutputSet<T> {
         true
     }
 
-    /// Remove a non-primary output.
+    /// Remove a non-primary output. If it owned the last desktop, reactivate
+    /// the preferred remaining connector at its saved extension position.
     ///
     /// # Arguments
     ///
@@ -565,16 +676,27 @@ impl<T> OutputSet<T> {
             return None;
         }
         let index = self.outputs.iter().position(|output| output.id == id)?;
+        let removed = self.outputs.remove(index);
+        if removed.role == OutputRole::Extend && self.desktops().next().is_none() {
+            let fallback = self
+                .iter()
+                .min_by_key(|output| self.desktop_preference(output))
+                .expect("hardware primary remains after unplug")
+                .id;
+            self.get_mut(fallback).unwrap().role = OutputRole::Extend;
+        }
         self.bump_generation();
-        Some(self.outputs.remove(index))
+        Some(removed)
     }
 
-    /// Where to place a new output: to the right of the current layout,
-    /// top-aligned with it.
+    /// Attach a new desktop to the top of the rightmost extended output's right edge.
     pub(super) fn next_placement(&self, width: u32, height: u32) -> OutputRect {
-        let bounds = self.bounds();
-        let right = i64::from(bounds.x) + i64::from(bounds.width);
-        OutputRect::new(right as i32, bounds.y, width, height)
+        let rightmost = self
+            .desktops()
+            .map(|output| output.rect)
+            .max_by_key(|rect| (rect.right(), core::cmp::Reverse(rect.y)))
+            .expect("output set always contains an extended desktop");
+        OutputRect::new(rightmost.right() as i32, rightmost.y, width, height)
     }
 
     /// Number of outputs.
@@ -582,27 +704,22 @@ impl<T> OutputSet<T> {
         self.outputs.len()
     }
 
-    /// Bounding box of every output rectangle.
+    /// Bounding box of every extended desktop.
     ///
     /// The box may include space no output covers; use
     /// [`OutputSet::clamp_point`] to confine a pointer.
     pub(super) fn bounds(&self) -> OutputRect {
-        let mut iter = self.outputs.iter().map(|output| output.rect);
-        let first = iter.next().expect("output set is never empty");
-        let (mut left, mut top) = (i64::from(first.x), i64::from(first.y));
-        let (mut right, mut bottom) = (first.right(), first.bottom());
-        for rect in iter {
-            left = left.min(i64::from(rect.x));
-            top = top.min(i64::from(rect.y));
-            right = right.max(rect.right());
-            bottom = bottom.max(rect.bottom());
-        }
-        OutputRect::new(
-            left as i32,
-            top as i32,
-            (right - left) as u32,
-            (bottom - top) as u32,
-        )
+        self.desktops()
+            .map(|output| output.rect)
+            .reduce(OutputRect::union)
+            .expect("output set always contains an extended desktop")
+    }
+
+    /// Bounding box of the portions of a global rectangle visible on any desktop.
+    pub(super) fn clip_to_desktops(&self, rect: OutputRect) -> Option<OutputRect> {
+        self.desktops()
+            .filter_map(|output| rect.intersect(output.rect))
+            .reduce(OutputRect::union)
     }
 
     /// Output containing a global point.
@@ -616,9 +733,7 @@ impl<T> OutputSet<T> {
     ///
     /// The first output whose rectangle contains the point.
     pub(super) fn output_at(&self, x: i32, y: i32) -> Option<&Output<T>> {
-        self.outputs
-            .iter()
-            .find(|output| output.rect.contains(x, y))
+        self.desktops().find(|output| output.rect.contains(x, y))
     }
 
     /// Confine a global point to the union of output rectangles.
@@ -639,12 +754,11 @@ impl<T> OutputSet<T> {
         if self.output_at(x, y).is_some() {
             return (x, y);
         }
-        self.outputs
-            .iter()
+        self.desktops()
             .filter_map(|output| output.rect.clamp_point(x, y))
             .min_by_key(|&(cx, cy)| {
-                let dx = i64::from(cx) - i64::from(x);
-                let dy = i64::from(cy) - i64::from(y);
+                let dx = i128::from(cx) - i128::from(x);
+                let dy = i128::from(cy) - i128::from(y);
                 dx * dx + dy * dy
             })
             .unwrap_or((x, y))
@@ -653,7 +767,9 @@ impl<T> OutputSet<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Output, OutputRect, OutputSet, PRIMARY_OUTPUT_ID, protocol};
+    use super::{
+        ConfigurationError, Output, OutputRect, OutputRole, OutputSet, PRIMARY_OUTPUT_ID, protocol,
+    };
 
     fn set(rects: &[OutputRect]) -> OutputSet<()> {
         let mut outputs = rects.iter().enumerate().map(|(index, rect)| {
@@ -662,6 +778,224 @@ mod tests {
         let mut set = OutputSet::single(outputs.next().unwrap());
         set.outputs.extend(outputs);
         set
+    }
+
+    #[test]
+    fn parked_connectors_retain_placement_and_contribute_no_desktop_space() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 200, 100),
+            OutputRect::new(-100, 0, 100, 100),
+            OutputRect::new(200, -40, 100, 100),
+        ]);
+        let original = outputs.snapshot().configuration;
+        let mut parked = original.clone();
+        parked[1].role = OutputRole::Mirror;
+        parked[2].role = OutputRole::Disabled;
+        let transaction = protocol::OutputTransaction {
+            base_generation: outputs.snapshot().generation,
+            configuration: parked.clone(),
+        };
+        outputs.apply_configuration(&outputs.validated_configuration(&transaction).unwrap());
+        assert_eq!(outputs.snapshot().configuration, parked);
+        assert_eq!(outputs.iter().count(), 3);
+        assert_eq!(outputs.desktops().count(), 1);
+        assert!(outputs.get(1).is_some());
+        assert!(outputs.desktop(1).is_none());
+        assert!(outputs.desktop(2).is_none());
+        assert!(outputs.output_at(-1, 0).is_none());
+        assert_eq!(outputs.clamp_point(299, 0), (199, 0));
+        assert_eq!(outputs.bounds(), outputs.primary().rect);
+        assert_eq!(
+            outputs.next_placement(20, 20),
+            OutputRect::new(200, 0, 20, 20)
+        );
+        assert_eq!(outputs.clip_to_desktops(outputs.get(2).unwrap().rect), None);
+        assert_eq!(
+            outputs.clip_to_desktops(OutputRect::new(-5, 1, 8, 8)),
+            Some(OutputRect::new(0, 1, 3, 8))
+        );
+        assert_eq!(
+            outputs.validated_configuration(&transaction),
+            Err(ConfigurationError::Stale)
+        );
+
+        let mut all_parked = parked;
+        all_parked[0].role = OutputRole::Disabled;
+        let transaction = protocol::OutputTransaction {
+            base_generation: outputs.snapshot().generation,
+            configuration: all_parked,
+        };
+        assert_eq!(
+            outputs.validated_configuration(&transaction),
+            Err(ConfigurationError::Invalid)
+        );
+        let restored = protocol::OutputTransaction {
+            configuration: original.clone(),
+            ..transaction
+        };
+        outputs.apply_configuration(&outputs.validated_configuration(&restored).unwrap());
+        assert_eq!(outputs.snapshot().configuration, original);
+    }
+
+    #[test]
+    fn desktop_primary_prefers_extended_builtin_then_hardware_primary_then_first_desktop() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 100, 100),
+            OutputRect::new(100, 0, 100, 100),
+            OutputRect::new(200, 0, 100, 100),
+        ]);
+        outputs.primary_mut().metadata.internal = false;
+        outputs.get_mut(2).unwrap().metadata.internal = true;
+        assert_eq!(outputs.desktop_primary().id, 2);
+        outputs.get_mut(2).unwrap().role = OutputRole::Disabled;
+        assert_eq!(outputs.desktop_primary().id, 0);
+        outputs.primary_mut().role = OutputRole::Mirror;
+        assert_eq!(outputs.desktop_primary().id, 1);
+        assert_eq!(outputs.primary().id, 0);
+
+        // Removing the final desktop reactivates the built-in and retains the hardware primary.
+        let before = outputs.snapshot().generation;
+        outputs.remove(1).unwrap();
+        assert_eq!(outputs.snapshot().generation, before + 1);
+        assert_eq!(outputs.desktop_primary().id, 2);
+        assert_eq!(
+            outputs.desktop_primary().rect,
+            OutputRect::new(200, 0, 100, 100)
+        );
+        assert_eq!(outputs.primary().role, OutputRole::Mirror);
+        outputs.remove(2).unwrap();
+        assert_eq!(outputs.desktop_primary().id, 0);
+        assert_eq!(outputs.primary().role, OutputRole::Extend);
+    }
+
+    #[test]
+    fn holes_exclude_damage_and_new_connections_touch_the_rightmost_desktop() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 100, 100),
+            OutputRect::new(100, 100, 100, 100),
+            OutputRect::new(100, 0, 100, 100),
+        ]);
+        outputs.get_mut(2).unwrap().role = OutputRole::Mirror;
+        assert_eq!(
+            outputs.clip_to_desktops(OutputRect::new(110, 10, 10, 10)),
+            None
+        );
+        assert_eq!(
+            outputs.next_placement(20, 20),
+            OutputRect::new(200, 100, 20, 20)
+        );
+    }
+
+    #[test]
+    fn bridge_unplug_repairs_only_extended_geometry_and_publishes_a_decodable_snapshot() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 100, 100),     // parked hardware primary
+            OutputRect::new(-300, 40, 100, 100), // desktop anchor
+            OutputRect::new(-200, 40, 100, 100), // bridge
+            OutputRect::new(-100, 40, 100, 100), // surviving desktop
+            OutputRect::new(-200, 40, 100, 100), // mirror behind the bridge
+        ]);
+        outputs.primary_mut().role = OutputRole::Disabled;
+        outputs.get_mut(4).unwrap().role = OutputRole::Mirror;
+        let original = outputs.snapshot().configuration;
+        outputs.remove(2).unwrap();
+        let mut expected = original;
+        expected.remove(2);
+        expected[2].x = -100; // logical pixels; retain its vertical offset
+        let repaired = outputs.layout_after_hotplug().unwrap().unwrap();
+        assert_eq!(repaired, expected);
+        // The installer needs the old geometry to translate each owning window.
+        assert_eq!(outputs.get(3).unwrap().rect.x, -100);
+        outputs.apply_configuration(&repaired);
+        assert_eq!(outputs.get(3).unwrap().rect.x, -200);
+        let live = outputs.snapshot();
+        assert_eq!(
+            protocol::decode_snapshot(&protocol::encode_snapshot(&live)),
+            Ok(live)
+        );
+    }
+
+    #[test]
+    fn coalesced_removals_and_attachment_reconnect_the_final_set() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 100, 100),
+            OutputRect::new(-100, 0, 100, 100),
+            OutputRect::new(-200, 0, 100, 100),
+            OutputRect::new(100, 0, 100, 100),
+            OutputRect::new(200, 0, 100, 100),
+            OutputRect::new(0, -100, 100, 100),
+        ]);
+        outputs.remove(1).unwrap();
+        outputs.remove(3).unwrap();
+        let next = outputs.next_placement(100, 100);
+        assert!(outputs.push(Output::new(6, next, protocol::COMPOSITOR_SCALE_MILLI, ())));
+        let repaired = outputs.layout_after_hotplug().unwrap().unwrap();
+        outputs.apply_configuration(&repaired);
+        assert_eq!(outputs.get(2).unwrap().rect.x, -100);
+        assert_eq!(outputs.get(4).unwrap().rect.x, 100);
+        assert_eq!(
+            outputs.get(5).unwrap().rect,
+            OutputRect::new(0, -100, 100, 100)
+        );
+        assert_eq!(outputs.get(6).unwrap().rect.x, 200);
+        assert_eq!(outputs.layout_after_hotplug(), Ok(None));
+    }
+
+    #[test]
+    fn restored_survivor_layout_takes_precedence_over_automatic_placement() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 100, 100),
+            OutputRect::new(100, 0, 100, 100),
+            OutputRect::new(200, 0, 100, 100),
+        ]);
+        outputs.remove(1).unwrap();
+        let mut saved = outputs.snapshot().configuration;
+        saved[1].x = 0;
+        saved[1].y = -50;
+        outputs.apply_configuration(&saved);
+        assert_eq!(outputs.layout_after_hotplug(), Ok(None));
+        assert_eq!(outputs.snapshot().configuration, saved);
+    }
+
+    #[test]
+    fn snapping_resized_hardware_primary_preserves_parked_position() {
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 200, 100),
+            OutputRect::new(200, 0, 100, 100),
+            OutputRect::new(-100, 0, 100, 100),
+        ]);
+        outputs.get_mut(2).unwrap().role = OutputRole::Mirror;
+        let parked = outputs.get(2).unwrap().configuration();
+        let mut mode = outputs.primary().metadata.mode;
+        mode.pixel_width = 100;
+        let layout = outputs.layout_for_mode(0, mode).unwrap();
+        assert_eq!(layout[0].x, 0);
+        assert_eq!(layout[1].x, 50);
+        assert_eq!(layout[2], parked);
+    }
+
+    #[test]
+    fn modeset_rearranges_only_the_disconnected_desktops() {
+        // Shrinking the middle desktop disconnects its neighbors. Neither
+        // edge can be snapped to reconnect both, forcing the row fallback.
+        let mut outputs = set(&[
+            OutputRect::new(0, 0, 100, 100),
+            OutputRect::new(0, 0, 100, 100),
+            OutputRect::new(100, 0, 200, 100),
+            OutputRect::new(300, 0, 100, 100),
+        ]);
+        outputs.primary_mut().role = OutputRole::Disabled;
+        let parked = outputs.primary().configuration();
+        let mut mode = outputs.get(2).unwrap().metadata.mode;
+        mode.pixel_width = 100;
+        let layout = outputs.layout_for_mode(2, mode).unwrap();
+        assert_eq!(layout[0], parked);
+        assert_eq!(layout[3].x, 100);
+        mode.pixel_width = 400;
+        assert_eq!(
+            outputs.layout_for_mode(0, mode).unwrap(),
+            outputs.snapshot().configuration
+        );
     }
 
     #[test]

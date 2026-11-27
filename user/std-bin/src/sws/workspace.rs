@@ -130,6 +130,7 @@ impl Drop for WorkspaceScope<'_> {
 /// connector so mode changes and pruning never rewrite another output's data.
 #[derive(Clone)]
 pub(super) struct WorkspaceManager {
+    desktop_primary_group: usize,
     partitions: Vec<WorkspacePartition>,
     namespace: WorkspaceNamespace,
     auto_remove_empty: bool,
@@ -1456,6 +1457,7 @@ impl WorkspaceManager {
         };
         let id = namespace.allocate(0);
         Self {
+            desktop_primary_group: 0,
             partitions: vec![WorkspacePartition {
                 output: Some(0),
                 connector_key: "primary".to_string(),
@@ -1466,8 +1468,16 @@ impl WorkspaceManager {
         }
     }
 
+    pub(super) fn set_desktop_primary(&mut self, output: OutputId) {
+        self.desktop_primary_group = self
+            .partitions
+            .iter()
+            .position(|partition| partition.output == Some(output))
+            .expect("desktop output has a workspace partition");
+    }
+
     fn primary(&self) -> &OutputWorkspaces {
-        &self.partitions[0].state
+        &self.partitions[self.desktop_primary_group].state
     }
     fn scope_at(&mut self, group: usize) -> WorkspaceScope<'_> {
         let state = &mut self.partitions[group].state;
@@ -1481,7 +1491,7 @@ impl WorkspaceManager {
         }
     }
     fn primary_mut(&mut self) -> WorkspaceScope<'_> {
-        self.scope_at(0)
+        self.scope_at(self.desktop_primary_group)
     }
 
     pub(super) fn output(&self, output: OutputId) -> Option<&OutputWorkspaces> {
@@ -1571,7 +1581,129 @@ impl WorkspaceManager {
         true
     }
 
-    pub(super) fn detach_output(&mut self, output: OutputId) -> bool {
+    /// Stage a connected desktop's demotion on the configuration transaction's copy.
+    /// Freeform desktops can show both active groups together. On a tablet each
+    /// incoming composition needs its own reachable card.
+    pub(super) fn stage_desktop_demotion(
+        &mut self,
+        source: OutputId,
+        destination: OutputId,
+    ) -> Result<(), ApplyError> {
+        let target = self.output(destination).ok_or(ApplyError::InvalidState)?;
+        let tablet = target.tablet_experience();
+        let target_active = target.active_workspace();
+        let target_index = target
+            .workspaces
+            .iter()
+            .position(|w| w.id == target_active)
+            .ok_or(ApplyError::InvalidState)?;
+        let target_count = target.workspaces[target_index].window_ids.len();
+        if source == destination {
+            return Err(ApplyError::InvalidState);
+        }
+        let mut source = self.output_mut(source).ok_or(ApplyError::InvalidState)?;
+        if source.workspaces.iter().all(|w| w.window_ids.is_empty()) {
+            return Ok(());
+        }
+        if !tablet {
+            source.leave_tablet_experience();
+        } else if !source.tablet_experience() {
+            source.enter_tablet_experience(None);
+            if !source.tablet_experience() {
+                return Err(ApplyError::InvalidState);
+            }
+        }
+        let active = source.active_workspace();
+        let active_count = source
+            .workspaces
+            .iter()
+            .find(|w| w.id == active)
+            .ok_or(ApplyError::InvalidState)?
+            .window_ids
+            .len();
+        if !tablet && target_count + active_count > sws_protocol::workspace::MAX_WORKSPACE_MEMBERS {
+            return Err(ApplyError::InvalidState);
+        }
+        let fill_empty_card = tablet && target_count == 0 && active_count != 0;
+        let incoming: Vec<_> = source
+            .workspaces
+            .iter()
+            .filter(|w| !w.window_ids.is_empty())
+            .cloned()
+            .collect();
+        // The parked connector still needs one workspace of its own.
+        let merge_active = active_count != 0 && (!tablet || fill_empty_card);
+        if source.namespace.workspace_count - source.original_count
+            + incoming.len()
+            + usize::from(!merge_active)
+            > MAX_WORKSPACES
+        {
+            return Err(ApplyError::InvalidState);
+        }
+        let mut restore = Vec::new();
+        let parked = if tablet {
+            // Resolve the source's saved desktop groups against its live scenes
+            // before giving the destination responsibility for restoring them.
+            source.leave_tablet_experience();
+            restore = core::mem::take(&mut source.state.workspaces);
+            source.allocate_workspace_id()
+        } else {
+            active
+        };
+        let generation = source.generation;
+        *source.state = OutputWorkspaces::initial(parked, source.auto_remove_empty);
+        source.state.generation = generation;
+        source.bump_generation();
+        source.membership_dirty = true;
+        drop(source);
+
+        let mut target = self.output_mut(destination).unwrap();
+        if tablet {
+            // Resolve both restore snapshots independently: a window that was
+            // bound across outputs can still occur in its former saved group.
+            let cards = target.state.clone();
+            target.leave_tablet_experience();
+            let mut desktop = core::mem::replace(target.state, cards);
+            if fill_empty_card {
+                target.state.workspaces.remove(target_index);
+                target.state.selection.active_workspace = active;
+                if target.normal_workspace() == target_active {
+                    target.state.selection.normal_workspace = active;
+                }
+                desktop
+                    .workspaces
+                    .retain(|w| w.id != target_active || !w.window_ids.is_empty());
+            }
+            desktop
+                .workspaces
+                .extend(restore.into_iter().filter(|w| !w.window_ids.is_empty()));
+            if target.namespace.workspace_count - target.original_count + desktop.workspaces.len()
+                > MAX_WORKSPACES
+            {
+                return Err(ApplyError::InvalidState);
+            }
+            target.state.desktop_restore = Some(DesktopWorkspaceRestore {
+                active_workspace: desktop.active_workspace(),
+                workspaces: desktop.workspaces,
+            });
+        }
+        target.membership_dirty = true;
+        for w in incoming {
+            if w.id == active && !tablet {
+                let current = &mut target.state.workspaces[target_index];
+                if current.window_ids.is_empty() {
+                    current.tablet_layout = w.tablet_layout;
+                }
+                current.window_ids.extend(w.window_ids);
+            } else {
+                target.state.workspaces.push(w);
+            }
+        }
+        target.bump_generation();
+        Ok(())
+    }
+
+    pub(super) fn detach_output(&mut self, output: OutputId, follow_desktop: bool) -> bool {
         if output == 0 {
             return false;
         }
@@ -1582,12 +1714,27 @@ impl WorkspaceManager {
         else {
             return false;
         };
+        if self.desktop_primary_group == group {
+            self.desktop_primary_group = 0;
+        }
         // Merge the desktop projections first so leaving tablet mode later
         // cannot discard or resurrect migrated scenes. Stable workspace IDs
-        // and membership are retained, and the primary selection stays put.
-        let tablet = self.partitions[0].state.tablet_experience;
+        // and membership are retained. When the last visible desktop goes
+        // away, its workspace stays on screen on the recovered display.
+        let source = &self.partitions[group].state;
+        let foreground = follow_desktop
+            .then(|| {
+                source
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == source.active_workspace())
+                    .and_then(|w| w.window_ids.last().copied())
+            })
+            .flatten();
+        let tablet = self.primary().tablet_experience;
         self.scope_at(group).leave_tablet_experience();
         self.primary_mut().leave_tablet_experience();
+        let selection = self.partitions[group].state.selection;
         let recovered = {
             let mut source = self.scope_at(group);
             source.membership_dirty = true;
@@ -1598,10 +1745,13 @@ impl WorkspaceManager {
             let mut primary = self.primary_mut();
             primary.membership_dirty = true;
             primary.state.workspaces.extend(recovered);
+            if follow_desktop {
+                primary.state.selection = selection;
+            }
             primary.bump_generation();
         }
         if tablet {
-            self.primary_mut().enter_tablet_experience(None);
+            self.primary_mut().enter_tablet_experience(foreground);
         }
         true
     }
@@ -2212,13 +2362,154 @@ mod tests {
     }
 
     #[test]
+    fn desktop_demotion_moves_only_the_visible_group_into_the_surviving_active_workspace() {
+        let mut manager = WorkspaceManager::new();
+        assert!(manager.attach_output(2, "external"));
+        let background = manager.add_scene_root(10);
+        manager.add_scene_root(11);
+        let visible = manager.create_workspace().unwrap();
+        manager.add_scene_root(12);
+        let destination = manager.output_mut(2).unwrap().add_scene_root(20);
+
+        manager.stage_desktop_demotion(0, 2).unwrap();
+        // Geometry relocation binds every root again after committing the config.
+        for window in [10, 11, 12] {
+            manager.rebind_scene(window, 2);
+            assert_eq!(manager.output_for_window(window), Some(2));
+        }
+        let external = manager.output(2).unwrap().snapshot();
+        assert_eq!(external.active_workspace, destination);
+        assert_eq!(external.workspaces[0].window_ids, [20, 12]);
+        assert_eq!(external.workspaces[1].id, background);
+        assert_eq!(external.workspaces[1].window_ids, [10, 11]);
+        assert_eq!(manager.active_workspace(), visible);
+        assert!(manager.snapshot().workspaces[0].window_ids.is_empty());
+        assert_eq!(manager.output_for_workspace(background), Some(2));
+    }
+
+    #[test]
+    fn demoting_tablet_to_freeform_restores_inactive_desktops_before_migration() {
+        let mut manager = WorkspaceManager::new();
+        assert!(manager.attach_output(2, "external"));
+        let inactive = manager.add_scene_root(10);
+        manager.add_scene_root(11);
+        manager.create_workspace().unwrap();
+        manager.add_scene_root(12);
+        manager.add_scene_root(13);
+        manager.enter_tablet_experience(Some(12));
+        // Select a projected card whose ID differs from the retained desktop.
+        manager.activate_window(13, true);
+        let external = manager.output_mut(2).unwrap().add_scene_root(20);
+        manager.stage_desktop_demotion(0, 2).unwrap();
+
+        let state = manager.output(2).unwrap().snapshot();
+        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.active_workspace, external);
+        assert_eq!(state.workspaces[0].window_ids, [20, 12, 13]);
+        assert_eq!(state.workspaces[1].id, inactive);
+        assert_eq!(state.workspaces[1].window_ids, [10, 11]);
+        manager.enter_tablet_experience(None);
+        manager.leave_tablet_experience();
+        assert!(manager.snapshot().workspaces[0].window_ids.is_empty());
+        assert_eq!(manager.workspace_for_window(11), Some(inactive));
+    }
+
+    #[test]
+    fn demotion_to_tablet_preserves_cards_and_restores_each_desktop_group_once() {
+        let mut manager = WorkspaceManager::new();
+        manager.attach_output(2, "external");
+        let destination = manager.add_scene_root(10);
+        manager.add_scene_root(11);
+        manager.enter_tablet_experience(Some(10));
+        let inactive = manager.output_mut(2).unwrap().add_scene_root(20);
+        // The destination's old restore snapshot still remembers window 11.
+        manager.rebind_scene(11, 2);
+        let visible = manager.output_mut(2).unwrap().create_workspace().unwrap();
+        manager.output_mut(2).unwrap().add_scene_root(21);
+        manager.stage_desktop_demotion(2, 0).unwrap();
+
+        assert_eq!(manager.active_workspace(), destination);
+        let cards = manager.snapshot().workspaces;
+        assert!(
+            cards
+                .iter()
+                .filter(|w| !w.window_ids.is_empty())
+                .all(|w| w.window_ids.len() == 1)
+        );
+        for id in [10, 11, 20, 21] {
+            assert_eq!(manager.output_for_window(id), Some(0));
+            assert!(cards.iter().any(|w| w.window_ids == [id]));
+        }
+        manager.leave_tablet_experience();
+        let state = manager.snapshot();
+        assert!(same_members(&state.workspaces, &[10, 11, 20, 21]));
+        assert_eq!(manager.workspace_for_window(10), Some(destination));
+        assert_eq!(manager.workspace_for_window(20), Some(inactive));
+        assert_eq!(manager.workspace_for_window(11), Some(inactive));
+        assert_eq!(manager.workspace_for_window(21), Some(visible));
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn demotion_at_capacity_can_fill_an_empty_tablet_card_or_reject_the_transaction() {
+        let mut manager = WorkspaceManager::new();
+        assert!(manager.attach_output(2, "external"));
+        let source = manager.output_mut(2).unwrap().add_scene_root(20);
+        for _ in 2..MAX_WORKSPACES {
+            manager.create_workspace().unwrap();
+        }
+        let empty = manager.clone();
+        manager.add_scene_root(10);
+        manager.enter_tablet_experience(Some(10));
+        let before = manager.session_snapshot();
+        let mut staged = manager.clone();
+        assert_eq!(
+            staged.stage_desktop_demotion(2, 0),
+            Err(ApplyError::InvalidState)
+        );
+        assert_eq!(manager.session_snapshot(), before);
+        assert_eq!(manager.output_for_window(20), Some(2));
+
+        let mut staged = empty;
+        staged.enter_tablet_experience(None);
+        staged.stage_desktop_demotion(2, 0).unwrap();
+        assert_eq!(staged.active_workspace(), source);
+        assert_eq!(staged.output_for_window(20), Some(0));
+        staged.leave_tablet_experience();
+        assert_eq!(staged.namespace.workspace_count, MAX_WORKSPACES);
+        assert_valid_state(&staged);
+    }
+
+    #[test]
+    fn oversized_desktop_merge_rolls_back_earlier_staged_demotions() {
+        let mut manager = WorkspaceManager::new();
+        manager.attach_output(2, "first");
+        manager.attach_output(3, "second");
+        manager.output_mut(2).unwrap().add_scene_root(10);
+        for id in 100..100 + sws_protocol::workspace::MAX_WORKSPACE_MEMBERS as u32 {
+            manager.output_mut(3).unwrap().add_scene_root(id);
+        }
+        let before = manager.session_snapshot();
+        // install_output_configuration publishes this copy only on success.
+        let mut staged = manager.clone();
+        staged.stage_desktop_demotion(2, 0).unwrap();
+        assert_eq!(
+            staged.stage_desktop_demotion(3, 0),
+            Err(ApplyError::InvalidState)
+        );
+        assert_eq!(manager.session_snapshot(), before);
+        assert_eq!(manager.output_for_window(10), Some(2));
+        assert_eq!(manager.output_for_window(100), Some(3));
+    }
+
+    #[test]
     fn disconnect_recovers_workspaces_and_reconnect_does_not_take_them_back() {
         let mut manager = WorkspaceManager::new();
         assert!(manager.attach_output(2, "platform:mdss/DP-1"));
         manager.output_mut(2).unwrap().add_scene_root(20);
         let before = manager.output(2).unwrap().snapshot();
         assert!(!manager.attach_output(3, "platform:mdss/DP-1"));
-        assert!(manager.detach_output(2));
+        assert!(manager.detach_output(2, false));
         assert_eq!(manager.output_for_window(20), Some(0));
         assert_eq!(
             manager.workspace_for_window(20),
@@ -2245,6 +2536,23 @@ mod tests {
     }
 
     #[test]
+    fn unplug_recovers_workspaces_on_the_active_desktop() {
+        let mut manager = WorkspaceManager::new();
+        assert!(manager.attach_output(2, "desktop-a"));
+        assert!(manager.attach_output(3, "desktop-b"));
+        manager.set_desktop_primary(2);
+        manager.output_mut(3).unwrap().add_scene_root(31);
+        assert!(manager.detach_output(3, false));
+        assert_eq!(manager.output_for_window(31), Some(2));
+        assert!(manager.detach_output(2, true));
+        assert_eq!(manager.output_for_window(31), Some(0));
+        // The active workspace was on connector 2; its identity is carried
+        // over even though the underlying physical primary was parked.
+        assert_ne!(manager.active_workspace(), 1);
+        assert_eq!(manager.snapshot(), manager.output(0).unwrap().snapshot());
+    }
+
+    #[test]
     fn recovered_scenes_survive_tablet_restore() {
         let mut manager = WorkspaceManager::new();
         manager.add_scene_root(10);
@@ -2252,7 +2560,7 @@ mod tests {
         assert!(manager.attach_output(2, "external"));
         manager.output_mut(2).unwrap().add_scene_root(20);
         manager.output_mut(2).unwrap().add_scene_root(21);
-        assert!(manager.detach_output(2));
+        assert!(manager.detach_output(2, false));
         assert!(manager.output(0).unwrap().tablet_experience());
         manager.leave_tablet_experience();
         for id in [10, 20, 21] {
@@ -2329,7 +2637,7 @@ mod tests {
     fn workspace_limit_includes_other_and_disconnected_outputs() {
         let mut manager = WorkspaceManager::new();
         assert!(manager.attach_output(2, "external"));
-        assert!(manager.detach_output(2));
+        assert!(manager.detach_output(2, false));
         for _ in 0..MAX_WORKSPACES - 2 {
             assert!(manager.create_workspace().is_some());
         }
