@@ -120,5 +120,5 @@ pub(super) fn probe(info: &HidDeviceInfo) -> Option<Box<dyn HidInstance>> {
     }))
 }
 
-#[cfg(all(test, not(target_os = "none")))]
+#[cfg(test)]
 mod tests;
