@@ -992,6 +992,14 @@ impl FileObject for DevFileObject {
 }
 
 impl crate::object::capability::selectable::Selectable for DevFileObject {
+    fn subscribe_readiness(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        self.device_open.as_deref()?.subscribe_readiness(interest, waiter)
+    }
+
     fn is_hung_up(&self) -> bool {
         self.device_open
             .as_ref()
@@ -1263,6 +1271,37 @@ mod tests {
     use super::*;
     use crate::device::{GenericDevice, manager::DeviceManager};
     use alloc::sync::Arc;
+
+    #[test_case]
+    fn devfs_forwards_input_and_hangup_to_a_shared_poll_waiter() {
+        use crate::device::input::event_device::{EventDevice, InputDeviceKind, InputDeviceMetadata};
+        use crate::object::capability::selectable::ReadyInterest;
+        use crate::sync::Waker;
+
+        let manager = DeviceManager::new_for_test();
+        let devfs = DevFS::new_with_device_manager(&manager);
+        let waiter = Arc::new(Waker::new_interruptible("devfs-input-poll"));
+        let [left, right] = ["left", "right"].map(|name| {
+            let device = Arc::new(EventDevice::named_snapshot(
+                name.into(),
+                InputDeviceMetadata::new(InputDeviceKind::Gamepad, 0),
+                None,
+            ));
+            manager.register_device_with_name(name.into(), device.clone());
+            let node = devfs.lookup(&devfs.root_node(), &name.to_string()).unwrap();
+            let file = devfs.open(&node, 0).unwrap();
+            let mut registrations = file.subscribe_readiness(ReadyInterest::read(), &waiter).unwrap();
+            (device, file, registrations.pop().unwrap())
+        });
+        let left_start = left.2.generation();
+        let right_start = right.2.generation();
+        left.0.push_events(&[(1, 0x130, 1), (0, 0, 0)]);
+        assert_ne!(left.2.generation(), left_start);
+        assert_eq!(right.2.generation(), right_start);
+        right.0.detach_gamepad();
+        assert!(right.1.is_hung_up());
+        assert_ne!(right.2.generation(), right_start);
+    }
 
     #[test_case]
     fn test_devfs_tty_open_modes_are_independent() {
