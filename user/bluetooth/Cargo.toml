@@ -11,6 +11,11 @@ path = "src/btctl.rs"
 
 [dependencies]
 scarlet-abi = { path = "../lib/scarlet-abi" }
-scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
+scarlet-os = { path = "../lib/scarlet-os" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 zeroize = { version = "1.8", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-accounts = { path = "../lib/scarlet-accounts" }

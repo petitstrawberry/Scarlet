@@ -196,6 +196,16 @@ pub fn login_available() -> bool {
             .any(|line| !line.ends_with(":!") && !line.ends_with(':'))
 }
 
+/// Whether an authenticated IPC principal belongs to an enabled graphical login.
+pub fn login_uid_enabled(uid: u32) -> bool {
+    load().is_ok_and(|data| {
+        core::str::from_utf8(&data).is_ok_and(|text| {
+            super::lookup_by(text, |_, id| id == uid)
+                .is_ok_and(|(account, verifier)| account.is_some() && !matches!(verifier, "" | "!"))
+        })
+    })
+}
+
 /// Names available for the graphical account chooser, in image configuration order.
 pub fn login_names() -> Vec<alloc::string::String> {
     load()

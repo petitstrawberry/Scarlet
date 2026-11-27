@@ -9,7 +9,8 @@ use alloc::{string::String, vec::Vec};
 #[cfg(target_os = "scarlet")]
 pub use database::{
     authenticate_console, authenticate_local, authorized_keys, initial_admin_available,
-    login_available, login_names, lookup_local, service_account, set_initial_admin_password,
+    login_available, login_names, login_uid_enabled, lookup_local, service_account,
+    set_initial_admin_password,
 };
 
 #[cfg(any(test, target_os = "scarlet"))]
@@ -59,6 +60,13 @@ fn id(text: &str) -> Option<u32> {
 }
 
 fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), ()> {
+    lookup_by(data, |login, _| login.as_bytes() == name)
+}
+
+fn lookup_by(
+    data: &str,
+    matches: impl Fn(&str, u32) -> bool,
+) -> Result<(Option<Account>, &str), ()> {
     use alloc::collections::BTreeSet;
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
@@ -105,7 +113,7 @@ fn lookup<'a>(data: &'a str, name: &[u8]) -> Result<(Option<Account>, &'a str), 
                 .collect::<Option<Vec<_>>>()
                 .ok_or(())?
         };
-        if login.as_bytes() == name {
+        if matches(login, uid) {
             selected = Some(Account {
                 name: String::from(login),
                 uid,

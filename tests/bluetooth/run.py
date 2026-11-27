@@ -60,6 +60,10 @@ def boot(out):
         binary = out / "user/aarch64-unknown-scarlet/release" / Path(name).name
         (stage / name).write_bytes(binary.read_bytes())
         (stage / name).chmod(0o755)
+    users = stage / "etc/scarlet-users"
+    users.write_text("qa:1001:1001::$2b$12$L6Bc/AlTQHyd9liGgGEZyOFLPHNgyxeEPfgYfBCVxJ7JIlwxyVU3u\n"
+                     "locked:1002:1002::!\n")
+    users.chmod(0o600)
     smoke.create_initramfs(stage, out / "initramfs.cpio")
     # btctl verifies the inode permissions protecting /etc and its bond files.
     # Use a private ext2 root as on the console. Archive-only cpio metadata
@@ -69,9 +73,10 @@ def boot(out):
         stream.truncate(48 * 1024 * 1024)
     subprocess.run(["mke2fs", "-q", "-F", "-t", "ext2", "-b", "4096",
                     "-E", "root_owner=0:0", "-d", str(stage), str(disk)], check=True)
-    for field in ["uid", "gid"]:
-        subprocess.run(["debugfs", "-w", "-R", f"set_inode_field /etc {field} 0", str(disk)],
-                       check=True, stdout=subprocess.DEVNULL)
+    for path in ["/etc", "/etc/scarlet-users"]:
+        for field in ["uid", "gid"]:
+            subprocess.run(["debugfs", "-w", "-R", f"set_inode_field {path} {field} 0", str(disk)],
+                           check=True, stdout=subprocess.DEVNULL)
     cmd = ["qemu-system-aarch64", "-machine", "virt,gic-version=3", "-cpu", "max", "-m", "2G",
            "-smp", "2", "-nic", "none", "-display", "none", "-monitor", "none", "-serial", "stdio",
            "-no-reboot", "-kernel", str(out / "Image"), "-initrd", str(out / "initramfs.cpio"),

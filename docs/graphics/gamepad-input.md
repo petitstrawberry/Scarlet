@@ -14,11 +14,15 @@ keyboard presence. SWS owns optional menu navigation and key repeat.
 
 ## Pair a Bluetooth gamepad
 
-On a system with a Classic Bluetooth adapter, log in as root at the serial
-console and run `btctl`. The Bluetooth bundle installs a system service
-that `stemd` starts with physical-seat management authority. The service
-authenticates the calling account and accepts an unconfined root session.
-The CLI also authenticates the service before sending a command.
+On a system with a Classic Bluetooth adapter, Settings and `btctl` use
+the Bluetooth service that `stemd` starts with physical-seat management
+authority. The service checks the kernel's local-socket peer credentials.
+It accepts unconfined root and unconfined processes whose UID belongs to
+an enabled graphical login in the protected `/etc/scarlet-users` database.
+This is account-wide access, including an unconfined shell for that account.
+Shield-confined processes, locked service accounts and the anonymous greeter
+are denied. Clients verify the service's root identity and device-management
+authority before sending a command.
 
 The default adapter is `/dev/bluetooth0`. To select another numbered
 adapter, put its path before the command, for example
@@ -52,6 +56,19 @@ root-owned mode-`0600` file at `/etc/bluetooth-<ADAPTER>-<PEER>.bond`.
 Both addresses use uppercase display order with the colons removed. The
 final status shows `key-readable=false` after the service consumes the key.
 Link-key bytes stay out of service replies and terminal output.
+
+Use `btctl bonded` to list saved peer addresses on the selected adapter,
+including devices that have gone offline. This reads bond file metadata and
+does not start an inquiry. Reconnect with `btctl connect MAC`.
+
+The blocking Rust API is available as `scarlet_bluetooth::Client::new(0)`
+from `user/bluetooth`. `status()` returns adapter and link state, `list()`
+returns connected peers, `bonded()` returns saved addresses, and `scan()`
+runs discovery. `pair(address)`, `connect(address)`, and
+`disconnect(Some(address))` return updated status. Run these calls on a
+worker thread in a GUI. Peer names are optional and may contain remote
+control characters. Use `Address`'s `Display` and `FromStr` implementations
+for human-readable addresses.
 
 Keep `/etc` on persistent storage to reuse the bond after reboot. The
 service rejects symlinks, permissive bond files, and storage whose ownership

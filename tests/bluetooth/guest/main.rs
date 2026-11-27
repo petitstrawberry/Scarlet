@@ -1,5 +1,6 @@
 //! Production Bluetooth broker, SDP, generic HID input and raw report checks.
 use scarlet_abi::{fs::VFS_O_RDWR, hidraw};
+use scarlet_bluetooth::{Address, Client};
 use scarlet_os::{Handle, InputDevice, Socket, handle::capability::StreamError};
 use std::{
     io::{Read, Write},
@@ -149,7 +150,73 @@ fn read_key(keyboard: &InputDevice, value: i32) {
     });
 }
 
+fn login_client(mode: &str) {
+    let uid = if mode == "locked" { 1002 } else { 1001 };
+    // SAFETY: fresh single-threaded child with no handle owners above stdio.
+    unsafe { scarlet_os::shield::enter_user_session(uid, uid, &[]) }.unwrap();
+    let client = Client::new(0);
+    if mode == "locked" {
+        assert!(
+            client
+                .status()
+                .unwrap_err()
+                .contains("unconfined login account")
+        );
+        return;
+    }
+    let other = Address(wire::OTHER_ADDR);
+    let status = client.status().unwrap();
+    assert!(status.ready);
+    assert_eq!(status.adapter, Address(wire::ADAPTER));
+    if mode == "pair" {
+        assert!(client.bonded().unwrap().is_empty());
+        assert_eq!(client.status().unwrap().generation, status.generation);
+        assert!(
+            client
+                .scan()
+                .unwrap()
+                .iter()
+                .any(|row| row.address == other && row.name.as_deref() == Some(wire::OTHER_NAME))
+        );
+        let paired = client.pair(other).unwrap();
+        assert!(paired.connected && paired.encrypted && !paired.key_readable);
+        return;
+    }
+    assert_eq!(mode, "reconnect");
+    assert_eq!(client.list().unwrap().len(), 2);
+    let down = client.disconnect(Some(other)).unwrap();
+    assert!(!down.connected);
+    let saved = client.bonded().unwrap();
+    assert_eq!(saved.len(), 2);
+    assert!(saved.contains(&other));
+    assert_eq!(client.status().unwrap().generation, down.generation);
+    assert!(
+        client
+            .list()
+            .unwrap()
+            .iter()
+            .all(|peer| peer.address != other)
+    );
+    assert!(std::fs::File::open("/etc/bluetooth-020000000001-020000000020.bond").is_err());
+    let up = client.connect(other).unwrap();
+    assert_eq!(up.peer, Some(other));
+    assert!(up.connected && up.encrypted);
+}
+
+fn as_login(mode: &str) {
+    assert!(
+        Command::new("/bin/bluetooth-qa")
+            .arg(mode)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
 fn main() {
+    if let Some(mode) = std::env::args().nth(1) {
+        return login_client(&mode);
+    }
     let mut broker = Command::new("/bin/btctl").arg("--serve").spawn().unwrap();
     let radio = Handle::open("/dev/bt-qa-radio", 0).unwrap();
     broker_ready();
@@ -161,7 +228,8 @@ fn main() {
         assert!(scan.contains(&format!("{mac}  \"{name}\"")));
     }
 
-    link(wire::OTHER, true);
+    as_login("locked");
+    as_login("pair");
     wait("non-HID SDP query", || {
         (radio_get(&radio, wire::CONNECTION_REQUESTS, wire::OTHER, 0) == 1).then_some(())
     });
@@ -224,6 +292,19 @@ fn main() {
     assert!(broker.try_wait().unwrap().is_none());
     println!(
         "BT_QA_RECONNECT_PASS a new HID endpoint reused the path while the old handle stayed detached"
+    );
+    as_login("reconnect");
+    assert!(btctl(&["bonded"]).contains("2 device(s) bonded"));
+    let policy = scarlet_os::shield::Policy::create(&[(1, "app")], &[]).unwrap();
+    policy.apply(1).unwrap();
+    assert!(
+        Client::new(0)
+            .status()
+            .unwrap_err()
+            .contains("unconfined login account")
+    );
+    println!(
+        "BT_QA_BROKER_PASS typed non-root management, offline bonds and restricted caller denial"
     );
     println!("BLUETOOTH_QEMU_PASS");
 }

@@ -2,8 +2,14 @@
 compile_error!("btctl requires a Scarlet Native target");
 
 mod broker;
+mod reply;
+use reply::Reply;
 
 use scarlet_abi::{bluetooth as bt, fs as vfs};
+use scarlet_bluetooth::{
+    Address, ConnectedPeer, DiscoveredPeer, Status,
+    protocol::{self, Command},
+};
 use scarlet_os::Handle;
 use scarlet_sys::{Syscall, syscall1, syscall2, syscall3, syscall4};
 use std::ffi::{CStr, CString};
@@ -12,39 +18,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
-const USAGE: &str = "usage: btctl [--device PATH | /dev/PATH] status|scan|devices|pair MAC|connect MAC|disconnect [MAC]";
+const USAGE: &str = "usage: btctl [--device PATH | /dev/PATH] status|scan|devices|bonded|pair MAC|connect MAC|disconnect [MAC]";
 const DEFAULT_DEVICE: &str = "/dev/bluetooth0";
 type Result<T> = std::result::Result<T, String>;
-
-fn parse_address(text: &str) -> Result<bt::Address> {
-    let mut address = [0; 6];
-    let mut parts = text.split(':');
-    for byte in address.iter_mut().rev() {
-        let part = parts.next().unwrap_or_default();
-        if part.len() != 2 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("expected a MAC in AA:BB:CC:DD:EE:FF form".into());
-        }
-        *byte = u8::from_str_radix(part, 16).unwrap();
-    }
-    if parts.next().is_some() || address == [0; 6] || address == [0xff; 6] {
-        return Err("invalid peer MAC".into());
-    }
-    Ok(address)
-}
-
-fn display_address([f, e, d, c, b, a]: bt::Address) -> String {
-    format!("{a:02X}:{b:02X}:{c:02X}:{d:02X}:{e:02X}:{f:02X}")
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Command {
-    Status,
-    Scan,
-    Devices,
-    Pair(bt::Address),
-    Connect(bt::Address),
-    Disconnect(Option<bt::Address>),
-}
 
 fn parse<'a>(args: &[&'a str]) -> Result<(&'a str, Command)> {
     let (path, command) = match args {
@@ -56,10 +32,11 @@ fn parse<'a>(args: &[&'a str]) -> Result<(&'a str, Command)> {
         ["status"] => Command::Status,
         ["scan"] => Command::Scan,
         ["devices"] => Command::Devices,
-        ["pair", mac] => Command::Pair(parse_address(mac)?),
-        ["connect", mac] => Command::Connect(parse_address(mac)?),
+        ["bonded"] => Command::Bonded,
+        ["pair", mac] => Command::Pair(mac.parse::<Address>()?.0),
+        ["connect", mac] => Command::Connect(mac.parse::<Address>()?.0),
         ["disconnect"] => Command::Disconnect(None),
-        ["disconnect", mac] => Command::Disconnect(Some(parse_address(mac)?)),
+        ["disconnect", mac] => Command::Disconnect(Some(mac.parse::<Address>()?.0)),
         _ => return Err(USAGE.into()),
     };
     Ok((path, command))
@@ -126,33 +103,23 @@ fn status(handle: &Handle, target: Option<bt::Address>) -> Result<bt::Record> {
     Ok(record)
 }
 
-fn peer_text(r: &bt::Record) -> String {
-    let has = |bit| flags(r) & bit != 0;
-    let peer = record_peer(r)
-        .map(display_address)
-        .unwrap_or_else(|| "none".into());
-    format!(
-        "peer={peer} connected={} encrypted={} profile-ready={} key-readable={} last-error={:#x}",
-        has(bt::CONNECTED),
-        has(bt::ENCRYPTED),
-        has(bt::PROFILE_READY),
-        has(bt::KEY_READABLE),
-        last_error(r),
-    )
-}
-
-fn status_text(adapter: &bt::Record, peer: &bt::Record) -> String {
-    let has = |bit| flags(adapter) & bit != 0;
-    format!(
-        "adapter={} ready={} busy={} scanning={} found={} generation={}\n{}",
-        display_address(adapter[bt::ADAPTER].try_into().unwrap()),
-        has(bt::READY),
-        has(bt::BUSY),
-        has(bt::SCANNING),
-        count(adapter),
-        generation(adapter),
-        peer_text(peer),
-    )
+fn public_status(adapter: &bt::Record, peer: &bt::Record) -> Status {
+    let adapter_flags = flags(adapter);
+    let peer_flags = flags(peer);
+    Status {
+        adapter: Address(adapter[bt::ADAPTER].try_into().unwrap()),
+        ready: adapter_flags & bt::READY != 0,
+        busy: adapter_flags & bt::BUSY != 0,
+        scanning: adapter_flags & bt::SCANNING != 0,
+        found: count(adapter),
+        generation: generation(adapter),
+        peer: record_peer(peer).map(Address),
+        connected: peer_flags & bt::CONNECTED != 0,
+        encrypted: peer_flags & bt::ENCRYPTED != 0,
+        profile_ready: peer_flags & bt::PROFILE_READY != 0,
+        key_readable: peer_flags & bt::KEY_READABLE != 0,
+        last_error: last_error(peer),
+    }
 }
 
 fn complete(r: &bt::Record, expected: u32) -> Result<bool> {
@@ -182,7 +149,10 @@ fn start_and_wait(handle: &Handle, op: u32, request: &mut bt::Record) -> Result<
             }
         }
         if let Ok(state) = status(handle, None) {
-            return Err(format!("{error}\n{}", status_text(&state, &state)));
+            return Err(format!(
+                "{error}\n{}",
+                reply::status_text(&public_status(&state, &state))
+            ));
         }
         return Err(error);
     }
@@ -209,15 +179,11 @@ fn start_and_wait(handle: &Handle, op: u32, request: &mut bt::Record) -> Result<
     }
 }
 
-fn peer_name(r: &bt::Record) -> Result<String> {
+fn peer_name(r: &bt::Record) -> Result<Option<String>> {
     let bytes = r[bt::NAME]
         .get(..usize::from(r[bt::NAME_LEN]))
         .ok_or("invalid peer name length")?;
-    if bytes.is_empty() {
-        return Ok("(unknown name)".into());
-    }
-    // Debug-quoted string escapes remote terminal controls, including embedded newlines.
-    Ok(format!("{:?}", String::from_utf8_lossy(bytes)))
+    Ok((!bytes.is_empty()).then(|| String::from_utf8_lossy(bytes).into_owned()))
 }
 
 fn indexed_record(snapshot: &bt::Record, index: u16) -> bt::Record {
@@ -227,32 +193,31 @@ fn indexed_record(snapshot: &bt::Record, index: u16) -> bt::Record {
     row
 }
 
-fn scan(handle: &Handle) -> Result<String> {
-    let mut listing = String::new();
+fn scan(handle: &Handle) -> Result<Vec<DiscoveredPeer>> {
+    let mut listing = Vec::new();
     let state = start_and_wait(handle, bt::SCAN_START, &mut [0; bt::RECORD_SIZE])?;
     let total = count(&state);
     for index in 0..total {
         let mut row = indexed_record(&state, index);
         control(handle, bt::SCAN_RESULT, &mut row)?;
-        let address = display_address(row[bt::PEER].try_into().unwrap());
-        listing.push_str(&format!("{address}  {}\n", peer_name(&row)?));
-        if listing.len() + 32 > broker::MAX_REPLY {
-            return Err("scan listing exceeds the service response limit".into());
-        }
+        let address = Address(record_peer(&row).ok_or("invalid discovery address")?);
+        listing.push(DiscoveredPeer {
+            address,
+            name: peer_name(&row)?,
+        });
     }
-    listing.push_str(&format!("{total} device(s) found"));
     Ok(listing)
 }
 
 // A remote disconnect can invalidate an index while we enumerate. Discard the
 // partial listing and retry only if the controller actually changed snapshots.
-fn devices(mut ctl: impl FnMut(u32, &mut bt::Record) -> Result<()>) -> Result<String> {
+fn devices(mut ctl: impl FnMut(u32, &mut bt::Record) -> Result<()>) -> Result<Vec<ConnectedPeer>> {
     let mut snapshot = [0; bt::RECORD_SIZE];
     ctl(bt::LINKS, &mut snapshot)?;
     for _ in 0..3 {
         let token = generation(&snapshot);
         let total = count(&snapshot);
-        let mut listing = String::new();
+        let mut listing = Vec::new();
         for index in 0..total {
             let mut row = indexed_record(&snapshot, index);
             if let Err(error) = ctl(bt::LINK_RESULT, &mut row) {
@@ -269,13 +234,16 @@ fn devices(mut ctl: impl FnMut(u32, &mut bt::Record) -> Result<()>) -> Result<St
             {
                 return Err("invalid connected-peer snapshot row".into());
             }
-            listing.push_str(&format!("{} name={}\n", peer_text(&row), peer_name(&row)?));
-            if listing.len() + 32 > broker::MAX_REPLY {
-                return Err("connected-peer listing exceeds the service response limit".into());
-            }
+            listing.push(ConnectedPeer {
+                address: Address(row[bt::PEER].try_into().unwrap()),
+                name: peer_name(&row)?,
+                encrypted: flags(&row) & bt::ENCRYPTED != 0,
+                profile_ready: flags(&row) & bt::PROFILE_READY != 0,
+                key_readable: flags(&row) & bt::KEY_READABLE != 0,
+                last_error: last_error(&row),
+            });
         }
         if generation(&snapshot) == token {
-            listing.push_str(&format!("{total} device(s) connected"));
             return Ok(listing);
         }
     }
@@ -317,6 +285,86 @@ mod bonds {
         }
     }
 
+    fn open_file(dir: &Handle, name: &str, flags: u32) -> Result<Option<Handle>> {
+        let component = CString::new(name).unwrap();
+        match open_at(dir.as_raw() as usize, &component, flags, 0o600) {
+            Ok(file) => {
+                check_access(&file, false)?;
+                Ok(Some(file))
+            }
+            Err(e) if e.raw_os_error() == Some(vfs::ERRNO_ENOENT) => Ok(None),
+            Err(e) => Err(format!("open /etc/{name}: {e}")),
+        }
+    }
+
+    fn directory() -> Result<Handle> {
+        let root = open_at(vfs::CURRENT_DIRECTORY, c"/", vfs::VFS_O_DIRECTORY, 0)
+            .map_err(|e| format!("open bond storage root: {e}"))?;
+        check_access(&root, true)?;
+        let dir = open_at(root.as_raw() as usize, c"etc", vfs::VFS_O_DIRECTORY, 0)
+            .map_err(|e| format!("open /etc for bond storage: {e}"))?;
+        check_access(&dir, true)?;
+        Ok(dir)
+    }
+
+    fn component(peer: Address) -> String {
+        peer.to_string().replace(':', "")
+    }
+
+    fn bonded_peer(name: &str, prefix: &str) -> Option<Address> {
+        let mac = name.strip_prefix(prefix)?.strip_suffix(".bond")?;
+        if mac.len() != 12
+            || !mac
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+        {
+            return None;
+        }
+        let mut bytes = [0; 6];
+        for (i, byte) in bytes.iter_mut().rev().enumerate() {
+            *byte = u8::from_str_radix(&mac[2 * i..2 * i + 2], 16).ok()?;
+        }
+        (bytes != [0; 6] && bytes != [255; 6]).then_some(Address(bytes))
+    }
+
+    pub fn list(adapter: bt::Address) -> Result<Vec<Address>> {
+        if adapter == [0; 6] {
+            return Err("controller has no adapter address for bond storage".into());
+        }
+        let dir = directory()?;
+        let prefix = format!("bluetooth-{}-", component(Address(adapter)));
+        let mut peers = Vec::new();
+        // / and /etc were both verified. Reopen each candidate relative to the checked
+        // directory and check its metadata without reading a single key octet.
+        for entry in std::fs::read_dir("/etc").map_err(|e| format!("list bond directory: {e}"))? {
+            let entry = entry.map_err(|e| format!("read bond directory entry: {e}"))?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(peer) = bonded_peer(name, &prefix) else {
+                continue;
+            };
+            let Some(file) = open_file(&dir, name, vfs::VFS_O_RDONLY)? else {
+                continue;
+            };
+            let size = file
+                .as_file()
+                .map_err(|_| "invalid bond file")?
+                .metadata()
+                .map_err(|_| "cannot inspect bond length")?
+                .size;
+            if size != 17 {
+                return Err("invalid bond file length".into());
+            }
+            peers.push(peer);
+            // A JSON address uses at least 13 bytes plus a delimiter.
+            if peers.len() > protocol::MAX_REPLY / 14 {
+                return Err("bond listing exceeds the service response limit".into());
+            }
+        }
+        peers.sort_unstable();
+        Ok(peers)
+    }
+
     // Root-owned /etc is supplied by the base image. All children are flat and
     // generated exclusively from numeric BD_ADDRs. Each file holds type || 16 HCI octets.
     pub struct Store {
@@ -330,32 +378,15 @@ mod bonds {
             if adapter == [0; 6] {
                 return Err("controller has no adapter address for bond storage".into());
             }
-            let root = open_at(vfs::CURRENT_DIRECTORY, c"/", vfs::VFS_O_DIRECTORY, 0)
-                .map_err(|e| format!("open bond storage root: {e}"))?;
-            check_access(&root, true)?;
-            let dir = open_at(root.as_raw() as usize, c"etc", vfs::VFS_O_DIRECTORY, 0)
-                .map_err(|e| format!("open /etc for bond storage: {e}"))?;
-            check_access(&dir, true)?;
-            let adapter = display_address(adapter).replace(':', "");
-            let peer = display_address(peer).replace(':', "");
+            let dir = directory()?;
+            let adapter = component(Address(adapter));
+            let peer = component(Address(peer));
             let name = format!("bluetooth-{adapter}-{peer}.bond");
             Ok(Self { dir, adapter, name })
         }
 
-        fn file(&self, name: &str, flags: u32) -> Result<Option<Handle>> {
-            let component = CString::new(name).unwrap();
-            match open_at(self.dir.as_raw() as usize, &component, flags, 0o600) {
-                Ok(file) => {
-                    check_access(&file, false)?;
-                    Ok(Some(file))
-                }
-                Err(e) if e.raw_os_error() == Some(vfs::ERRNO_ENOENT) => Ok(None),
-                Err(e) => Err(format!("open /etc/{name}: {e}")),
-            }
-        }
-
         pub fn supply_key(&self, request: &mut bt::Record) -> Result<()> {
-            let Some(file) = self.file(&self.name, vfs::VFS_O_RDONLY)? else {
+            let Some(file) = open_file(&self.dir, &self.name, vfs::VFS_O_RDONLY)? else {
                 return Ok(());
             };
             let stream = file.as_stream().map_err(|_| "cannot read bond file")?;
@@ -383,7 +414,7 @@ mod bonds {
             } else {
                 vfs::VFS_O_RDONLY
             };
-            let Some(lock) = self.file(&name, flags)? else {
+            let Some(lock) = open_file(&self.dir, &name, flags)? else {
                 return if pairing {
                     Err("cannot create bond storage lock".into())
                 } else {
@@ -400,8 +431,8 @@ mod bonds {
             }
             if pairing {
                 // Reject unsafe files before changing the peer's bond.
-                self.file(&self.name, vfs::VFS_O_RDONLY)?;
-                self.file(&format!(".{}.new", self.name), vfs::VFS_O_WRONLY)?;
+                open_file(&self.dir, &self.name, vfs::VFS_O_RDONLY)?;
+                open_file(&self.dir, &format!(".{}.new", self.name), vfs::VFS_O_WRONLY)?;
             }
             Ok(Some(lock))
         }
@@ -410,8 +441,7 @@ mod bonds {
             // The stable adapter lock serializes this staging name. Reopen and
             // validate a stage left by an interrupted pair before modifying it.
             let stage = format!(".{}.new", self.name);
-            let file = self
-                .file(&stage, vfs::VFS_O_WRONLY | vfs::VFS_O_CREAT)?
+            let file = open_file(&self.dir, &stage, vfs::VFS_O_WRONLY | vfs::VFS_O_CREAT)?
                 .ok_or("cannot create bond staging file")?;
             let old = CString::new(format!("/etc/{stage}")).unwrap();
             let new = CString::new(format!("/etc/{}", self.name)).unwrap();
@@ -452,9 +482,34 @@ mod bonds {
             sync(&self.dir)
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_installed_canonical_bonds_for_this_adapter_match() {
+            let prefix = "bluetooth-020000000001-";
+            let parse = |file| bonded_peer(file, prefix);
+            assert_eq!(
+                parse("bluetooth-020000000001-AABBCCDDEEFF.bond"),
+                Some("AA:BB:CC:DD:EE:FF".parse().unwrap())
+            );
+            for name in [
+                "bluetooth-020000000002-AABBCCDDEEFF.bond",
+                ".bluetooth-020000000001-AABBCCDDEEFF.bond.new",
+                "bluetooth-020000000001-FFFFFFFFFFFF.bond",
+                "bluetooth-020000000001-000000000000.bond",
+                "bluetooth-020000000001-aaBBCCDDEEFF.bond",
+                "bluetooth-020000000001-0123.bond",
+            ] {
+                assert_eq!(parse(name), None);
+            }
+        }
+    }
 }
 
-fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<String> {
+fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<Status> {
     let initial = status(handle, None)?;
     let adapter: bt::Address = initial[bt::ADAPTER].try_into().unwrap();
     let store = bonds::Store::open(adapter, peer)?;
@@ -484,35 +539,31 @@ fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<String> {
             .and_then(|()| store.save_key(&request))
             .map_err(|e| format!("paired, but could not save the bond: {e}"))?;
         request.zeroize();
-        let report = status(handle, target)
-            .and_then(|state| completion_text(handle, target, &state))
+        return status(handle, target)
+            .and_then(|state| completion_status(handle, target, &state))
             .map_err(|e| {
                 format!(
                     "bond saved for {}, but status refresh failed: {e}",
-                    display_address(peer)
+                    Address(peer)
                 )
-            })?;
-        return Ok(format!(
-            "bond saved for {}\n{report}",
-            display_address(peer)
-        ));
+            });
     }
-    completion_text(handle, target, &state)
+    completion_status(handle, target, &state)
 }
 
-fn completion_text(
+fn completion_status(
     handle: &Handle,
     target: Option<bt::Address>,
     state: &bt::Record,
-) -> Result<String> {
+) -> Result<Status> {
     if target.is_some() {
-        Ok(status_text(&status(handle, None)?, state))
+        Ok(public_status(&status(handle, None)?, state))
     } else {
-        Ok(status_text(state, state))
+        Ok(public_status(state, state))
     }
 }
 
-fn disconnect(handle: &Handle, target: Option<bt::Address>) -> Result<String> {
+fn disconnect(handle: &Handle, target: Option<bt::Address>) -> Result<Status> {
     let mut request = [0; bt::RECORD_SIZE];
     let op = if let Some(peer) = target {
         request[bt::PEER].copy_from_slice(&peer);
@@ -527,14 +578,17 @@ fn disconnect(handle: &Handle, target: Option<bt::Address>) -> Result<String> {
     if target.is_none() && record_peer(&request).is_some() {
         // Preserve the legacy adapter summary after implicitly detaching its sole peer.
         let adapter = status(handle, None)?;
-        return Ok(status_text(&adapter, &adapter));
+        return Ok(public_status(&adapter, &adapter));
     }
-    completion_text(handle, target, &state)
+    completion_status(handle, target, &state)
 }
 
-fn direct(path: &str, command: Command) -> Result<String> {
+fn direct(path: &str, command: Command) -> Result<Reply> {
     let device = CString::new(path).map_err(|_| "invalid device path")?;
-    let access = if matches!(command, Command::Status | Command::Devices) {
+    let access = if matches!(
+        command,
+        Command::Status | Command::Devices | Command::Bonded
+    ) {
         vfs::VFS_O_RDONLY
     } else {
         vfs::VFS_O_RDWR
@@ -544,13 +598,17 @@ fn direct(path: &str, command: Command) -> Result<String> {
     match command {
         Command::Status => {
             let state = status(&handle, None)?;
-            Ok(status_text(&state, &state))
+            Ok(Reply::Status(public_status(&state, &state)))
         }
-        Command::Devices => devices(|op, record| control(&handle, op, record)),
-        Command::Scan => scan(&handle),
-        Command::Pair(peer) => link(&handle, peer, true),
-        Command::Connect(peer) => link(&handle, peer, false),
-        Command::Disconnect(target) => disconnect(&handle, target),
+        Command::Devices => devices(|op, record| control(&handle, op, record)).map(Reply::Devices),
+        Command::Bonded => {
+            let state = status(&handle, None)?;
+            bonds::list(state[bt::ADAPTER].try_into().unwrap()).map(Reply::Bonded)
+        }
+        Command::Scan => scan(&handle).map(Reply::Scan),
+        Command::Pair(peer) => link(&handle, peer, true).map(Reply::Status),
+        Command::Connect(peer) => link(&handle, peer, false).map(Reply::Status),
+        Command::Disconnect(target) => disconnect(&handle, target).map(Reply::Status),
     }
 }
 
@@ -562,9 +620,11 @@ fn run() -> Result<()> {
     }
     let (path, command) = parse(&words)?;
     let response = if let Some(adapter) = broker::adapter_number(path) {
-        broker::invoke(adapter, command, || direct(path, command))?
+        broker::invoke(adapter, command, || {
+            direct(path, command).map(|reply| reply.text(command))
+        })?
     } else {
-        direct(path, command)?
+        direct(path, command)?.text(command)
     };
     println!("{response}");
     Ok(())
@@ -615,7 +675,7 @@ mod tests {
         .unwrap();
         assert_eq!(round, 2);
         assert_eq!(
-            listing,
+            Reply::Devices(listing).text(Command::Devices),
             "peer=02:00:00:00:00:20 connected=true encrypted=true profile-ready=false key-readable=false last-error=0x0 name=\"R\\n\"\n1 device(s) connected"
         );
     }

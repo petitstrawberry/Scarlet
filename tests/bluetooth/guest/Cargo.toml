@@ -9,5 +9,6 @@ name = "bluetooth-qa"
 path = "main.rs"
 
 [dependencies]
+scarlet-bluetooth = { path = "../../../user/bluetooth" }
 scarlet-os = { path = "../../../user/lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-abi = { path = "../../../user/lib/scarlet-abi" }

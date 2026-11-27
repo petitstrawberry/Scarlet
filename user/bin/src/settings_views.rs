@@ -451,6 +451,7 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
 
 pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
     let network_app = original.clone();
+    let bluetooth_app = original.clone();
     let app = original.clone();
     let display_app = original.clone();
     let audio_app = original.clone();
@@ -461,6 +462,7 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
         NavigationLink::new("Display", move || DisplayPage(display_app.clone())),
         NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
         NavigationLink::new("Network", move || network_page(network_app.clone())),
+        NavigationLink::new("Bluetooth", move || BluetoothPage(bluetooth_app.clone())),
         NavigationLink::new("Input", move || input_page(input_app.clone())),
         NavigationLink::new("Shell & Status", move || status_page(status_app.clone()))
             .on_select(move || original.refresh_status_preferences()),
@@ -476,6 +478,63 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
         .navigation_header()
         .sidebar_width(144.0)
         .frame(f32::INFINITY, f32::INFINITY)
+}
+
+#[derive(Clone)]
+struct BluetoothPage(SettingsApp);
+
+impl View for BluetoothPage {
+    fn create_element(&self) -> Box<dyn Element> {
+        if !self.0.bluetooth.get().loaded {
+            settings_bluetooth::run(&self.0, settings_bluetooth::Action::Refresh);
+        }
+        Box::new(scarlet_ui::element::ComponentElement::new_with_builder(
+            self.clone(),
+            |page| Box::new(bluetooth_page(&page.0)),
+        ))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        vec![&self.0.bluetooth, &self.0.bluetooth_index]
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+fn bluetooth_page(app: &SettingsApp) -> impl View + Clone {
+    use settings_bluetooth::{Action, run};
+    let panel = app.bluetooth.get();
+    let labels = panel.devices.iter().map(|device| device.label()).collect();
+    let selected = panel.devices.get(app.bluetooth_index.get());
+    let action = selected.map(|device| device.action());
+    let scan = app.clone();
+    let refresh = app.clone();
+    let change = app.clone();
+    settings_page(vstack! {
+        settings_section(vstack! {
+            settings_note(panel.adapter),
+            hstack! {
+                Button::new("Find devices").enabled(panel.ready && !panel.busy)
+                    .on_click(move || run(&scan, Action::Scan)),
+                Button::new("Refresh").enabled(!panel.busy)
+                    .on_click(move || run(&refresh, Action::Refresh)),
+            }.spacing(8.0),
+        }.spacing(12.0).alignment(Alignment::Leading), "Bluetooth adapter", 16.0),
+        settings_section(with_feedback(vstack! {
+            settings_row(Select::new(labels, app.bluetooth_index.clone())
+                .width(350.0).enabled(!panel.busy && !panel.devices.is_empty())
+                .placeholder(if panel.devices.is_empty() { "No devices" } else { "Choose a device" }), "Device"),
+            Button::new(action.map_or("Connect", |a| a.button()))
+                .enabled(panel.ready && !panel.busy && action.is_some())
+                .on_click(move || {
+                    if let Some(action) = action {
+                        run(&change, action);
+                    }
+                }),
+        }.spacing(12.0).alignment(Alignment::Leading), panel.feedback), "Devices", 16.0),
+    }.spacing(18.0).alignment(Alignment::Leading))
 }
 
 pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
