@@ -18,6 +18,8 @@ pub const PAGE_SCAN_ENABLED: u32 = 0x4251_0090;
 pub const REJECTED_PAGES: u32 = 0x4251_00a0;
 pub const CONTROLLER_FAULT: u32 = 0x4251_00b0;
 pub const HOST_PAGES: u32 = 0x4251_00c0;
+pub const WAKE_BOTH: u32 = 0x4251_00d0;
+pub const COMPLETE_WAKE: u32 = 0x4251_00e0;
 
 // Numbered keyboard input plus two vendor-defined Output reports.
 pub const DESCRIPTOR: &[u8] = &[

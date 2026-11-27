@@ -300,6 +300,21 @@ struct Link {
 }
 
 impl Link {
+    fn incoming_setup(&self) -> bool {
+        self.kind == ConnectionKind::Incoming
+            && !self.disconnect_requested
+            && matches!(
+                self.phase,
+                Phase::AcceptQueued
+                    | Phase::Accepting
+                    | Phase::PeerSecurity
+                    | Phase::PeerAuthenticated
+                    | Phase::PeerSecurityCollision
+                    | Phase::Authenticating
+                    | Phase::Encrypting
+            )
+    }
+
     fn waiting_for_peer(&self) -> bool {
         matches!(self.phase, Phase::PeerSecurity | Phase::PeerAuthenticated)
     }
@@ -385,7 +400,7 @@ impl Classic {
     }
 
     pub fn start_inquiry(&mut self) -> Result<(), Error> {
-        self.check_management_idle()?;
+        self.check_management_idle(false)?;
         if self.scan != Scan::Idle {
             return Err(Error::Busy);
         }
@@ -562,23 +577,21 @@ impl Classic {
         .min()
     }
 
-    fn check_management_idle(&self) -> Result<(), Error> {
+    fn check_management_idle(&self, allow_incoming_setup: bool) -> Result<(), Error> {
         if !self.ready {
             return Err(Error::NotReady);
         }
-        if self
-            .links
-            .iter()
-            .flatten()
-            .any(|l| !matches!(l.phase, Phase::Up | Phase::Quarantined))
-        {
+        if self.links.iter().flatten().any(|l| {
+            !(matches!(l.phase, Phase::Up | Phase::Quarantined)
+                || allow_incoming_setup && l.incoming_setup())
+        }) {
             return Err(Error::Busy);
         }
         Ok(())
     }
 
     fn select(&mut self, address: Address, kind: ConnectionKind) -> Result<(), Error> {
-        self.check_management_idle()?;
+        self.check_management_idle(kind == ConnectionKind::Incoming)?;
         if self.link(address).is_some() {
             return Err(Error::Busy);
         }
@@ -739,7 +752,7 @@ impl Classic {
                     });
                 }
                 // Post-link names share the controller's paging procedure with Create.
-                if self.check_management_idle().is_err() {
+                if self.check_management_idle(false).is_err() {
                     return None;
                 }
                 let link = self

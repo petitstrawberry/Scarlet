@@ -83,7 +83,10 @@ pub(super) struct State {
     links: Vec<PeerState>,
     pub request: Option<Request>,
     selected: Option<Address>,
+    // STATUS retains the last explicit operation. PEER_STATUS reports a
+    // fresh generation for each accepted incoming attempt from the same sequence.
     generation: u32,
+    last_issued_generation: u32,
     link_generation: u32,
     adapter_generation: u64,
     bonds: alloc::collections::BTreeMap<Address, Zeroizing<[u8; 16]>>,
@@ -112,6 +115,7 @@ impl State {
             request: None,
             selected: None,
             generation: 0,
+            last_issued_generation: 0,
             link_generation: 1,
             adapter_generation: 0,
             bonds: Default::default(),
@@ -172,7 +176,11 @@ impl State {
     }
 
     fn finish_peer(&mut self, address: Address, error: u32) {
-        if self.selected == Some(address) {
+        if self.selected == Some(address)
+            && self
+                .peer(address)
+                .is_some_and(|p| p.generation == self.generation)
+        {
             self.flags &= !abi::BUSY;
             self.error = error;
         }
@@ -255,8 +263,18 @@ impl State {
         }
     }
 
+    fn adapter_flags(&self) -> u32 {
+        // The broker submits work when STATUS is idle. Incoming handshakes
+        // occupy the adapter without taking ownership of a user command.
+        if self.links.iter().any(|p| p.flags & abi::BUSY != 0) {
+            self.flags | abi::BUSY
+        } else {
+            self.flags
+        }
+    }
+
     fn target(&self, cmd: u32, address: Address) -> Result<Option<Address>, &'static str> {
-        if self.flags & (abi::READY | abi::BUSY) != abi::READY {
+        if self.adapter_flags() & (abi::READY | abi::BUSY) != abi::READY {
             return Err("Bluetooth adapter busy or offline");
         }
         if cmd == abi::SCAN_START {
@@ -272,6 +290,11 @@ impl State {
         } else {
             address
         };
+        self.check_peer_target(cmd, address)?;
+        Ok(Some(address))
+    }
+
+    fn check_peer_target(&self, cmd: u32, address: Address) -> Result<(), &'static str> {
         if address == [0; 6] || address == [255; 6] || address == self.adapter {
             return Err("invalid Bluetooth peer address");
         }
@@ -288,7 +311,7 @@ impl State {
         {
             return Err("Bluetooth peer table full");
         }
-        Ok(Some(address))
+        Ok(())
     }
 
     pub fn has_bonds(&self) -> bool {
@@ -297,16 +320,13 @@ impl State {
 
     pub fn begin_incoming(&mut self, request: IncomingAcl, classic: &mut Classic) {
         let address = request.address;
-        if self.target(abi::CONNECT, address).is_ok()
+        if self.flags & (abi::READY | abi::BUSY) == abi::READY
+            && self.check_peer_target(abi::CONNECT, address).is_ok()
             && let Some(key) = self.bonds.get(&address)
             && classic.accept_incoming(request, **key).is_ok()
         {
-            self.begin(
-                abi::CONNECT,
-                Some(address),
-                0,
-                next_generation(self.generation),
-            );
+            self.last_issued_generation = next_generation(self.last_issued_generation);
+            self.begin_peer(address, 0, self.last_issued_generation);
         } else {
             classic.reject_incoming(address);
         }
@@ -320,6 +340,7 @@ impl State {
     fn begin(&mut self, cmd: u32, target: Option<Address>, owner: usize, generation: u32) {
         self.selected = target;
         self.generation = generation;
+        self.last_issued_generation = generation;
         self.error = 0;
         self.flags |= abi::BUSY;
         let Some(address) = target else {
@@ -327,6 +348,14 @@ impl State {
             self.peers.clear();
             return;
         };
+        self.begin_peer(
+            address,
+            if cmd == abi::PAIR { owner } else { 0 },
+            generation,
+        );
+    }
+
+    fn begin_peer(&mut self, address: Address, pairing_owner: usize, generation: u32) {
         if self.peer(address).is_none() {
             if self.links.len() == MAX_PEER_RECORDS {
                 let inactive = self.links.iter().position(|p| p.flags == 0).unwrap();
@@ -354,9 +383,7 @@ impl State {
         peer.error = 0;
         peer.flags |= abi::BUSY;
         peer.clear_key();
-        if cmd == abi::PAIR {
-            peer.pairing_owner = owner;
-        }
+        peer.pairing_owner = pairing_owner;
         self.changed();
     }
 
@@ -491,7 +518,7 @@ impl ControlOps for Endpoint {
                     .and_then(|addr| state.peer(addr))
                     .filter(|p| p.flags != 0)
                     .or_else(|| state.live().next());
-                let mut flags = state.flags;
+                let mut flags = state.adapter_flags();
                 if let Some(peer) = peer {
                     flags |= peer.flags & !abi::BUSY;
                     if peer.generation == state.generation {
@@ -566,7 +593,7 @@ impl ControlOps for Endpoint {
                     (_, Some(addr)) => Request::Disconnect(addr),
                     _ => return Err("missing Bluetooth peer"),
                 };
-                let next = next_generation(state.generation);
+                let next = next_generation(state.last_issued_generation);
                 output[abi::GENERATION].copy_from_slice(&next.to_le_bytes());
                 if let Some(addr) = target {
                     output[abi::PEER].copy_from_slice(&addr);

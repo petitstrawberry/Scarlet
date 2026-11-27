@@ -24,6 +24,7 @@ between links.
 | `BT_QA_SDP_PASS` | The keyboard's report descriptor and PnP identity reach hidraw. The non-HID peer pairs and stays connected without opening HID channels. |
 | `BT_QA_REPORT_PASS` | The descriptor-driven input driver publishes a keyboard press and release. Two raw readers get the same unmodified reports, and outbound reports preserve their boundaries. |
 | `BT_QA_RECONNECT_PASS` | Unplug detaches the old descriptor. Waking the bonded keyboard reconnects it and publishes a replacement at the same path while the other peer stays connected. |
+| `BT_QA_OVERLAPPING_WAKE_PASS` | Both bonded peers page before either handshake completes. One fails authentication while the keyboard stays pending, then encrypts and delivers a HID report. The broker retains the last user command's generation and result throughout. |
 | `BT_QA_HOST_RETRY_PASS` | The keyboard advertises HID host/any reconnection. An unexpected loss starts a delayed outgoing page, and a manual disconnect leaves the peer offline. |
 | `BT_QA_BROKER_PASS` | An enabled non-root account scans, pairs, enumerates an offline bond, and reconnects without a new inquiry. Locked and Shield-confined clients are denied. |
 | `BT_QA_FORGET_PASS` | Saved names survive disconnect. A legacy bond gains a name without replacing the key file. Forget detaches only its target, reports a failed disconnect, retries after physical loss, and prevents a keyless controller reconnect. |

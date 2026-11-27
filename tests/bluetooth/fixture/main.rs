@@ -82,6 +82,13 @@ impl Wire {
     }
 }
 
+#[derive(PartialEq)]
+enum Wake {
+    Immediate,
+    AwaitAccept,
+    Accepted,
+}
+
 struct Peer {
     address: [u8; 6],
     base_handle: u16,
@@ -91,6 +98,7 @@ struct Peer {
     encrypted: bool,
     bonded: bool,
     peer_opens_hid: bool,
+    wake: Wake,
     auth_requested: bool,
     control_pending: bool,
     fail_disconnect: bool,
@@ -118,6 +126,7 @@ impl Peer {
             encrypted: false,
             bonded: false,
             peer_opens_hid: false,
+            wake: Wake::Immediate,
             auth_requested: false,
             control_pending: false,
             fail_disconnect: false,
@@ -441,7 +450,11 @@ impl Controller {
                             p.host_pages += 1;
                         }
                         rx.accepted(op);
-                        p.connected(rx, op == 0x0409);
+                        if op == 0x0409 && p.wake == Wake::AwaitAccept {
+                            p.wake = Wake::Accepted;
+                        } else {
+                            p.connected(rx, op == 0x0409);
+                        }
                     }
                     0x040c => {
                         assert!(!p.bonded, "reconnect must use the stored link key");
@@ -578,6 +591,30 @@ impl ControlOps for Radio {
                 }
                 wire::REJECTED_PAGES => return Ok(i32::from(p.rejected_pages)),
                 wire::HOST_PAGES => return Ok(i32::from(p.host_pages)),
+                wire::WAKE_BOTH if *page_scan => {
+                    for peer in peers {
+                        assert!(
+                            peer.bonded && peer.handle.is_none() && peer.wake == Wake::Immediate
+                        );
+                        peer.wake = Wake::AwaitAccept;
+                        rx.event(0x04, &[&peer.address[..], &[0, 5, 0, 1]].concat());
+                    }
+                    1
+                }
+                wire::COMPLETE_WAKE => {
+                    if p.wake != Wake::Accepted {
+                        return Ok(0);
+                    }
+                    p.wake = Wake::Immediate;
+                    p.connected(rx, true);
+                    if arg != 0 {
+                        rx.event(
+                            6,
+                            &[&[arg as u8][..], &p.handle.unwrap().to_le_bytes()].concat(),
+                        );
+                    }
+                    1
+                }
                 wire::WAKE if *page_scan && p.handle.is_none() => {
                     rx.event(0x04, &[&p.address[..], &[0, 5, 0, 1]].concat());
                     1

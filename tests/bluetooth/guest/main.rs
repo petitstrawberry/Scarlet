@@ -345,6 +345,75 @@ fn saved_and_forget(radio: &Handle) {
     );
 }
 
+fn overlapping_wakes(radio: &Handle) {
+    let client = Client::new(0);
+    client.disconnect(Some(Address(wire::HID_ADDR))).unwrap();
+    let command = client.disconnect(Some(Address(wire::OTHER_ADDR))).unwrap();
+    let controller = Handle::open("/dev/bluetooth0", VFS_O_RDWR as usize).unwrap();
+    let peer = |addr: bt::Address| {
+        let mut row = [0; bt::RECORD_SIZE];
+        row[bt::PEER].copy_from_slice(&addr);
+        assert_eq!(
+            unsafe { controller.control(bt::PEER_STATUS, row.as_mut_ptr() as usize) },
+            Ok(0)
+        );
+        let [flags, generation, error] = [bt::FLAGS, bt::GENERATION, bt::LAST_ERROR]
+            .map(|field| u32::from_le_bytes(row[field].try_into().unwrap()));
+        assert_ne!(flags & bt::READY, 0);
+        (flags & !bt::READY, generation, error)
+    };
+    let adapter = |busy| {
+        let status = client.status().unwrap();
+        assert_eq!(status.generation, command.generation);
+        assert_eq!(status.last_error, command.last_error);
+        assert_eq!(status.busy, busy);
+    };
+    assert_eq!(radio_get(radio, wire::WAKE_BOTH, 0, 0), 1);
+    let [hid_gen, other_gen] = wait("two pending bonded pages", || {
+        let [(hid_flags, hid_gen, _), (other_flags, other_gen, _)] =
+            [wire::HID_ADDR, wire::OTHER_ADDR].map(peer);
+        (hid_flags == bt::BUSY && other_flags == bt::BUSY).then_some([hid_gen, other_gen])
+    });
+    assert_ne!(hid_gen, other_gen);
+    assert!(![hid_gen, other_gen].contains(&command.generation));
+    adapter(true);
+    let mut scan = [0; bt::RECORD_SIZE];
+    assert!(unsafe { controller.control(bt::SCAN_START, scan.as_mut_ptr() as usize) }.is_err());
+
+    // Fail the peer selected by the last user command while HID is still pending.
+    wait("second page accepted", || {
+        (radio_get(radio, wire::COMPLETE_WAKE, wire::OTHER, 0x05) == 1).then_some(())
+    });
+    wait("peer authentication failure", || {
+        (peer(wire::OTHER_ADDR) == (0, other_gen, 0x05)).then_some(())
+    });
+    assert_eq!(peer(wire::HID_ADDR), (bt::BUSY, hid_gen, 0));
+    adapter(true);
+    wait("first page accepted", || {
+        (radio_get(radio, wire::COMPLETE_WAKE, wire::HID, 0) == 1).then_some(())
+    });
+    let survivor = raw();
+    verify_description(&survivor);
+    radio_get(radio, wire::SEND_INPUT, wire::HID, 0);
+    read_report(&survivor, wire::PRESS);
+    assert_eq!(
+        peer(wire::HID_ADDR),
+        (
+            bt::CONNECTED | bt::ENCRYPTED | bt::PROFILE_READY,
+            hid_gen,
+            0
+        )
+    );
+    assert_eq!(peer(wire::OTHER_ADDR), (0, other_gen, 0x05));
+    adapter(false);
+    let next = client.connect(Address(wire::OTHER_ADDR)).unwrap();
+    assert!(![command.generation, hid_gen, other_gen].contains(&next.generation));
+    assert_eq!(peer(wire::OTHER_ADDR).1, next.generation);
+    println!(
+        "BT_QA_OVERLAPPING_WAKE_PASS simultaneous bonded pages, isolated authentication failure and encrypted HID input"
+    );
+}
+
 fn host_reconnect(radio: &Handle) {
     let client = Client::new(0);
     let hid = Address(wire::HID_ADDR);
@@ -489,6 +558,7 @@ fn main() {
         "BT_QA_RECONNECT_PASS saved HID peer initiated an encrypted reconnect while the other link stayed up"
     );
     as_login("reconnect");
+    overlapping_wakes(&radio);
     host_reconnect(&radio);
     assert!(btctl(&["bonded"]).contains("2 device(s) bonded"));
     saved_and_forget(&radio);
