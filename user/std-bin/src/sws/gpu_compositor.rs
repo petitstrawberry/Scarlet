@@ -302,6 +302,28 @@ struct SharedWindowState {
     retire_after_present: [Option<SgfxCommitToken>; 3],
 }
 
+impl SharedWindowState {
+    /// A full old generation can withhold the very frame that would make a
+    /// resized window visible. Request a presentation boundary for its retirees.
+    fn register_generation(&mut self, generation: u32) -> bool {
+        let advanced = generation > self.latest_generation;
+        self.latest_generation = generation;
+        advanced
+            && shared_lease_snapshot(self).iter().flatten().count()
+                == crate::sgfx_ir_support::SHARED_FRAME_LEASE_CAPACITY
+    }
+
+    /// Called after presentation, once all GPU readers of this window retired.
+    /// Keep both possible sources for composition (front and latest pending).
+    fn release_superseded_generation(&mut self, releases: &mut Vec<SgfxCommitToken>) {
+        for slot in &mut self.retire_after_present {
+            if slot.is_some_and(|token| token.identity.generation < self.latest_generation) {
+                releases.extend(slot.take());
+            }
+        }
+    }
+}
+
 struct CursorTextureSet {
     width: u32,
     height: u32,
@@ -430,6 +452,7 @@ pub(super) struct GpuCompositor {
     imported_shm_textures: Vec<ImportedShmTexture>,
     shared_textures: Vec<SharedWindowTexture>,
     shared_windows: Vec<SharedWindowState>,
+    pending_resize_retirements: Vec<WindowId>,
     rebuild_pending: bool,
     /// Output extents to recreate the target with on the next rebuild.
     rebuild_extents: Option<Vec<(u32, u32)>>,
@@ -539,6 +562,7 @@ impl GpuCompositor {
             }
             releases.extend(self.publish_completed_frame(displays, frame)?);
         }
+        self.finish_resize_retirements(&mut releases);
         Ok(Some(releases))
     }
 
@@ -603,6 +627,7 @@ impl GpuCompositor {
             imported_shm_textures: Vec::new(),
             shared_textures: Vec::new(),
             shared_windows: Vec::new(),
+            pending_resize_retirements: Vec::new(),
             rebuild_pending: false,
             rebuild_extents: None,
             output_rects: vec![(0, 0, width, height)],
@@ -888,7 +913,14 @@ impl GpuCompositor {
             .map_err(|_| SgfxBufferError::ImportFailed)?;
         match state_index {
             Some(index) => {
-                self.shared_windows[index].latest_generation = identity.generation;
+                if self.shared_windows[index].register_generation(identity.generation)
+                    && !self
+                        .pending_resize_retirements
+                        .contains(&identity.window_id)
+                {
+                    self.pending_resize_retirements.push(identity.window_id);
+                    self.force_full_repaint = true;
+                }
             }
             None => self.shared_windows.push(SharedWindowState {
                 window_id: identity.window_id,
@@ -1236,6 +1268,8 @@ impl GpuCompositor {
         }
         self.shared_windows
             .retain(|state| state.window_id != window_id);
+        self.pending_resize_retirements
+            .retain(|id| *id != window_id);
         Ok(())
     }
 
@@ -2339,11 +2373,28 @@ impl GpuCompositor {
             return Err(GpuCompositionError::Pending);
         }
         let logical_damage = publication.logical_damage;
-        self.publish_completed_frame(
+        let mut releases = self.publish_completed_frame(
             &outputs.iter().map(|f| f.display).collect::<Vec<_>>(),
             publication,
-        )
-        .map(|releases| (releases, logical_damage))
+        )?;
+        self.finish_resize_retirements(&mut releases);
+        Ok((releases, logical_damage))
+    }
+
+    fn finish_resize_retirements(&mut self, releases: &mut Vec<SgfxCommitToken>) {
+        self.pending_resize_retirements.retain(|id| {
+            if self
+                .pending_frames
+                .iter()
+                .any(|frame| frame.sampled_windows.contains(id))
+            {
+                return true;
+            }
+            if let Some(state) = self.shared_windows.iter_mut().find(|s| s.window_id == *id) {
+                state.release_superseded_generation(releases);
+            }
+            false
+        });
     }
 
     fn publish_completed_frame(
@@ -3072,6 +3123,68 @@ mod shared_frame_promotion_tests {
         assert_eq!(releases, [Some(old_presented), None, None, None, None]);
         assert_eq!(state.presented, Some(replacement));
         assert!(state.pending.is_none());
+    }
+
+    #[test]
+    fn saturated_tablet_resize_admits_replacement_after_an_unsampled_present() {
+        for had_front in [false, true] {
+            let mut window = Window::new(41, 0, 0, 1302, 702);
+            window.owner_client_id = Some(1);
+            window.note_native_sgfx_registration(3, 7);
+            let mut state = SharedWindowState {
+                window_id: 41,
+                latest_generation: 7,
+                compositor_epoch: 3,
+                presented: None,
+                pending: None,
+                retire_after_present: [None; 3],
+            };
+            let queue = |state: &mut SharedWindowState, commit| {
+                let leases = crate::sgfx_ir_support::queue_shared_commit(
+                    shared_lease_snapshot(state),
+                    commit,
+                    |a, b| a.identity == b.identity,
+                )?;
+                install_shared_lease_snapshot(state, leases);
+                Ok::<_, &'static str>(())
+            };
+            for id in 1..=4 {
+                queue(&mut state, token(id, 7, 100 + u64::from(id))).unwrap();
+                if id == 1 && had_front {
+                    promote_pending_shared_frame(&mut state);
+                }
+            }
+            let old = shared_lease_snapshot(&state);
+            let replacement = token(1, 8, 105);
+            window.set_tablet_managed(true);
+            window.width = 1280;
+            window.height = 680;
+            window.set_backing_extent(1280, 680);
+            window.note_native_backing_replaced();
+            window.note_native_sgfx_registration(3, 8);
+            assert!(!window.is_presented());
+            assert!(state.register_generation(8));
+            assert!(!state.register_generation(8));
+            assert_eq!(shared_lease_snapshot(&state), old);
+            assert!(queue(&mut state, replacement).is_err());
+
+            // Tablet policy excludes the old extent from the completed frame.
+            let mut released = Vec::new();
+            state.release_superseded_generation(&mut released);
+            assert_eq!(
+                released,
+                old[2..].iter().flatten().copied().collect::<Vec<_>>()
+            );
+            assert_eq!((state.presented, state.pending), (old[0], old[1]));
+            queue(&mut state, replacement).unwrap();
+            assert!(window.complete_native_policy_frame((1280, 680), Some((3, 8))));
+            assert!(window.is_presented());
+            let submitted = state.clone();
+            let released = promote_completed_shared_frame(&mut state, &submitted).unwrap();
+            assert_eq!(released[0], old[0]);
+            assert_eq!(released[1], old[1]);
+            assert_eq!(state.presented, Some(replacement));
+        }
     }
 }
 
