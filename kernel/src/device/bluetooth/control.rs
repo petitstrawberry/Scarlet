@@ -1,6 +1,6 @@
 //! Per-controller management, independent of UART and USB. Pairing key export
 //! belongs to the open endpoint that initiated that pairing operation.
-use super::classic::{Address, Name, Peer};
+use super::classic::{Address, Classic, IncomingAcl, Name, Peer};
 use crate::{
     device::{Device, DeviceType},
     library::std::usercopy::{copy_from_user, copy_to_user},
@@ -295,10 +295,11 @@ impl State {
         !self.bonds.is_empty()
     }
 
-    pub fn begin_incoming(&mut self, address: Address, classic: &mut super::classic::Classic) {
+    pub fn begin_incoming(&mut self, request: IncomingAcl, classic: &mut Classic) {
+        let address = request.address;
         if self.target(abi::CONNECT, address).is_ok()
             && let Some(key) = self.bonds.get(&address)
-            && classic.accept_incoming(address, **key).is_ok()
+            && classic.accept_incoming(request, **key).is_ok()
         {
             self.begin(
                 abi::CONNECT,

@@ -107,11 +107,16 @@ impl Command {
     }
 }
 
+pub struct IncomingAcl {
+    pub address: Address,
+    peripheral_class: bool,
+}
+
 pub enum Action {
     Command(Command),
     Ready(ControllerInfo),
     PeerFound(Peer),
-    IncomingAcl(Address),
+    IncomingAcl(IncomingAcl),
     InquiryComplete(Result<(), Reason>),
     /// The upper layer owns persistence. Call provide_link_key to authorize future reuse.
     LinkKey {
@@ -167,6 +172,8 @@ const WRITE_SCAN_ENABLE: u16 = 0x0c1a;
 const RESET: u16 = 0x0c03;
 const INQUIRY_MODE: u16 = 0x0c45;
 const SSP_MODE: u16 = 0x0c56;
+const LOCAL_FEATURES: u16 = 0x1003;
+const LMP_ROLE_SWITCH: u8 = 1 << 5; // LMP features page 0, octet 0.
 const BUFFER_SIZE: u16 = 0x1005;
 const LOCAL_ADDR: u16 = 0x1009;
 
@@ -327,6 +334,7 @@ pub struct Classic {
     terminal: Option<Reason>,
     info: ControllerInfo,
     inquiry_mode: u8,
+    role_switch: bool,
     page_scan: bool,
     pub(super) accept_saved: bool,
     credits: u8,
@@ -358,6 +366,7 @@ impl Classic {
             terminal: None,
             info: ControllerInfo::default(),
             inquiry_mode: 2,
+            role_switch: false,
             page_scan: false,
             accept_saved: false,
             credits: 1,
@@ -397,7 +406,12 @@ impl Classic {
     }
 
     /// Arm a peer-initiated ACL only after the adapter owner matched its saved bond.
-    pub(super) fn accept_incoming(&mut self, addr: Address, key: [u8; 16]) -> Result<(), Error> {
+    pub(super) fn accept_incoming(
+        &mut self,
+        request: IncomingAcl,
+        key: [u8; 16],
+    ) -> Result<(), Error> {
+        let addr = request.address;
         if !self.page_scan || self.link(addr).is_some() {
             return Err(Error::Busy);
         }
@@ -407,7 +421,13 @@ impl Classic {
             return Err(error);
         }
         self.link_mut(addr).unwrap().phase = Phase::AcceptQueued;
-        self.enqueue(Owner::Link(addr), Command::addressed(ACCEPT, addr, &[1]));
+        // Accept expresses a preference; either negotiated role can secure the ACL.
+        let role = if self.role_switch && request.peripheral_class {
+            0
+        } else {
+            1
+        };
+        self.enqueue(Owner::Link(addr), Command::addressed(ACCEPT, addr, &[role]));
         Ok(())
     }
 
@@ -1084,7 +1104,11 @@ impl Classic {
                 let addr = address(p);
                 if p[9] == 1 {
                     if self.page_scan {
-                        self.emit(Action::IncomingAcl(addr));
+                        self.emit(Action::IncomingAcl(IncomingAcl {
+                            address: addr,
+                            // Format type 00, Major Device Class 0x05 (Peripheral).
+                            peripheral_class: p[6] & 3 == 0 && p[7] & 0x1f == 0x05,
+                        }));
                     } else {
                         self.reject_incoming(addr);
                     }
@@ -1198,6 +1222,7 @@ impl Classic {
             );
             if (code == 0x0f) != asynchronous
                 || (opcode == LOCAL_ADDR && result.len() != 7)
+                || (opcode == LOCAL_FEATURES && result.len() != 9)
                 || (opcode == BUFFER_SIZE && result.len() != 8)
             {
                 return Err(Error::MalformedEvent);
@@ -1282,7 +1307,10 @@ impl Classic {
     fn init_ack(&mut self, opcode: u16, result: &[u8]) {
         let status = result[0];
         if status != 0 {
-            if opcode == INQUIRY_MODE && matches!(status, 0x01 | 0x11 | 0x12) {
+            if opcode == LOCAL_FEATURES && matches!(status, 0x01 | 0x11) {
+                // Legacy controller: retain the default peripheral role preference.
+                self.enqueue(Owner::Init, Command::new(BUFFER_SIZE, &[]));
+            } else if opcode == INQUIRY_MODE && matches!(status, 0x01 | 0x11 | 0x12) {
                 // Controllers with RSSI-only or standard inquiry still provide usable discovery.
                 if self.inquiry_mode == 2 {
                     self.inquiry_mode = 1;
@@ -1300,6 +1328,10 @@ impl Classic {
             RESET => Command::new(LOCAL_ADDR, &[]),
             LOCAL_ADDR => {
                 self.info.address = address(&result[1..]);
+                Command::new(LOCAL_FEATURES, &[])
+            }
+            LOCAL_FEATURES => {
+                self.role_switch = result[1] & LMP_ROLE_SWITCH != 0;
                 Command::new(BUFFER_SIZE, &[])
             }
             BUFFER_SIZE => {

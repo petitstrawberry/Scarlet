@@ -357,6 +357,10 @@ impl Controller {
                 rx.complete(op, &[0]);
             }
             0x1009 => rx.complete(op, &[&[0], wire::ADAPTER.as_slice()].concat()),
+            0x1003 => {
+                assert!(data.is_empty());
+                rx.complete(op, &[0, 0x20, 0, 0, 0, 0, 0, 0, 0]);
+            }
             0x1005 => rx.complete(op, &[0, 32, 0, 0, 1, 0, 0, 0]),
             0x0401 => {
                 rx.accepted(op);
@@ -430,7 +434,9 @@ impl Controller {
                     }
                     0x0405 | 0x0409 => {
                         if op == 0x0409 {
-                            assert_eq!(&data[6..], &[1]);
+                            // WAKE advertises the Peripheral major class. The peer
+                            // accepts either role and does not report a Role Change.
+                            assert_eq!(&data[6..], &[0]);
                         } else {
                             p.host_pages += 1;
                         }

@@ -5,6 +5,11 @@ const PAD: Address = [1, 2, 3, 4, 5, 6];
 const OTHER: Address = [7, 8, 9, 10, 11, 12];
 const KEY: [u8; 16] = [0x50; 16];
 const HANDLE: u16 = 0x123;
+const ROLE_SWITCH_FEATURES: &[u8] = &[0, 0x20, 0, 0, 0, 0, 0, 0, 0];
+const PAD_REQUEST: IncomingAcl = IncomingAcl {
+    address: PAD,
+    peripheral_class: true,
+};
 
 struct Host {
     sm: Classic,
@@ -54,11 +59,12 @@ impl Host {
         self.complete(op, 1, &result);
     }
 
-    fn init(&mut self) {
+    fn init(&mut self, local_features: &[u8]) {
         assert_eq!(self.sm.connect(PAD), Err(Error::NotReady));
         for (op, result) in [
             (RESET, &[0][..]),
             (LOCAL_ADDR, &[0, 16, 16, 16, 16, 16, 16]),
+            (LOCAL_FEATURES, local_features),
             (BUFFER_SIZE, &[0, 0xfd, 3, 0, 8, 0, 0, 0]),
             (EVENT_MASK, &[0]),
             (SSP_MODE, &[0]),
@@ -81,8 +87,12 @@ impl Host {
     }
 
     fn ready() -> Self {
+        Self::ready_with_features(ROLE_SWITCH_FEATURES)
+    }
+
+    fn ready_with_features(local_features: &[u8]) -> Self {
         let mut h = Self::new();
-        h.init();
+        h.init(local_features);
         h.complete(INQUIRY_MODE, 1, &[0]);
         let Some(Action::Ready(info)) = h.poll() else {
             panic!()
@@ -101,6 +111,19 @@ impl Host {
         p[3..9].copy_from_slice(&addr);
         p[9] = 1;
         self.event(3, &p);
+    }
+
+    fn incoming(&mut self, address: Address, class: [u8; 3]) -> IncomingAcl {
+        let mut params = [0; 10];
+        params[..6].copy_from_slice(&address);
+        params[6..9].copy_from_slice(&class);
+        params[9] = 1;
+        self.event(4, &params);
+        let Some(Action::IncomingAcl(request)) = self.poll() else {
+            panic!("expected incoming ACL")
+        };
+        assert_eq!(request.address, address);
+        request
     }
 
     fn acl(&mut self, bonded: bool) {
@@ -160,7 +183,7 @@ impl Host {
 #[test]
 fn initialization_falls_back_for_inquiry_mode_and_fails_on_mandatory_command_error() {
     let mut h = Host::new();
-    h.init();
+    h.init(ROLE_SWITCH_FEATURES);
     h.complete(INQUIRY_MODE, 1, &[0x11]);
     assert_eq!(h.cmd(INQUIRY_MODE).params(), &[1]);
     h.complete(INQUIRY_MODE, 1, &[0x01]);
@@ -951,29 +974,23 @@ fn outgoing_page_timeout_releases_the_operation_and_preserves_incoming_listen() 
         })
     ));
     assert!(h.poll().is_none());
-    assert!(h.sm.accept_incoming(PAD, KEY).is_ok());
+    assert!(h.sm.accept_incoming(PAD_REQUEST, KEY).is_ok());
 }
 
 #[test]
 fn remote_wake_uses_registered_key_and_requires_encryption() {
     let mut h = Host::ready();
-    assert!(h.sm.accept_incoming(PAD, KEY).is_err());
+    assert!(h.sm.accept_incoming(PAD_REQUEST, KEY).is_err());
     h.sm.accept_saved = true;
     assert_eq!(h.cmd(WRITE_SCAN_ENABLE).params(), &[2]);
     h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
-    let mut req = [0; 10];
-    req[..6].copy_from_slice(&OTHER);
-    req[9] = 1;
-    h.event(4, &req);
-    assert!(matches!(h.poll(), Some(Action::IncomingAcl(OTHER))));
-    h.sm.reject_incoming(OTHER);
+    let req = h.incoming(OTHER, [0x40, 5, 0]);
+    h.sm.reject_incoming(req.address);
     h.cmd(REJECT);
     h.status(REJECT, 0);
-    req[..6].copy_from_slice(&PAD);
-    h.event(4, &req);
-    assert!(matches!(h.poll(), Some(Action::IncomingAcl(PAD))));
-    h.sm.accept_incoming(PAD, KEY).unwrap();
-    assert_eq!(h.cmd(ACCEPT).params()[6], 1);
+    let req = h.incoming(PAD, [0x40, 5, 0]);
+    h.sm.accept_incoming(req, KEY).unwrap();
+    assert_eq!(h.cmd(ACCEPT).params()[6], 0);
     h.status(ACCEPT, 0);
     h.connected(PAD, HANDLE);
     assert!(h.poll().is_none());
@@ -999,10 +1016,79 @@ fn accepting_peer() -> Host {
     h.sm.accept_saved = true;
     h.cmd(WRITE_SCAN_ENABLE);
     h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
-    h.sm.accept_incoming(PAD, KEY).unwrap();
+    h.sm.accept_incoming(PAD_REQUEST, KEY).unwrap();
     h.cmd(ACCEPT);
     h.status(ACCEPT, 0);
     h
+}
+
+#[test]
+fn accept_role_uses_request_class_and_local_lmp_page_zero() {
+    let other_features = &[0, 0xdf, 0x20, 0, 0, 0, 0, 0, 0][..];
+    for (features, class, role) in [
+        (ROLE_SWITCH_FEATURES, [0x08, 0x05, 0], 0),    // Gamepad.
+        (ROLE_SWITCH_FEATURES, [0x40, 0xe5, 0xff], 0), // Keyboard plus service bits.
+        (ROLE_SWITCH_FEATURES, [0x40, 0xe1, 0xff], 1), // Computer.
+        (ROLE_SWITCH_FEATURES, [0x09, 0x05, 0], 1),    // Unknown CoD format.
+        (other_features, [0x40, 5, 0], 1),
+        (&[0x01], [0x40, 5, 0], 1), // Unknown HCI Command.
+        (&[0x11], [0x40, 5, 0], 1), // Unsupported Feature.
+    ] {
+        let mut h = Host::ready_with_features(features);
+        h.sm.accept_saved = true;
+        h.cmd(WRITE_SCAN_ENABLE);
+        h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
+        let req = h.incoming(PAD, class);
+        h.sm.accept_incoming(req, KEY).unwrap();
+        let cmd = h.cmd(ACCEPT);
+        assert_eq!(&cmd.params()[..6], &PAD);
+        assert_eq!(&cmd.params()[6..], &[role]);
+    }
+}
+
+#[test]
+fn declined_role_switch_still_requires_saved_key_and_encryption() {
+    let mut h = accepting_peer();
+    let mut change = [0; 8];
+    change[0] = 0x35; // Role Switch Failed.
+    change[1..7].copy_from_slice(&PAD);
+    change[7] = 1;
+    h.event(0x12, &change);
+    h.connected(PAD, HANDLE);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    assert!(h.poll().is_none());
+    h.event(8, &[0, 0x23, 1, 1]);
+    expect_incoming_up(&mut h);
+    h.event(8, &[0, 0x23, 1, 0]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkDown {
+            address: PAD,
+            reason: Reason::EncryptionLost,
+            ..
+        })
+    ));
+    h.cmd(DISCONNECT);
+}
+
+#[test]
+fn malformed_or_failed_feature_read_is_not_an_unsupported_controller() {
+    let mut h = Host::new();
+    h.cmd(RESET);
+    h.complete(RESET, 1, &[0]);
+    h.cmd(LOCAL_ADDR);
+    h.complete(LOCAL_ADDR, 1, &[0, 16, 16, 16, 16, 16, 16]);
+    assert!(h.cmd(LOCAL_FEATURES).params().is_empty());
+    assert_eq!(
+        h.sm.on_event(h.now, 0x0e, &[1, 3, 0x10, 0, 0x20]),
+        Err(Error::MalformedEvent)
+    );
+    h.complete(LOCAL_FEATURES, 1, &[3]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ControllerFault(Reason::Hci(3)))
+    ));
 }
 
 fn expect_incoming_up(h: &mut Host) {
@@ -1067,7 +1153,7 @@ fn failed_accept_revokes_queued_early_key_reply() {
     h.sm.accept_saved = true;
     h.cmd(WRITE_SCAN_ENABLE);
     h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
-    h.sm.accept_incoming(PAD, KEY).unwrap();
+    h.sm.accept_incoming(PAD_REQUEST, KEY).unwrap();
     h.cmd(ACCEPT);
     h.event(0x17, &PAD);
     assert!(h.poll().is_none());

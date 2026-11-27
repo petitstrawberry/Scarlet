@@ -345,11 +345,11 @@ impl Host {
                     );
                     self.shared.state.lock().ready(info.address);
                 }
-                Action::IncomingAcl(addr) => self
+                Action::IncomingAcl(request) => self
                     .shared
                     .state
                     .lock()
-                    .begin_incoming(addr, &mut self.classic),
+                    .begin_incoming(request, &mut self.classic),
                 Action::PeerFound(peer) => {
                     self.shared.state.lock().update_peer(peer);
                     if let Some(name) = peer.name
