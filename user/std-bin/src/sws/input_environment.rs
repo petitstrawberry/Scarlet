@@ -1,152 +1,172 @@
-//! Authoritative system-wide input and tablet-presentation state.
+//! Physical input state and the legacy protocol view of each output's Experience.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::sync::Mutex;
-use sws_protocol::WindowingMode;
+use sws_protocol::outputs::OutputExperience;
+use sws_protocol::{
+    WindowingMode, input_environment_known_flags as known, input_environment_state_flags as flags,
+};
 
-const TABLET_MODE_KNOWN: u32 = sws_protocol::input_environment_known_flags::TABLET_MODE;
-const LID_CLOSED_KNOWN: u32 = sws_protocol::input_environment_known_flags::LID_CLOSED;
-const WINDOWING_MODE_KNOWN: u32 = sws_protocol::input_environment_known_flags::WINDOWING_MODE;
-const TABLET_OVERRIDE_KNOWN: u32 =
-    sws_protocol::input_environment_known_flags::TABLET_MODE_OVERRIDE_ACTIVE;
-const WINDOWING_OVERRIDE_KNOWN: u32 =
-    sws_protocol::input_environment_known_flags::WINDOWING_MODE_OVERRIDE_ACTIVE;
-const TABLET_MODE_STATE: u32 = sws_protocol::input_environment_state_flags::TABLET_MODE;
-const LID_CLOSED_STATE: u32 = sws_protocol::input_environment_state_flags::LID_CLOSED;
-const FOCUSED_WINDOWING_STATE: u32 = sws_protocol::input_environment_state_flags::FOCUSED_WINDOWING;
-const TABLET_OVERRIDE_STATE: u32 =
-    sws_protocol::input_environment_state_flags::TABLET_MODE_OVERRIDE_ACTIVE;
-const WINDOWING_OVERRIDE_STATE: u32 =
-    sws_protocol::input_environment_state_flags::WINDOWING_MODE_OVERRIDE_ACTIVE;
-
-/// A complete, self-consistent input-environment snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Nonzero version advanced after every externally visible change.
     pub generation: u32,
-    /// Bits whose corresponding state values are known.
     pub known_flags: u32,
-    /// Current boolean state bits.
     pub state_flags: u32,
-    /// Currently present input-device capability bits.
     pub capability_flags: u32,
 }
 
 impl Snapshot {
-    const fn initial() -> Self {
-        Self {
-            generation: 1,
-            known_flags: 0,
-            state_flags: 0,
-            capability_flags: 0,
-        }
-    }
-
-    /// Return whether tablet mode is both known and enabled.
-    pub const fn tablet_mode(self) -> bool {
-        self.known_flags & TABLET_MODE_KNOWN != 0 && self.state_flags & TABLET_MODE_STATE != 0
-    }
-
-    /// Return whether the lid state is both known and closed.
-    pub const fn lid_closed(self) -> bool {
-        self.known_flags & LID_CLOSED_KNOWN != 0 && self.state_flags & LID_CLOSED_STATE != 0
-    }
-
-    /// Return the effective system-wide windowing policy.
-    pub const fn windowing_mode(self) -> WindowingMode {
-        if self.state_flags & FOCUSED_WINDOWING_STATE != 0 {
-            WindowingMode::Focused
-        } else {
-            WindowingMode::Freeform
-        }
-    }
-
-    /// Return whether tablet posture is currently forced by an override.
-    pub const fn tablet_mode_override_active(self) -> bool {
-        self.state_flags & TABLET_OVERRIDE_STATE != 0
-    }
-
-    /// Return whether windowing policy is currently forced by an override.
-    pub const fn windowing_mode_override_active(self) -> bool {
-        self.state_flags & WINDOWING_OVERRIDE_STATE != 0
+    pub fn hardware_tablet_mode(self) -> bool {
+        self.state_flags & flags::HARDWARE_TABLET_MODE != 0
     }
 }
 
+/// Published only after the compositor has installed the workspace projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputPolicy {
+    pub id: u32,
+    pub experience: OutputExperience,
+    pub tablet: bool,
+}
+
 struct EnvironmentState {
-    snapshot: Snapshot,
-    hardware_tablet_mode: Option<bool>,
-    hardware_lid_closed: Option<bool>,
-    tablet_mode_override: Option<bool>,
-    windowing_mode_override: Option<WindowingMode>,
-    console_session: bool,
+    generation: u32,
+    hardware_tablet: Option<bool>,
+    lid_closed: Option<bool>,
+    capabilities: u32,
+    // Primary first, including after hotplug.
+    outputs: Vec<OutputPolicy>,
+    clients: BTreeMap<usize, u32>,
 }
 
 impl EnvironmentState {
-    const fn initial() -> Self {
+    const fn new() -> Self {
         Self {
-            snapshot: Snapshot::initial(),
-            hardware_tablet_mode: None,
-            hardware_lid_closed: None,
-            tablet_mode_override: None,
-            windowing_mode_override: None,
-            console_session: false,
+            generation: 1,
+            hardware_tablet: None,
+            lid_closed: None,
+            capabilities: 0,
+            outputs: Vec::new(),
+            clients: BTreeMap::new(),
         }
     }
 
-    fn recompute_effective_flags(&mut self) {
-        let mut known_flags =
-            WINDOWING_MODE_KNOWN | TABLET_OVERRIDE_KNOWN | WINDOWING_OVERRIDE_KNOWN;
+    fn snapshot(&self, output: Option<u32>) -> Snapshot {
+        let policy = self
+            .outputs
+            .iter()
+            .find(|p| Some(p.id) == output)
+            .or(self.outputs.first());
+        let mut known_flags = known::TABLET_MODE
+            | known::WINDOWING_MODE
+            | known::TABLET_MODE_OVERRIDE_ACTIVE
+            | known::WINDOWING_MODE_OVERRIDE_ACTIVE;
         let mut state_flags = 0;
-
-        let tablet_mode = self.tablet_mode_override.or(self.hardware_tablet_mode);
-        if let Some(tablet_mode) = tablet_mode {
-            known_flags |= TABLET_MODE_KNOWN;
-            if tablet_mode {
-                state_flags |= TABLET_MODE_STATE;
+        if policy.is_some_and(|p| p.tablet) {
+            state_flags |= flags::TABLET_MODE | flags::FOCUSED_WINDOWING;
+        }
+        if policy.is_some_and(|p| p.experience != OutputExperience::Auto) {
+            state_flags |=
+                flags::TABLET_MODE_OVERRIDE_ACTIVE | flags::WINDOWING_MODE_OVERRIDE_ACTIVE;
+        }
+        if let Some(tablet) = self.hardware_tablet {
+            known_flags |= known::HARDWARE_TABLET_MODE;
+            if tablet {
+                state_flags |= flags::HARDWARE_TABLET_MODE;
             }
         }
-
-        if let Some(lid_closed) = self.hardware_lid_closed {
-            known_flags |= LID_CLOSED_KNOWN;
-            if lid_closed {
-                state_flags |= LID_CLOSED_STATE;
+        if let Some(closed) = self.lid_closed {
+            known_flags |= known::LID_CLOSED;
+            if closed {
+                state_flags |= flags::LID_CLOSED;
             }
         }
+        Snapshot {
+            generation: self.generation,
+            known_flags,
+            state_flags,
+            capability_flags: self.capabilities,
+        }
+    }
 
-        let windowing_mode = if self.console_session {
-            WindowingMode::Focused
-        } else {
-            self.windowing_mode_override.unwrap_or_else(|| {
-                if tablet_mode == Some(true) {
-                    WindowingMode::Focused
-                } else {
-                    WindowingMode::Freeform
-                }
-            })
-        };
-        if windowing_mode == WindowingMode::Focused {
-            state_flags |= FOCUSED_WINDOWING_STATE;
-        }
-        if self.tablet_mode_override.is_some() {
-            state_flags |= TABLET_OVERRIDE_STATE;
-        }
-        if self.windowing_mode_override.is_some() || self.console_session {
-            state_flags |= WINDOWING_OVERRIDE_STATE;
-        }
+    fn advance(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+    }
 
-        self.snapshot.known_flags = known_flags;
-        self.snapshot.state_flags = state_flags;
+    fn set_client_output(&mut self, client: usize, output: u32) -> Option<Snapshot> {
+        let previous = self.clients.insert(client, output);
+        if self.snapshot(previous) == self.snapshot(Some(output)) {
+            return None;
+        }
+        self.advance();
+        Some(self.snapshot(Some(output)))
     }
 }
 
-static STATE: Mutex<EnvironmentState> = Mutex::new(EnvironmentState::initial());
+static STATE: Mutex<EnvironmentState> = Mutex::new(EnvironmentState::new());
 #[cfg(test)]
 pub(super) static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
 
-fn next_generation(generation: u32) -> u32 {
-    let generation = generation.wrapping_add(1);
-    if generation == 0 { 1 } else { generation }
+pub fn snapshot() -> Snapshot {
+    STATE.lock().expect("input environment").snapshot(None)
+}
+
+pub fn client_snapshot(client: usize) -> Snapshot {
+    let state = STATE.lock().expect("input environment");
+    state.snapshot(state.clients.get(&client).copied())
+}
+
+pub fn client_output(client: usize) -> Option<u32> {
+    let state = STATE.lock().expect("input environment");
+    state
+        .clients
+        .get(&client)
+        .copied()
+        .filter(|id| state.outputs.iter().any(|p| p.id == *id))
+}
+
+pub fn forget_client(client: usize) {
+    STATE
+        .lock()
+        .expect("input environment")
+        .clients
+        .remove(&client);
+}
+
+pub fn set_client_output(client: usize, output: u32) -> Option<Snapshot> {
+    STATE
+        .lock()
+        .expect("input environment")
+        .set_client_output(client, output)
+}
+
+pub fn update_outputs(
+    outputs: Vec<OutputPolicy>,
+    tablet: Option<Option<bool>>,
+    lid: Option<Option<bool>>,
+) -> bool {
+    let mut state = STATE.lock().expect("input environment");
+    let tablet = tablet.unwrap_or(state.hardware_tablet);
+    let lid = lid.unwrap_or(state.lid_closed);
+    if state.outputs == outputs && state.hardware_tablet == tablet && state.lid_closed == lid {
+        return false;
+    }
+    state.outputs = outputs;
+    state.hardware_tablet = tablet;
+    state.lid_closed = lid;
+    state.advance();
+    true
+}
+
+pub fn update_capabilities(flags: u32) -> bool {
+    let mut state = STATE.lock().expect("input environment");
+    if state.capabilities == flags {
+        return false;
+    }
+    state.capabilities = flags;
+    state.advance();
+    true
 }
 
 /// Parse a startup tablet-mode override.
@@ -203,168 +223,27 @@ pub fn parse_windowing_mode_override(value: &str) -> Option<WindowingMode> {
     }
 }
 
-/// Initialize system state from `SCARLET_TABLET_MODE` and
-/// `SCARLET_TABLET_WINDOWING`.
-///
-/// Startup values are real overrides: later hardware reports continue to be
-/// sampled underneath them, and clearing an override immediately reveals the
-/// latest hardware-derived state.
-///
-/// # Returns
-///
-/// The initialized full snapshot.
-pub fn initialize_from_env() -> Snapshot {
-    let tablet_mode_override = env::var("SCARLET_TABLET_MODE")
-        .ok()
-        .as_deref()
-        .and_then(parse_tablet_mode_override);
-    let windowing_mode_override = env::var("SCARLET_TABLET_WINDOWING")
+/// Legacy startup defaults seed the primary output until a saved profile is applied.
+pub fn startup_experience() -> OutputExperience {
+    let mode = env::var("SCARLET_TABLET_WINDOWING")
         .ok()
         .as_deref()
         .and_then(parse_windowing_mode_override);
-    initialize(tablet_mode_override, windowing_mode_override)
+    let tablet = mode.map(|m| m == WindowingMode::Focused).or_else(|| {
+        env::var("SCARLET_TABLET_MODE")
+            .ok()
+            .as_deref()
+            .and_then(parse_tablet_mode_override)
+    });
+    legacy_experience(tablet)
 }
 
-fn initialize(
-    tablet_mode_override: Option<bool>,
-    windowing_mode_override: Option<WindowingMode>,
-) -> Snapshot {
-    let mut state = EnvironmentState {
-        tablet_mode_override,
-        windowing_mode_override,
-        ..EnvironmentState::initial()
-    };
-    state.recompute_effective_flags();
-    let snapshot = state.snapshot;
-    *STATE.lock().expect("SWS input-environment mutex poisoned") = state;
-    snapshot
-}
-
-/// Read the current full snapshot atomically.
-///
-/// # Returns
-///
-/// A copy of the authoritative snapshot.
-pub fn snapshot() -> Snapshot {
-    STATE
-        .lock()
-        .expect("SWS input-environment mutex poisoned")
-        .snapshot
-}
-
-fn apply_hardware_update(field: &mut Option<bool>, update: Option<Option<bool>>) {
-    if let Some(update) = update {
-        *field = update;
+pub fn legacy_experience(tablet: Option<bool>) -> OutputExperience {
+    match tablet {
+        Some(true) => OutputExperience::Tablet,
+        Some(false) => OutputExperience::Desktop,
+        None => OutputExperience::Auto,
     }
-}
-
-fn finish_update(state: &mut EnvironmentState, previous: Snapshot) -> Option<Snapshot> {
-    state.recompute_effective_flags();
-    if state.snapshot.known_flags == previous.known_flags
-        && state.snapshot.state_flags == previous.state_flags
-        && state.snapshot.capability_flags == previous.capability_flags
-    {
-        return None;
-    }
-    state.snapshot.generation = next_generation(previous.generation);
-    Some(state.snapshot)
-}
-
-/// Apply an optional hardware posture report.
-///
-/// Hardware state is always retained even while an override masks it.
-///
-/// # Arguments
-///
-/// * `tablet_mode` - `None` to preserve the field, `Some(None)` to make it
-///   unknown, or `Some(Some(value))` to publish a known value.
-/// * `lid_closed` - `None` to preserve the field, `Some(None)` to make it
-///   unknown, or `Some(Some(value))` to publish a known value.
-///
-/// # Returns
-///
-/// The new externally visible snapshot when it changed, otherwise `None`.
-pub fn update_posture(
-    tablet_mode: Option<Option<bool>>,
-    lid_closed: Option<Option<bool>>,
-) -> Option<Snapshot> {
-    let mut state = STATE.lock().expect("SWS input-environment mutex poisoned");
-    let previous = state.snapshot;
-    apply_hardware_update(&mut state.hardware_tablet_mode, tablet_mode);
-    apply_hardware_update(&mut state.hardware_lid_closed, lid_closed);
-    finish_update(&mut state, previous)
-}
-
-/// Set or clear the system-wide tablet-mode override.
-///
-/// # Arguments
-///
-/// * `tablet_mode` - Forced posture, or `None` to return to hardware detection.
-///
-/// # Returns
-///
-/// The new snapshot when the effective state or override metadata changed.
-pub fn set_tablet_mode_override(tablet_mode: Option<bool>) -> Option<Snapshot> {
-    let mut state = STATE.lock().expect("SWS input-environment mutex poisoned");
-    if state.tablet_mode_override == tablet_mode {
-        return None;
-    }
-    let previous = state.snapshot;
-    state.tablet_mode_override = tablet_mode;
-    finish_update(&mut state, previous)
-}
-
-/// Set or clear the system-wide windowing-mode override.
-///
-/// # Arguments
-///
-/// * `windowing_mode` - Forced policy, or `None` for posture-derived policy.
-///
-/// # Returns
-///
-/// The new snapshot when the effective state or override metadata changed.
-pub fn set_windowing_mode_override(windowing_mode: Option<WindowingMode>) -> Option<Snapshot> {
-    let mut state = STATE.lock().expect("SWS input-environment mutex poisoned");
-    if state.windowing_mode_override == windowing_mode {
-        return None;
-    }
-    let previous = state.snapshot;
-    state.windowing_mode_override = windowing_mode;
-    finish_update(&mut state, previous)
-}
-
-/// Apply the lifetime-scoped windowing policy of the console system shell.
-///
-/// This changes window placement without inventing a tablet posture or input
-/// capability. Hardware state and the user's override are retained and become
-/// effective again when the console shell disconnects.
-pub fn set_console_session(active: bool) -> Option<Snapshot> {
-    let mut state = STATE.lock().expect("SWS input-environment mutex poisoned");
-    if state.console_session == active {
-        return None;
-    }
-    let previous = state.snapshot;
-    state.console_session = active;
-    finish_update(&mut state, previous)
-}
-
-/// Replace the present-device capability bitset.
-///
-/// # Arguments
-///
-/// * `capability_flags` - Complete replacement capability bitset.
-///
-/// # Returns
-///
-/// The new full snapshot when the bitset changed, otherwise `None`.
-pub fn update_capabilities(capability_flags: u32) -> Option<Snapshot> {
-    let mut state = STATE.lock().expect("SWS input-environment mutex poisoned");
-    if state.snapshot.capability_flags == capability_flags {
-        return None;
-    }
-    state.snapshot.capability_flags = capability_flags;
-    state.snapshot.generation = next_generation(state.snapshot.generation);
-    Some(state.snapshot)
 }
 
 /// Encode a snapshot in SWS protocol field order.
@@ -390,149 +269,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn console_session_focuses_windows_without_changing_posture_or_losing_user_policy() {
-        let _guard = TEST_STATE_LOCK.lock().unwrap();
-        initialize(Some(false), Some(WindowingMode::Freeform));
-        let console = set_console_session(true).unwrap();
-        assert_eq!(console.windowing_mode(), WindowingMode::Focused);
-        assert!(!console.tablet_mode());
-        assert!(set_console_session(true).is_none());
-        assert!(set_windowing_mode_override(Some(WindowingMode::Freeform)).is_none());
-        assert_eq!(snapshot().windowing_mode(), WindowingMode::Focused);
-        let restored = set_console_session(false).unwrap();
-        assert_eq!(restored.windowing_mode(), WindowingMode::Freeform);
-        assert!(restored.windowing_mode_override_active());
-        assert!(!restored.tablet_mode());
-    }
-
-    #[test]
-    fn leaving_console_restores_current_hardware_policy() {
-        let _guard = TEST_STATE_LOCK.lock().unwrap();
-        initialize(None, None);
-        set_console_session(true).unwrap();
-        update_posture(Some(Some(true)), None).unwrap();
-        let tablet = set_console_session(false).unwrap();
-        assert!(tablet.tablet_mode());
-        assert_eq!(tablet.windowing_mode(), WindowingMode::Focused);
-        assert!(!tablet.windowing_mode_override_active());
-        let laptop = update_posture(Some(Some(false)), None).unwrap();
-        assert_eq!(laptop.windowing_mode(), WindowingMode::Freeform);
-    }
-
-    #[test]
-    fn parsers_accept_documented_values_case_insensitively() {
-        for value in ["1", "true", "YES", "On", "tablet", " TABLET "] {
-            assert_eq!(parse_tablet_mode_override(value), Some(true));
-        }
-        for value in ["0", "false", "NO", "Off", "laptop", " LAPTOP "] {
-            assert_eq!(parse_tablet_mode_override(value), Some(false));
-        }
-        assert_eq!(parse_tablet_mode_override(""), None);
-        assert_eq!(parse_tablet_mode_override("convertible"), None);
-
+    fn tablet_projection_preserves_physical_posture_lid_and_capabilities() {
+        let mut state = EnvironmentState::new();
+        state.hardware_tablet = Some(true);
+        state.lid_closed = Some(false);
+        state.capabilities = sws_protocol::input_environment_capability_flags::DIRECT_TOUCH;
+        state.outputs = vec![
+            OutputPolicy {
+                id: 0,
+                experience: OutputExperience::Desktop,
+                tablet: false,
+            },
+            OutputPolicy {
+                id: 8,
+                experience: OutputExperience::Tablet,
+                tablet: true,
+            },
+        ];
+        let primary = state.snapshot(None);
+        let external = state.set_client_output(7, 8).unwrap();
+        assert_eq!(external.generation, primary.generation + 1);
+        assert_eq!(state.set_client_output(7, 8), None);
         assert_eq!(
-            parse_windowing_mode_override(" FOCUSED "),
-            Some(WindowingMode::Focused)
+            primary.state_flags & (flags::TABLET_MODE | flags::FOCUSED_WINDOWING),
+            0
         );
         assert_eq!(
-            parse_windowing_mode_override("floating"),
-            Some(WindowingMode::Freeform)
+            external.state_flags & (flags::TABLET_MODE | flags::FOCUSED_WINDOWING),
+            flags::TABLET_MODE | flags::FOCUSED_WINDOWING
         );
-        assert_eq!(parse_windowing_mode_override("auto"), None);
+        for view in [primary, external] {
+            assert!(view.hardware_tablet_mode());
+            assert_ne!(view.known_flags & known::LID_CLOSED, 0);
+            assert_eq!(view.state_flags & flags::LID_CLOSED, 0);
+            assert_eq!(view.capability_flags, state.capabilities);
+            assert_eq!(protocol_payload(view).len(), 16);
+        }
+        state.outputs.pop();
+        assert_eq!(state.snapshot(Some(8)), state.snapshot(None));
     }
 
     #[test]
-    fn generation_advances_only_for_externally_visible_changes() {
-        let _test_guard = TEST_STATE_LOCK
-            .lock()
-            .expect("input-environment test mutex poisoned");
-        let initial = initialize(None, None);
-        assert_eq!(initial.generation, 1);
-        assert_eq!(initial.windowing_mode(), WindowingMode::Freeform);
-        assert_eq!(next_generation(u32::MAX), 1);
-        assert_eq!(update_posture(None, None), None);
-
-        let tablet =
-            update_posture(Some(Some(true)), None).expect("tablet state should become known");
-        assert_eq!(tablet.generation, 2);
-        assert_eq!(tablet.windowing_mode(), WindowingMode::Focused);
-        assert_eq!(update_posture(Some(Some(true)), None), None);
-
-        let lid = update_posture(None, Some(Some(false))).expect("lid state should become known");
-        assert_eq!(lid.generation, 3);
-        assert_eq!(update_capabilities(0), None);
-        let devices = update_capabilities(0b111).expect("capabilities should change");
-        assert_eq!(devices.generation, 4);
+    fn sensor_and_device_updates_remain_visible_under_an_explicit_experience() {
+        let _guard = TEST_STATE_LOCK.lock().unwrap();
+        let previous = std::mem::replace(&mut *STATE.lock().unwrap(), EnvironmentState::new());
+        let outputs = vec![OutputPolicy {
+            id: 0,
+            experience: OutputExperience::Tablet,
+            tablet: true,
+        }];
+        assert!(update_outputs(
+            outputs.clone(),
+            Some(Some(false)),
+            Some(Some(true))
+        ));
+        let laptop = snapshot();
+        assert_ne!(laptop.state_flags & flags::TABLET_MODE, 0);
+        assert!(!laptop.hardware_tablet_mode());
+        assert!(update_outputs(outputs.clone(), Some(Some(true)), None));
+        assert!(snapshot().hardware_tablet_mode());
+        assert!(!update_outputs(outputs.clone(), Some(Some(true)), None));
+        assert!(update_capabilities(7));
+        assert!(!update_capabilities(7));
+        assert!(update_outputs(outputs, Some(None), None));
+        let unknown = snapshot();
+        assert_eq!(unknown.generation, laptop.generation + 3);
+        assert_eq!(unknown.known_flags & known::HARDWARE_TABLET_MODE, 0);
+        assert_ne!(unknown.state_flags & flags::LID_CLOSED, 0);
+        assert_ne!(unknown.state_flags & flags::TABLET_MODE, 0);
+        assert_eq!(unknown.capability_flags, 7);
+        *STATE.lock().unwrap() = previous;
     }
 
     #[test]
-    fn tablet_override_masks_but_does_not_discard_hardware_state() {
-        let _test_guard = TEST_STATE_LOCK
-            .lock()
-            .expect("input-environment test mutex poisoned");
-        initialize(None, None);
-        let laptop = update_posture(Some(Some(false)), None).expect("hardware becomes known");
-        assert!(!laptop.tablet_mode());
-
-        let forced = set_tablet_mode_override(Some(true)).expect("override becomes active");
-        assert!(forced.tablet_mode());
-        assert!(forced.tablet_mode_override_active());
-        assert_eq!(forced.windowing_mode(), WindowingMode::Focused);
-
-        assert_eq!(update_posture(Some(Some(true)), None), None);
-        assert_eq!(update_posture(Some(Some(false)), None), None);
-
-        let restored = set_tablet_mode_override(None).expect("override metadata changes");
-        assert!(!restored.tablet_mode());
-        assert!(!restored.tablet_mode_override_active());
-        assert_eq!(restored.windowing_mode(), WindowingMode::Freeform);
-    }
-
-    #[test]
-    fn windowing_override_is_independent_from_posture() {
-        let _test_guard = TEST_STATE_LOCK
-            .lock()
-            .expect("input-environment test mutex poisoned");
-        initialize(Some(true), Some(WindowingMode::Freeform));
-        let initial = snapshot();
-        assert!(initial.tablet_mode());
-        assert_eq!(initial.windowing_mode(), WindowingMode::Freeform);
-        assert!(initial.windowing_mode_override_active());
-
-        let derived = set_windowing_mode_override(None).expect("override should clear");
-        assert_eq!(derived.windowing_mode(), WindowingMode::Focused);
-        assert!(!derived.windowing_mode_override_active());
-    }
-
-    #[test]
-    fn explicit_unknown_clears_only_the_selected_hardware_field() {
-        let _test_guard = TEST_STATE_LOCK
-            .lock()
-            .expect("input-environment test mutex poisoned");
-        initialize(None, None);
-        let known = update_posture(Some(Some(true)), Some(Some(true)))
-            .expect("hardware fields should become known");
-        assert!(known.tablet_mode());
-        assert!(known.lid_closed());
-
-        let unknown = update_posture(Some(None), None).expect("tablet should become unknown");
-        assert_eq!(unknown.known_flags & TABLET_MODE_KNOWN, 0);
-        assert_eq!(unknown.state_flags & TABLET_MODE_STATE, 0);
-        assert!(unknown.lid_closed());
-        assert_eq!(update_posture(Some(None), None), None);
-    }
-
-    #[test]
-    fn protocol_encoding_uses_snapshot_order() {
-        let snapshot = Snapshot {
-            generation: 0x0102_0304,
-            known_flags: 0x1112_1314,
-            state_flags: 0x2122_2324,
-            capability_flags: 0x3132_3334,
-        };
+    fn legacy_setters_share_the_output_policy() {
+        assert_eq!(legacy_experience(Some(true)), OutputExperience::Tablet);
+        assert_eq!(legacy_experience(Some(false)), OutputExperience::Desktop);
+        assert_eq!(legacy_experience(None), OutputExperience::Auto);
+        let mut state = EnvironmentState::new();
+        state.outputs.push(OutputPolicy {
+            id: 0,
+            experience: OutputExperience::Auto,
+            tablet: false,
+        });
+        assert_eq!(state.snapshot(None).state_flags, 0);
         assert_eq!(
-            protocol_payload(snapshot),
-            [4, 3, 2, 1, 20, 19, 18, 17, 36, 35, 34, 33, 52, 51, 50, 49,]
+            state.snapshot(None).known_flags & known::HARDWARE_TABLET_MODE,
+            0
         );
     }
 }

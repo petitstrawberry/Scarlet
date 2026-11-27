@@ -343,6 +343,7 @@ pub(super) enum OutputDamage {
 /// One display output to compose in a GPU frame.
 pub(super) struct GpuOutputFrame<'a> {
     pub(super) id: u32,
+    pub(super) navigation_indicator: Option<(i32, i32, u32, u32)>,
     pub(super) overview_shadows: Vec<((i32, i32, u32, u32), u32, [u8; 4])>,
     pub(super) overview_cards: Vec<((i32, i32, u32, u32), bool, bool)>,
     pub(super) overview_remove_buttons: Vec<(u32, (i32, i32, u32, u32), bool)>,
@@ -1492,7 +1493,6 @@ impl GpuCompositor {
         cursor: &Cursor,
         background: [u8; 4],
         resize_outline: Option<(i32, i32, u32, u32)>,
-        navigation_indicator: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         scene_damage: Option<&[BackdropDamage]>,
         backdrops: &[(WindowId, BackdropGeometry)],
@@ -1953,10 +1953,14 @@ impl GpuCompositor {
                     damage_clip,
                 )?;
             }
-            if let Some(rect) = navigation_indicator {
+            if let Some(rect) = frame.navigation_indicator {
                 append_overview_shadows(
                     &mut operations,
-                    &[(projection.rect(rect), rect.3 / 2, [96, 96, 96, 210])],
+                    &[(
+                        projection.rect(rect),
+                        projection.radius(rect.3 / 2),
+                        [96, 96, 96, 210],
+                    )],
                     self.target.width,
                     self.target.height,
                     damage_clip,

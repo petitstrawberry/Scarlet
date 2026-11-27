@@ -167,7 +167,7 @@ impl OcclusionTracker {
                 ..Default::default()
             });
         }
-        if let Some((panel, surface, _)) = target {
+        if let Some((panel, surface, scale)) = target {
             // i64 keeps signed origins plus unsigned extents from overflowing.
             let left = i64::from(panel.x).max(i64::from(surface.0));
             let top = i64::from(panel.y).max(i64::from(surface.1));
@@ -176,12 +176,25 @@ impl OcclusionTracker {
             let bottom = (i64::from(panel.y) + i64::from(panel.height))
                 .min(i64::from(surface.1) + i64::from(surface.3));
             events.push(if left < right && top < bottom {
+                // Scene coordinates are half-logical pixels; the wire rectangle
+                // is in the editor's buffer pixels. Round the covered edges out.
+                let axis = |start: i64, end: i64, origin: i32| {
+                    let units = u64::from(sws_protocol::outputs::COMPOSITOR_SCALE_MILLI);
+                    let start = (start - i64::from(origin)) as u64 * u64::from(scale) / units;
+                    let end = ((end - i64::from(origin)) as u64 * u64::from(scale)).div_ceil(units);
+                    (
+                        start.min(i32::MAX as u64) as i32,
+                        (end - start).min(u64::from(u32::MAX)) as u32,
+                    )
+                };
+                let (x, width) = axis(left, right, surface.0);
+                let (y, height) = axis(top, bottom, surface.1);
                 Occlusion {
                     window_id: panel.window_id,
-                    x: (left - i64::from(surface.0)).min(i64::from(i32::MAX)) as i32,
-                    y: (top - i64::from(surface.1)).min(i64::from(i32::MAX)) as i32,
-                    width: (right - left) as u32,
-                    height: (bottom - top) as u32,
+                    x,
+                    y,
+                    width,
+                    height,
                 }
             } else {
                 Occlusion {
@@ -288,19 +301,19 @@ mod tests {
             vec![Occlusion {
                 window_id: 1,
                 x: 0,
-                y: 568,
-                width: 596,
-                height: 300
+                y: 284,
+                width: 298,
+                height: 150
             }]
         );
         assert_eq!(
             tracker.update(Some((keyboard(1), (-20, 500, 400, 200), 1000))),
             vec![Occlusion {
                 window_id: 1,
-                x: 20,
-                y: 100,
-                width: 380,
-                height: 100
+                x: 10,
+                y: 50,
+                width: 190,
+                height: 50
             }]
         );
     }
@@ -352,9 +365,9 @@ mod tests {
             Occlusion {
                 window_id: 2,
                 x: 0,
-                y: 50,
-                width: 400,
-                height: 150
+                y: 25,
+                width: 200,
+                height: 75
             }
         );
         assert_eq!(
@@ -378,7 +391,7 @@ mod tests {
             height: 20,
         };
         assert_eq!(
-            tracker.update(Some((panel, (i32::MAX - 5, 0, 10, 10), 1000))),
+            tracker.update(Some((panel, (i32::MAX - 5, 0, 10, 10), 2000))),
             vec![Occlusion {
                 window_id: 1,
                 x: 0,

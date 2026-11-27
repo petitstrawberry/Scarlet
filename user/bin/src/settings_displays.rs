@@ -434,7 +434,16 @@ pub(super) fn watch(state: State<Editor>) {
                             if editor.applying {
                                 return;
                             }
-                            editor.adopt(snapshot);
+                            // A sensor-driven experience transition advances the
+                            // generation without changing the editable preferences.
+                            if editor.snapshot.as_ref().is_some_and(|old| {
+                                old.outputs == snapshot.outputs
+                                    && old.configuration == snapshot.configuration
+                            }) {
+                                editor.snapshot = Some(snapshot);
+                            } else {
+                                editor.adopt(snapshot);
+                            }
                             editor.modes = modes;
                             editor.status.clear();
                         });
@@ -703,6 +712,17 @@ pub(super) fn apply(state: &State<Editor>) {
                     })
                 {
                     return Err("Connected displays changed".into());
+                }
+                // Modesetting may move displays, but preserves their preferences.
+                // Avoid resubmitting an old preference under the new generation.
+                if !original.configuration.iter().all(|old| {
+                    live.configuration.iter().any(|current| {
+                        current.id == old.id
+                            && current.experience == old.experience
+                            && current.scale_milli == old.scale_milli
+                    })
+                }) {
+                    return Err("Display preferences changed while setting resolution".into());
                 }
             }
             connection

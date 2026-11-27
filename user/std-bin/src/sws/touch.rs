@@ -316,7 +316,7 @@ pub(crate) struct GestureRecognizer {
     config: GestureConfig,
     screen_width: u32,
     screen_height: u32,
-    tablet_mode: bool,
+    hardware_tablet_posture: bool,
     sources: Vec<SourceState>,
 }
 
@@ -334,16 +334,16 @@ impl GestureRecognizer {
             config,
             screen_width: screen_width.max(1),
             screen_height: screen_height.max(1),
-            tablet_mode: false,
+            hardware_tablet_posture: false,
             sources: Vec::new(),
         }
     }
 
-    pub(crate) fn set_tablet_mode(&mut self, enabled: bool) -> Vec<TouchPolicyEvent> {
-        if self.tablet_mode == enabled {
+    pub(crate) fn set_hardware_tablet_posture(&mut self, enabled: bool) -> Vec<TouchPolicyEvent> {
+        if self.hardware_tablet_posture == enabled {
             return Vec::new();
         }
-        self.tablet_mode = enabled;
+        self.hardware_tablet_posture = enabled;
         if !enabled {
             return Vec::new();
         }
@@ -361,7 +361,9 @@ impl GestureRecognizer {
     }
 
     pub(crate) fn process(&mut self, frame: TouchFrame) -> Vec<TouchPolicyEvent> {
-        if self.tablet_mode && matches!(frame.surface, TouchSurface::Touchpad { internal: true }) {
+        if self.hardware_tablet_posture
+            && matches!(frame.surface, TouchSurface::Touchpad { internal: true })
+        {
             return Vec::new();
         }
         let index = self
@@ -1003,7 +1005,7 @@ mod tests {
         external.source = PointerSource::Local(9);
         external.surface = TouchSurface::Touchpad { internal: false };
         recognizer.process(external);
-        let cancelled = recognizer.set_tablet_mode(true);
+        let cancelled = recognizer.set_hardware_tablet_posture(true);
         assert!(cancelled.iter().any(|event| matches!(
             event,
             TouchPolicyEvent::ReleaseSource {

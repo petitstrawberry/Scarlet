@@ -906,8 +906,8 @@ fn apply_input_environment(
     shell_layout: &State<ShellLayout>,
     open_menu_index: &State<Option<usize>>,
 ) {
-    // ShellSession resolves posture together with each monitor's configured
-    // experience. The listener only updates its shared environment snapshot.
+    // ShellSession gets each display's applied experience with its workarea.
+    // The listener supplies the shared physical input snapshot.
     if multi_output::session().is_some() {
         return;
     }
@@ -1514,14 +1514,14 @@ fn input_environment_snapshot(
     match environment {
         Some(environment) => InputEnvironmentSnapshot {
             available: true,
-            tablet_mode: environment.tablet_mode(),
+            hardware_tablet_mode: environment.hardware_tablet_mode(),
             touch_present: Some(environment.has_direct_touch()),
             keyboard_present: Some(environment.has_keyboard()),
             pointer_present: Some(environment.has_fine_pointer()),
         },
         None => InputEnvironmentSnapshot {
             available: false,
-            tablet_mode: None,
+            hardware_tablet_mode: None,
             touch_present: None,
             keyboard_present: None,
             pointer_present: None,
@@ -4220,21 +4220,28 @@ impl ShellApp {
         }
     }
 
+    /// Use the same applied experience for shell chrome and reserved workarea.
+    fn sync_output_workarea(&self, conn: &sws::Connection) -> bool {
+        let Ok(context) = conn.output_context(self.output_id.get()) else {
+            return false;
+        };
+        let layout = ShellLayout::from_tablet_mode(Some(context.tablet));
+        if self.shell_layout.get() != layout {
+            self.open_menu_index.set(None);
+            self.shell_layout.set(layout);
+        }
+        let area = layout.physical_workarea(
+            context.mode.pixel_width,
+            context.mode.pixel_height,
+            context.scale_milli,
+        );
+        let _ = conn.set_output_workarea(context.id, area.x, area.y, area.width, area.height);
+        true
+    }
+
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
-            if let Ok(context) = conn.output_context(self.output_id.get()) {
-                let workarea = layout.physical_workarea(
-                    context.mode.pixel_width,
-                    context.mode.pixel_height,
-                    context.scale_milli,
-                );
-                let _ = conn.set_output_workarea(
-                    context.id,
-                    workarea.x,
-                    workarea.y,
-                    workarea.width,
-                    workarea.height,
-                );
+            if self.sync_output_workarea(&conn) || self.output_id.get() != 0 {
                 return;
             }
             let scale_milli = query_output_scale(&conn);
@@ -4246,19 +4253,7 @@ impl ShellApp {
 
     fn update_workarea_from_screen_query(&self, fallback_width: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
-            if let Ok(context) = conn.output_context(self.output_id.get()) {
-                let workarea = layout.physical_workarea(
-                    context.mode.pixel_width,
-                    context.mode.pixel_height,
-                    context.scale_milli,
-                );
-                let _ = conn.set_output_workarea(
-                    context.id,
-                    workarea.x,
-                    workarea.y,
-                    workarea.width,
-                    workarea.height,
-                );
+            if self.sync_output_workarea(&conn) || self.output_id.get() != 0 {
                 return;
             }
             if let Ok((screen_width, screen_height)) = conn.get_screen_size() {

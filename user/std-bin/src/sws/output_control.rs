@@ -52,20 +52,24 @@ impl Compositor {
             .filter(|w| self.top_level_window_id(w.id) == root)
             .map(|w| w.id)
             .collect();
-        if self.workspace_manager.output_for_window(root) != Some(output) {
-            if let Some(destination) = self
-                .workspace_manager
-                .output(output)
-                .map(|state| state.active_workspace())
-            {
-                self.workspace_manager.transfer_window(root, destination);
-            }
-        }
-        let counter = self.outputs.get(output).unwrap().present_counter;
+        self.workspace_manager.rebind_scene(root, output);
+        let destination = self.outputs.get(output).unwrap();
+        let counter = destination.present_counter;
+        let bounds = destination.rect;
         for id in group {
             let old_output = self.window_output_id(id);
             if let Some(w) = self.window_manager.get_window_mut(id) {
                 if old_output != output {
+                    if w.fullscreen
+                        && let Some(source) = self.outputs.get(old_output)
+                    {
+                        // Translate the saved desktop rectangle along with its
+                        // owner before configuring the new fullscreen bounds.
+                        w.translate_output(
+                            bounds.x.saturating_sub(source.rect.x),
+                            bounds.y.saturating_sub(source.rect.y),
+                        );
+                    }
                     w.last_frame_submission_counter = Some(counter);
                     w.last_frame_credit_tick = None;
                     for callback in &mut self.pending_frame_callbacks {
@@ -84,9 +88,29 @@ impl Compositor {
             if let Some(source) = self.outputs.get_mut(old_output) {
                 source.target.full_redraw = true;
             }
-            self.send_current_window_configure(id);
+            if old_output != output
+                && self.window_manager.resize_fullscreen_window_on(
+                    id,
+                    (bounds.x, bounds.y, bounds.width, bounds.height),
+                )
+            {
+                self.send_fullscreen_configure(id);
+            } else {
+                self.send_current_window_configure(id);
+            }
         }
         self.outputs.get_mut(output).unwrap().target.full_redraw = true;
+        if let Some(owner) = self
+            .window_manager
+            .get_window(window)
+            .and_then(|w| w.owner_client_id)
+        {
+            self.project_client_environment(owner);
+        }
+        let panel = super::super::ipc::input_panel_state();
+        if panel.context.active() && self.top_level_window_id(panel.context.window_id) == root {
+            self.refresh_input_panel();
+        }
         true
     }
 
@@ -151,9 +175,7 @@ impl Compositor {
             scale_milli: output.scale_milli,
             mode: output.metadata.mode,
             rect: output.logical_rect,
-            tablet: output
-                .experience
-                .tablet_experience(output.metadata.internal, self.tablet_mode),
+            tablet: self.output_is_tablet(id),
         })
     }
 
@@ -252,14 +274,128 @@ impl Compositor {
             .map_or(self.outputs.primary_id(), |window| window.output_id)
     }
 
-    pub(super) fn window_uses_focused_mode(&self, id: u32) -> bool {
-        let output = self.window_output_id(id);
-        let Some(context) = self.output_context_for(output) else {
-            return false;
+    /// The wire environment is per connection. A provider follows its editor;
+    /// a pinned application without an output binding follows its focused or
+    /// topmost owned window. Headless legacy clients use the primary output.
+    pub(super) fn project_client_environment(&self, client: usize) {
+        let panel = super::super::ipc::input_panel_state();
+        let editor = panel
+            .provider
+            .filter(|(provider, _)| *provider == client && panel.context.active())
+            .and_then(|_| self.window_manager.get_window(panel.context.window_id));
+        let bound = super::super::ipc::client_output_context(client);
+        let owned = || {
+            self.window_manager
+                .get_focused_window_id()
+                .and_then(|id| self.window_manager.get_window(id))
+                .filter(|w| w.owner_client_id == Some(client))
+                .or_else(|| {
+                    self.window_manager
+                        .get_windows()
+                        .iter()
+                        .rev()
+                        .find(|w| w.owner_client_id == Some(client))
+                })
         };
-        context.tablet
-            || (output == self.outputs.primary_id()
-                && self.windowing_mode == sws_protocol::WindowingMode::Focused)
+        let id = editor
+            .map(|w| w.output_id)
+            .or(bound.map(|c| c.id))
+            .or_else(|| owned().map(|w| w.output_id))
+            .filter(|id| self.outputs.get(*id).is_some())
+            .unwrap_or(self.outputs.primary_id());
+        super::super::ipc::project_client_input_environment(client, id);
+    }
+
+    pub(super) fn window_uses_tablet_experience(&self, id: u32) -> bool {
+        self.output_is_tablet(self.window_output_id(id))
+    }
+
+    pub(super) fn output_is_tablet(&self, id: u32) -> bool {
+        self.workspace_manager
+            .output(id)
+            .is_some_and(|scope| scope.tablet_experience())
+    }
+
+    pub(super) fn publish_input_environment(
+        &self,
+        posture: Option<Option<bool>>,
+        lid: Option<Option<bool>>,
+    ) {
+        let outputs = self
+            .outputs
+            .iter()
+            .map(|output| input_environment::OutputPolicy {
+                id: output.id,
+                experience: output.experience,
+                tablet: self.output_is_tablet(output.id),
+            })
+            .collect();
+        if input_environment::update_outputs(outputs, posture, lid) {
+            super::super::ipc::broadcast_input_environment_changed();
+            super::super::input_environment_sbus::queue_state_changed();
+        }
+    }
+
+    /// Posture changes cannot be rejected. If materializing all cards would
+    /// exceed the workspace limit, keep reporting the actual projection and
+    /// retry when a workspace operation frees capacity.
+    pub(super) fn reconcile_output_experiences(&mut self, folded: bool) -> bool {
+        let mut changed = false;
+        self.experience_retry_pending = false;
+        let focused = self
+            .window_manager
+            .get_focused_window_id()
+            .map(|id| self.top_level_window_id(id));
+        for output in self.outputs.iter() {
+            match self.workspace_manager.apply_output_experience(
+                output.id,
+                output.experience,
+                output.metadata.internal,
+                folded,
+                focused,
+            ) {
+                Ok(applied) => changed |= applied,
+                Err(_) => self.experience_retry_pending = true,
+            }
+        }
+        if changed {
+            self.outputs.bump_generation();
+        }
+        changed
+    }
+
+    pub(super) fn set_legacy_experience(
+        &mut self,
+        client: usize,
+        request: u8,
+        tablet: Option<bool>,
+    ) {
+        let id = input_environment::client_output(client).unwrap_or(self.outputs.primary_id());
+        let experience = input_environment::legacy_experience(tablet);
+        let mut configuration = self.outputs.snapshot().configuration;
+        let result = match configuration.iter_mut().find(|entry| entry.id == id) {
+            Some(entry) if entry.experience == experience => Ok(()),
+            Some(entry) => {
+                entry.experience = experience;
+                self.install_output_configuration(&configuration, true)
+            }
+            None => Err(sws_protocol::error_codes::UNKNOWN_OUTPUT),
+        };
+        match result {
+            Ok(()) => send_response_to_client(
+                client,
+                sws_protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
+                request,
+                input_environment::protocol_payload(input_environment::client_snapshot(client))
+                    .to_vec(),
+            ),
+            Err(code) => send_response_to_client(
+                client,
+                sws_protocol::server_msg::ERROR,
+                request,
+                sws_protocol::payload_error(code).to_vec(),
+            ),
+        }
     }
 
     pub(super) fn restore_output_configuration(&mut self) {
@@ -301,16 +437,32 @@ impl Compositor {
         persist: bool,
     ) -> Result<(), u32> {
         use sws_protocol::error_codes as errors;
+        let folded = input_environment::snapshot().hardware_tablet_mode();
+        let was_tablet = self.output_is_tablet(self.outputs.primary_id());
+        let focused = self
+            .window_manager
+            .get_focused_window_id()
+            .map(|id| self.top_level_window_id(id));
         let mut workspaces = self.workspace_manager.clone();
-        for entry in configuration {
+        // Restore desktop groups first so freed workspace IDs count toward
+        // tablet expansion within the same atomic transaction.
+        let mut ordered: Vec<_> = configuration.iter().collect();
+        ordered.sort_by_key(|entry| {
+            self.outputs.get(entry.id).is_some_and(|o| {
+                entry
+                    .experience
+                    .tablet_experience(o.metadata.internal, folded)
+            })
+        });
+        for entry in ordered {
             let output = self.outputs.get(entry.id).ok_or(errors::UNKNOWN_OUTPUT)?;
             workspaces
                 .apply_output_experience(
                     entry.id,
                     entry.experience,
                     output.metadata.internal,
-                    self.tablet_mode,
-                    None,
+                    folded,
+                    focused,
                 )
                 .map_err(|_| errors::INVALID_OUTPUT_CONFIGURATION)?;
         }
@@ -326,6 +478,11 @@ impl Compositor {
         }
         self.workspace_manager = workspaces;
         self.outputs.apply_configuration(configuration);
+        self.experience_retry_pending = false;
+        if was_tablet != self.output_is_tablet(self.outputs.primary_id()) {
+            self.cancel_primary_experience_gestures();
+        }
+        self.publish_input_environment(None, None);
         super::super::input::set_screen_size(self.screen_width(), self.screen_height());
         for entry in configuration {
             let previous = old
@@ -366,11 +523,13 @@ impl Compositor {
             self.window_manager
                 .set_workarea(area.0, area.1, area.2, area.3);
         }
+        self.publish_window_creation_environment();
         self.reflow_maximized_windows_to_workarea();
         self.full_redraw_needed = true;
         self.confine_cursor_to_outputs();
         self.apply_workspace_presentation_policy();
-        self.publish_outputs();
+        self.refresh_input_panel();
+        self.publish_workspace_state();
         Ok(())
     }
 
@@ -433,6 +592,7 @@ impl Compositor {
                 };
                 let context = self.output_context_for(id).ok_or(errors::UNKNOWN_OUTPUT)?;
                 super::super::ipc::set_client_output_context(client, context);
+                self.project_client_environment(client);
                 Ok(OutputEvent::Context(context))
             }
             OutputRequest::Apply(transaction) => {
@@ -471,8 +631,7 @@ impl Compositor {
                         self.workspace_manager.output_for_window(*window) == Some(output)
                     })
                     .collect::<Vec<_>>();
-                let state = self
-                    .workspace_manager
+                self.workspace_manager
                     .output_mut(output)
                     .ok_or(errors::UNKNOWN_OUTPUT)?
                     .apply_transaction(transaction, &live)
@@ -483,13 +642,13 @@ impl Compositor {
                         super::super::workspace::ApplyError::InvalidState => {
                             errors::INVALID_WORKSPACE_STATE
                         }
-                    })?
-                    .state;
+                    })?;
                 self.apply_workspace_presentation_policy_on(Some(output));
-                self.publish_outputs();
+                self.publish_workspace_state();
                 if let Some(target) = self.outputs.get_mut(output) {
                     target.target.full_redraw = true;
                 }
+                let state = self.workspace_manager.output(output).unwrap().snapshot();
                 Ok(OutputEvent::Workspace { output, state })
             }
             OutputRequest::Workarea {

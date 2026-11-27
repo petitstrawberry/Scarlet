@@ -302,6 +302,18 @@ mod panel {
             sws_protocol::window_types::INPUT_PANEL,
         )
         .map_err(|error| format!("{error:?}"))?;
+        // This low-level window constructor starts on the primary display.
+        // Opt the surface into per-output scale and logical size configures
+        // before registering: SWS can immediately move it to the active editor.
+        if let Ok(snapshot) = probe.outputs()
+            && let Some(primary) = snapshot.outputs.iter().find(|output| output.primary)
+        {
+            window
+                .connection()
+                .output_context(primary.id)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        drop(probe);
         let receiver = window
             .connection()
             .subscribe_window_events(window.surface_id());
@@ -381,7 +393,8 @@ mod panel {
                     _ => {}
                 }
             }
-            // Posture and keyboard hotplug updates also hide an already-open panel.
+            // The provider's environment follows the active editor to its output.
+            // Changes to that experience or to input devices can hide the panel.
             let should_show = super::keyboard_input::should_show(
                 context,
                 environment.should_auto_show_input_panel(),

@@ -191,7 +191,6 @@ impl ShellSession {
         bus.observe(&bus.windows);
         bus.observe(&primary.home_applications);
         bus.observe(&primary.workspace_state);
-        bus.observe(&primary.input_environment_snapshot);
         let _ = SESSION.set(bus.clone());
         Self {
             primary,
@@ -417,41 +416,7 @@ impl ShellSession {
         let all_windows = self.bus.windows.get();
         self.menus.update_windows(&all_windows);
         self.menus_changed = true;
-        let topology = self.bus.outputs.get();
-        let physical_tablet = self
-            .primary
-            .input_environment_snapshot
-            .get()
-            .is_some_and(|environment| environment.tablet_mode == Some(true));
         for app in core::iter::once(&self.primary).chain(&self.secondary) {
-            if let Some(snapshot) = &topology {
-                if let Some(output) = snapshot
-                    .outputs
-                    .iter()
-                    .find(|output| output.id == app.output_id.get())
-                {
-                    if let Some(config) = snapshot
-                        .configuration
-                        .iter()
-                        .find(|config| config.id == output.id)
-                    {
-                        let layout = ShellLayout::from_tablet_mode(Some(
-                            config
-                                .experience
-                                .tablet_experience(output.internal, physical_tablet),
-                        ));
-                        if app.shell_layout.get() != layout {
-                            app.open_menu_index.set(None);
-                            app.shell_layout.set(layout);
-                            app.update_workarea(
-                                app.screen_width.get() as u32,
-                                app.screen_height.get() as u32,
-                                layout,
-                            );
-                        }
-                    }
-                }
-            }
             let workspace = app.workspace_state.get();
             let filtered = all_windows
                 .iter()

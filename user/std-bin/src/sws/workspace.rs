@@ -455,20 +455,11 @@ impl WorkspaceScope<'_> {
     /// # Arguments
     ///
     /// * `window_id` - Confirmed top-level scene-root identifier.
-    /// * `tablet_experience` - Whether launches use one composition per
-    ///   workspace.
-    /// * `focused_layout` - Whether the active projection should immediately
-    ///   present the new scene as `Single`.
     ///
     /// # Returns
     ///
     /// The workspace containing the scene after assignment.
-    pub(super) fn add_scene_root(
-        &mut self,
-        window_id: u32,
-        tablet_experience: bool,
-        focused_layout: bool,
-    ) -> WorkspaceId {
+    pub(super) fn add_scene_root(&mut self, window_id: u32) -> WorkspaceId {
         self.membership_dirty = true;
         if let Some((owner, workspace)) = self.namespace.window_owners.get(&window_id) {
             if *owner != self.group {
@@ -479,8 +470,8 @@ impl WorkspaceScope<'_> {
         if let Some(workspace_id) = self.workspace_for_window(window_id) {
             return workspace_id;
         }
-        if !tablet_experience {
-            return self.add_window(window_id, focused_layout);
+        if !self.tablet_experience() {
+            return self.add_window(window_id, false);
         }
 
         let active_index = self
@@ -1645,6 +1636,31 @@ impl WorkspaceManager {
         self.partitions[group].output
     }
 
+    /// An output bind has no explicit destination card. A tablet display
+    /// places the incoming scene using the same rules as a launch.
+    pub(super) fn rebind_scene(&mut self, window: u32, output: OutputId) {
+        let Some(source) = self.output_for_window(window) else {
+            return;
+        };
+        let Some(target) = self.output(output) else {
+            return;
+        };
+        if source == output {
+            return;
+        }
+        if !target.tablet_experience() {
+            self.transfer_window(window, target.active_workspace());
+            return;
+        }
+        {
+            let mut scope = self.output_mut(source).unwrap();
+            scope.remove_window(window);
+            let tablet = scope.tablet_experience();
+            scope.settle_after_close(tablet);
+        }
+        self.output_mut(output).unwrap().add_scene_root(window);
+    }
+
     /// Move a scene between output partitions atomically, repairing the source
     /// composition. Neither output's selected workspace or Home state changes.
     pub(super) fn transfer_window(&mut self, window: u32, destination: WorkspaceId) -> bool {
@@ -1667,17 +1683,11 @@ impl WorkspaceManager {
                 .scope_at(source)
                 .move_window_to_workspace(window, destination);
         }
-        // Remove from the saved desktop projection too. Otherwise leaving
-        // tablet mode could restore the migrated scene onto both monitors.
         {
             let mut scope = self.scope_at(source);
             scope.remove_window(window);
-            if let Some(restore) = &mut scope.state.desktop_restore {
-                for workspace in &mut restore.workspaces {
-                    workspace.window_ids.retain(|id| *id != window);
-                    workspace.tablet_layout = repaired_layout(workspace, window);
-                }
-            }
+            let tablet = scope.tablet_experience();
+            scope.settle_after_close(tablet);
         }
         let mut scope = self.scope_at(target);
         scope.membership_dirty = true;
@@ -1765,14 +1775,8 @@ impl WorkspaceManager {
         self.primary_mut().add_window(window_id, tablet_experience)
     }
 
-    pub(super) fn add_scene_root(
-        &mut self,
-        window_id: u32,
-        tablet_experience: bool,
-        focused_layout: bool,
-    ) -> WorkspaceId {
-        self.primary_mut()
-            .add_scene_root(window_id, tablet_experience, focused_layout)
+    pub(super) fn add_scene_root(&mut self, window_id: u32) -> WorkspaceId {
+        self.primary_mut().add_scene_root(window_id)
     }
 
     pub(super) fn remove_window(&mut self, window_id: u32) -> bool {
@@ -1780,6 +1784,30 @@ impl WorkspaceManager {
             return false;
         };
         self.scope_at(group).remove_window(window_id)
+    }
+
+    /// Close all scenes in a client batch before choosing successor cards.
+    /// Each output settles according to its own applied Experience.
+    pub(super) fn close_windows(&mut self, windows: &[u32]) -> bool {
+        let mut affected = Vec::new();
+        let mut changed = false;
+        for &window in windows {
+            if let Some(output) = self.output_for_window(window)
+                && !affected.contains(&output)
+            {
+                affected.push(output);
+            }
+            changed |= self.remove_window(window);
+        }
+        for id in affected {
+            let mut scope = self.output_mut(id).unwrap();
+            let tablet = scope.tablet_experience();
+            changed |= scope.settle_after_close(tablet);
+            if tablet && scope.workspaces.iter().all(|w| w.window_ids.is_empty()) {
+                changed |= scope.set_presentation(ShellPresentation::Home);
+            }
+        }
+        changed
     }
 
     pub(super) fn settle_after_close(&mut self, tablet_experience: bool) -> bool {
@@ -2066,15 +2094,15 @@ mod tests {
     #[test]
     fn output_navigation_and_tablet_projection_are_independent() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
-        manager.add_scene_root(11, false, false);
+        manager.add_scene_root(10);
+        manager.add_scene_root(11);
         assert!(manager.attach_output(8, "platform:mdss/DP-1"));
         let internal = manager.snapshot();
         let external_workspace;
         {
             let mut external = manager.output_mut(8).unwrap();
-            external_workspace = external.add_scene_root(20, false, false);
-            external.add_scene_root(21, false, false);
+            external_workspace = external.add_scene_root(20);
+            external.add_scene_root(21);
             external.enter_tablet_experience(Some(21));
             external.set_presentation(ShellPresentation::Overview);
         }
@@ -2094,13 +2122,10 @@ mod tests {
     fn folding_the_chassis_preserves_the_external_desktop() {
         use sws_protocol::outputs::OutputExperience;
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
-        manager.add_scene_root(11, false, false);
+        manager.add_scene_root(10);
+        manager.add_scene_root(11);
         assert!(manager.attach_output(2, "external"));
-        manager
-            .output_mut(2)
-            .unwrap()
-            .add_scene_root(20, false, false);
+        manager.output_mut(2).unwrap().add_scene_root(20);
         let external = manager.output(2).unwrap().snapshot();
         assert_eq!(
             manager.apply_output_experience(0, OutputExperience::Auto, true, true, Some(11)),
@@ -2128,13 +2153,69 @@ mod tests {
     }
 
     #[test]
+    fn closing_external_tablet_scenes_leaves_internal_desktop_untouched() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10);
+        manager.attach_output(7, "external");
+        manager
+            .apply_output_experience(
+                7,
+                sws_protocol::outputs::OutputExperience::Tablet,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+        {
+            let mut external = manager.output_mut(7).unwrap();
+            external.add_scene_root(20);
+            external.add_scene_root(21);
+            assert_eq!(external.snapshot().workspaces.len(), 2);
+        }
+        let desktop = manager.snapshot();
+        assert!(manager.close_windows(&[20, 21]));
+        assert_eq!(manager.snapshot(), desktop);
+        let external = manager.output(7).unwrap().snapshot();
+        assert_eq!(external.presentation, ShellPresentation::Home);
+        assert_eq!(external.workspaces.len(), 1);
+        assert!(manager.close_windows(&[10]));
+        assert_eq!(
+            manager.snapshot().presentation,
+            ShellPresentation::Workspace
+        );
+    }
+
+    #[test]
+    fn binding_a_scene_to_an_occupied_external_tablet_allocates_a_card() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10);
+        manager.add_scene_root(11);
+        manager.attach_output(7, "external");
+        manager
+            .apply_output_experience(
+                7,
+                sws_protocol::outputs::OutputExperience::Tablet,
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+        manager.output_mut(7).unwrap().add_scene_root(20);
+        manager.rebind_scene(10, 7);
+        let scope = manager.output(7).unwrap();
+        assert_eq!(scope.snapshot().workspaces.len(), 2);
+        assert_eq!(
+            scope.tablet_layout(scope.active_workspace()),
+            TabletLayout::Single { window_id: 10 }
+        );
+        assert_eq!(manager.snapshot().workspaces[0].window_ids, [11]);
+    }
+
+    #[test]
     fn disconnect_recovers_workspaces_and_reconnect_does_not_take_them_back() {
         let mut manager = WorkspaceManager::new();
         assert!(manager.attach_output(2, "platform:mdss/DP-1"));
-        manager
-            .output_mut(2)
-            .unwrap()
-            .add_scene_root(20, false, false);
+        manager.output_mut(2).unwrap().add_scene_root(20);
         let before = manager.output(2).unwrap().snapshot();
         assert!(!manager.attach_output(3, "platform:mdss/DP-1"));
         assert!(manager.detach_output(2));
@@ -2166,17 +2247,11 @@ mod tests {
     #[test]
     fn recovered_scenes_survive_tablet_restore() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(10);
         manager.enter_tablet_experience(Some(10));
         assert!(manager.attach_output(2, "external"));
-        manager
-            .output_mut(2)
-            .unwrap()
-            .add_scene_root(20, false, false);
-        manager
-            .output_mut(2)
-            .unwrap()
-            .add_scene_root(21, false, false);
+        manager.output_mut(2).unwrap().add_scene_root(20);
+        manager.output_mut(2).unwrap().add_scene_root(21);
         assert!(manager.detach_output(2));
         assert!(manager.output(0).unwrap().tablet_experience());
         manager.leave_tablet_experience();
@@ -2195,8 +2270,8 @@ mod tests {
     #[test]
     fn scene_transfer_cannot_be_undone_by_tablet_restore() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
-        manager.add_scene_root(11, false, false);
+        manager.add_scene_root(10);
+        manager.add_scene_root(11);
         manager.enter_tablet_experience(Some(10));
         assert!(manager.attach_output(2, "external"));
         let target = manager.output(2).unwrap().active_workspace();
@@ -2218,12 +2293,9 @@ mod tests {
     #[test]
     fn shell_transaction_cannot_steal_another_outputs_workspace_or_scene() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(10);
         assert!(manager.attach_output(2, "external"));
-        manager
-            .output_mut(2)
-            .unwrap()
-            .add_scene_root(20, false, false);
+        manager.output_mut(2).unwrap().add_scene_root(20);
         let before = manager.output(2).unwrap().snapshot();
         let stolen = manager.snapshot();
         for (workspace, members) in [
@@ -2269,8 +2341,8 @@ mod tests {
     #[test]
     fn shared_allocator_does_not_rewind_on_tablet_restore_or_shell_transaction() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
-        manager.add_scene_root(11, false, false);
+        manager.add_scene_root(10);
+        manager.add_scene_root(11);
         manager.enter_tablet_experience(Some(10));
         assert!(manager.attach_output(2, "external"));
         let external_id = manager.output(2).unwrap().active_workspace();
@@ -2296,9 +2368,10 @@ mod tests {
     #[test]
     fn tablet_top_level_launches_create_separate_workspace_compositions() {
         let mut manager = WorkspaceManager::new();
-        assert_eq!(manager.add_scene_root(10, true, true), 1);
+        manager.enter_tablet_experience(None);
+        assert_eq!(manager.add_scene_root(10), 1);
         let generation = manager.snapshot().generation;
-        let second = manager.add_scene_root(11, true, true);
+        let second = manager.add_scene_root(11);
         assert_ne!(second, 1);
         assert_eq!(manager.active_workspace(), second);
         assert_eq!(
@@ -2318,11 +2391,12 @@ mod tests {
     #[test]
     fn tablet_top_level_launch_fills_the_selected_empty_workspace() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, true, true);
+        manager.enter_tablet_experience(None);
+        manager.add_scene_root(10);
         let empty = manager.create_workspace().unwrap();
         let workspace_count = manager.snapshot().workspaces.len();
 
-        assert_eq!(manager.add_scene_root(11, true, true), empty);
+        assert_eq!(manager.add_scene_root(11), empty);
         assert_eq!(manager.snapshot().workspaces.len(), workspace_count);
         assert_eq!(
             manager.tablet_layout(empty),
@@ -2333,8 +2407,8 @@ mod tests {
     #[test]
     fn desktop_launches_share_the_active_virtual_desktop() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
-        manager.add_scene_root(11, false, false);
+        manager.add_scene_root(10);
+        manager.add_scene_root(11);
         assert_eq!(manager.snapshot().workspaces[0].window_ids, vec![10, 11]);
         assert_eq!(manager.snapshot().workspaces.len(), 1);
     }
@@ -2364,7 +2438,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(manager.add_scene_root(999, true, true), 1);
+        manager.enter_tablet_experience(None);
+        assert_eq!(manager.add_scene_root(999), 1);
         assert_eq!(manager.snapshot().workspaces.len(), MAX_WORKSPACES);
     }
 
@@ -2408,12 +2483,12 @@ mod tests {
     #[test]
     fn tablet_launch_filling_a_retained_empty_workspace_survives_desktop_restore() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(10);
         let empty = manager.create_workspace().unwrap();
         manager.enter_tablet_experience(None);
 
         assert_eq!(manager.active_workspace(), empty);
-        assert_eq!(manager.add_scene_root(11, true, true), empty);
+        assert_eq!(manager.add_scene_root(11), empty);
         manager.leave_tablet_experience();
         assert_eq!(manager.workspace_for_window(11), Some(empty));
         assert_eq!(manager.snapshot().workspaces.len(), 2);
@@ -2422,10 +2497,10 @@ mod tests {
     #[test]
     fn tablet_launch_appended_workspace_survives_desktop_restore() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, false, false);
+        manager.add_scene_root(10);
         manager.enter_tablet_experience(Some(10));
 
-        let launched = manager.add_scene_root(11, true, true);
+        let launched = manager.add_scene_root(11);
         assert_ne!(launched, 1);
         manager.leave_tablet_experience();
         assert_eq!(manager.workspace_for_window(11), Some(launched));
@@ -2745,12 +2820,13 @@ mod tests {
             ShellPresentation::Home,
         ] {
             let mut manager = WorkspaceManager::new();
-            manager.add_scene_root(10, true, true);
+            manager.enter_tablet_experience(None);
+            manager.add_scene_root(10);
             manager.create_workspace();
             manager.create_workspace();
             let closing = manager.create_workspace().unwrap();
-            manager.add_scene_root(11, true, true);
-            let successor = manager.add_scene_root(12, true, true);
+            manager.add_scene_root(11);
+            let successor = manager.add_scene_root(12);
             manager.activate_window(11, true);
             manager.set_presentation(presentation);
 
@@ -2776,8 +2852,9 @@ mod tests {
     #[test]
     fn tablet_close_at_first_workspace_selects_successor() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, true, true);
-        let successor = manager.add_scene_root(11, true, true);
+        manager.enter_tablet_experience(None);
+        manager.add_scene_root(10);
+        let successor = manager.add_scene_root(11);
         manager.activate_window(10, true);
         manager.remove_window(10);
 
@@ -2790,9 +2867,10 @@ mod tests {
     #[test]
     fn tablet_close_repairs_normal_destination_without_changing_live_selection() {
         let mut manager = WorkspaceManager::new();
-        manager.add_scene_root(10, true, true);
-        let successor = manager.add_scene_root(11, true, true);
-        let selected = manager.add_scene_root(12, true, true);
+        manager.enter_tablet_experience(None);
+        manager.add_scene_root(10);
+        let successor = manager.add_scene_root(11);
+        let selected = manager.add_scene_root(12);
         manager.set_presentation(ShellPresentation::Overview);
         manager.partitions[0].state.selection.normal_workspace = 1;
         manager.remove_window(10);
@@ -2810,8 +2888,9 @@ mod tests {
     fn tablet_move_prunes_source_and_preserves_selected_survivor() {
         for move_kind in 0..3 {
             let mut manager = WorkspaceManager::new();
-            manager.add_scene_root(10, true, true);
-            let second = manager.add_scene_root(11, true, true);
+            manager.enter_tablet_experience(None);
+            manager.add_scene_root(10);
+            let second = manager.add_scene_root(11);
             manager.set_presentation(ShellPresentation::Overview);
             let selected = match move_kind {
                 0 => {
@@ -2861,7 +2940,8 @@ mod tests {
         assert!(!manager.settle_after_close(true));
         assert!(!manager.leave_tablet_experience());
         assert_eq!(manager.snapshot(), state);
-        assert_eq!(manager.add_scene_root(12, true, true), selected);
+        manager.enter_tablet_experience(None);
+        assert_eq!(manager.add_scene_root(12), selected);
         assert_eq!(manager.snapshot().workspaces.len(), 1);
         assert_valid_state(&manager);
     }
@@ -2890,7 +2970,7 @@ mod tests {
         let mut manager = WorkspaceManager::new();
         manager.add_window(10, false);
         manager.enter_tablet_experience(Some(10));
-        let launched = manager.add_scene_root(11, true, true);
+        let launched = manager.add_scene_root(11);
         manager.remove_window(10);
 
         assert!(manager.settle_after_close(true));

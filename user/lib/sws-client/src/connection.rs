@@ -120,7 +120,7 @@ impl Capabilities {
         self.capabilities & protocol::capabilities::TOUCH_INPUT != 0
     }
 
-    /// Whether the server accepts system-wide tablet and windowing overrides.
+    /// Whether the server accepts legacy requests to set an output's experience.
     ///
     /// # Returns
     ///
@@ -3699,19 +3699,12 @@ impl Connection {
         }
     }
 
-    /// Set or clear the system-wide tablet-mode override.
+    /// Set the Experience preference on this client's display. An explicit
+    /// output binding takes precedence over an owned window. An unbound
+    /// connection without windows uses the primary display.
     ///
-    /// This affects the compositor, desktop shell, and every subscribed
-    /// application. Clearing the override immediately resumes the most recent
-    /// hardware posture sampled by SWS.
-    ///
-    /// # Arguments
-    ///
-    /// * `tablet_mode` - Forced posture, or `None` to resume hardware detection.
-    ///
-    /// # Returns
-    ///
-    /// The resulting complete system input-environment snapshot.
+    /// `Some(true)` selects Tablet, `Some(false)` selects Desktop, and `None`
+    /// selects Auto. Returns the resulting input environment for this client.
     pub fn set_tablet_mode_override(
         &self,
         tablet_mode: Option<bool>,
@@ -3724,15 +3717,10 @@ impl Connection {
         input_environment_from_server_message(response.message())
     }
 
-    /// Set or clear the system-wide windowing-policy override.
+    /// Set the same output preference as [`Self::set_tablet_mode_override`].
     ///
-    /// # Arguments
-    ///
-    /// * `windowing_mode` - Forced policy, or `None` to derive policy from posture.
-    ///
-    /// # Returns
-    ///
-    /// The resulting complete system input-environment snapshot.
+    /// Focused selects Tablet, Freeform selects Desktop, and `None` selects
+    /// Auto. Returns the resulting input environment for this client.
     pub fn set_windowing_mode_override(
         &self,
         windowing_mode: Option<protocol::WindowingMode>,

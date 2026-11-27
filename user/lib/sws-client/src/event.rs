@@ -33,7 +33,7 @@ pub struct InputEnvironment {
 }
 
 impl InputEnvironment {
-    /// Return whether tablet-mode state is known and enabled.
+    /// Return whether the client's output is using the tablet experience.
     ///
     /// # Returns
     ///
@@ -44,6 +44,19 @@ impl InputEnvironment {
         } else {
             None
         }
+    }
+
+    /// Read the physical tablet switch, independently of display experience.
+    /// A missing switch or a compositor without this field returns `None`.
+    pub const fn hardware_tablet_mode(self) -> Option<bool> {
+        if self.known_flags & sws_protocol::input_environment_known_flags::HARDWARE_TABLET_MODE == 0
+        {
+            return None;
+        }
+        Some(
+            self.state_flags & sws_protocol::input_environment_state_flags::HARDWARE_TABLET_MODE
+                != 0,
+        )
     }
 
     /// Return whether lid-closed state is known and enabled.
@@ -59,7 +72,7 @@ impl InputEnvironment {
         }
     }
 
-    /// Return the effective system-wide windowing policy.
+    /// Return the effective windowing policy for this client's output.
     ///
     /// # Returns
     ///
@@ -75,7 +88,7 @@ impl InputEnvironment {
         }
     }
 
-    /// Return whether a system-wide tablet-mode override is active.
+    /// Return whether this output has an explicit experience preference.
     ///
     /// # Returns
     ///
@@ -94,7 +107,7 @@ impl InputEnvironment {
         )
     }
 
-    /// Return whether a system-wide windowing-mode override is active.
+    /// Return whether this output has an explicit windowing preference via Experience.
     ///
     /// # Returns
     ///
@@ -146,7 +159,8 @@ impl InputEnvironment {
             != 0
     }
 
-    /// Automatic input panels require tablet posture and no external keyboard.
+    /// The panel provider receives its editor's display experience. Automatic panels
+    /// require tablet presentation, direct touch, and no external keyboard.
     pub const fn should_auto_show_input_panel(self) -> bool {
         matches!(self.tablet_mode(), Some(true))
             && self.has_direct_touch()
@@ -479,26 +493,34 @@ mod tests {
     use super::InputEnvironment;
 
     #[test]
-    fn input_panel_tracks_posture_and_external_keyboard_hotplug() {
+    fn input_panel_tracks_editor_experience_and_input_devices_independently_of_posture() {
         use sws_protocol::{
             input_environment_capability_flags as caps, input_environment_known_flags as known,
             input_environment_state_flags as state,
         };
         let mut environment = InputEnvironment {
             generation: 1,
-            known_flags: known::TABLET_MODE,
-            state_flags: 0,
+            known_flags: known::TABLET_MODE | known::HARDWARE_TABLET_MODE,
+            state_flags: state::HARDWARE_TABLET_MODE,
             capability_flags: caps::DIRECT_TOUCH | caps::KEYBOARD,
         };
-        assert!(!environment.should_auto_show_input_panel()); // touch laptop
+        assert_eq!(environment.hardware_tablet_mode(), Some(true));
+        assert!(!environment.should_auto_show_input_panel()); // desktop on a folded device
         environment.state_flags = state::TABLET_MODE;
-        assert!(environment.should_auto_show_input_panel()); // folded internal keyboard
+        assert_eq!(environment.hardware_tablet_mode(), Some(false));
+        assert!(environment.should_auto_show_input_panel()); // tablet on an unfolded device
+        environment.known_flags = known::TABLET_MODE;
+        assert_eq!(environment.hardware_tablet_mode(), None);
+        assert!(environment.should_auto_show_input_panel());
         environment.capability_flags |= caps::EXTERNAL_KEYBOARD;
         assert!(!environment.should_auto_show_input_panel());
         environment.capability_flags &= !caps::EXTERNAL_KEYBOARD;
-        assert!(environment.should_auto_show_input_panel()); // external keyboard detached
+        assert!(environment.should_auto_show_input_panel());
+        environment.capability_flags &= !caps::DIRECT_TOUCH;
+        assert!(!environment.should_auto_show_input_panel());
+        environment.capability_flags |= caps::DIRECT_TOUCH;
         environment.known_flags = 0;
-        assert!(!environment.should_auto_show_input_panel()); // unknown posture
+        assert!(!environment.should_auto_show_input_panel());
     }
 
     #[test]

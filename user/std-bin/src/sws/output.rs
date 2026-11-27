@@ -474,7 +474,7 @@ impl<T> OutputSet<T> {
     pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Output<T>> {
         self.outputs.iter_mut()
     }
-    fn bump_generation(&mut self) {
+    pub(super) fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1).max(1);
     }
 
@@ -653,13 +653,12 @@ impl<T> OutputSet<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Output, OutputRect, OutputSet, PRIMARY_OUTPUT_ID};
+    use super::{Output, OutputRect, OutputSet, PRIMARY_OUTPUT_ID, protocol};
 
     fn set(rects: &[OutputRect]) -> OutputSet<()> {
-        let mut outputs = rects
-            .iter()
-            .enumerate()
-            .map(|(index, rect)| Output::new(index as u32, *rect, 1000, ()));
+        let mut outputs = rects.iter().enumerate().map(|(index, rect)| {
+            Output::new(index as u32, *rect, protocol::COMPOSITOR_SCALE_MILLI, ())
+        });
         let mut set = OutputSet::single(outputs.next().unwrap());
         set.outputs.extend(outputs);
         set
@@ -749,8 +748,18 @@ mod tests {
         let mut set = set(&[OutputRect::new(0, 0, 1280, 800)]);
         let placement = set.next_placement(1024, 768);
         assert_eq!(placement, OutputRect::new(1280, 0, 1024, 768));
-        assert!(set.push(Output::new(7, placement, 1000, ())));
-        assert!(!set.push(Output::new(7, placement, 1000, ())));
+        assert!(set.push(Output::new(
+            7,
+            placement,
+            protocol::COMPOSITOR_SCALE_MILLI,
+            ()
+        )));
+        assert!(!set.push(Output::new(
+            7,
+            placement,
+            protocol::COMPOSITOR_SCALE_MILLI,
+            ()
+        )));
         assert_eq!(set.len(), 2);
         assert_eq!(set.bounds(), OutputRect::new(0, 0, 2304, 800));
         // The shorter right output leaves dead space below it.

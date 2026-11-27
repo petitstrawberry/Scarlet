@@ -83,7 +83,7 @@ pub mod capabilities {
     pub const INPUT_ENVIRONMENT: u64 = 1 << 4;
     /// Clients may distinguish visible window geometry from surface bounds.
     pub const WINDOW_GEOMETRY: u64 = 1 << 5;
-    /// Trusted user-space tools may override system-wide tablet and windowing modes.
+    /// Legacy setters can configure the selected display Experience.
     pub const SYSTEM_MODE_OVERRIDES: u64 = 1 << 6;
     /// Window creation may atomically negotiate initial size, limits, and geometry.
     pub const CONFIGURED_WINDOW_CREATION: u64 = 1 << 7;
@@ -132,7 +132,7 @@ pub mod extension_commit_flags {
 /// A bit in [`input_environment_state_flags`] is meaningful only when its
 /// matching bit is set here.
 pub mod input_environment_known_flags {
-    /// Whether the tablet-mode state is known.
+    /// Whether the effective output Experience is known.
     pub const TABLET_MODE: u32 = 1 << 0;
     /// Whether the lid-closed state is known.
     pub const LID_CLOSED: u32 = 1 << 1;
@@ -142,6 +142,8 @@ pub mod input_environment_known_flags {
     pub const TABLET_MODE_OVERRIDE_ACTIVE: u32 = 1 << 3;
     /// Whether the windowing-mode override state is known.
     pub const WINDOWING_MODE_OVERRIDE_ACTIVE: u32 = 1 << 4;
+    /// Raw EV_SW tablet posture, independent of the output Experience.
+    pub const HARDWARE_TABLET_MODE: u32 = 1 << 5;
 }
 
 /// Current input-environment state bits.
@@ -149,19 +151,21 @@ pub mod input_environment_known_flags {
 /// Each bit is meaningful only when the corresponding bit is set in
 /// [`input_environment_known_flags`].
 pub mod input_environment_state_flags {
-    /// The device is currently in tablet mode.
+    /// The selected output uses tablet presentation.
     pub const TABLET_MODE: u32 = 1 << 0;
     /// The device lid is currently closed.
     pub const LID_CLOSED: u32 = 1 << 1;
     /// Focused windowing is active. When clear, freeform windowing is active.
     pub const FOCUSED_WINDOWING: u32 = 1 << 2;
-    /// A system-wide tablet-mode override is active.
+    /// The selected output has an explicit Desktop or Tablet Experience.
     pub const TABLET_MODE_OVERRIDE_ACTIVE: u32 = 1 << 3;
-    /// A system-wide windowing-mode override is active.
+    /// Legacy alias for an explicit output Experience.
     pub const WINDOWING_MODE_OVERRIDE_ACTIVE: u32 = 1 << 4;
+    /// Raw EV_SW tablet posture, independent of the output Experience.
+    pub const HARDWARE_TABLET_MODE: u32 = 1 << 5;
 }
 
-/// System-wide window-management presentation.
+/// Legacy windowing projection of the selected display Experience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum WindowingMode {
@@ -462,9 +466,9 @@ pub mod client_msg {
     pub const GET_INPUT_ENVIRONMENT: u32 = 45;
     /// Set the visible window geometry inside the complete surface bounds.
     pub const SET_WINDOW_GEOMETRY: u32 = 46;
-    /// Set or clear the system-wide tablet-mode override.
+    /// Configure the selected display Experience using the legacy tablet-mode encoding.
     pub const SET_TABLET_MODE_OVERRIDE: u32 = 47;
-    /// Set or clear the system-wide windowing-mode override.
+    /// Configure the selected display Experience using the legacy windowing-mode encoding.
     pub const SET_WINDOWING_MODE_OVERRIDE: u32 = 48;
     /// Create a window after applying compositor policy and client size constraints.
     pub const CREATE_WINDOW_CONFIGURED: u32 = 49;
@@ -1569,15 +1573,15 @@ pub enum ClientMessageRef<'a> {
     /// Query the current input environment snapshot.
     GetInputEnvironment {},
 
-    /// Set or clear the system-wide tablet-mode override.
+    /// Configure the selected display Experience using the legacy tablet-mode encoding.
     SetTabletModeOverride {
-        /// `None` restores hardware-driven posture.
+        /// `None` selects Auto for the output.
         tablet_mode: Option<bool>,
     },
 
-    /// Set or clear the system-wide windowing-mode override.
+    /// Configure the selected display Experience using the legacy windowing-mode encoding.
     SetWindowingModeOverride {
-        /// `None` restores posture-derived windowing policy.
+        /// `None` selects Auto for the output.
         windowing_mode: Option<WindowingMode>,
     },
 
@@ -5276,7 +5280,7 @@ pub fn payload_input_environment_changed(
 ///
 /// # Arguments
 ///
-/// * `tablet_mode` - Forced posture, or `None` to resume hardware detection.
+/// * `tablet_mode` - Tablet or Desktop, or `None` for Auto.
 ///
 /// # Returns
 ///
@@ -5294,7 +5298,7 @@ pub fn payload_set_tablet_mode_override(tablet_mode: Option<bool>) -> [u8; 4] {
 ///
 /// # Arguments
 ///
-/// * `windowing_mode` - Forced policy, or `None` to resume posture-derived policy.
+/// * `windowing_mode` - Focused for Tablet, Freeform for Desktop, or `None` for Auto.
 ///
 /// # Returns
 ///

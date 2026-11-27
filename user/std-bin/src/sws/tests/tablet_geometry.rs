@@ -2,8 +2,12 @@
 //! Run test-tablet-geometry.sh through the Scarlet Nix environment on AArch64.
 #[path = "../animation_policy.rs"]
 mod animation_policy;
-#[path = "../config.rs"]
-mod config;
+// Device-reader setup is outside this host geometry/input harness.
+mod config {
+    pub(super) fn read_sws_config() -> Result<String, &'static str> {
+        panic!("input test started device reader")
+    }
+}
 #[path = "../frame_callback.rs"]
 mod frame_callback;
 #[path = "../input.rs"]
@@ -31,7 +35,7 @@ mod workspace_geometry;
 // Input frame tests exercise production decoding without starting device readers
 // or the compositor. Fail if a test unexpectedly crosses that boundary.
 mod ipc {
-    pub fn broadcast_input_environment_changed(_: super::input_environment::Snapshot) {
+    pub fn broadcast_input_environment_changed() {
         panic!("input test attempted IPC");
     }
     pub fn wake_compositor() {
@@ -39,7 +43,7 @@ mod ipc {
     }
 }
 mod input_environment_sbus {
-    pub fn queue_state_changed(_: super::input_environment::Snapshot) {
+    pub fn queue_state_changed() {
         panic!("input test attempted SBus");
     }
 }

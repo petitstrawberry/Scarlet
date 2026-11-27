@@ -135,8 +135,8 @@ The shell and compositor must preserve these invariants:
 
 ## Output and Posture Model
 
-Posture and presentation are per output, even though the initial SWS
-implementation exposes one output:
+The chassis has one physical posture. Each connected display has its own
+experience preference and shell presentation.
 
 ```rust
 enum DevicePosture {
@@ -158,9 +158,38 @@ enum OutputPresentation {
 }
 ```
 
-`Auto` derives the experience from device posture. An external monitor may use
-Desktop while the internal display uses Tablet. Closing or detaching an output
-makes its workspace unassigned; it does not delete that workspace.
+In Settings → Displays, select a display, choose its Experience, and apply.
+Automatic follows the physical tablet switch on a built-in display. It uses
+Desktop on an external display or when the switch is unavailable. Explicit
+Desktop and Tablet preferences apply regardless of posture.
+
+`tabletctl` uses the same SWS transaction as Settings. Both update the live
+display and save the layout in `/etc/sws/config.toml` for monitor combinations
+with unique identities. An ambiguous monitor combination gets the live update
+for the session.
+
+```sh
+tabletctl outputs
+tabletctl --output 1 experience tablet
+tabletctl --output 1 status
+tabletctl --output 1 watch
+tabletctl --output 1 experience auto
+```
+
+Without `--output ID`, tabletctl selects the built-in display, then falls back
+to the primary display. The legacy commands `posture tablet` and
+`windowing focused` select Tablet. `posture laptop` and `windowing freeform`
+select Desktop. Both legacy commands accept `auto` to restore Automatic.
+
+In status and watch output, `posture` reports the physical switch
+(`tablet`, `laptop`, or `unknown`). `configured` reports the selected
+preference and `experience` reports the layout SWS has applied. Its source is
+`configured` for an explicit preference, `hardware` for a known posture in
+Automatic, or `desktop-default` for the automatic desktop fallback. A source
+of `compositor` indicates that SWS has retained a different layout, for
+example while waiting for workspace capacity.
+
+Detaching an output leaves its workspace available for reassignment.
 
 The single-output implementation stores one active workspace, its committed
 shell-navigation return target, and one presentation. Moving the Overview
@@ -761,8 +790,8 @@ destruction, parent changes, output changes, or posture-derived layout repair.
   workspace metadata is advisory until live scenes return.
 - Stale transaction: reject with a typed protocol error and no visual change.
 - Invalid split/member reference: reject the complete transaction.
-- Unknown posture: preserve the current experience until an explicit policy or
-  reliable posture becomes available.
+- With unknown physical posture, Automatic selects Desktop. Explicit display
+  preferences continue to apply.
 
 ## Persistence
 

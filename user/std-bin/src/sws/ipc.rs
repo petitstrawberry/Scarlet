@@ -629,7 +629,7 @@ static WINDOW_CREATION_ENVIRONMENT: Mutex<WindowCreationEnvironment> =
 /// * `screen_width` - Current physical output width.
 /// * `screen_height` - Current physical output height.
 /// * `workarea` - Current managed workarea, when a shell reserved one.
-/// * `windowing_mode` - Effective system-wide windowing policy.
+/// * `windowing_mode` - Windowing projection of the primary output for legacy creation.
 ///
 /// # Returns
 ///
@@ -878,6 +878,9 @@ static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>>
 ///
 /// Keeping this separate from the general client registry preserves protocol
 /// compatibility with clients that predate message type 35.
+// Serialize publication from capability readers and the compositor. Take each
+// projected snapshot while holding this lock so older events cannot queue last.
+static INPUT_ENVIRONMENT_DELIVERY: Mutex<()> = Mutex::new(());
 static INPUT_ENVIRONMENT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
 /// Connection holding the exclusive system-shell workspace-control role.
@@ -1012,6 +1015,7 @@ fn subscribe_input_environment(client_id: usize) {
 }
 
 fn unsubscribe_input_environment(client_id: usize) {
+    input_environment::forget_client(client_id);
     OUTPUT_SUBSCRIBERS
         .lock()
         .expect("output subscribers")
@@ -1487,13 +1491,11 @@ fn input_environment_frame(snapshot: Snapshot) -> PendingServerFrame {
     }
 }
 
-/// Broadcast one complete input-environment snapshot to subscribed clients.
-///
-/// # Arguments
-///
-/// * `snapshot` - Authoritative snapshot produced by an effective state change.
-pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
-    let frame = input_environment_frame(snapshot);
+/// Publish the current output projection to each subscribed connection.
+pub fn broadcast_input_environment_changed() {
+    let _delivery = INPUT_ENVIRONMENT_DELIVERY
+        .lock()
+        .expect("input environment delivery");
     let client_ids: Vec<usize> = INPUT_ENVIRONMENT_SUBSCRIBERS
         .lock()
         .expect("SWS input-environment subscriber mutex poisoned")
@@ -1501,7 +1503,23 @@ pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
         .copied()
         .collect();
     for client_id in client_ids {
-        send_message_to_client(client_id, frame.msg_type, frame.payload.clone());
+        let frame = input_environment_frame(input_environment::client_snapshot(client_id));
+        send_message_to_client(client_id, frame.msg_type, frame.payload);
+    }
+}
+
+pub(super) fn project_client_input_environment(client: usize, output: u32) {
+    let _delivery = INPUT_ENVIRONMENT_DELIVERY
+        .lock()
+        .expect("input environment delivery");
+    if let Some(snapshot) = input_environment::set_client_output(client, output)
+        && INPUT_ENVIRONMENT_SUBSCRIBERS
+            .lock()
+            .expect("input environment subscribers")
+            .contains(&client)
+    {
+        let frame = input_environment_frame(snapshot);
+        send_message_to_client(client, frame.msg_type, frame.payload);
     }
 }
 
@@ -1551,21 +1569,13 @@ fn update_input_panel_context(context: Option<&TextInputContext>) {
             content_purpose: context.current.content_purpose,
         }
     });
-    let snapshot = {
-        let mut panel = INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
-        if !panel.update(state) {
-            return;
-        }
-        *panel
-    };
-    if let Some((client_id, _)) = snapshot.provider {
-        send_message_to_client(
-            client_id,
-            protocol::server_msg::INPUT_PANEL_CONTEXT,
-            snapshot.provider_context().encode(),
-        );
+    if INPUT_PANEL
+        .lock()
+        .expect("SWS input panel mutex poisoned")
+        .update(state)
+    {
+        push_ipc_event(IpcEvent::PublishInputPanelContext);
     }
-    push_ipc_event(IpcEvent::InputPanelChanged);
 }
 pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, valid: bool) {
     let accepted = valid
@@ -1580,13 +1590,7 @@ pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, va
         u32::from(accepted).to_le_bytes().to_vec(),
     );
     if accepted {
-        let snapshot = input_panel_state();
-        send_message_to_client(
-            client_id,
-            protocol::server_msg::INPUT_PANEL_CONTEXT,
-            snapshot.provider_context().encode(),
-        );
-        push_ipc_event(IpcEvent::InputPanelChanged);
+        push_ipc_event(IpcEvent::PublishInputPanelContext);
     }
 }
 pub(super) fn unregister_input_panel(client_id: usize) {
@@ -4359,7 +4363,9 @@ fn client_thread_main(
                 // delivered as a later notification, so no transition can be
                 // missed between query and subscription.
                 subscribe_input_environment(client_id);
-                let payload = input_environment::protocol_payload(input_environment::snapshot());
+                let payload = input_environment::protocol_payload(
+                    input_environment::client_snapshot(client_id),
+                );
                 if let Err(error) = write_frame_response(
                     &mut stream_writer,
                     protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
@@ -4776,20 +4782,13 @@ fn client_thread_main(
                             context.client_id == client_id && context.enabled
                         }) && input_panel_state().context.context_id == context_id
                         {
-                            let (provider, delivered) = {
-                                let mut panel =
-                                    INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
-                                let Some(delivered) = panel.request_show(context_id) else {
-                                    continue;
-                                };
-                                (panel.provider, delivered)
-                            };
-                            if let Some((provider, _)) = provider {
-                                send_message_to_client(
-                                    provider,
-                                    protocol::server_msg::INPUT_PANEL_CONTEXT,
-                                    delivered.encode(),
-                                );
+                            if INPUT_PANEL
+                                .lock()
+                                .expect("SWS input panel mutex poisoned")
+                                .request_show(context_id)
+                                .is_some()
+                            {
+                                push_ipc_event(IpcEvent::PublishInputPanelContext);
                             }
                         }
                     }
@@ -5033,6 +5032,7 @@ pub enum IpcEvent {
         request_id: u8,
     },
     InputPanelChanged,
+    PublishInputPanelContext,
     InputPanelDismiss {
         client_id: usize,
         context_id: u32,
@@ -5454,14 +5454,14 @@ pub enum IpcEvent {
         target_app_id: Vec<u8>,
     },
 
-    /// Set or clear the system-wide tablet posture override.
+    /// Legacy tablet spelling of an output Experience change.
     SetTabletModeOverride {
         client_id: usize,
         request_id: u8,
         tablet_mode: Option<bool>,
     },
 
-    /// Set or clear the system-wide windowing-policy override.
+    /// Legacy windowing spelling of an output Experience change.
     SetWindowingModeOverride {
         client_id: usize,
         request_id: u8,
@@ -5668,12 +5668,7 @@ mod input_environment_tests {
         unsubscribe_input_environment(legacy_client);
         subscribe_input_environment(subscribed_client);
 
-        broadcast_input_environment_changed(Snapshot {
-            generation: 10,
-            known_flags: 1,
-            state_flags: 1,
-            capability_flags: 0,
-        });
+        broadcast_input_environment_changed();
 
         let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
         assert!(pending.get(&legacy_client).is_some_and(Vec::is_empty));
