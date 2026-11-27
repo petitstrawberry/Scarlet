@@ -4,6 +4,7 @@
 
 use crate::{
     arch::Trapframe,
+    library::std::usercopy::copy_to_user,
     object::{
         handle::HandleMetadata, handle::HandleType, handle::StandardInputOutput,
         introspection::KernelObjectInfo,
@@ -35,22 +36,21 @@ pub fn sys_handle_query(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Translate the pointer to get access to the info structure
-    let info_vaddr = match task.vm_manager.translate_to_kva(info_ptr) {
-        Some(addr) => addr as *mut KernelObjectInfo,
-        None => return usize::MAX, // Invalid pointer
+    let Some(info) = task.handle_table.get_object_info(handle) else {
+        return usize::MAX;
     };
-
-    // Get object information
-    match task.handle_table.get_object_info(handle) {
-        Some(info) => {
-            // Write the information to user space
-            unsafe {
-                *info_vaddr = info;
-            }
-            0 // Success
-        }
-        None => usize::MAX, // Invalid handle
+    // The C ABI record has three 32-bit fields and eight one-byte capability flags.
+    const { assert!(size_of::<KernelObjectInfo>() == 3 * size_of::<u32>() + 8) };
+    // SAFETY: all fields of this padding-free record are initialized by get_object_info.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::from_ref(&info).cast::<u8>(),
+            size_of::<KernelObjectInfo>(),
+        )
+    };
+    match copy_to_user(&task, info_ptr, bytes) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
     }
 }
 
