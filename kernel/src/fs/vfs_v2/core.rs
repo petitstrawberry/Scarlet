@@ -151,7 +151,11 @@ impl VfsEntry {
         // Try to upgrade the weak reference
         if let Some(weak_ref) = children.get(name) {
             if let Some(strong_ref) = weak_ref.upgrade() {
-                return Some(strong_ref);
+                drop(children);
+                return strong_ref
+                    .node
+                    .cached_name_is_current()
+                    .then_some(strong_ref);
             } else {
                 // Clean up dead weak reference
                 children.remove(name);
@@ -203,6 +207,12 @@ impl fmt::Debug for VfsEntry {
 /// This trait provides only basic APIs for file/directory attributes, type checks, fs reference, and downcasting.
 /// All operation APIs (lookup, create, remove, open, etc.) are consolidated in FileSystemOperations for clear separation of concerns.
 pub trait VfsNode: Send + Sync + Any {
+    /// A filesystem whose names change outside VFS namespace operations can
+    /// revalidate a positive directory entry before another lookup uses it.
+    fn cached_name_is_current(&self) -> bool {
+        true
+    }
+
     /// Native labels belong to the inode rather than its pathname or an ABI.
     fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {
         None

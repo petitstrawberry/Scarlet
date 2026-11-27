@@ -382,6 +382,15 @@ impl DevNode {
         *self.device_manager_addr.write() = Some(device_manager as *const DeviceManager as usize);
     }
 
+    fn device_manager(&self) -> &DeviceManager {
+        #[cfg(test)]
+        if let Some(addr) = *self.device_manager_addr.read() {
+            // The test creating this DevFS owns the manager for its lifetime.
+            return unsafe { &*(addr as *const DeviceManager) };
+        }
+        DeviceManager::get_manager()
+    }
+
     /// Add a child node
     pub fn add_child(&self, name: String, child: Arc<DevNode>) -> Result<(), FileSystemError> {
         if self.file_type != FileType::Directory {
@@ -452,19 +461,11 @@ impl DevNode {
         match self.file_type {
             FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) => {
                 // Create a device file object that can handle device operations
-                #[cfg(test)]
-                if let Some(device_manager_addr) = *self.device_manager_addr.read() {
-                    return Ok(Arc::new(DevFileObject::new_with_device_manager(
-                        Arc::new(self.clone()),
-                        device_info.device_id,
-                        device_info.device_type,
-                        unsafe { &*(device_manager_addr as *const DeviceManager) },
-                    )?));
-                }
-                Ok(Arc::new(DevFileObject::new(
+                Ok(Arc::new(DevFileObject::new_with_manager(
                     Arc::new(self.clone()),
                     device_info.device_id,
                     device_info.device_type,
+                    self.device_manager(),
                 )?))
             }
             FileType::Directory => {
@@ -480,6 +481,15 @@ impl DevNode {
 }
 
 impl VfsNode for DevNode {
+    fn cached_name_is_current(&self) -> bool {
+        match self.file_type {
+            FileType::CharDevice(info) | FileType::BlockDevice(info) => {
+                self.device_manager().get_device_id_by_name(&self.name) == Some(info.device_id)
+            }
+            _ => true,
+        }
+    }
+
     fn id(&self) -> u64 {
         self.file_id
     }
@@ -1511,6 +1521,52 @@ mod tests {
             truncate_result.is_err(),
             "Truncate should fail for device files"
         );
+    }
+
+    #[test_case]
+    fn devfs_cached_name_follows_registration_while_old_file_stays_open() {
+        use crate::device::char::mockchar::MockCharDevice;
+        use crate::fs::{VfsManager, vfs_v2::drivers::devpts::DevPtsFS};
+        use scarlet_abi::fs::VFS_O_RDWR;
+
+        let manager = DeviceManager::new_for_test();
+        let vfs = VfsManager::new();
+        vfs.create_dir("/dev").unwrap();
+        vfs.mount(DevFS::new_with_device_manager(&manager), "/dev", 0)
+            .unwrap();
+        vfs.mount(DevPtsFS::new(), "/dev/pts", 0).unwrap();
+        let (ptmx, pts_mount) = vfs.resolve_path("/dev/ptmx").unwrap();
+
+        let first = Arc::new(MockCharDevice::new("first"));
+        let first_id = manager.register_device_with_name("gamepad0".into(), first.clone());
+        let path = "/dev/gamepad0";
+        let old = vfs.open(path, VFS_O_RDWR).unwrap();
+        assert_eq!(
+            vfs.resolve_path(path).unwrap().0.node().id(),
+            first_id as u64
+        );
+
+        manager.unregister_device(first_id).unwrap();
+        assert!(
+            matches!(vfs.resolve_path(path), Err(e) if e.kind == FileSystemErrorKind::NotFound)
+        );
+
+        let second = Arc::new(MockCharDevice::new("second"));
+        let second_id = manager.register_device_with_name("gamepad0".into(), second.clone());
+        let new = vfs.open(path, VFS_O_RDWR).unwrap();
+        assert_ne!(first_id, second_id);
+        assert_eq!(
+            vfs.resolve_path(path).unwrap().0.node().id(),
+            second_id as u64
+        );
+        old.as_stream().unwrap().write(b"old").unwrap();
+        new.as_stream().unwrap().write(b"new").unwrap();
+        assert_eq!(first.get_written_data(), b"old");
+        assert_eq!(second.get_written_data(), b"new");
+
+        let (ptmx_after, mount_after) = vfs.resolve_path("/dev/pts/ptmx").unwrap();
+        assert!(Arc::ptr_eq(&ptmx, &ptmx_after));
+        assert!(Arc::ptr_eq(&pts_mount, &mount_after));
     }
 
     #[test_case]
