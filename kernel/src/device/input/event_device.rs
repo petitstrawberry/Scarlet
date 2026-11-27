@@ -21,8 +21,37 @@ static TABLET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TOUCHSCREEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static SWITCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static BUTTONS_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static GAMEPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+// SWS probes gamepad0 through gamepad7. All native gamepad constructors
+// reserve from the same pool, including the permanent rail controller.
+const GAMEPAD_SLOTS: usize = 8;
+static USED_GAMEPADS: IrqSpinLock<[bool; GAMEPAD_SLOTS]> = IrqSpinLock::new([false; GAMEPAD_SLOTS]);
+// Preserve the infallible constructor for permanent devices beyond the scan range.
+static EXTRA_GAMEPAD_COUNTER: AtomicUsize = AtomicUsize::new(GAMEPAD_SLOTS);
+
+struct GamepadSlot(usize);
+
+impl GamepadSlot {
+    fn reserve() -> Option<Self> {
+        let mut used = USED_GAMEPADS.lock();
+        let index = used.iter().position(|&occupied| !occupied)?;
+        used[index] = true;
+        Some(Self(index))
+    }
+}
+
+impl Drop for GamepadSlot {
+    fn drop(&mut self) {
+        USED_GAMEPADS.lock()[self.0] = false;
+    }
+}
+
+enum Attachment {
+    Permanent { _slot: Option<GamepadSlot> },
+    Removable { _slot: GamepadSlot },
+    Detached,
+}
 
 use crate::arch::Trapframe;
 use crate::device::char::CharDevice;
@@ -30,7 +59,7 @@ use crate::device::{Device, DeviceType};
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
-use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError};
 use crate::sync::Waker;
 
 use super::InputEvent;
@@ -44,15 +73,33 @@ const EVENT_QUEUE_CAPACITY: usize = 256;
 /// Buffered events together with recovery state after an overflow.
 struct EventQueue {
     events: VecDeque<InputEvent>,
+    attachment: Attachment,
     /// Drop the remainder of the interrupted input frame before accepting a new one.
     discard_until_syn_report: bool,
 }
 
 impl EventQueue {
-    fn with_capacity(capacity: usize) -> Self {
+    fn new(attachment: Attachment) -> Self {
         Self {
-            events: VecDeque::with_capacity(capacity),
+            events: VecDeque::with_capacity(EVENT_QUEUE_CAPACITY),
+            attachment,
             discard_until_syn_report: false,
+        }
+    }
+
+    fn detached(&self) -> bool {
+        matches!(self.attachment, Attachment::Detached)
+    }
+
+    fn mark_overflow(&mut self, time: u64) {
+        self.events.clear();
+        for code in [SYN_DROPPED, SYN_REPORT] {
+            self.events.push_back(InputEvent {
+                time,
+                type_: super::event_types::EV_SYN,
+                code,
+                value: 0,
+            });
         }
     }
 }
@@ -325,6 +372,7 @@ impl EventDevice {
     /// A new event device carrying the supplied metadata.
     pub fn new_with_metadata(device_type: &str, metadata: InputDeviceMetadata) -> Self {
         // Get incremented ID based on device type
+        let mut slot = None;
         let id = match device_type {
             "keyboard" => KEYBOARD_COUNTER.fetch_add(1, Ordering::SeqCst),
             "mouse" => MOUSE_COUNTER.fetch_add(1, Ordering::SeqCst),
@@ -332,14 +380,37 @@ impl EventDevice {
             "tablet" => TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
             "touchscreen" => TOUCHSCREEN_COUNTER.fetch_add(1, Ordering::SeqCst),
             "switch" => SWITCH_COUNTER.fetch_add(1, Ordering::SeqCst),
-            "gamepad" => GAMEPAD_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "gamepad" => {
+                slot = GamepadSlot::reserve();
+                slot.as_ref().map_or_else(
+                    || EXTRA_GAMEPAD_COUNTER.fetch_add(1, Ordering::Relaxed),
+                    |s| s.0,
+                )
+            }
             "buttons" => BUTTONS_COUNTER.fetch_add(1, Ordering::SeqCst),
             _ => INPUT_COUNTER.fetch_add(1, Ordering::SeqCst),
         };
 
-        // Generate device name
-        let name = alloc::format!("{}{}", device_type, id);
+        Self::named(
+            alloc::format!("{}{}", device_type, id),
+            metadata,
+            Attachment::Permanent { _slot: slot },
+        )
+    }
 
+    /// Reserve a discoverable gamepad name before publishing the endpoint.
+    pub(crate) fn new_removable_gamepad(
+        metadata: InputDeviceMetadata,
+    ) -> Result<Self, &'static str> {
+        let slot = GamepadSlot::reserve().ok_or("All discoverable gamepad slots are occupied")?;
+        Ok(Self::named(
+            alloc::format!("gamepad{}", slot.0),
+            metadata,
+            Attachment::Removable { _slot: slot },
+        ))
+    }
+
+    fn named(name: String, metadata: InputDeviceMetadata, attachment: Attachment) -> Self {
         // Waiter identity belongs to the Waker, not this diagnostic label.
         // Virtual channels can be short-lived, so do not leak a label per device.
         let waker_name = "input-event";
@@ -348,10 +419,23 @@ impl EventDevice {
             name,
             metadata,
             switch_state: IrqSpinLock::new(0),
-            queue: IrqSpinLock::new(EventQueue::with_capacity(EVENT_QUEUE_CAPACITY)),
+            queue: IrqSpinLock::new(EventQueue::new(attachment)),
             waker: Waker::new_interruptible(waker_name),
             nonblocking: IrqSpinLock::new(false),
         }
+    }
+
+    /// Called by the producer after its final frame and registry removal.
+    /// Open descriptors retain this queue while a new producer can reuse its name.
+    pub(crate) fn detach_gamepad(&self) {
+        {
+            let mut queue = self.queue.lock();
+            if !matches!(queue.attachment, Attachment::Removable { .. }) {
+                return;
+            }
+            queue.attachment = Attachment::Detached;
+        }
+        self.waker.wake_all();
     }
 
     /// Get the device name
@@ -410,6 +494,20 @@ impl EventDevice {
         let time = crate::time::current_time_ns();
         {
             let mut q = self.queue.lock();
+            if q.detached() {
+                return;
+            }
+            // Joy-Con batches are complete state snapshots. Make room for the
+            // whole snapshot, especially the final neutral frame on unplug.
+            if matches!(q.attachment, Attachment::Removable { .. })
+                && events.last() == Some(&(super::event_types::EV_SYN, SYN_REPORT, 0))
+                && events.len() <= EVENT_QUEUE_CAPACITY - 2
+                && (q.discard_until_syn_report
+                    || q.events.len() + events.len() > EVENT_QUEUE_CAPACITY)
+            {
+                q.mark_overflow(time);
+                q.discard_until_syn_report = false;
+            }
             for &(type_, code, value) in events {
                 if q.discard_until_syn_report {
                     if type_ == super::event_types::EV_SYN && code == SYN_REPORT {
@@ -418,19 +516,7 @@ impl EventDevice {
                 } else if q.events.len() >= EVENT_QUEUE_CAPACITY {
                     // Discard the interrupted frame through its boundary so
                     // the next accepted event begins a complete frame.
-                    q.events.clear();
-                    q.events.push_back(InputEvent {
-                        time,
-                        type_: super::event_types::EV_SYN,
-                        code: SYN_DROPPED,
-                        value: 0,
-                    });
-                    q.events.push_back(InputEvent {
-                        time,
-                        type_: super::event_types::EV_SYN,
-                        code: SYN_REPORT,
-                        value: 0,
-                    });
+                    q.mark_overflow(time);
                     q.discard_until_syn_report = true;
                 } else {
                     q.events.push_back(InputEvent {
@@ -445,9 +531,9 @@ impl EventDevice {
         self.waker.wake_one();
     }
 
-    /// Check if there are events available to read
-    fn has_events(&self) -> bool {
-        !self.queue.lock().events.is_empty()
+    fn read_ready(&self) -> bool {
+        let q = self.queue.lock();
+        !q.events.is_empty() || q.detached()
     }
 
     /// Drain complete native records without sleeping or changing the device's
@@ -459,18 +545,37 @@ impl EventDevice {
             let Some(event) = queue.events.pop_front() else {
                 break;
             };
-            record[..8].copy_from_slice(&event.time.to_ne_bytes());
-            record[8..10].copy_from_slice(&event.type_.to_ne_bytes());
-            record[10..12].copy_from_slice(&event.code.to_ne_bytes());
-            record[12..16].copy_from_slice(&event.value.to_ne_bytes());
+            encode_event(event, record);
             count += InputEvent::size();
         }
         count
     }
 }
 
+fn encode_event(event: InputEvent, record: &mut [u8]) {
+    record[..8].copy_from_slice(&event.time.to_ne_bytes());
+    record[8..10].copy_from_slice(&event.type_.to_ne_bytes());
+    record[10..12].copy_from_slice(&event.code.to_ne_bytes());
+    record[12..16].copy_from_slice(&event.value.to_ne_bytes());
+}
+
 // Implement Device trait for device registration
 impl Device for EventDevice {
+    fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
+        let removable = match self.queue.lock().attachment {
+            Attachment::Permanent { .. } => false,
+            Attachment::Removable { .. } => true,
+            Attachment::Detached => return Err("Input device detached"),
+        };
+        if removable {
+            // This descriptor observes hangup on its original queue even after
+            // another gamepad takes its name.
+            Ok(self)
+        } else {
+            Ok(Arc::new(crate::device::DefaultDeviceOpen::new(self)))
+        }
+    }
+
     fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
         &[crate::device::DeviceCapability::PhysicalSeat]
     }
@@ -505,57 +610,50 @@ impl CharDevice for EventDevice {
     }
 
     fn read(&self, buffer: &mut [u8]) -> usize {
-        let event_size = InputEvent::size();
+        self.try_read(buffer).unwrap_or(0)
+    }
 
-        // Buffer must be large enough to hold at least one event
-        if buffer.len() < event_size {
-            return 0;
+    fn try_read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if buffer.len() < InputEvent::size() {
+            return Ok(0);
         }
-
-        // Try to read one event
-        {
+        let mut next = || {
             let mut q = self.queue.lock();
             if let Some(event) = q.events.pop_front() {
-                // Convert event structure to bytes
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(&event as *const _ as *const u8, event_size)
-                };
-
-                buffer[..event_size].copy_from_slice(bytes);
-                return event_size;
+                encode_event(event, &mut buffer[..InputEvent::size()]);
+                Some(Ok(InputEvent::size()))
+            } else if q.detached() {
+                Some(Err(StreamError::EndOfStream))
+            } else {
+                None
             }
+        };
+        if let Some(result) = next() {
+            return result;
         }
-
-        // No data available - check nonblocking mode
         if *self.nonblocking.lock() {
-            // In non-blocking mode, return immediately with 0 bytes
-            return 0;
+            return Ok(0);
         }
-
-        // In blocking mode, wait for data using waker
-        use crate::task::mytask;
-
-        if let Some(task) = mytask() {
-            self.waker.wait(task.get_id(), task.get_trapframe());
-
-            // After waking up, try to read again
-            let mut q = self.queue.lock();
-            if let Some(event) = q.events.pop_front() {
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(&event as *const _ as *const u8, event_size)
-                };
-                buffer[..event_size].copy_from_slice(bytes);
-                return event_size;
-            }
+        if let Some(task) = crate::task::mytask() {
+            // Recheck the queue *after* wait registration as well. Multiple
+            // readers racing the final broadcast must all observe permanent EOF.
+            self.waker
+                .wait_with_condition(task.get_id(), task.get_trapframe(), None, 0, || {
+                    self.read_ready()
+                });
+            return next().unwrap_or(Ok(0));
         }
-
-        // No task context or spurious wakeup
-        0
+        Ok(0)
     }
 
     fn read_at(&self, _offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        // Delegate to read() which implements blocking
         Ok(self.read(buffer))
+    }
+
+    fn try_read_at(&self, _offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        // DevFS forwards this structured result to native StreamRead. SWS
+        // retries a short live read and releases its path claim on end-of-stream.
+        self.try_read(buffer)
     }
 
     fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
@@ -567,7 +665,7 @@ impl CharDevice for EventDevice {
     }
 
     fn can_read(&self) -> bool {
-        self.has_events()
+        self.read_ready()
     }
 
     fn can_write(&self) -> bool {
@@ -577,12 +675,16 @@ impl CharDevice for EventDevice {
 
 // Implement Selectable trait for poll/select support
 impl Selectable for EventDevice {
+    fn is_hung_up(&self) -> bool {
+        self.queue.lock().detached()
+    }
+
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
 
-        if interest.read {
-            set.read = self.has_events();
-        }
+        let q = self.queue.lock();
+        set.read = interest.read && (!q.events.is_empty() || q.detached());
+        set.except = interest.except && q.detached();
 
         // Write is never ready for input devices
         set.write = false;
@@ -595,7 +697,7 @@ impl Selectable for EventDevice {
         interest: ReadyInterest,
         waiter: &Arc<Waker>,
     ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
-        if interest.read {
+        if interest.read || interest.except {
             Some(alloc::vec![self.waker.subscribe_readiness(waiter)])
         } else {
             // Input devices have no writable readiness source.
@@ -616,7 +718,7 @@ impl Selectable for EventDevice {
         }
 
         // If data is already available, return immediately
-        if self.has_events() {
+        if self.read_ready() {
             return SelectWaitOutcome::Ready;
         }
 
@@ -750,7 +852,7 @@ mod tests {
         let dev = EventDevice::new("input");
         // Device name should be "input" + counter (e.g., "input0", "input1", etc.)
         assert!(dev.name.starts_with("input"));
-        assert!(!dev.has_events());
+        assert!(!dev.read_ready());
     }
 
     #[test_case]
@@ -904,7 +1006,7 @@ mod tests {
         dev.push_event(EV_REL, REL_X, 10);
 
         // Should have events now
-        assert!(dev.has_events());
+        assert!(dev.read_ready());
 
         // Read the event
         let mut buffer = [0u8; InputEvent::size()];
@@ -919,7 +1021,7 @@ mod tests {
         assert_eq!(event.value, 10);
 
         // Should have no more events
-        assert!(!dev.has_events());
+        assert!(!dev.read_ready());
     }
 
     #[test_case]
@@ -964,5 +1066,104 @@ mod tests {
             (super::super::event_types::EV_ABS, ABS_MT_TRACKING_ID, 8)
         );
         assert_eq!((events[4].type_, events[4].code), (EV_SYN, SYN_REPORT));
+    }
+
+    #[test_case]
+    fn gamepad_reconnect_reuses_only_unpublished_slots_while_old_files_are_open() {
+        use crate::device::manager::DeviceManager;
+        let manager = DeviceManager::new_for_test();
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Gamepad, INPUT_CAP_KEY);
+        let wired = EventDevice::new_with_metadata("gamepad", metadata.clone());
+        let mut held = Vec::new();
+        while let Ok(pad) = EventDevice::new_removable_gamepad(metadata.clone()) {
+            held.push(pad);
+            assert!(held.len() <= GAMEPAD_SLOTS);
+        }
+        let available = held.pop().unwrap();
+        let name = available.name.clone();
+        assert!(name["gamepad".len()..].parse::<usize>().unwrap() < GAMEPAD_SLOTS);
+        assert_ne!(name, wired.name);
+        drop(available);
+
+        let mut stale = Vec::new();
+        for generation in 0..24 {
+            let pad = Arc::new(EventDevice::new_removable_gamepad(metadata.clone()).unwrap());
+            assert_eq!(pad.name, name);
+            assert!(EventDevice::new_removable_gamepad(metadata.clone()).is_err());
+            let id = manager.register_device_with_name(name.clone(), pad.clone());
+            let fd = manager.get_device_by_name(&name).unwrap().open().unwrap();
+            pad.push_event(EV_KEY, 0x130, generation);
+            let mut record = [0; InputEvent::size()];
+            let reader = fd.as_char_device().unwrap();
+            assert_eq!(reader.try_read_at(0, &mut record).unwrap(), record.len());
+            assert_eq!(
+                i32::from_ne_bytes(record[12..].try_into().unwrap()),
+                generation
+            );
+            manager.unregister_device(id).unwrap();
+            pad.detach_gamepad();
+            assert!(manager.get_device_by_name(&name).is_none());
+            assert!(fd.is_hung_up());
+            assert!(matches!(
+                reader.try_read_at(0, &mut record),
+                Err(StreamError::EndOfStream)
+            ));
+            stale.push(fd);
+        }
+        let replacement = EventDevice::new_removable_gamepad(metadata.clone()).unwrap();
+        assert_eq!(replacement.name, name);
+        drop(stale);
+        assert!(EventDevice::new_removable_gamepad(metadata).is_err());
+    }
+
+    #[test_case]
+    fn gamepad_detach_notifies_all_subscribers_and_drains_final_snapshot_before_eof() {
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Gamepad, INPUT_CAP_KEY);
+        let pad = Arc::new(EventDevice::new_removable_gamepad(metadata).unwrap());
+        let fd = pad.clone().open().unwrap();
+        let neutral = [
+            (EV_KEY, 0x130, 0),
+            (EV_ABS, 0, 2048),
+            (EV_SYN, SYN_REPORT, 0),
+        ];
+        for _ in 0..EVENT_QUEUE_CAPACITY - 1 {
+            pad.push_event(EV_KEY, 0x130, 1);
+        }
+        pad.push_events(&neutral);
+        let first = Arc::new(Waker::new_interruptible("gamepad-test-reader"));
+        let second = Arc::new(Waker::new_interruptible("gamepad-test-reader"));
+        let subscribe = |waker| {
+            fd.subscribe_readiness(ReadyInterest::read(), waker)
+                .unwrap()
+                .pop()
+                .unwrap()
+        };
+        let a = subscribe(&first);
+        let b = subscribe(&second);
+        pad.detach_gamepad();
+        assert!(a.generation() > 0 && b.generation() > 0);
+        assert!(pad.clone().open().is_err());
+        pad.push_event(EV_KEY, 0x130, 1);
+
+        let reader = fd.as_char_device().unwrap();
+        let mut record = [0; InputEvent::size()];
+        for (ty, code, value) in [(EV_SYN, SYN_DROPPED, 0), (EV_SYN, SYN_REPORT, 0)]
+            .into_iter()
+            .chain(neutral)
+        {
+            assert_eq!(reader.try_read_at(0, &mut record).unwrap(), record.len());
+            assert_eq!(u16::from_ne_bytes(record[8..10].try_into().unwrap()), ty);
+            assert_eq!(u16::from_ne_bytes(record[10..12].try_into().unwrap()), code);
+            assert_eq!(i32::from_ne_bytes(record[12..].try_into().unwrap()), value);
+        }
+        for nonblocking in [false, true] {
+            fd.set_nonblocking(nonblocking);
+            assert!(fd.is_hung_up() && fd.current_ready(ReadyInterest::read()).read);
+            assert_eq!(reader.read(&mut record), 0);
+            assert!(matches!(
+                reader.try_read_at(0, &mut record),
+                Err(StreamError::EndOfStream)
+            ));
+        }
     }
 }

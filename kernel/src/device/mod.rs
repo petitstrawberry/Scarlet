@@ -6,6 +6,7 @@
 
 pub mod audio;
 pub mod block;
+pub mod bluetooth;
 pub mod char;
 pub mod clk;
 pub mod cpufreq;

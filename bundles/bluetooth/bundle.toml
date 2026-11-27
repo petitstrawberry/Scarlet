@@ -1,0 +1,6 @@
+[[layers]]
+kind = "cargo"
+source = "../../user/bluetooth"
+package = "scarlet-bluetooth"
+bin = "btctl"
+to = "/bin/btctl"

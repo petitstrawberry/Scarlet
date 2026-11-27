@@ -1,0 +1,12 @@
+[package]
+name = "bluetooth-qa-kernel"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bluetooth-qa-kernel"
+path = "main.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel", default-features = false, features = ["linux-boot", "network", "user-fpu", "user-vector"] }

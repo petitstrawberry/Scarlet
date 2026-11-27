@@ -1,0 +1,13 @@
+[package]
+name = "bluetooth-qa"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bluetooth-qa"
+path = "main.rs"
+
+[dependencies]
+scarlet-os = { path = "../../../user/lib/scarlet-os", default-features = false, features = ["std"] }
+sws-protocol = { path = "../../../user/lib/sws-protocol", default-features = false, features = ["std"] }

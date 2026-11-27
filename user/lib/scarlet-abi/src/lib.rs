@@ -6,6 +6,7 @@
 
 #![no_std]
 
+pub mod bluetooth;
 pub mod data_model;
 pub mod environment;
 pub mod fs;

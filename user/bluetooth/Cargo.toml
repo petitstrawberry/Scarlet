@@ -1,0 +1,16 @@
+[package]
+name = "scarlet-bluetooth"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[[bin]]
+name = "btctl"
+path = "src/btctl.rs"
+
+[dependencies]
+scarlet-abi = { path = "../lib/scarlet-abi" }
+scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
+scarlet-sys = { path = "../lib/scarlet-sys" }
+zeroize = { version = "1.8", default-features = false }
