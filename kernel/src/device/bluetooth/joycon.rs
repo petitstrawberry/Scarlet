@@ -10,6 +10,8 @@ use alloc::{vec, vec::Vec};
 
 const DEVICE_INFO: u8 = 0x02;
 const SET_MODE: u8 = 0x03;
+const SET_PLAYER_LIGHTS: u8 = 0x30;
+const PLAYER_ONE_STEADY: u8 = 0x01;
 const FULL_REPORT: u8 = 0x30;
 const SUBCMD_REPLY: u8 = 0x21;
 const ACK_WAIT_MS: u64 = 2000;
@@ -35,15 +37,15 @@ impl Side {
     }
 }
 
-enum Phase {
-    Setup { subcmd: u8, sends: u8, due_ms: u64 },
-    Playing(Gamepad),
-    Failed(&'static str),
+struct Pending {
+    subcmd: u8,
+    sends: u8,
+    due_ms: u64,
 }
 
-impl Phase {
-    fn request(subcmd: u8) -> Self {
-        Self::Setup {
+impl Pending {
+    fn new(subcmd: u8) -> Self {
+        Self {
             subcmd,
             sends: 0,
             due_ms: 0,
@@ -51,11 +53,18 @@ impl Phase {
     }
 }
 
+enum Phase {
+    Setup,
+    Playing(Gamepad),
+    Failed(&'static str),
+}
+
 /// Session for a single resolved peer. Serialize calls in the HID channel worker.
 pub struct JoyCon {
     side: Side,
     packet_number: u8,
     phase: Phase,
+    pending: Option<Pending>,
 }
 
 impl JoyCon {
@@ -65,7 +74,8 @@ impl JoyCon {
         Some(Self {
             side: Side::from_name(peer_name)?,
             packet_number: 0,
-            phase: Phase::request(DEVICE_INFO),
+            phase: Phase::Setup,
+            pending: Some(Pending::new(DEVICE_INFO)),
         })
     }
 
@@ -77,29 +87,29 @@ impl JoyCon {
     /// Monotonic milliseconds. Zero means poll immediately. Poll again after
     /// input since a matching reply may make a new command ready.
     pub fn next_deadline_ms(&self) -> Option<u64> {
-        match self.phase {
-            Phase::Setup { due_ms, .. } => Some(due_ms),
-            _ => None,
-        }
+        self.pending.as_ref().map(|request| request.due_ms)
     }
 
     /// Return at most one output report to enqueue on the HID interrupt channel.
     /// Keep the returned report until sent, or close the session on send failure.
     /// An error terminates negotiation.
     pub fn poll_output(&mut self, now_ms: u64) -> Result<Option<Vec<u8>>, &'static str> {
-        let (subcmd, sends, due_ms) = match &mut self.phase {
-            Phase::Setup {
-                subcmd,
-                sends,
-                due_ms,
-            } => (*subcmd, sends, due_ms),
-            Phase::Playing(_) => return Ok(None),
-            Phase::Failed(reason) => return Err(reason),
+        if let Phase::Failed(reason) = self.phase {
+            return Err(reason);
+        }
+        let Some(request) = &mut self.pending else {
+            return Ok(None);
         };
-        if now_ms < *due_ms {
+        if now_ms < request.due_ms {
             return Ok(None);
         }
-        if *sends == MAX_SENDS {
+        let subcmd = request.subcmd;
+        if request.sends == MAX_SENDS {
+            self.pending = None;
+            if subcmd == SET_PLAYER_LIGHTS {
+                // LED feedback is optional. The registered gamepad stays live.
+                return Ok(None);
+            }
             let reason = "Joy-Con subcommand timed out";
             self.phase = Phase::Failed(reason);
             return Err(reason);
@@ -119,12 +129,14 @@ impl JoyCon {
             0x40,
             subcmd,
         ];
-        if subcmd == SET_MODE {
-            report.push(FULL_REPORT);
+        match subcmd {
+            SET_MODE => report.push(FULL_REPORT),
+            SET_PLAYER_LIGHTS => report.push(PLAYER_ONE_STEADY),
+            _ => (),
         }
         self.packet_number = (self.packet_number + 1) & 0x0f;
-        *sends += 1;
-        *due_ms = now_ms.saturating_add(ACK_WAIT_MS);
+        request.sends += 1;
+        request.due_ms = now_ms.saturating_add(ACK_WAIT_MS);
         Ok(Some(report))
     }
 
@@ -132,44 +144,55 @@ impl JoyCon {
     /// acknowledge a request or extend its deadline. A terminal error tells
     /// the caller to close this session.
     pub fn input_report(&mut self, hid: &[u8]) -> Result<(), &'static str> {
-        let subcmd = match &mut self.phase {
+        match &mut self.phase {
             Phase::Playing(gamepad) => {
+                // Subcommand replies also carry controls, including the light ACK.
                 if let Some(sample) = Report::decode(self.side, hid) {
                     gamepad.update(sample);
                 }
-                return Ok(());
             }
             Phase::Failed(reason) => return Err(reason),
-            Phase::Setup { sends: 0, .. } => return Ok(()),
-            Phase::Setup { subcmd, .. } => *subcmd,
-        };
+            Phase::Setup => (),
+        }
 
-        if hid.first() != Some(&SUBCMD_REPLY) || hid.get(14) != Some(&subcmd) {
+        let Some(request) = &self.pending else {
+            return Ok(());
+        };
+        if request.sends == 0
+            || hid.first() != Some(&SUBCMD_REPLY)
+            || hid.get(14) != Some(&request.subcmd)
+        {
             return Ok(());
         }
 
-        match (subcmd, hid[13]) {
+        match (request.subcmd, hid[13]) {
             // The 12-byte device-info body starts with two firmware bytes,
             // then controller type (1 = L, 2 = R, 3 = Pro).
             (DEVICE_INFO, 0x82) if hid.len() >= 27 => {
                 if hid[17] != self.side as u8 {
                     let reason = "Joy-Con name and controller type disagree";
                     self.phase = Phase::Failed(reason);
+                    self.pending = None;
                     return Err(reason);
                 }
-                self.phase = Phase::request(SET_MODE);
+                self.pending = Some(Pending::new(SET_MODE));
             }
             (SET_MODE, 0x80) => {
                 // The mode ACK itself carries the first authoritative sample.
                 let sample = Report::from_common_header(self.side, hid);
                 match Gamepad::register(self.side, sample) {
-                    Ok(gamepad) => self.phase = Phase::Playing(gamepad),
+                    Ok(gamepad) => {
+                        self.phase = Phase::Playing(gamepad);
+                        self.pending = Some(Pending::new(SET_PLAYER_LIGHTS));
+                    }
                     Err(reason) => {
                         self.phase = Phase::Failed(reason);
+                        self.pending = None;
                         return Err(reason);
                     }
                 }
             }
+            (SET_PLAYER_LIGHTS, 0x80) => self.pending = None,
             // NACK and malformed replies leave the bounded retry armed.
             _ => (),
         }

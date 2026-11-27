@@ -23,6 +23,7 @@ struct Controller {
     rx: VecDeque<u8>,
     selected: Option<[u8; 6]>,
     encrypted: bool,
+    light_requests: u8,
     local_interrupt: u16,
     local_control: u16,
 }
@@ -126,6 +127,11 @@ impl Controller {
             }
             // Disconnect
             0x0406 => {
+                assert_eq!(
+                    self.light_requests,
+                    if self.selected == Some(LEFT) { 2 } else { 1 }
+                );
+                self.light_requests = 0;
                 assert_eq!(word(data), HANDLE);
                 self.accepted(op);
                 self.event(5, &[&[0][..], &HANDLE.to_le_bytes(), &[0x16]].concat());
@@ -210,23 +216,31 @@ impl Controller {
                 assert_eq!(output[12], 0x30);
                 input[14] = 0x80;
             }
+            0x30 => {
+                assert_eq!(&output[12..], &[0x01], "only player LED 1 is steady");
+                self.light_requests += 1;
+                if side == 1 && self.light_requests == 1 {
+                    return; // Lose the first ACK and exercise the host deadline.
+                }
+                input[14] = 0x80; // Generic firmware ACK, with current controls.
+                if side == 1 {
+                    input[6] = 0x44; // L + d-pad right
+                } else {
+                    input[4] = 0x40;
+                    input[10..12].copy_from_slice(&[255, 255]); // R + stick right
+                }
+            }
             other => panic!("unexpected Joy-Con subcommand {other}"),
         }
         self.pdu(self.local_interrupt, &input, true);
         if output[11] == 3 {
+            // Input is already live while the player light is being configured.
             input[1] = 0x30;
-            // Previous, then next, keeping a gamepad button held until link loss.
             if side == 1 {
                 input[6] = 0x48; // L + d-pad left
             } else {
-                input[4] = 0x40; // R shoulder, independent of the page-turn gesture
-                input[10..12].copy_from_slice(&[0, 0xf0]); // right stick full left
-            }
-            self.pdu(self.local_interrupt, &input, true);
-            if side == 1 {
-                input[6] = 0x44;
-            } else {
-                input[10..12].copy_from_slice(&[255, 255]);
+                input[4] = 0x40;
+                input[10..12].copy_from_slice(&[0, 0xf0]); // R + stick left
             }
             self.pdu(self.local_interrupt, &input, true);
         }

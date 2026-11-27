@@ -41,7 +41,7 @@ fn info(kind: u8) -> [u8; 49] {
     reply
 }
 
-fn connect(name: &[u8], kind: u8) -> JoyCon {
+fn register(name: &[u8], kind: u8) -> JoyCon {
     let mut pad = JoyCon::connect(name).unwrap();
     let cmd = pad.poll_output(10).unwrap().unwrap();
     assert_eq!(cmd, [1, 0, 0, 1, 0x40, 0x40, 0, 1, 0x40, 0x40, 2]);
@@ -52,6 +52,17 @@ fn connect(name: &[u8], kind: u8) -> JoyCon {
     assert_eq!(mode, [1, 1, 0, 1, 0x40, 0x40, 0, 1, 0x40, 0x40, 3, 0x30]);
     pad.input_report(&ack(3, 0x80)).unwrap();
     assert!(pad.is_ready());
+    assert_eq!(pad.next_deadline_ms(), Some(0));
+    pad
+}
+
+fn connect(name: &[u8], kind: u8) -> JoyCon {
+    let mut pad = register(name, kind);
+    assert_eq!(
+        pad.poll_output(30).unwrap().unwrap(),
+        [1, 2, 0, 1, 0x40, 0x40, 0, 1, 0x40, 0x40, 0x30, 1]
+    );
+    pad.input_report(&ack(0x30, 0x80)).unwrap();
     assert_eq!(pad.next_deadline_ms(), None);
     assert_eq!(pad.poll_output(99999).unwrap(), None);
     pad
@@ -287,4 +298,38 @@ fn late_ack_after_retry_succeeds_and_reconnect_starts_fresh() {
     assert!(frame(&old[1]).contains(&(1, 0x130, 0)));
     assert_eq!(old[2], Event::Removed);
     assert_eq!(frame(&old[1]), frame(&fresh.lock().unwrap()[0]));
+}
+
+#[test]
+fn optional_lights_timeout_preserves_input_and_reconnect_reissues_command() {
+    let mut pad = register(b"Joy-Con (R)", 2);
+    let log = events(&pad);
+    // An unsolicited LED ACK must not cancel a command still waiting to send.
+    pad.input_report(&ack(0x30, 0x80)).unwrap();
+    assert_eq!(&pad.poll_output(75).unwrap().unwrap()[10..], &[0x30, 1]);
+    for reply in [ack(3, 0x80), ack(0x30, 0x00), ack(0x30, 0xb0)] {
+        pad.input_report(&reply).unwrap();
+    }
+    pad.input_report(&ack(0x30, 0x80)[..14]).unwrap();
+    assert_eq!(pad.next_deadline_ms(), Some(2075));
+    assert_eq!(pad.poll_output(2074).unwrap(), None);
+    let mut held = ack(0, 0);
+    held[0] = 0x30;
+    held[3] = 8;
+    pad.input_report(&held).unwrap();
+    assert!(frame(&log.lock().unwrap()[1]).contains(&(1, 0x131, 1)));
+    let retry = pad.poll_output(2075).unwrap().unwrap();
+    assert_eq!(retry[1], 3);
+    assert_eq!(&retry[10..], &[0x30, 1]);
+    assert_eq!(pad.poll_output(4075).unwrap(), None);
+    assert_eq!(pad.next_deadline_ms(), None);
+    assert!(pad.is_ready());
+    // Even a late ACK is an input sample. It cannot restart the timer.
+    pad.input_report(&ack(0x30, 0x80)).unwrap();
+    assert!(frame(&log.lock().unwrap()[2]).contains(&(1, 0x131, 0)));
+    pad.input_report(&held).unwrap();
+    assert!(frame(&log.lock().unwrap()[3]).contains(&(1, 0x131, 1)));
+    assert_eq!(pad.poll_output(99999).unwrap(), None);
+    pad.disconnect();
+    connect(b"Joy-Con (R)", 2).disconnect();
 }
