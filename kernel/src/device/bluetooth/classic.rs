@@ -80,6 +80,7 @@ pub struct Command {
     pub opcode: u16,
     bytes: [u8; 22],
     len: u8,
+    overlapping_key_reply: bool,
 }
 
 impl Command {
@@ -90,6 +91,7 @@ impl Command {
             opcode,
             bytes,
             len: params.len() as u8,
+            overlapping_key_reply: false,
         }
     }
 
@@ -173,6 +175,7 @@ const COMMAND_MS: u64 = 5_000;
 const INQUIRY_MS: u64 = 15_000; // Inquiry_Length 8 * 1.28 seconds plus scheduling margin.
 const PAGE_MS: u64 = 20_000;
 const PAIR_MS: u64 = 60_000;
+const PEER_SECURITY_MS: u64 = 2_500;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Owner {
@@ -189,6 +192,7 @@ struct Queued {
 
 struct Pending {
     reply_address: Option<Address>,
+    overlapping_key_reply: bool,
     opcode: u16,
     owner: Owner,
     deadline: u64,
@@ -255,6 +259,9 @@ enum Phase {
     Paging,
     AcceptQueued,
     Accepting,
+    PeerSecurity,
+    PeerAuthenticated,
+    PeerSecurityCollision, // A disallowed fallback gets one final wait for peer encryption.
     CancelPage,
     Authenticating,
     Encrypting,
@@ -265,9 +272,16 @@ enum Phase {
     Quarantined,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionKind {
+    Pair,
+    Reconnect,
+    Incoming,
+}
+
 struct Link {
     address: Address,
-    allow_pairing: bool,
+    kind: ConnectionKind,
     disconnect_requested: bool,
     needs_name: bool,
     phase: Phase,
@@ -279,6 +293,18 @@ struct Link {
 }
 
 impl Link {
+    fn waiting_for_peer(&self) -> bool {
+        matches!(self.phase, Phase::PeerSecurity | Phase::PeerAuthenticated)
+    }
+
+    // Each new piece of security evidence gives the peer time to finish the
+    // procedure it started. Duplicate events do not extend this deadline.
+    fn peer_progress(&mut self, now: u64) {
+        if self.waiting_for_peer() {
+            self.deadline = Some(now.saturating_add(PEER_SECURITY_MS));
+        }
+    }
+
     fn loss(&self, reason: Reason) -> Option<Action> {
         match (self.phase, self.handle) {
             (Phase::Up | Phase::Disconnecting, Some(handle)) => Some(Action::LinkDown {
@@ -362,12 +388,12 @@ impl Classic {
 
     /// Select this address for an outgoing ACL and permit SSP Just Works during authentication.
     pub fn connect(&mut self, addr: Address) -> Result<(), Error> {
-        self.select(addr, true)
+        self.select(addr, ConnectionKind::Pair)
     }
 
     /// Select a bonded peer. Never consent to a fresh pairing on this attempt.
     pub fn reconnect(&mut self, addr: Address) -> Result<(), Error> {
-        self.select(addr, false)
+        self.select(addr, ConnectionKind::Reconnect)
     }
 
     /// Arm a peer-initiated ACL only after the adapter owner matched its saved bond.
@@ -376,7 +402,7 @@ impl Classic {
             return Err(Error::Busy);
         }
         self.provide_link_key(addr, key);
-        if let Err(error) = self.select(addr, false) {
+        if let Err(error) = self.select(addr, ConnectionKind::Incoming) {
             self.clear_link_key(addr);
             return Err(error);
         }
@@ -531,12 +557,12 @@ impl Classic {
         Ok(())
     }
 
-    fn select(&mut self, address: Address, allow_pairing: bool) -> Result<(), Error> {
+    fn select(&mut self, address: Address, kind: ConnectionKind) -> Result<(), Error> {
         self.check_management_idle()?;
         if self.link(address).is_some() {
             return Err(Error::Busy);
         }
-        if !allow_pairing && self.key(address).is_none() {
+        if kind != ConnectionKind::Pair && self.key(address).is_none() {
             return Err(Error::MissingKey);
         }
         let slot = self
@@ -548,7 +574,7 @@ impl Classic {
             disconnect_requested: false,
             needs_name: false,
             address,
-            allow_pairing,
+            kind,
             phase: Phase::Queued,
             handle: None,
             encrypted: false,
@@ -635,6 +661,25 @@ impl Classic {
     }
 
     fn planned(&self) -> Option<Queued> {
+        // Keep the fallback revocable until there is a command credit. An
+        // addressed key reply in the command FIFO always takes precedence.
+        if let Some(l) = self
+            .links
+            .iter()
+            .flatten()
+            .find(|l| l.waiting_for_peer() && l.deadline.is_none())
+        {
+            let [lo, hi] = l.handle.unwrap().to_le_bytes();
+            let command = if l.phase == Phase::PeerAuthenticated && l.ssp && !l.encrypted {
+                Command::new(ENCRYPT, &[lo, hi, 1])
+            } else {
+                Command::new(AUTHENTICATE, &[lo, hi])
+            };
+            return Some(Queued {
+                owner: Owner::Link(l.address),
+                command,
+            });
+        }
         // A sleeping bonded peripheral can page the host when woken. Page scan
         // keeps the adapter connectable without making it discoverable.
         let listen = self.ready && self.accept_saved;
@@ -694,6 +739,19 @@ impl Classic {
 
     fn sent(&mut self, owner: Owner, command: &Command, now: u64) {
         match command.opcode {
+            AUTHENTICATE | ENCRYPT => {
+                if let Owner::Link(addr) = owner
+                    && let Some(l) = self.link_mut(addr).filter(|l| l.waiting_for_peer())
+                {
+                    let (phase, timeout) = if command.opcode == AUTHENTICATE {
+                        (Phase::Authenticating, PAIR_MS)
+                    } else {
+                        (Phase::Encrypting, PAGE_MS)
+                    };
+                    l.phase = phase;
+                    l.deadline = Some(now.saturating_add(timeout));
+                }
+            }
             WRITE_SCAN_ENABLE => self.page_scan = command.params()[0] != 0,
             INQUIRY => {
                 self.scan = Scan::Inquiry;
@@ -800,6 +858,7 @@ impl Classic {
                     self.sent(q.owner, &q.command, now_ms);
                     self.credits -= 1;
                     self.pending = Some(Pending {
+                        overlapping_key_reply: q.command.overlapping_key_reply,
                         reply_address: match q.command.opcode {
                             KEY_REPLY | NO_KEY | NO_PIN | IO_REPLY | NO_IO | CONFIRM
                             | NO_CONFIRM | NO_PASSKEY | NO_OOB | CREATE_CANCEL | NAME_CANCEL => {
@@ -856,11 +915,15 @@ impl Classic {
         }
         for i in 0..MAX_LINKS {
             if let Some(l) = self.links[i]
-                .as_ref()
+                .as_mut()
                 .filter(|l| l.deadline.is_some_and(|d| now >= d))
             {
                 let addr = l.address;
-                if matches!(
+                if l.waiting_for_peer() {
+                    l.deadline = None;
+                } else if l.phase == Phase::PeerSecurityCollision {
+                    self.stop_link(addr, Reason::Hci(0x0c));
+                } else if matches!(
                     l.phase,
                     Phase::Closing | Phase::CancelPage | Phase::Disconnecting | Phase::Accepting
                 ) {
@@ -993,7 +1056,7 @@ impl Classic {
             return Err(Error::MalformedEvent);
         }
         if code == 0x0e || code == 0x0f {
-            return self.ack(code, p);
+            return self.ack(now_ms, code, p);
         }
         if code == 0x10 {
             let [error] = *p else {
@@ -1056,8 +1119,8 @@ impl Classic {
             }
             0x06 if p.len() == 3 => self.auth_complete(now_ms, p),
             0x07 if p.len() >= 7 => self.remote_name_complete(p),
-            0x08 if p.len() == 4 => self.encryption_change(p),
-            0x59 if p.len() == 5 => self.encryption_change(p),
+            0x08 if p.len() == 4 => self.encryption_change(now_ms, p),
+            0x59 if p.len() == 5 => self.encryption_change(now_ms, p),
             0x13 => self.completed_packets(p)?,
             0x16 | 0x17 | 0x31 | 0x34 | 0x35 if p.len() == 6 => {
                 self.security_reply(code, address(p))
@@ -1074,7 +1137,8 @@ impl Classic {
             0x36 if p.len() == 7 => {
                 let addr = address(&p[1..]);
                 if self.link(addr).is_some_and(|l| {
-                    l.allow_pairing && matches!(l.phase, Phase::Authenticating | Phase::Encrypting)
+                    l.kind == ConnectionKind::Pair
+                        && matches!(l.phase, Phase::Authenticating | Phase::Encrypting)
                 }) {
                     if p[0] != 0 {
                         self.stop_link(addr, Reason::Hci(p[0]));
@@ -1091,7 +1155,7 @@ impl Classic {
         Ok(())
     }
 
-    fn ack(&mut self, code: u8, p: &[u8]) -> Result<(), Error> {
+    fn ack(&mut self, now: u64, code: u8, p: &[u8]) -> Result<(), Error> {
         let (credits, opcode, result) = match code {
             0x0e if p.len() >= 3 => (p[0], word(&p[1..]), &p[3..]),
             0x0f if p.len() == 4 => (p[1], word(&p[2..]), &p[..1]),
@@ -1139,7 +1203,8 @@ impl Classic {
                 return Err(Error::MalformedEvent);
             }
         }
-        let owner = self.pending.take().unwrap().owner;
+        let pending = self.pending.take().unwrap();
+        let owner = pending.owner;
         if owner == Owner::Init {
             self.init_ack(opcode, result);
         } else if status != 0 {
@@ -1158,12 +1223,32 @@ impl Classic {
                 (Owner::Link(addr), DISCONNECT) if status == 0x02 => self.end_link(addr, reason),
                 (Owner::Link(addr), DISCONNECT) => self.quarantine(addr, reason),
                 (Owner::Link(_), CREATE_CANCEL) => (),
+                (Owner::Link(addr), AUTHENTICATE | ENCRYPT)
+                    if status == 0x0c && self.peer_security_collision(addr, now) =>
+                {
+                    ()
+                }
+                // HCI has no key-request transaction ID. We answered both
+                // requests, and the controller already accepted a reply on
+                // this link. Disallowed on the overlapping reply adds no proof.
+                (Owner::Link(addr), KEY_REPLY)
+                    if status == 0x0c
+                        && pending.overlapping_key_reply
+                        && self.link(addr).is_some_and(|l| l.ssp) =>
+                {
+                    ()
+                }
                 (Owner::Link(addr), _) => self.stop_link(addr, reason),
                 _ => (),
             }
         } else if let Owner::Link(addr) = owner
             && opcode == KEY_REPLY
         {
+            if let Some(l) = self.link_mut(addr)
+                && !l.ssp
+            {
+                l.peer_progress(now);
+            }
             self.confirm_ssp(addr);
         } else if owner == Owner::Discovery
             && opcode == INQUIRY_CANCEL
@@ -1172,6 +1257,26 @@ impl Classic {
             self.finish_scan();
         }
         Ok(())
+    }
+
+    fn peer_security_collision(&mut self, addr: Address, now: u64) -> bool {
+        let Some(l) = self
+            .link_mut(addr)
+            .filter(|l| l.kind == ConnectionKind::Incoming && l.ssp)
+        else {
+            return false;
+        };
+        if l.phase == Phase::Up {
+            return true;
+        }
+        if !matches!(l.phase, Phase::Authenticating | Phase::Encrypting) {
+            return false;
+        }
+        l.phase = Phase::PeerSecurityCollision;
+        l.deadline = Some(now.saturating_add(PEER_SECURITY_MS));
+        self.commands
+            .retain(|q| !(q.owner == Owner::Link(addr) && q.command.opcode == ENCRYPT));
+        true
     }
 
     fn init_ack(&mut self, opcode: u16, result: &[u8]) {
@@ -1411,6 +1516,11 @@ impl Classic {
             l.deadline = None;
             self.revoke(Owner::Link(addr));
             self.enqueue(Owner::Link(addr), disconnect(handle));
+        } else if l.phase == Phase::Accepting {
+            l.phase = Phase::PeerSecurity;
+            l.encrypted = p[10] == 1;
+            l.peer_progress(now);
+            self.maybe_link_up(addr);
         } else {
             l.phase = Phase::Authenticating;
             l.encrypted = p[10] == 1;
@@ -1433,6 +1543,11 @@ impl Classic {
             return;
         }
         let l = self.link_mut(addr).unwrap();
+        if l.phase == Phase::PeerSecurity {
+            l.phase = Phase::PeerAuthenticated;
+            l.peer_progress(now);
+            return;
+        }
         if l.phase != Phase::Authenticating {
             return;
         }
@@ -1446,7 +1561,7 @@ impl Classic {
         }
     }
 
-    fn encryption_change(&mut self, p: &[u8]) {
+    fn encryption_change(&mut self, now: u64, p: &[u8]) {
         let Some(addr) = self.address_for_handle(word(&p[1..])) else {
             return;
         };
@@ -1456,10 +1571,11 @@ impl Classic {
             self.stop_link(addr, Reason::EncryptionLost);
         } else {
             let l = self.link_mut(addr).unwrap();
-            l.encrypted = true;
-            if l.phase == Phase::Encrypting {
-                self.maybe_link_up(addr);
+            if !l.encrypted {
+                l.peer_progress(now);
             }
+            l.encrypted = true;
+            self.maybe_link_up(addr);
         }
     }
 
@@ -1471,10 +1587,16 @@ impl Classic {
     }
 
     fn maybe_link_up(&mut self, addr: Address) {
-        let Some(l) = self
-            .link_mut(addr)
-            .filter(|l| l.phase == Phase::Encrypting && l.encrypted && l.ssp)
-        else {
+        // The responder can get Encryption Change without Authentication
+        // Complete. Encryption on this ACL and confirmation of this peer's
+        // saved-key reply together establish possession of the bond.
+        let Some(l) = self.link_mut(addr).filter(|l| {
+            l.encrypted
+                && l.ssp
+                && (matches!(l.phase, Phase::Encrypting | Phase::PeerSecurityCollision)
+                    || l.waiting_for_peer()
+                    || l.kind == ConnectionKind::Incoming && l.phase == Phase::Authenticating)
+        }) else {
             return;
         };
 
@@ -1482,6 +1604,11 @@ impl Classic {
         l.phase = Phase::Up;
         l.deadline = None;
         let new_key = l.new_key.take();
+        if l.kind == ConnectionKind::Incoming {
+            // Peer encryption can win while our enable-encryption command awaits credit.
+            self.commands
+                .retain(|q| !(q.owner == Owner::Link(addr) && q.command.opcode == ENCRYPT));
+        }
         if let Some((key, key_type)) = new_key {
             self.emit(Action::LinkKey {
                 address: addr,
@@ -1513,14 +1640,19 @@ impl Classic {
         let selected = self.link(addr).filter(|l| {
             matches!(
                 l.phase,
-                Phase::Authenticating | Phase::Encrypting | Phase::Up
-            )
+                Phase::Authenticating
+                    | Phase::Encrypting
+                    | Phase::PeerSecurityCollision
+                    | Phase::Up
+            ) || l.waiting_for_peer()
+                || (code == 0x17 && l.phase == Phase::Accepting)
         });
-        let pairing = selected.is_some_and(|l| l.allow_pairing && l.phase == Phase::Authenticating);
-        let key = self
-            .key(addr)
-            .filter(|_| selected.is_some_and(|l| !l.allow_pairing || l.phase == Phase::Up));
-        let cmd = match code {
+        let pairing = selected
+            .is_some_and(|l| l.kind == ConnectionKind::Pair && l.phase == Phase::Authenticating);
+        let key = self.key(addr).filter(|_| {
+            selected.is_some_and(|l| l.kind != ConnectionKind::Pair || l.phase == Phase::Up)
+        });
+        let mut cmd = match code {
             0x16 => Command::addressed(NO_PIN, addr, &[]),
             0x17 => match key {
                 Some(key) => Command::addressed(KEY_REPLY, addr, key),
@@ -1541,6 +1673,18 @@ impl Classic {
         } else {
             Owner::Other
         };
+        if cmd.opcode == KEY_REPLY && selected.is_some_and(|l| l.kind == ConnectionKind::Incoming) {
+            cmd.overlapping_key_reply = self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.owner == owner && p.opcode == KEY_REPLY)
+                || self
+                    .commands
+                    .0
+                    .iter()
+                    .flatten()
+                    .any(|q| q.owner == owner && q.command.opcode == KEY_REPLY);
+        }
         self.enqueue(owner, cmd);
     }
 
@@ -1550,14 +1694,19 @@ impl Classic {
         let Some(l) = self.link_mut(addr).filter(|l| {
             matches!(
                 l.phase,
-                Phase::Authenticating | Phase::Encrypting | Phase::Up
-            )
+                Phase::Authenticating
+                    | Phase::Encrypting
+                    | Phase::PeerSecurityCollision
+                    | Phase::Up
+            ) || l.waiting_for_peer()
         }) else {
             return;
         };
         let kind = p[22];
         // Only SSP combination keys and changes to an existing SSP key are supported.
-        if !(matches!(kind, 4 | 5 | 7 | 8) && l.allow_pairing || kind == 6 && has_key) {
+        if !(matches!(kind, 4 | 5 | 7 | 8) && l.kind == ConnectionKind::Pair
+            || kind == 6 && has_key)
+        {
             self.stop_link(addr, Reason::UnsupportedKey);
             return;
         }
@@ -1570,7 +1719,10 @@ impl Classic {
             });
         } else {
             l.new_key = Some((key, kind));
-            self.confirm_ssp(addr);
+            // A key-change notification cannot vouch for the saved key reply.
+            if l.kind != ConnectionKind::Incoming {
+                self.confirm_ssp(addr);
+            }
         }
     }
 }

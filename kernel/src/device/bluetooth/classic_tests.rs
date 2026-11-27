@@ -973,9 +973,13 @@ fn remote_wake_uses_registered_key_and_requires_encryption() {
     h.event(4, &req);
     assert!(matches!(h.poll(), Some(Action::IncomingAcl(PAD))));
     h.sm.accept_incoming(PAD, KEY).unwrap();
-    h.cmd(ACCEPT);
+    assert_eq!(h.cmd(ACCEPT).params()[6], 1);
     h.status(ACCEPT, 0);
     h.connected(PAD, HANDLE);
+    assert!(h.poll().is_none());
+    h.now += PEER_SECURITY_MS - 1;
+    assert!(h.poll().is_none());
+    h.now += 1;
     h.cmd(AUTHENTICATE);
     h.status(AUTHENTICATE, 0);
     h.event(0x17, &PAD);
@@ -988,4 +992,286 @@ fn remote_wake_uses_registered_key_and_requires_encryption() {
             handle: HANDLE
         })
     ));
+}
+
+fn accepting_peer() -> Host {
+    let mut h = Host::ready();
+    h.sm.accept_saved = true;
+    h.cmd(WRITE_SCAN_ENABLE);
+    h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
+    h.sm.accept_incoming(PAD, KEY).unwrap();
+    h.cmd(ACCEPT);
+    h.status(ACCEPT, 0);
+    h
+}
+
+fn expect_incoming_up(h: &mut Host) {
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkUp {
+            address: PAD,
+            handle: HANDLE
+        })
+    ));
+    h.resolve_name(PAD, b"Keyboard");
+    assert_eq!(h.peer().address, PAD);
+    h.now += PEER_SECURITY_MS + 1;
+    assert!(h.poll().is_none());
+}
+
+#[test]
+fn bonded_peer_key_reply_and_encryption_publish_once_in_either_order() {
+    for key_first in [true, false] {
+        let mut h = accepting_peer();
+        h.connected(PAD, HANDLE);
+        assert!(h.poll().is_none());
+        h.event(0x17, &PAD);
+        h.cmd(KEY_REPLY);
+        if key_first {
+            h.addressed_ack(KEY_REPLY, PAD);
+            assert!(h.poll().is_none());
+            h.event(8, &[0, 0x23, 1, 1]);
+        } else {
+            h.event(0x59, &[0, 0x23, 1, 2, 16]);
+            assert!(h.poll().is_none());
+            // The deadline expires while the addressed reply still owns the command credit.
+            h.now += PEER_SECURITY_MS;
+            assert!(h.poll().is_none());
+            h.addressed_ack(KEY_REPLY, PAD);
+        }
+        expect_incoming_up(&mut h);
+    }
+}
+
+#[test]
+fn early_key_reply_requires_the_sent_accept_and_current_peer() {
+    let mut h = accepting_peer();
+    h.sm.provide_link_key(OTHER, SECOND_KEY);
+    h.event(0x17, &OTHER);
+    assert_eq!(h.cmd(NO_KEY).params(), &OTHER);
+    h.addressed_ack(NO_KEY, OTHER);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    assert!(h.poll().is_none());
+    let mut connected = [0; 11];
+    connected[1..3].copy_from_slice(&HANDLE.to_le_bytes());
+    connected[3..9].copy_from_slice(&PAD);
+    connected[9..].copy_from_slice(&[1, 1]); // ACL already encrypted at setup.
+    h.event(3, &connected);
+    expect_incoming_up(&mut h);
+}
+
+#[test]
+fn failed_accept_revokes_queued_early_key_reply() {
+    let mut h = Host::ready();
+    h.sm.accept_saved = true;
+    h.cmd(WRITE_SCAN_ENABLE);
+    h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
+    h.sm.accept_incoming(PAD, KEY).unwrap();
+    h.cmd(ACCEPT);
+    h.event(0x17, &PAD);
+    assert!(h.poll().is_none());
+    h.status(ACCEPT, 0x0f);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ConnectionFailed {
+            address: PAD,
+            reason: Reason::Hci(0x0f)
+        })
+    ));
+    assert!(h.poll().is_none());
+    h.event(0x17, &PAD);
+    assert_eq!(h.cmd(NO_KEY).params(), &PAD);
+}
+
+#[test]
+fn encryption_and_changed_key_cannot_replace_a_confirmed_saved_key() {
+    let mut h = accepting_peer();
+    h.connected(PAD, HANDLE);
+    h.event(8, &[0, 0x23, 1, 1]);
+    h.new_key(PAD, 6);
+    h.event(6, &[0, 0x23, 1]);
+    assert!(h.poll().is_none());
+    h.event(0x17, &PAD);
+    h.cmd(KEY_REPLY);
+    h.complete(KEY_REPLY, 1, &[6]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ConnectionFailed {
+            address: PAD,
+            reason: Reason::Hci(6)
+        })
+    ));
+    h.cmd(DISCONNECT);
+}
+
+#[test]
+fn authenticated_peer_waiting_for_encryption_gets_only_encrypt() {
+    let mut h = accepting_peer();
+    h.connected(PAD, HANDLE);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    h.event(6, &[0, 0x23, 1]);
+    h.now += PEER_SECURITY_MS - 1;
+    h.event(6, &[0, 0x23, 1]);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    assert!(h.poll().is_none());
+    h.now += 1;
+    assert_eq!(h.cmd(ENCRYPT).params(), &[0x23, 1, 1]);
+    h.status(ENCRYPT, 0);
+    assert!(h.poll().is_none());
+    h.event(8, &[0, 0x23, 1, 1]);
+    expect_incoming_up(&mut h);
+}
+
+#[test]
+fn peer_security_can_finish_while_fallback_awaits_status() {
+    let mut h = accepting_peer();
+    h.connected(PAD, HANDLE);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    h.now += PEER_SECURITY_MS;
+    h.cmd(AUTHENTICATE);
+    h.event(8, &[0, 0x23, 1, 1]);
+    h.status(AUTHENTICATE, 0x0c);
+    expect_incoming_up(&mut h);
+    h.event(6, &[5, 0x23, 1]); // A real authentication failure still closes the ACL.
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkDown {
+            address: PAD,
+            reason: Reason::Hci(5),
+            ..
+        })
+    ));
+    h.cmd(DISCONNECT);
+}
+
+#[test]
+fn incoming_peer_encryption_retires_unsent_fallback_encryption() {
+    let mut h = accepting_peer();
+    h.connected(PAD, HANDLE);
+    h.now += PEER_SECURITY_MS;
+    h.cmd(AUTHENTICATE);
+    h.status(AUTHENTICATE, 0);
+    h.event(0x17, &PAD);
+    h.cmd(KEY_REPLY);
+    h.event(6, &[0, 0x23, 1]);
+    assert!(h.poll().is_none());
+    h.event(8, &[0, 0x23, 1, 1]);
+    assert!(h.poll().is_none());
+    h.addressed_ack(KEY_REPLY, PAD);
+    expect_incoming_up(&mut h);
+}
+
+#[test]
+fn outgoing_reconnect_requires_authentication_complete_even_with_key_and_encryption() {
+    let mut h = Host::ready();
+    h.acl(true);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    h.event(8, &[0, 0x23, 1, 1]);
+    assert!(h.poll().is_none());
+    h.event(6, &[0, 0x23, 1]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkUp {
+            address: PAD,
+            handle: HANDLE
+        })
+    ));
+}
+
+#[test]
+fn disallowed_incoming_fallback_waits_once_for_confirmed_peer_encryption() {
+    for encrypt_in_time in [true, false] {
+        let mut h = accepting_peer();
+        h.connected(PAD, HANDLE);
+        h.event(0x17, &PAD);
+        h.expect_key(PAD, KEY);
+        h.now += PEER_SECURITY_MS;
+        h.cmd(AUTHENTICATE);
+        h.status(AUTHENTICATE, 0x0c);
+        assert!(h.poll().is_none());
+        assert_eq!(h.sm.next_deadline_ms(), Some(h.now + PEER_SECURITY_MS));
+        h.now += PEER_SECURITY_MS - 1;
+        h.event(6, &[0, 0x23, 1]);
+        h.event(0x17, &PAD);
+        h.expect_key(PAD, KEY);
+        assert!(h.poll().is_none());
+        if encrypt_in_time {
+            h.event(8, &[0, 0x23, 1, 1]);
+            expect_incoming_up(&mut h);
+        } else {
+            h.now += 1;
+            assert!(matches!(
+                h.poll(),
+                Some(Action::ConnectionFailed {
+                    address: PAD,
+                    reason: Reason::Hci(0x0c)
+                })
+            ));
+            h.cmd(DISCONNECT);
+        }
+    }
+}
+
+#[test]
+fn disallowed_fallback_without_a_successful_key_reply_fails_immediately() {
+    let mut h = accepting_peer();
+    h.connected(PAD, HANDLE);
+    h.now += PEER_SECURITY_MS;
+    h.cmd(AUTHENTICATE);
+    h.status(AUTHENTICATE, 0x0c);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ConnectionFailed {
+            address: PAD,
+            reason: Reason::Hci(0x0c)
+        })
+    ));
+    h.cmd(DISCONNECT);
+}
+
+#[test]
+fn only_overlapping_inbound_key_reply_can_have_stale_disallowed_status() {
+    for first_in_flight in [true, false] {
+        for encrypted_first in [true, false] {
+            let mut h = accepting_peer();
+            h.connected(PAD, HANDLE);
+            h.event(0x17, &PAD);
+            if first_in_flight {
+                h.cmd(KEY_REPLY);
+            }
+            h.event(0x17, &PAD);
+            if !first_in_flight {
+                h.cmd(KEY_REPLY);
+            }
+            h.addressed_ack(KEY_REPLY, PAD);
+            h.cmd(KEY_REPLY);
+            if encrypted_first {
+                h.event(8, &[0, 0x23, 1, 1]);
+            }
+            h.complete(KEY_REPLY, 1, &[0x0c]);
+            if !encrypted_first {
+                assert!(h.poll().is_none());
+                h.event(8, &[0, 0x23, 1, 1]);
+            }
+            expect_incoming_up(&mut h);
+            // A later independent request gets a fresh reply and owns its error.
+            h.event(0x17, &PAD);
+            h.cmd(KEY_REPLY);
+            h.complete(KEY_REPLY, 1, &[0x0c]);
+            assert!(matches!(
+                h.poll(),
+                Some(Action::LinkDown {
+                    address: PAD,
+                    reason: Reason::Hci(0x0c),
+                    ..
+                })
+            ));
+            h.cmd(DISCONNECT);
+        }
+    }
 }

@@ -49,20 +49,26 @@ impl Wire {
         self.event(0x0f, &[&[0, 1][..], &opcode.to_le_bytes()].concat());
     }
     fn receive(&mut self, out: &mut [u8]) -> usize {
-        let Some(frame) = self.frames.front() else {
-            return 0;
-        };
-        let n = out.len().min(17).min(frame.len() - self.offset);
-        out[..n].copy_from_slice(&frame[self.offset..self.offset + n]);
-        self.offset += n;
-        if self.offset == frame.len() {
+        // Split long frames but deliver adjacent short H4 events and ACL frames
+        // in one transport read, as a controller can do on a bonded wake.
+        let mut written = 0;
+        while written < out.len()
+            && let Some(frame) = self.frames.front()
+        {
+            let n = (out.len() - written).min(17).min(frame.len() - self.offset);
+            out[written..written + n].copy_from_slice(&frame[self.offset..self.offset + n]);
+            written += n;
+            self.offset += n;
+            if self.offset < frame.len() {
+                break;
+            }
             if frame.starts_with(&[4, 0x13]) {
                 assert_eq!(self.acl_in_flight.take(), Some(word(&frame[4..])));
             }
             self.frames.pop_front();
             self.offset = 0;
         }
-        n
+        written
     }
     fn acl(&mut self, handle: u16, pb: u16, data: &[u8]) {
         self.frames.push_back(
@@ -84,6 +90,9 @@ struct Peer {
     authenticated: bool,
     encrypted: bool,
     bonded: bool,
+    peer_opens_hid: bool,
+    auth_requested: bool,
+    control_pending: bool,
     fail_disconnect: bool,
     rejected_pages: u16,
     host_pages: u16,
@@ -108,6 +117,9 @@ impl Peer {
             authenticated: false,
             encrypted: false,
             bonded: false,
+            peer_opens_hid: false,
+            auth_requested: false,
+            control_pending: false,
             fail_disconnect: false,
             rejected_pages: 0,
             host_pages: 0,
@@ -122,13 +134,16 @@ impl Peer {
             outgoing_pdu: Vec::new(),
         }
     }
-    fn connected(&mut self, rx: &mut Wire) {
+    fn connected(&mut self, rx: &mut Wire, incoming: bool) {
         assert!(self.handle.is_none(), "duplicate ACL for the same peer");
         let h = self.base_handle + self.connects;
         self.handle = Some(h);
         self.connects += 1;
         self.authenticated = false;
         self.encrypted = false;
+        self.peer_opens_hid = incoming && self.address == wire::HID_ADDR;
+        self.auth_requested = false;
+        self.control_pending = false;
         self.local_sdp = None;
         self.discovery = sdp::Discovery::default();
         self.output_count = 0;
@@ -139,6 +154,9 @@ impl Peer {
             3,
             &[&[0][..], &h.to_le_bytes(), &self.address, &[1, 0]].concat(),
         );
+        if self.peer_opens_hid {
+            rx.event(0x17, &self.address); // The peer authenticates with its saved key.
+        }
     }
     fn lost(&mut self, rx: &mut Wire, reason: u8) {
         let handle = self.handle.take().unwrap();
@@ -177,6 +195,10 @@ impl Peer {
                         self.remote_interrupt + 1
                     }
                     0x11 => {
+                        assert!(
+                            !self.peer_opens_hid,
+                            "host duplicated the peer's HID control open"
+                        );
                         assert_eq!(self.address, wire::HID_ADDR, "HID opened on a non-HID peer");
                         assert!(self.discovery.identity_complete && self.local_sdp.is_none());
                         assert_eq!(self.local_control, 0);
@@ -184,6 +206,10 @@ impl Peer {
                         self.remote_control
                     }
                     0x13 => {
+                        assert!(
+                            !self.peer_opens_hid,
+                            "host duplicated the peer's HID interrupt open"
+                        );
                         assert_ne!(self.local_control, 0);
                         assert_eq!(self.local_interrupt, 0);
                         self.local_interrupt = local;
@@ -193,6 +219,36 @@ impl Peer {
                 };
                 self.signal(rx, 3, id, &words(&[remote, local, 0, 0]));
                 self.signal(rx, 4, remote as u8, &words(&[local, 0]));
+            }
+            3 => {
+                assert!(self.peer_opens_hid && self.encrypted);
+                assert_eq!(body.len(), 8);
+                let remote = word(&body[2..]);
+                assert_eq!(id, remote as u8, "wrong identifier for peer's HID open");
+                let result = word(&body[4..]);
+                if result == 1 {
+                    assert_eq!(remote, self.remote_control);
+                    assert_eq!(self.local_control, 0);
+                    self.control_pending = true;
+                    return;
+                }
+                assert_eq!(result, 0, "host refused the peer's HID open");
+                assert!(
+                    self.control_pending
+                        && self.discovery.identity_complete
+                        && self.local_sdp.is_none()
+                );
+                let local = word(body);
+                assert!(local >= 0x40);
+                let channel = if remote == self.remote_control {
+                    &mut self.local_control
+                } else {
+                    assert_eq!(remote, self.remote_interrupt);
+                    &mut self.local_interrupt
+                };
+                assert_eq!(*channel, 0);
+                *channel = local;
+                self.signal(rx, 4, id.wrapping_add(0x10), &words(&[local, 0]));
             }
             4 => {
                 let remote = word(body);
@@ -206,7 +262,17 @@ impl Peer {
                 };
                 self.signal(rx, 5, id, &words(&[local, 0, 0]));
             }
-            5 => assert_eq!(word(&body[4..]), 0),
+            5 => {
+                assert_eq!(word(&body[4..]), 0);
+                if self.peer_opens_hid && word(body) == self.remote_control {
+                    self.signal(
+                        rx,
+                        2,
+                        self.remote_interrupt as u8,
+                        &words(&[0x13, self.remote_interrupt]),
+                    );
+                }
+            }
             6 => {
                 let remote = word(body);
                 if remote == self.remote_interrupt + 1 {
@@ -320,7 +386,14 @@ impl Controller {
                 }
                 rx.accepted(op);
                 match op {
-                    0x0411 => rx.event(0x17, &p.address),
+                    0x0411 => {
+                        p.auth_requested = true;
+                        if !p.peer_opens_hid {
+                            rx.event(0x17, &p.address);
+                        } else if p.authenticated {
+                            rx.event(6, &[&[0][..], &h.to_le_bytes()].concat());
+                        }
+                    }
                     0x0413 => {
                         assert!(p.authenticated, "encryption before authentication");
                         assert_eq!(data[2], 1);
@@ -362,7 +435,7 @@ impl Controller {
                             p.host_pages += 1;
                         }
                         rx.accepted(op);
-                        p.connected(rx);
+                        p.connected(rx, op == 0x0409);
                     }
                     0x040c => {
                         assert!(!p.bonded, "reconnect must use the stored link key");
@@ -387,7 +460,22 @@ impl Controller {
                         assert_eq!(&data[6..], &[addr[0]; 16]);
                         p.authenticated = true;
                         rx.complete(op, &reply);
-                        rx.event(6, &[&[0][..], &p.handle.unwrap().to_le_bytes()].concat());
+                        let handle = p.handle.unwrap().to_le_bytes();
+                        if p.peer_opens_hid {
+                            // Both fit in one receive(). The host must consume LinkUp
+                            // before dispatching this ACL, even if its local auth completes later.
+                            p.encrypted = true;
+                            rx.event(8, &[&[0][..], &handle, &[1]].concat());
+                            p.signal(
+                                rx,
+                                2,
+                                p.remote_control as u8,
+                                &words(&[0x11, p.remote_control]),
+                            );
+                        }
+                        if p.auth_requested {
+                            rx.event(6, &[&[0][..], &handle].concat());
+                        }
                     }
                     _ => panic!("unexpected host HCI opcode {op:#06x}"),
                 }
