@@ -150,8 +150,8 @@ impl State {
 
     pub fn connected(&mut self, address: Address) {
         if let Some(peer) = self.peer_mut(address) {
-            peer.flags |= abi::CONNECTED | abi::ENCRYPTED;
-            self.changed();
+            peer.flags = abi::CONNECTED | abi::ENCRYPTED;
+            self.finish_peer(address, 0);
         }
     }
 
@@ -170,27 +170,14 @@ impl State {
         self.changed();
     }
 
-    pub fn profile_ready(&mut self, address: Address, hid: bool) {
-        // The management caller can queue a disconnect between worker iterations.
-        if matches!(self.request, Some(Request::Disconnect(addr)) if addr == address) {
-            return;
-        }
-        if let Some(peer) = self.peer_mut(address) {
-            peer.flags &= !abi::BUSY;
-            if hid {
+    pub fn profile_ready(&mut self, address: Address, ready: bool) {
+        if let Some(peer) = self.peer_mut(address)
+            && (peer.flags & abi::PROFILE_READY != 0) != ready
+        {
+            if ready {
                 peer.flags |= abi::PROFILE_READY;
-            }
-            self.finish_peer(address, 0);
-        }
-    }
-
-    pub fn closing_after_failure(&mut self, address: Address, error: u32) {
-        if let Some(peer) = self.peer_mut(address) {
-            peer.flags = (peer.flags & !abi::PROFILE_READY) | abi::BUSY;
-            peer.error = error;
-            peer.clear_key();
-            if self.selected == Some(address) {
-                self.flags |= abi::BUSY;
+            } else {
+                peer.flags &= !abi::PROFILE_READY;
             }
             self.changed();
         }
@@ -544,6 +531,10 @@ mod tests {
             state.begin(abi::PAIR, target, owner, generation);
             state.set_key(addr, [generation as u8; 16], 4);
             state.connected(addr);
+            let p = state.peer(addr).unwrap();
+            assert_eq!(p.flags, abi::CONNECTED | abi::ENCRYPTED);
+            assert_ne!(p.flags_for(owner) & abi::KEY_READABLE, 0);
+            assert_eq!(state.flags, abi::READY);
             state.profile_ready(addr, true);
         }
         assert_eq!(state.live().count(), 2);

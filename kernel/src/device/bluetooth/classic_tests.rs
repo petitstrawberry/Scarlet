@@ -245,9 +245,10 @@ fn discovery_decodes_multiple_records_rssi_eir_and_name_completion() {
         (p.address, p.class_of_device, p.rssi),
         (PAD, [4, 5, 6], Some(-30))
     );
-    eir[15..26].copy_from_slice(&[2, 8, b'J', 7, 9, b'J', b'o', b'y', b'C', b'o', b'n']);
+    // Shortened local name "S", followed by the complete local name "Sensor".
+    eir[15..26].copy_from_slice(b"\x02\x08S\x07\x09Sensor");
     h.event(0x2f, &eir);
-    assert_eq!(h.peer().name.unwrap().as_bytes(), b"JoyCon");
+    assert_eq!(h.peer().name.unwrap().as_bytes(), b"Sensor");
     h.event(1, &[0]);
     assert_eq!(
         h.cmd(REMOTE_NAME).params(),
@@ -356,11 +357,11 @@ fn unseen_bonded_peer_resolves_name_and_reconnect_refuses_fresh_pairing() {
     ));
     assert_eq!(h.cmd(REMOTE_NAME).params(), &[1, 2, 3, 4, 5, 6, 2, 0, 0, 0]);
     h.status(REMOTE_NAME, 0);
-    h.name(PAD, b"Joy-Con (R)");
+    h.name(PAD, b"Desk Sensor");
     let p = h.peer();
     assert_eq!(
         (p.address, p.name.unwrap().as_bytes()),
-        (PAD, b"Joy-Con (R)".as_slice())
+        (PAD, b"Desk Sensor".as_slice())
     );
     assert!(h.poll().is_none());
     assert_eq!(h.sm.next_deadline_ms(), None);
@@ -659,10 +660,10 @@ impl Host {
     fn two_named_peers() -> Self {
         let mut h = Self::ready();
         h.bond_up(PAD, HANDLE, KEY);
-        h.resolve_name(PAD, b"Left");
+        h.resolve_name(PAD, b"Mouse");
         assert_eq!(h.peer().address, PAD);
         h.bond_up(OTHER, SECOND_HANDLE, SECOND_KEY);
-        h.resolve_name(OTHER, b"Right");
+        h.resolve_name(OTHER, b"Keyboard");
         assert_eq!(h.peer().address, OTHER);
         h
     }
@@ -780,7 +781,7 @@ fn encryption_loss_and_teardown_timeout_isolate_the_handle_until_physical_discon
 fn pairing_deadline_and_failed_command_ack_do_not_revoke_another_peers_key_reply() {
     let mut h = Host::ready();
     h.bond_up(PAD, HANDLE, KEY);
-    h.resolve_name(PAD, b"Left");
+    h.resolve_name(PAD, b"Mouse");
     h.peer();
     h.sm.connect(OTHER).unwrap();
     h.cmd(CREATE);
@@ -844,13 +845,13 @@ fn preempted_link_name_resumes_and_cannot_name_or_disconnect_the_other_peer() {
             handle: SECOND_HANDLE
         })
     ));
-    h.resolve_name(PAD, b"Left");
+    h.resolve_name(PAD, b"Mouse");
     assert_eq!(h.cmd(REMOTE_NAME).params()[..6], OTHER);
     h.status(REMOTE_NAME, 0);
     let p = h.peer();
     assert_eq!(
         (p.address, p.name.unwrap().as_bytes()),
-        (PAD, b"Left".as_slice())
+        (PAD, b"Mouse".as_slice())
     );
     h.name(PAD, b"Late");
     h.event(5, &[0, 0x23, 1, 8]);
@@ -859,11 +860,11 @@ fn preempted_link_name_resumes_and_cannot_name_or_disconnect_the_other_peer() {
         Some(Action::LinkDown { address: PAD, .. })
     ));
     assert!(h.poll().is_none());
-    h.name(OTHER, b"Right");
+    h.name(OTHER, b"Keyboard");
     let p = h.peer();
     assert_eq!(
         (p.address, p.name.unwrap().as_bytes()),
-        (OTHER, b"Right".as_slice())
+        (OTHER, b"Keyboard".as_slice())
     );
 }
 

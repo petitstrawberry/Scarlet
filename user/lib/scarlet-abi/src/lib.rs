@@ -12,6 +12,7 @@ pub mod environment;
 pub mod fs;
 pub mod gamepad;
 pub mod gpu_timestamp;
+pub mod hidraw;
 pub mod hypervisor;
 pub mod native_scalar;
 pub mod network;

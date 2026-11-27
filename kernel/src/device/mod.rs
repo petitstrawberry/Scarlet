@@ -17,6 +17,7 @@ pub mod fdt;
 pub mod gpio;
 pub mod gpu;
 pub mod graphics;
+pub mod hid;
 pub mod i2c;
 pub mod input;
 pub mod iommu;

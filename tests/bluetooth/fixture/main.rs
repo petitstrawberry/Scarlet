@@ -20,11 +20,9 @@ use scarlet::{
     sync::{SpinLock, Waker},
 };
 
+mod sdp;
 #[path = "../radio.rs"]
 mod wire;
-const ADAPTER: [u8; 6] = [1, 0, 0, 0, 0, 2];
-const LEFT: [u8; 6] = [0x10, 0, 0, 0, 0, 2];
-const RIGHT: [u8; 6] = [0x20, 0, 0, 0, 0, 2];
 
 fn word(bytes: &[u8]) -> u16 {
     u16::from_le_bytes(bytes[..2].try_into().unwrap())
@@ -91,13 +89,11 @@ struct Peer {
     // Remote channel IDs deliberately differ by peer. Local channel IDs can legally coincide.
     remote_control: u16,
     remote_interrupt: u16,
-    sample: u64,
-    staged: Option<u64>,
-    echoes: u8,
-    led: u8,
-    led_requests: u8,
-    missed_led_ack: bool,
-    hold_led_retry: bool,
+    local_sdp: Option<u16>,
+    discovery: sdp::Discovery,
+    connection_requests: u16,
+    output_count: usize,
+    outgoing_pdu: Vec<u8>,
 }
 impl Peer {
     fn new(address: [u8; 6], base_handle: u16, remote: u16) -> Self {
@@ -113,13 +109,11 @@ impl Peer {
             local_interrupt: 0,
             remote_control: remote,
             remote_interrupt: remote + 1,
-            staged: None,
-            echoes: 0,
-            sample: wire::sample(0, 2048, 2048),
-            led: 0,
-            led_requests: 0,
-            missed_led_ack: false,
-            hold_led_retry: true,
+            local_sdp: None,
+            discovery: sdp::Discovery::default(),
+            connection_requests: 0,
+            output_count: 0,
+            outgoing_pdu: Vec::new(),
         }
     }
     fn connected(&mut self, rx: &mut Wire) {
@@ -129,15 +123,12 @@ impl Peer {
         self.connects += 1;
         self.authenticated = false;
         self.encrypted = false;
-        self.staged = None;
-        self.echoes = 0;
-        self.led = 0;
-        self.led_requests = 0;
-        self.missed_led_ack = false;
-        self.hold_led_retry = true;
+        self.local_sdp = None;
+        self.discovery = sdp::Discovery::default();
+        self.output_count = 0;
+        self.outgoing_pdu.clear();
         self.local_interrupt = 0;
         self.local_control = 0;
-        self.sample = wire::sample(0, 2048, 2048);
         rx.event(
             3,
             &[&[0][..], &h.to_le_bytes(), &self.address, &[1, 0]].concat(),
@@ -147,16 +138,16 @@ impl Peer {
         let handle = self.handle.take().unwrap();
         self.authenticated = false;
         self.encrypted = false;
+        self.local_sdp = None;
+        self.local_control = 0;
+        self.local_interrupt = 0;
+        self.outgoing_pdu.clear();
         rx.event(5, &[&[0][..], &handle.to_le_bytes(), &[reason]].concat());
     }
-    fn pdu(&self, rx: &mut Wire, cid: u16, data: &[u8], fragmented: bool) {
-        let handle = self.handle.unwrap();
+    fn pdu(&self, rx: &mut Wire, cid: u16, data: &[u8]) {
         let pdu = [words(&[data.len() as u16, cid]).as_slice(), data].concat();
-        if fragmented {
-            rx.acl(handle, 2, &pdu[..11]);
-            rx.acl(handle, 1, &pdu[11..]);
-        } else {
-            rx.acl(handle, 2, &pdu)
+        for (i, frag) in pdu.chunks(32).enumerate() {
+            rx.acl(self.handle.unwrap(), if i == 0 { 2 } else { 1 }, frag);
         }
     }
     fn signal(&self, rx: &mut Wire, code: u8, id: u8, body: &[u8]) {
@@ -164,7 +155,6 @@ impl Peer {
             rx,
             1,
             &[&[code, id][..], &(body.len() as u16).to_le_bytes(), body].concat(),
-            false,
         );
     }
     fn signaling(&mut self, rx: &mut Wire, data: &[u8]) {
@@ -173,13 +163,23 @@ impl Peer {
         assert_eq!(word(&data[2..]) as usize, body.len());
         match data[0] {
             2 => {
+                self.connection_requests += 1;
                 let local = word(&body[2..]);
                 let remote = match word(body) {
+                    1 => {
+                        assert!(self.local_sdp.replace(local).is_none());
+                        self.remote_interrupt + 1
+                    }
                     0x11 => {
+                        assert_eq!(self.address, wire::HID_ADDR, "HID opened on a non-HID peer");
+                        assert!(self.discovery.identity_complete && self.local_sdp.is_none());
+                        assert_eq!(self.local_control, 0);
                         self.local_control = local;
                         self.remote_control
                     }
                     0x13 => {
+                        assert_ne!(self.local_control, 0);
+                        assert_eq!(self.local_interrupt, 0);
                         self.local_interrupt = local;
                         self.remote_interrupt
                     }
@@ -190,7 +190,9 @@ impl Peer {
             }
             4 => {
                 let remote = word(body);
-                let local = if remote == self.remote_control {
+                let local = if remote == self.remote_interrupt + 1 {
+                    self.local_sdp.unwrap()
+                } else if remote == self.remote_control {
                     self.local_control
                 } else {
                     assert_eq!(remote, self.remote_interrupt);
@@ -198,71 +200,60 @@ impl Peer {
                 };
                 self.signal(rx, 5, id, &words(&[local, 0, 0]));
             }
-            9 => {
-                assert_eq!(id, 77);
-                assert_eq!(body, &self.address);
-                self.echoes += 1;
-            }
             5 => assert_eq!(word(&body[4..]), 0),
-            6 => self.signal(rx, 7, id, body),
+            6 => {
+                let remote = word(body);
+                if remote == self.remote_interrupt + 1 {
+                    assert_eq!(self.local_sdp.take(), Some(word(&body[2..])));
+                } else {
+                    let local = if remote == self.remote_interrupt {
+                        &mut self.local_interrupt
+                    } else {
+                        assert_eq!(remote, self.remote_control);
+                        &mut self.local_control
+                    };
+                    assert_ne!(*local, 0, "disconnect on a closed channel");
+                    assert_eq!(word(&body[2..]), *local);
+                    *local = 0;
+                }
+                self.signal(rx, 7, id, body);
+            }
             code => panic!("unexpected L2CAP signal {code}"),
         }
     }
-    fn report(&self, kind: u8) -> [u8; 50] {
-        let mut input = [0; 50];
-        input[..2].copy_from_slice(&[0xa1, kind]);
-        input[4..7].copy_from_slice(&self.sample.to_le_bytes()[..3]);
-        let x = (self.sample >> 24) & 4095;
-        let y = 4095 - ((self.sample >> 36) & 4095);
-        let center = (2048u32 | (2047 << 12)).to_le_bytes();
-        input[7..10].copy_from_slice(&center[..3]);
-        input[10..13].copy_from_slice(&center[..3]);
-        let offset = if self.address == LEFT { 7 } else { 10 };
-        input[offset..offset + 3].copy_from_slice(&(x | y << 12).to_le_bytes()[..3]);
-        input
-    }
-    fn hid(&mut self, rx: &mut Wire, output: &[u8]) {
-        assert_eq!(&output[..2], &[0xa2, 1]);
-        let mut input = self.report(0x21);
-        input[15] = output[11];
-        match output[11] {
+    fn output_fragment(&mut self, rx: &mut Wire, pb: u16, fragment: &[u8]) {
+        match pb {
             2 => {
-                input[14] = 0x82;
-                input[18] = if self.address == LEFT { 1 } else { 2 };
+                assert!(self.outgoing_pdu.is_empty(), "overlapping outbound PDUs");
+                assert!(fragment.len() >= 4);
             }
-            3 => {
-                assert_eq!(output[12], 0x30);
-                input[14] = 0x80;
-            }
-            0x30 => {
-                let mask = output[12];
-                assert_eq!(output.len(), 13);
-                assert_eq!(mask & 0xf0, 0, "expected steady player lamps");
-                self.led_requests = if self.led == mask {
-                    self.led_requests.saturating_add(1)
-                } else {
-                    1
-                };
-                self.led = mask;
-                if self.address == LEFT && mask == 3 {
-                    if !self.missed_led_ack {
-                        self.missed_led_ack = true;
-                        // A full report still reaches applications while the LED ACK is missing.
-                        self.sample = wire::sample((1 << 8) | (1 << 19), 2048, 2048);
-                        self.pdu(rx, self.local_interrupt, &self.report(0x30), true);
-                        return;
-                    }
-                    // Keep the retry response until the guest has observed the
-                    // first D-pad state, even when it opens the reader late.
-                    if self.hold_led_retry {
-                        return;
-                    }
-                }
-                input[14] = 0x80;
-            }
-            code => panic!("unexpected Joy-Con subcommand {code}"),
+            1 => assert!(!self.outgoing_pdu.is_empty(), "unexpected continuation"),
+            _ => panic!("unexpected ACL boundary {pb}"),
         }
-        self.pdu(rx, self.local_interrupt, &input, true);
+        self.outgoing_pdu.extend_from_slice(fragment);
+        let expected = 4 + usize::from(word(&self.outgoing_pdu));
+        assert!(self.outgoing_pdu.len() <= expected);
+        if self.outgoing_pdu.len() < expected {
+            return;
+        }
+        let pdu = core::mem::take(&mut self.outgoing_pdu);
+        match word(&pdu[2..]) {
+            1 => self.signaling(rx, &pdu[4..]),
+            cid if cid == self.remote_interrupt + 1 => {
+                let reply = self
+                    .discovery
+                    .response(&pdu[4..], self.address == wire::HID_ADDR);
+                self.pdu(rx, self.local_sdp.unwrap(), &reply);
+            }
+            cid if cid == self.remote_interrupt => {
+                assert_ne!(self.local_interrupt, 0);
+                let report = [wire::OUTPUT_LONG, wire::OUTPUT_SHORT][self.output_count % 2];
+                assert_eq!(pdu[4], 0xa2, "expected HIDP DATA output");
+                assert_eq!(&pdu[5..], report, "output report changed or coalesced");
+                self.output_count += 1;
+            }
+            cid => panic!("unexpected peer CID {cid:#x}"),
+        }
     }
 }
 
@@ -275,7 +266,10 @@ impl Controller {
     fn new() -> Self {
         Self {
             rx: Wire::default(),
-            peers: [Peer::new(LEFT, 0x123, 0x83), Peer::new(RIGHT, 0x234, 0x93)],
+            peers: [
+                Peer::new(wire::HID_ADDR, 0x123, 0x83),
+                Peer::new(wire::OTHER_ADDR, 0x234, 0x93),
+            ],
             wake: None,
         }
     }
@@ -283,14 +277,19 @@ impl Controller {
         let rx = &mut self.rx;
         match op {
             0x0c03 | 0x0c01 | 0x0c56 | 0x0c45 => rx.complete(op, &[0]),
-            0x1009 => rx.complete(op, &[&[0], ADAPTER.as_slice()].concat()),
-            0x1005 => rx.complete(op, &[0, 128, 0, 0, 1, 0, 0, 0]),
+            0x1009 => rx.complete(op, &[&[0], wire::ADAPTER.as_slice()].concat()),
+            0x1005 => rx.complete(op, &[0, 32, 0, 0, 1, 0, 0, 0]),
             0x0401 => {
                 rx.accepted(op);
                 for peer in &self.peers {
+                    let class = if peer.address == wire::HID_ADDR {
+                        [0x40, 5, 0]
+                    } else {
+                        [0, 1, 0]
+                    };
                     rx.event(
                         0x22,
-                        &[&[1][..], &peer.address, &[1, 0, 8, 0x25, 0, 0, 0, 0xd0]].concat(),
+                        &[&[1][..], &peer.address, &[1, 0], &class, &[0, 0, 0xd0]].concat(),
                     );
                 }
                 rx.event(1, &[0]);
@@ -327,11 +326,12 @@ impl Controller {
                         rx.accepted(op);
                         let mut result = [0; 255];
                         result[1..7].copy_from_slice(addr);
-                        result[7..18].copy_from_slice(if addr == LEFT {
-                            b"Joy-Con (L)"
+                        let name = if p.address == wire::HID_ADDR {
+                            wire::HID_NAME
                         } else {
-                            b"Joy-Con (R)"
-                        });
+                            wire::OTHER_NAME
+                        };
+                        result[7..7 + name.len()].copy_from_slice(name.as_bytes());
                         rx.event(7, &result);
                     }
                     0x0405 => {
@@ -371,24 +371,19 @@ impl Controller {
     fn acl(&mut self, frame: &[u8]) {
         let header = word(&frame[1..]);
         let handle = header & 0x0fff;
-        assert_eq!(header >> 12, 2);
+        assert!(frame.len() - 5 <= 32);
         assert_eq!(usize::from(word(&frame[3..])), frame.len() - 5);
-        assert_eq!(usize::from(word(&frame[5..])), frame.len() - 9);
         let p = self
             .peers
             .iter_mut()
             .find(|p| p.handle == Some(handle))
             .expect("unknown ACL");
-        assert!(p.encrypted, "host sent plaintext HID");
+        assert!(p.encrypted, "host sent plaintext ACL");
         assert!(
             self.rx.acl_in_flight.replace(handle).is_none(),
             "one shared ACL credit exceeded"
         );
-        match word(&frame[7..]) {
-            1 => p.signaling(&mut self.rx, &frame[9..]),
-            cid if cid == p.remote_interrupt => p.hid(&mut self.rx, &frame[9..]),
-            cid => panic!("unexpected peer CID {cid:#x}"),
-        }
+        p.output_fragment(&mut self.rx, header >> 12, &frame[5..]);
         // All peer responses are delivered before this credit return, testing backpressure.
         self.rx
             .event(0x13, &[&[1][..], &handle.to_le_bytes(), &[1, 0]].concat());
@@ -430,59 +425,26 @@ impl ControlOps for Radio {
         let (result, wake) = {
             let mut controller = self.0.lock();
             let Controller { peers, rx, wake } = &mut *controller;
-            let side = (cmd & 1) as usize;
-            let p = &mut peers[side];
+            let p = &mut peers[(cmd & 1) as usize];
             let result = match cmd & !1 {
-                wire::REPORT if p.encrypted && p.local_interrupt != 0 => {
-                    p.sample = arg as u64;
-                    p.pdu(rx, p.local_interrupt, &p.report(0x30), true);
+                wire::SEND_INPUT if p.encrypted && p.local_interrupt != 0 => {
+                    let report = match arg {
+                        0 => wire::PRESS,
+                        1 => wire::RELEASE,
+                        _ => return Err("unknown input report"),
+                    };
+                    p.pdu(rx, p.local_interrupt, &[&[0xa1][..], report].concat());
                     0
                 }
-                wire::INTERLEAVE if p.encrypted && p.local_interrupt != 0 => {
-                    assert!(p.staged.replace(arg as u64).is_none());
-                    if peers.iter().any(|p| p.staged.is_none()) {
-                        return Ok(0);
-                    }
-                    // Reuse the signaling ID on both ACL handles. Both requests
-                    // precede any completed-packets event generated by a reply.
-                    let reports = peers.each_mut().map(|p| {
-                        p.signal(rx, 8, 77, &p.address);
-                        p.sample = p.staged.take().unwrap();
-                        let hid = p.report(0x30);
-                        let pdu = [
-                            words(&[hid.len() as u16, p.local_interrupt]).as_slice(),
-                            &hid,
-                        ]
-                        .concat();
-                        (p.handle.unwrap(), pdu)
-                    });
-                    for (handle, pdu) in &reports {
-                        rx.acl(*handle, 2, &pdu[..11]);
-                    }
-                    for (handle, pdu) in &reports {
-                        rx.acl(*handle, 1, &pdu[11..]);
-                    }
-                    0
+                wire::CONNECTION_REQUESTS => return Ok(i32::from(p.connection_requests)),
+                wire::OPEN_CHANNELS => {
+                    return Ok(i32::from(p.local_control != 0) + i32::from(p.local_interrupt != 0));
                 }
-                wire::ACK_LIGHTS
-                    if p.address == LEFT
-                        && p.hold_led_retry
-                        && p.led == 3
-                        && p.led_requests >= 2 =>
-                {
-                    p.hold_led_retry = false;
-                    p.sample = wire::sample((1 << 8) | (1 << 18), 2048, 2048);
-                    let mut ack = p.report(0x21);
-                    ack[14..16].copy_from_slice(&[0x80, 0x30]);
-                    p.pdu(rx, p.local_interrupt, &ack, true);
-                    0
-                }
-                wire::ECHO_COUNT => return Ok(i32::from(p.echoes)),
+                wire::OUTPUT_COUNT => return Ok(p.output_count as i32),
                 wire::UNPLUG if p.encrypted => {
                     p.lost(rx, 0x08);
                     0
                 }
-                wire::LIGHTS => return Ok(i32::from(p.led) | i32::from(p.led_requests) << 8),
                 _ => return Err("invalid QA radio command or offline peer"),
             };
             (result, wake.clone())

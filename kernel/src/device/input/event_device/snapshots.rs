@@ -1,31 +1,13 @@
-//! Raw halves and uinput gamepads broadcast complete snapshots. Readers share bounded history
+//! Published gamepads broadcast complete snapshots. Readers share bounded history
 //! but own their positions, overflow recovery, and nonblocking mode.
 use super::*;
-use crate::shield::authorization::{Management, permits_management};
 use crate::sync::waker::WaitResult;
 use core::sync::atomic::AtomicBool;
-use scarlet_abi::gamepad::SET_JOYCON_PLAYER;
 
 #[derive(Default)]
 pub(super) struct History {
     end: u64,
     latest_len: usize,
-    pub(super) player: Option<PlayerControl>,
-}
-
-impl History {
-    pub(super) fn joycon() -> Self {
-        Self {
-            player: Some(PlayerControl::default()),
-            ..Self::default()
-        }
-    }
-}
-
-#[derive(Default)]
-pub(super) struct PlayerControl {
-    pub(super) pending: Option<u8>,
-    pub(super) notify: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EventQueue {
@@ -211,50 +193,13 @@ impl CharDevice for Reader {
 
 impl ControlOps for Reader {
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
-        let mut commands = self.source.supported_control_commands();
-        if self
-            .source
-            .queue
-            .lock()
-            .history
-            .as_ref()
-            .is_some_and(|h| h.player.is_some())
-        {
-            commands.push((SET_JOYCON_PLAYER, "Set player number for this Joy-Con"));
-        }
-        commands
+        self.source.supported_control_commands()
     }
 
     fn control(&self, cmd: u32, arg: usize) -> Result<i32, &'static str> {
         match cmd {
             0x5353_0007 => {
                 self.set_nonblocking(arg != 0);
-                Ok(0)
-            }
-            SET_JOYCON_PLAYER => {
-                let task = crate::task::mytask().ok_or("No physical-seat caller")?;
-                if !permits_management(&task, Management::PhysicalSeat) {
-                    return Err("Physical-seat management permission denied");
-                }
-                if !(1..=4).contains(&arg) {
-                    return Err("Invalid Joy-Con player");
-                }
-                let notify = {
-                    let mut q = self.source.queue.lock();
-                    if q.detached() {
-                        return Err("Joy-Con detached");
-                    }
-                    let player = q
-                        .history
-                        .as_mut()
-                        .and_then(|h| h.player.as_mut())
-                        .ok_or("Player control requires a physical Joy-Con")?;
-                    player.pending = Some(arg as u8);
-                    player.notify.clone()
-                };
-                if let Some(notify) = notify {
-                    notify();
-                }
                 Ok(0)
             }
             _ => self.source.control(cmd, arg),
@@ -346,41 +291,21 @@ mod tests {
         )
     }
 
-    fn half(side: JoyConSide) -> Arc<EventDevice> {
-        Arc::new(
-            EventDevice::new_removable_joycon(
-                side,
-                InputDeviceMetadata::new(InputDeviceKind::Gamepad, INPUT_CAP_KEY),
-            )
-            .unwrap(),
-        )
+    fn gamepad() -> Arc<EventDevice> {
+        let metadata = InputDeviceMetadata::new(InputDeviceKind::Gamepad, 0)
+            .with_absolute_axis(0, 0, 200)
+            .unwrap();
+        Arc::new(EventDevice::logical_gamepad(metadata).unwrap().1)
     }
 
     #[test_case]
-    fn raw_slots_are_independent_and_a_restarted_reader_replays_current_state() {
-        let left = half(JoyConSide::Left);
-        let right = half(JoyConSide::Right);
-        let logical = EventDevice::new_removable_gamepad(InputDeviceMetadata::new(
-            InputDeviceKind::Gamepad,
-            0,
-        ))
-        .unwrap();
-        assert!(left.name.starts_with("joycon-left"));
-        assert!(right.name.starts_with("joycon-right"));
-        assert!(logical.name.starts_with("gamepad"));
-        let mut more = Vec::new();
-        while let Ok(another) =
-            EventDevice::new_removable_joycon(JoyConSide::Left, left.metadata.clone())
-        {
-            more.push(another);
-            assert!(more.len() < GAMEPAD_SLOTS);
-        }
-        let _other_right = half(JoyConSide::Right);
-        left.push_events(&frame(17));
-        let first = left.clone().open().unwrap();
+    fn restarted_gamepad_reader_replays_current_state_and_detaches_independently() {
+        let pad = gamepad();
+        pad.push_events(&frame(17));
+        let first = pad.clone().open().unwrap();
         assert_eq!(next(&*first), frame(17)[0]);
-        left.push_events(&frame(44));
-        let second = left.clone().open().unwrap();
+        pad.push_events(&frame(44));
+        let second = pad.clone().open().unwrap();
         second.set_nonblocking(true);
         assert!(!first.is_nonblocking());
         assert_eq!(next(&*second), frame(44)[0]);
@@ -392,11 +317,11 @@ mod tests {
         ));
         assert_eq!(next(&*first), frame(17)[1]);
         assert_eq!(next(&*first), frame(44)[0]);
-        left.push_events(&frame(0));
-        left.detach_gamepad();
-        assert!(left.clone().open().is_err());
-        let replacement = half(JoyConSide::Left);
-        assert_eq!(replacement.get_name(), left.get_name());
+        pad.push_events(&frame(0));
+        pad.detach_gamepad();
+        assert!(pad.clone().open().is_err());
+        let replacement = gamepad();
+        assert_eq!(replacement.get_name(), pad.get_name());
         replacement.push_events(&frame(88));
         assert_eq!(next(&*second), frame(0)[0]);
         assert_eq!(next(&*second), frame(0)[1]);
@@ -408,8 +333,8 @@ mod tests {
     }
 
     #[test_case]
-    fn raw_overrun_preserves_fast_reader_and_resynchronizes_slow_reader() {
-        let pad = half(JoyConSide::Right);
+    fn gamepad_overrun_preserves_fast_reader_and_resynchronizes_slow_reader() {
+        let pad = gamepad();
         pad.push_events(&frame(0));
         let fast = pad.clone().open().unwrap();
         let slow = pad.clone().open().unwrap();

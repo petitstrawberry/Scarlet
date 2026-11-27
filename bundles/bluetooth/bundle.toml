@@ -6,13 +6,6 @@ bin = "btctl"
 to = "/bin/btctl"
 
 [[layers]]
-kind = "cargo"
-source = "../../user/bluetooth"
-package = "scarlet-bluetooth"
-bin = "joycond"
-to = "/bin/joycond"
-
-[[layers]]
 kind = "copy"
 source = "fs"
 to = "/"

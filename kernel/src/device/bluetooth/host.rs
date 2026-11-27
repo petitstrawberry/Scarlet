@@ -1,19 +1,18 @@
-//! The controller worker drives Classic management and one HID session per ACL link.
+//! The controller worker drives Classic management, SDP and HID over encrypted ACL links.
 //! Command and ACL transmit buffers belong to the controller.
 use super::{
     H4Transport,
-    classic::{Action, Address, Classic, ControllerInfo, Reason},
+    classic::{Action, Address, Classic, ControllerInfo, Name, Reason},
     control::{Request, Shared},
     h4,
-    joycon::JoyCon,
     l2cap::{self, L2capSession},
 };
+use crate::device::hid::{self, HidDevice, HidDeviceInfo, HidIdentity, HidTransport, HidWake};
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::Ordering;
 use zeroize::Zeroizing;
 
 const LINK_ERROR: u32 = 0x101;
-const PROFILE_ERROR: u32 = 0x102;
 const PROFILE_TIMEOUT_MS: u64 = 12_000;
 
 fn error_code(reason: Reason) -> u32 {
@@ -26,10 +25,172 @@ fn error_code(reason: Reason) -> u32 {
 struct Link {
     address: Address,
     handle: u16,
-    hid: Option<(L2capSession, JoyCon)>,
+    name: Option<Name>,
+    profile: Option<Profile>,
+    disconnecting: bool,
+}
+
+enum Stage {
+    Discovering,
+    Opening(l2cap::sdp::HidService),
+    Active(HidDevice),
+    Closing,
+}
+
+struct Profile {
+    channels: L2capSession,
+    stage: Stage,
     deadline: Option<u64>,
-    // Final management result while waiting for the addressed HCI disconnect.
-    closing: Option<u32>,
+    pending_output: Option<Vec<u8>>,
+}
+
+impl Profile {
+    fn discover(handle: u16, now: u64) -> Option<Self> {
+        Some(Self {
+            channels: L2capSession::discover(handle, l2cap::DEFAULT_MTU).ok()?,
+            stage: Stage::Discovering,
+            deadline: Some(now.saturating_add(PROFILE_TIMEOUT_MS)),
+            pending_output: None,
+        })
+    }
+
+    fn active(&self) -> bool {
+        matches!(self.stage, Stage::Active(_))
+    }
+
+    fn close(&mut self, now: u64) {
+        if matches!(self.stage, Stage::Closing) {
+            return;
+        }
+        self.stage = Stage::Closing; // Drops the binding and its hidraw node.
+        self.pending_output = None;
+        self.deadline = Some(now.saturating_add(PROFILE_TIMEOUT_MS));
+        let _ = self.channels.disconnect();
+    }
+
+    fn next_deadline(&self, can_transmit: bool) -> Option<u64> {
+        match &self.stage {
+            Stage::Active(device) if can_transmit && self.pending_output.is_none() => {
+                device.next_deadline_ms()
+            }
+            _ => self.deadline,
+        }
+    }
+
+    fn queue_output(&mut self, now: u64) -> Result<(), &'static str> {
+        let packet = if let Some(packet) = self.pending_output.take() {
+            packet
+        } else {
+            let Stage::Active(device) = &mut self.stage else {
+                return Ok(());
+            };
+            let Some(mut report) = device.poll_output(now)? else {
+                return Ok(());
+            };
+            report.insert(0, 0xa2); // HIDP DATA, Output.
+            report
+        };
+        match self.channels.send_interrupt(&packet) {
+            Ok(()) => Ok(()),
+            Err(l2cap::Error::QueueFull) => {
+                self.pending_output = Some(packet);
+                Ok(())
+            }
+            Err(_) => Err("cannot send HID output"),
+        }
+    }
+
+    // Returns false after a terminal event. This ACL never reuses unconfirmed
+    // channel IDs for a second profile, even if the peer stops answering.
+    fn drive(
+        &mut self,
+        now: u64,
+        handle: u16,
+        transport: HidTransport,
+        name: Option<Name>,
+        wake: &HidWake,
+        can_transmit: bool,
+    ) -> bool {
+        if self.deadline.is_some_and(|due| now >= due) {
+            if matches!(self.stage, Stage::Closing) {
+                return false;
+            }
+            self.close(now);
+        }
+        if self.active() && !self.channels.is_ready() {
+            self.close(now);
+        }
+        while let Some(event) = self.channels.poll_event() {
+            match event {
+                l2cap::Event::Discovered(Some(service))
+                    if matches!(self.stage, Stage::Discovering) =>
+                {
+                    // The SDP channel has closed. Only a valid HID record authorizes its PSMs.
+                    if !hid::valid_report_descriptor(&service.report_descriptor) {
+                        return false;
+                    }
+                    let Ok(mut channels) = L2capSession::for_hid(
+                        handle,
+                        l2cap::DEFAULT_MTU,
+                        service.control_psm,
+                        service.interrupt_psm,
+                    ) else {
+                        return false;
+                    };
+                    if channels.start().is_err() {
+                        return false;
+                    }
+                    self.channels = channels;
+                    self.stage = Stage::Opening(service);
+                    self.deadline = Some(now.saturating_add(PROFILE_TIMEOUT_MS));
+                }
+                l2cap::Event::Discovered(_) | l2cap::Event::Closed(_) => return false,
+                l2cap::Event::Ready => {
+                    let Stage::Opening(service) = &mut self.stage else {
+                        continue;
+                    };
+                    let Some(mtu) = self.channels.interrupt_tx_mtu() else {
+                        self.close(now);
+                        continue;
+                    };
+                    let info = HidDeviceInfo {
+                        transport,
+                        name: name
+                            .as_ref()
+                            .map_or_else(Vec::new, |n| n.as_bytes().to_vec()),
+                        identity: service.device_id.as_ref().map(|id| HidIdentity {
+                            vendor_id_source: id.vendor_id_source,
+                            vendor_id: id.vendor_id,
+                            product_id: id.product_id,
+                            version: id.version,
+                        }),
+                        report_descriptor: core::mem::take(&mut service.report_descriptor),
+                        max_output_len: usize::from(mtu.saturating_sub(1)),
+                    };
+                    match HidDevice::attach(info, wake.clone()) {
+                        Ok(device) => {
+                            self.stage = Stage::Active(device);
+                            self.deadline = None;
+                        }
+                        Err(_) => self.close(now),
+                    }
+                }
+                l2cap::Event::Interrupt(packet) => {
+                    if let Stage::Active(device) = &mut self.stage
+                        && let [0xa1, report @ ..] = packet.as_slice()
+                        && device.input_report(report).is_err()
+                    {
+                        self.close(now);
+                    }
+                }
+                l2cap::Event::Control(_) => {}
+            }
+        }
+        if can_transmit && self.queue_output(now).is_err() {
+            self.close(now);
+        }
+        true
+    }
 }
 
 // A logical link may go down before the controller has flushed its ACL packets.
@@ -72,11 +233,19 @@ pub(super) struct Host {
     links: Vec<Link>,
     buffers: AclBuffers,
     next_tx: usize,
+    wake: HidWake,
+    repoll: bool,
 }
 
 impl Host {
     pub fn new(shared: Arc<Shared>) -> Self {
+        let notify = shared.clone();
         Self {
+            wake: Arc::new(move || {
+                notify.queued.store(true, Ordering::Release);
+                notify.wake.wake_one();
+            }),
+            repoll: false,
             shared,
             classic: Classic::new(),
             controller: ControllerInfo::default(),
@@ -106,8 +275,9 @@ impl Host {
                 if result.is_ok()
                     && let Some(link) = self.links.iter_mut().find(|l| l.address == addr)
                 {
-                    link.closing.get_or_insert(0);
-                    link.deadline = None;
+                    link.disconnecting = true;
+                    link.profile = None;
+                    self.shared.state.lock().profile_ready(addr, false);
                 }
                 (addr, result)
             }
@@ -132,14 +302,15 @@ impl Host {
             h4::ACL => {
                 let hf = u16::from_le_bytes([frame[0], frame[1]]);
                 if hf >> 14 == 0
-                    && let Some(i) = self.links.iter().position(|l| l.handle == hf & 0x0fff)
-                    && self.links[i].closing.is_none()
-                    && let Some((channels, _)) = &mut self.links[i].hid
-                    && channels
+                    && let Some(link) = self.links.iter_mut().find(|l| l.handle == hf & 0x0fff)
+                    && let Some(profile) = &mut link.profile
+                    && profile
+                        .channels
                         .receive_acl(((hf >> 12) & 3) as u8, &frame[4..])
                         .is_err()
                 {
-                    self.fail_profile(i);
+                    profile.close(now);
+                    self.shared.state.lock().profile_ready(link.address, false);
                 }
             }
             _ => {}
@@ -147,54 +318,8 @@ impl Host {
         Ok(())
     }
 
-    fn identify_profile(&mut self, index: usize, now: u64) {
-        let link = &mut self.links[index];
-        if link.hid.is_some() || link.closing.is_some() {
-            return;
-        }
-        let Some(name) = self.shared.state.lock().name(link.address) else {
-            return;
-        };
-        let shared = self.shared.clone();
-        let Some(profile) = JoyCon::connect(name.as_bytes(), move || {
-            shared.queued.store(true, Ordering::Release);
-            shared.wake.wake_one();
-        }) else {
-            if link.deadline.take().is_some() {
-                self.shared.state.lock().profile_ready(link.address, false);
-            }
-            return;
-        };
-        let channels =
-            L2capSession::new(link.handle, l2cap::DEFAULT_MTU).and_then(|mut channels| {
-                channels.start()?;
-                Ok(channels)
-            });
-        let Ok(channels) = channels else {
-            return self.fail_profile(index);
-        };
-        link.hid = Some((channels, profile));
-        link.deadline = Some(now.saturating_add(PROFILE_TIMEOUT_MS));
-    }
-
-    fn fail_profile(&mut self, index: usize) {
-        let link = &mut self.links[index];
-        link.hid = None;
-        link.deadline = None;
-        link.closing = Some(PROFILE_ERROR);
-        self.shared
-            .state
-            .lock()
-            .closing_after_failure(link.address, PROFILE_ERROR);
-        if self.classic.disconnect_peer(link.address).is_err() {
-            // Classic may already have queued the loss while delivering an earlier event.
-            let address = link.address;
-            self.links.remove(index);
-            self.shared.state.lock().ended(address, PROFILE_ERROR);
-        }
-    }
-
     pub fn drive(&mut self, transport: &dyn H4Transport, now: u64) -> Result<(), &'static str> {
+        self.repoll = false;
         while let Some(action) = self.classic.poll(now) {
             match action {
                 Action::Command(command) => {
@@ -216,8 +341,18 @@ impl Host {
                 }
                 Action::PeerFound(peer) => {
                     self.shared.state.lock().update_peer(peer);
-                    if let Some(i) = self.links.iter().position(|l| l.address == peer.address) {
-                        self.identify_profile(i, now);
+                    if let Some(name) = peer.name
+                        && let Some(link) =
+                            self.links.iter_mut().find(|l| l.address == peer.address)
+                    {
+                        link.name = Some(name);
+                        if let Some(Profile {
+                            stage: Stage::Active(device),
+                            ..
+                        }) = &link.profile
+                        {
+                            device.set_name(name.as_bytes());
+                        }
                     }
                 }
                 Action::InquiryComplete(result) => self
@@ -233,15 +368,17 @@ impl Host {
                     self.shared.state.lock().set_key(address, key, key_type);
                 }
                 Action::LinkUp { address, handle } => {
-                    self.shared.state.lock().connected(address);
+                    let mut state = self.shared.state.lock();
+                    state.connected(address);
+                    let name = state.name(address);
+                    drop(state);
                     self.links.push(Link {
                         address,
                         handle,
-                        hid: None,
-                        closing: None,
-                        deadline: Some(now.saturating_add(PROFILE_TIMEOUT_MS)),
+                        name,
+                        profile: Profile::discover(handle, now),
+                        disconnecting: false,
                     });
-                    self.identify_profile(self.links.len() - 1, now);
                 }
                 Action::LinkDown {
                     address,
@@ -254,10 +391,10 @@ impl Host {
                         .position(|l| l.address == address && l.handle == handle)
                     {
                         let link = self.links.remove(i);
-                        let error = match (link.closing, reason) {
-                            (Some(0), Reason::LocalDisconnect) => 0,
-                            (Some(PROFILE_ERROR), _) => PROFILE_ERROR,
-                            _ => error_code(reason),
+                        let error = if link.disconnecting && reason == Reason::LocalDisconnect {
+                            0
+                        } else {
+                            error_code(reason)
                         };
                         drop(link);
                         self.shared.state.lock().ended(address, error);
@@ -270,22 +407,30 @@ impl Host {
                 Action::ControllerFault(_) => return Err("Bluetooth controller fault"),
             }
         }
-        for i in (0..self.links.len()).rev() {
-            let link = &mut self.links[i];
-            if link.closing.is_some() {
+        let can_transmit = self.buffers.available() != 0;
+        for link in &mut self.links {
+            let Some(profile) = &mut link.profile else {
                 continue;
+            };
+            let was_ready = profile.active();
+            let location = HidTransport::Bluetooth {
+                controller: self.controller.address,
+                peer: link.address,
+            };
+            let keep = profile.drive(
+                now,
+                link.handle,
+                location,
+                link.name,
+                &self.wake,
+                can_transmit,
+            );
+            let ready = keep && profile.active();
+            if !keep {
+                link.profile = None;
             }
-            let expired = link.deadline.is_some_and(|due| now >= due);
-            if let Some((channels, joycon)) = &mut link.hid {
-                if expired || !drive_hid(channels, joycon, now) {
-                    self.fail_profile(i);
-                } else if joycon.is_ready() && link.deadline.take().is_some() {
-                    self.shared.state.lock().profile_ready(link.address, true);
-                }
-            } else if expired {
-                // No remote name was resolved. Keep the generic encrypted link usable.
-                link.deadline = None;
-                self.shared.state.lock().profile_ready(link.address, false);
+            if ready != was_ready {
+                self.shared.state.lock().profile_ready(link.address, ready);
             }
         }
         self.transmit(transport)
@@ -300,9 +445,10 @@ impl Host {
                 let i = self.next_tx % count;
                 self.next_tx = (i + 1) % count;
                 let link = &mut self.links[i];
-                if link.closing.is_none()
-                    && let Some((channels, _)) = &mut link.hid
-                    && let Some(fragment) = channels.poll_acl(usize::from(self.controller.acl_mtu))
+                if let Some(profile) = &mut link.profile
+                    && let Some(fragment) = profile
+                        .channels
+                        .poll_acl(usize::from(self.controller.acl_mtu))
                 {
                     next = Some(fragment);
                     break;
@@ -317,57 +463,27 @@ impl Host {
             frame.extend_from_slice(&fragment.data);
             transport.send(&frame)?;
             self.buffers.sent(fragment.handle);
+            // Sending frees L2CAP queue space and can expose a final SDP/close event.
+            self.repoll = true;
         }
         Ok(())
     }
 
     pub fn next_deadline(&self) -> Option<u64> {
+        if self.repoll {
+            return Some(0);
+        }
+        let can_transmit = self.buffers.available() != 0;
         let profile = self
             .links
             .iter()
-            .filter(|link| link.closing.is_none())
-            .flat_map(|link| {
-                let hid = link
-                    .hid
-                    .as_ref()
-                    .filter(|(c, _)| c.is_ready())
-                    .and_then(|(_, joycon)| joycon.next_deadline_ms());
-                [link.deadline, hid].into_iter().flatten()
-            });
+            .filter_map(|link| link.profile.as_ref()?.next_deadline(can_transmit));
         self.classic
             .next_deadline_ms()
             .into_iter()
             .chain(profile)
             .min()
     }
-}
-
-fn drive_hid(channels: &mut L2capSession, joycon: &mut JoyCon, now: u64) -> bool {
-    while let Some(event) = channels.poll_event() {
-        match event {
-            l2cap::Event::Closed(_) => return false,
-            l2cap::Event::Interrupt(data) if data.first() == Some(&0xa1) => {
-                if joycon.input_report(&data[1..]).is_err() {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    if channels.is_ready() {
-        match joycon.poll_output(now) {
-            Ok(Some(report)) => {
-                let mut packet = vec![0xa2]; // HIDP DATA, Output
-                packet.extend_from_slice(&report);
-                if channels.send_interrupt(&packet).is_err() {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-            Ok(None) => {}
-        }
-    }
-    true
 }
 
 #[cfg(test)]

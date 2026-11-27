@@ -10,4 +10,4 @@ path = "main.rs"
 
 [dependencies]
 scarlet-os = { path = "../../../user/lib/scarlet-os", default-features = false, features = ["std"] }
-sws-protocol = { path = "../../../user/lib/sws-protocol", default-features = false, features = ["std"] }
+scarlet-abi = { path = "../../../user/lib/scarlet-abi" }

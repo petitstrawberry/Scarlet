@@ -52,8 +52,8 @@ dependencies = [
 name = "bluetooth-qa"
 version = "0.1.0"
 dependencies = [
+ "scarlet-abi",
  "scarlet-os",
- "sws-protocol",
 ]
 
 [[package]]
@@ -330,10 +330,6 @@ dependencies = [
  "cpufeatures 0.2.17",
  "digest",
 ]
-
-[[package]]
-name = "sws-protocol"
-version = "1.0.0"
 
 [[package]]
 name = "talc"

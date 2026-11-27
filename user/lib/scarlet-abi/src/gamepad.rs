@@ -1,4 +1,4 @@
-//! Native gamepad publication and physical Joy-Con controls.
+//! Native virtual gamepad publication.
 //!
 //! Open /dev/uinput for writing. CREATE takes a pointer to one GamepadSpec
 //! and returns the assigned /dev/gamepadN index. Each subsequent write is
@@ -6,21 +6,11 @@
 //! declared button and axis exactly once and a final SYN_REPORT. The kernel
 //! supplies timestamps. The last close publishes neutral and removes the pad.
 //! Creation and writes require physical-seat management authority.
-//! Each raw half or published gamepad reader starts at its latest complete
+//! Each published gamepad reader starts at the latest complete
 //! snapshot with its own cursor. A reader that falls behind receives
 //! SYN_DROPPED, SYN_REPORT and a complete current snapshot.
-//!
-//! SET_JOYCON_PLAYER takes an immediate player number (1 through 4) on a raw
-//! /dev/joycon-leftN or /dev/joycon-rightN reader and requires the same authority.
-//!
-//! SCTL_JOYCON_CLAIM_MAPPER takes argument zero on a separate, empty /dev/uinput
-//! open. It returns zero when the caller has physical-seat authority and this
-//! open owns the exclusive mapper claim. Repeating the call is idempotent.
-//! The last close releases the claim. Gamepads use their own producer opens.
 
 pub const SCTL_GAMEPAD_CREATE: u32 = 0x4750_0001;
-pub const SET_JOYCON_PLAYER: u32 = 0x4750_0002;
-pub const SCTL_JOYCON_CLAIM_MAPPER: u32 = 0x4750_0003;
 pub const MAX_BUTTONS: usize = 32;
 pub const MAX_AXES: usize = 8;
 

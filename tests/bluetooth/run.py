@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot Scarlet with a test-only H4 radio, then exercise btctl, joycond and SWS navigation."""
+"""Boot Scarlet with a test-only H4 radio and verify the common HID stack."""
 import argparse
 import importlib.util
 import json
@@ -56,7 +56,7 @@ def boot(out):
     stage = out / "stage"
     for name in ["bin", "dev", "etc", "mnt/newroot", "root", "tmp"]:
         (stage / name).mkdir(mode=0o755, parents=True, exist_ok=True)
-    for name in ["init", "bin/scarlet-ld", "bin/btctl", "bin/joycond", "bin/bluetooth-qa"]:
+    for name in ["init", "bin/scarlet-ld", "bin/btctl", "bin/bluetooth-qa"]:
         binary = out / "user/aarch64-unknown-scarlet/release" / Path(name).name
         (stage / name).write_bytes(binary.read_bytes())
         (stage / name).chmod(0o755)

@@ -16,8 +16,9 @@
 //! bytes of NAME (no terminator). Reject stale generations and out-of-range indices.
 //! PAIR takes PEER. CONNECT takes PEER and optionally KEY_SUPPLIED, KEY_TYPE and
 //! KEY. DISCONNECT requires exactly one live link. DISCONNECT_PEER takes PEER.
-//! ENCRYPTED and PROFILE_READY describe the negotiated link state.
-//! Successful PAIR may set KEY_READABLE.
+//! PAIR and CONNECT complete on an authenticated, encrypted ACL. Successful
+//! PAIR may set KEY_READABLE immediately. PROFILE_READY reports whether a
+//! discovered HID service has configured its control and interrupt channels.
 //! READ_KEY takes pairing GENERATION and PEER and returns KEY_TYPE and KEY.
 //! Restrict key export to the authorized pairing caller and matching generation
 //! and peer. Operations on other peers leave the key available.
@@ -69,6 +70,7 @@ pub const BUSY: u32 = 1 << 1;
 pub const SCANNING: u32 = 1 << 2;
 pub const CONNECTED: u32 = 1 << 3;
 pub const ENCRYPTED: u32 = 1 << 4;
+/// Both HID channels for the discovered service are configured.
 pub const PROFILE_READY: u32 = 1 << 5;
 pub const KEY_READABLE: u32 = 1 << 6;
 /// CONNECT input only.

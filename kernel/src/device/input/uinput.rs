@@ -17,12 +17,8 @@ use crate::{
     task::{CurrentTaskRef, mytask},
 };
 use alloc::{sync::Arc, vec::Vec};
-use core::{
-    any::Any,
-    mem::size_of,
-    sync::atomic::{AtomicBool, Ordering},
-};
-use scarlet_abi::gamepad::{Axis, GamepadSpec, SCTL_GAMEPAD_CREATE, SCTL_JOYCON_CLAIM_MAPPER};
+use core::{any::Any, mem::size_of};
+use scarlet_abi::gamepad::{Axis, GamepadSpec, SCTL_GAMEPAD_CREATE};
 
 type Event = (u16, u16, i32);
 const SYN: Event = (0, 0, 0);
@@ -147,38 +143,7 @@ impl Drop for Publication {
 
 enum Uinput {
     Root,
-    Producer(Mutex<Producer>),
-}
-
-static MAPPER_CLAIMED: AtomicBool = AtomicBool::new(false);
-
-enum Producer {
-    Empty,
-    Gamepad(Publication),
-    Mapper,
-}
-
-impl Drop for Producer {
-    fn drop(&mut self) {
-        if matches!(self, Self::Mapper) {
-            MAPPER_CLAIMED.store(false, Ordering::Release);
-        }
-    }
-}
-
-impl Producer {
-    fn claim_mapper(&mut self) -> Result<i32, &'static str> {
-        match self {
-            Self::Mapper => return Ok(0),
-            Self::Gamepad(_) => return Err("Mapper requires an empty producer"),
-            Self::Empty => {}
-        }
-        MAPPER_CLAIMED
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map_err(|_| "Joy-Con mapper already claimed")?;
-        *self = Self::Mapper;
-        Ok(0)
-    }
+    Producer(Mutex<Option<Publication>>),
 }
 
 fn authorized_caller() -> Result<CurrentTaskRef, &'static str> {
@@ -190,7 +155,7 @@ fn authorized_caller() -> Result<CurrentTaskRef, &'static str> {
 impl Device for Uinput {
     fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
         drop(authorized_caller()?);
-        Ok(Arc::new(Self::Producer(Mutex::new(Producer::Empty))))
+        Ok(Arc::new(Self::Producer(Mutex::new(None))))
     }
     fn capabilities(&self) -> &'static [DeviceCapability] {
         &[DeviceCapability::PhysicalSeat]
@@ -214,10 +179,7 @@ impl Device for Uinput {
 
 impl ControlOps for Uinput {
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
-        alloc::vec![
-            (SCTL_GAMEPAD_CREATE, "Create a logical gamepad"),
-            (SCTL_JOYCON_CLAIM_MAPPER, "Claim the Joy-Con mapper"),
-        ]
+        alloc::vec![(SCTL_GAMEPAD_CREATE, "Create a logical gamepad")]
     }
 
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
@@ -225,11 +187,8 @@ impl ControlOps for Uinput {
             return Err("Open a gamepad producer first");
         };
         let task = authorized_caller()?;
-        match command {
-            SCTL_JOYCON_CLAIM_MAPPER if arg == 0 => return state.lock().claim_mapper(),
-            SCTL_JOYCON_CLAIM_MAPPER => return Err("Mapper claim argument must be zero"),
-            SCTL_GAMEPAD_CREATE => {}
-            _ => return Err("Unknown gamepad producer control"),
+        if command != SCTL_GAMEPAD_CREATE {
+            return Err("Unknown gamepad producer control");
         }
         let mut spec = GamepadSpec::default();
         // SAFETY: repr(C), no padding, integer fields only. The mutable slice
@@ -242,11 +201,11 @@ impl ControlOps for Uinput {
         };
         copy_from_user(&task, arg, bytes).map_err(|_| "Invalid gamepad descriptor pointer")?;
         let mut live = state.lock();
-        if !matches!(*live, Producer::Empty) {
+        if live.is_some() {
             return Err("Gamepad creation requires an empty producer");
         }
         let (slot, publication) = Publication::create(spec)?;
-        *live = Producer::Gamepad(publication);
+        *live = Some(publication);
         Ok(slot)
     }
 }
@@ -267,7 +226,7 @@ impl CharDevice for Uinput {
             return Err("Open a gamepad producer first");
         };
         let live = state.lock();
-        let Producer::Gamepad(pad) = &*live else {
+        let Some(pad) = &*live else {
             return Err("Create a gamepad before injecting events");
         };
         let frame = pad.layout.decode(bytes)?;
@@ -431,10 +390,6 @@ mod tests {
             current.metadata().unwrap().file_id,
             replacement.registration as u64
         );
-        assert!(
-            app.control(scarlet_abi::gamepad::SET_JOYCON_PLAYER, 1)
-                .is_err()
-        );
         for expected in neutral.iter().chain(&live).chain(&neutral) {
             let mut rec = [0; InputEvent::size()];
             assert_eq!(reader.read(&mut rec).unwrap(), rec.len());
@@ -458,99 +413,76 @@ mod tests {
     }
 
     #[test_case]
-    fn mapper_claim_lasts_through_last_close_and_coexists_with_gamepads() {
-        use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
-        let mut task = Task::new("gamepad-mapper".into(), 0, TaskType::User);
-        task.set_id(91010);
-        set_mock_current_task(Arc::new(task));
+    fn independent_producer_opens_publish_until_their_last_close() {
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{clear_mock_current_task, new_user_task, set_mock_current_task};
+        let owner = Arc::new(new_user_task("gamepad-producers".into(), 0));
+        let address = 0x2000_0000;
+        owner.allocate_stack_pages(address, 1).unwrap();
+        let descriptor = spec();
+        // SAFETY: GamepadSpec is an initialized, padding-free repr(C) ABI record.
+        let descriptor_bytes = unsafe {
+            core::slice::from_raw_parts(
+                core::ptr::from_ref(&descriptor).cast::<u8>(),
+                size_of::<GamepadSpec>(),
+            )
+        };
+        copy_to_user(&owner, address, descriptor_bytes).unwrap();
+        set_mock_current_task(owner);
         let root = Arc::new(Uinput::Root);
         let first = root.clone().open().unwrap();
-        let next = root.open().unwrap();
-        let manager = DeviceManager::get_manager();
-        let initial_devices = manager.get_devices_count();
-        assert!(first.control(SCTL_JOYCON_CLAIM_MAPPER, 1).is_err());
-        assert_eq!(first.control(SCTL_JOYCON_CLAIM_MAPPER, 0), Ok(0));
+        let second = root.open().unwrap();
+        assert_eq!(
+            first.supported_control_commands(),
+            [(SCTL_GAMEPAD_CREATE, "Create a logical gamepad")]
+        );
+        assert!(first.control(u32::MAX, address).is_err());
+        let slot = first.control(SCTL_GAMEPAD_CREATE, address).unwrap();
+        assert!(first.control(SCTL_GAMEPAD_CREATE, address).is_err());
+        let other_slot = second.control(SCTL_GAMEPAD_CREATE, address).unwrap();
+        assert_ne!(slot, other_slot);
         let duplicate = first.clone();
-        assert_eq!(duplicate.control(SCTL_JOYCON_CLAIM_MAPPER, 0), Ok(0));
-        assert_eq!(manager.get_devices_count(), initial_devices);
         drop(first);
-        assert!(next.control(SCTL_JOYCON_CLAIM_MAPPER, 0).is_err());
-        let (_, pad) = Publication::create(spec()).unwrap();
-        let writer = Uinput::Producer(Mutex::new(Producer::Gamepad(pad)));
-        let frame = bytes(&[(1, 0x130, 1), (3, 0, 13), SYN]);
-        assert_eq!(writer.write(&frame), Ok(frame.len()));
-        assert!(duplicate.as_char_device().unwrap().write(&frame).is_err());
+        let manager = DeviceManager::get_manager();
+        let name = alloc::format!("gamepad{slot}");
+        assert!(manager.get_device_by_name(&name).is_some());
+        let frame = bytes(&[(3, 0, 7), (1, 0x130, 1), SYN]);
+        assert_eq!(
+            duplicate.as_char_device().unwrap().write(&frame),
+            Ok(frame.len())
+        );
         drop(duplicate);
-        assert!(writer.control(SCTL_JOYCON_CLAIM_MAPPER, 0).is_err());
-        assert_eq!(next.control(SCTL_JOYCON_CLAIM_MAPPER, 0), Ok(0));
-        assert_eq!(writer.write(&frame), Ok(frame.len()));
-        drop(writer);
-        drop(next);
-        assert_eq!(manager.get_devices_count(), initial_devices);
+        assert!(manager.get_device_by_name(&name).is_none());
+        assert_eq!(
+            second.as_char_device().unwrap().write(&frame),
+            Ok(frame.len())
+        );
+        drop(second);
         clear_mock_current_task();
     }
 
     #[test_case]
-    fn transferred_producer_and_raw_player_control_recheck_current_seat_authority() {
-        use crate::{
-            device::input::event_device::JoyConSide,
-            task::{Task, TaskType, clear_mock_current_task, set_mock_current_task},
-        };
-        use scarlet_abi::gamepad::SET_JOYCON_PLAYER;
-        let mut task = Task::new("gamepad-authority".into(), 0, TaskType::User);
-        task.set_id(91009);
-        let task = Arc::new(task);
-        set_mock_current_task(task.clone());
-
+    fn transferred_producers_recheck_the_current_callers_seat_authority() {
+        use crate::task::{clear_mock_current_task, new_user_task, set_mock_current_task};
+        let owner = Arc::new(new_user_task("gamepad-owner".into(), 0));
+        set_mock_current_task(owner);
         let (_, publication) = Publication::create(spec()).unwrap();
-        assert!(
-            publication
-                .device
-                .clone()
-                .open()
-                .unwrap()
-                .control(SET_JOYCON_PLAYER, 1)
-                .is_err()
-        );
-        let producer = Uinput::Producer(Mutex::new(Producer::Gamepad(publication)));
+        let producer = Uinput::Producer(Mutex::new(Some(publication)));
         let empty = Arc::new(Uinput::Root).open().unwrap();
-        let pad = Arc::new(
-            EventDevice::new_removable_joycon(
-                JoyConSide::Left,
-                InputDeviceMetadata::new(InputDeviceKind::Gamepad, INPUT_CAP_KEY),
-            )
-            .unwrap(),
-        );
-        let fd = pad.clone().open().unwrap();
-        for player in [0, 5, usize::MAX] {
-            assert!(fd.control(SET_JOYCON_PLAYER, player).is_err());
-        }
-        fd.control(SET_JOYCON_PLAYER, 1).unwrap();
-        fd.control(SET_JOYCON_PLAYER, 4).unwrap();
-        assert_eq!(pad.take_joycon_player(), Some(4));
-        assert_eq!(pad.take_joycon_player(), None);
-        let calls = Arc::new(core::sync::atomic::AtomicU8::new(0));
-        let notified = calls.clone();
-        let peer = Arc::downgrade(&pad);
-        pad.set_joycon_player_notify(Arc::new(move || {
-            // A reentrant worker can take the assignment immediately.
-            let value = peer.upgrade().unwrap().take_joycon_player().unwrap();
-            notified.store(value, core::sync::atomic::Ordering::Release);
-        }));
-        fd.control(SET_JOYCON_PLAYER, 2).unwrap();
-        assert_eq!(calls.load(core::sync::atomic::Ordering::Acquire), 2);
         let frame = bytes(&[(3, 0, 7), (1, 0x130, 1), SYN]);
-        assert_eq!(producer.write(&frame).unwrap(), frame.len());
-        task.credentials.write().set_authority(0, 0).unwrap();
+        assert_eq!(producer.write(&frame), Ok(frame.len()));
+        let recipient = Arc::new(new_user_task("gamepad-recipient".into(), 0));
+        recipient.credentials.write().set_authority(0, 0).unwrap();
+        set_mock_current_task(recipient);
         assert!(Arc::new(Uinput::Root).open().is_err());
-        assert!(empty.control(SCTL_JOYCON_CLAIM_MAPPER, 0).is_err());
         assert_eq!(
             empty.control(SCTL_GAMEPAD_CREATE, 0),
             Err("Physical-seat management permission denied")
         );
-        assert!(producer.write(&frame).is_err());
-        assert!(fd.control(SET_JOYCON_PLAYER, 2).is_err());
-        assert_eq!(pad.take_joycon_player(), None);
+        assert_eq!(
+            producer.write(&frame),
+            Err("Physical-seat management permission denied")
+        );
         drop(producer);
         clear_mock_current_task();
     }

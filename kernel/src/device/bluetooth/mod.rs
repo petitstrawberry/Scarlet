@@ -1,11 +1,10 @@
 //! Native Classic Bluetooth controllers. A board supplies H4 byte transport;
-//! controller management, pairing, L2CAP and HID input run on a common worker.
+//! controller management, pairing, SDP discovery and HID report channels run on a common worker.
 extern crate alloc;
 mod classic;
 mod control;
 mod h4;
 mod host;
-mod joycon;
 mod l2cap;
 
 use crate::{

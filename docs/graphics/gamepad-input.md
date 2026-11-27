@@ -35,13 +35,17 @@ btctl scan
 btctl pair 01:23:45:67:89:AB
 ```
 
-Pairing establishes the link. For a first-generation `Joy-Con (L)` or
-`Joy-Con (R)`, look for `connected=true encrypted=true profile-ready=true`.
-`encrypted` reports link encryption. `profile-ready` means the HID profile
-has registered an input device for that half. A generic peer can have an
-encrypted link with `profile-ready=false`. To add a second Joy-Con, put
-that half into pairing mode, scan and pair its address while the first
-half remains connected. Use `btctl devices` to list connected peers.
+Use `btctl devices` to list the connected peers. Pairing establishes
+an encrypted link. The host discovers the peer's HID service and report
+descriptor via SDP. `profile-ready=true` means the HID channels are open
+and the device is registered with the common HID layer.
+
+The common layer uses the report descriptor to publish standard input.
+Platform modules can register a driver for a device with a specific
+protocol. Applications with physical-seat management authority can read
+the descriptor and reports from `/dev/hidrawN`. Output reports are also
+available when the bound driver permits them. The Classic Bluetooth
+transport currently supports interrupt Input and Output reports.
 
 When `pair` prints `bond saved`, the service has stored the link key in a
 root-owned mode-`0600` file at `/etc/bluetooth-<ADAPTER>-<PEER>.bond`.
@@ -63,29 +67,6 @@ btctl disconnect 01:23:45:67:89:AB
 btctl connect 01:23:45:67:89:AB
 btctl devices
 ```
-
-## Use wireless Joy-Con
-
-The Bluetooth bundle starts `joycond` at boot. The daemon reads
-`/dev/joycon-leftN` and `/dev/joycon-rightN` and publishes the selected
-controllers as `/dev/gamepadN`. Applications open the gamepad devices.
-
-- **Upright**. A newly connected half works on its own. The left stick
-  reports X/Y and the right stick reports RX/RY. Either half can navigate
-  menus or advance slides without a second controller.
-- **Sideways**. Hold SL and SR on the same half to use it as a small
-  horizontal gamepad. The stick becomes the gamepad's left stick, the
-  four face buttons follow the rotated grip, and SL/SR become the two
-  shoulders. In this grip, Minus and Capture on the left half provide
-  Start and Home. [SDL Joy-Con mappings](https://github.com/libsdl-org/SDL/blob/main/src/joystick/SDL_gamepad_db.h)
-- **Combined**. Hold L or ZL on the left half together with R or ZR on the
-  right half. Applications see one gamepad with both sticks, the left
-  direction pad and the right face buttons. Both halves share a player
-  number. Disconnecting one half returns its partner to upright use.
-
-Bluetooth pairing saves a radio bond. Changing grip uses the buttons on
-the connected controllers and does not require pressing SYNC again. One
-through four steady player LEDs indicate the assigned player number.
 
 ## Menu policy
 

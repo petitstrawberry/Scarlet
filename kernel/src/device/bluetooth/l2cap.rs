@@ -1,14 +1,17 @@
-//! Basic-mode BR/EDR L2CAP for one encrypted HID host connection.
+//! Basic-mode BR/EDR L2CAP for SDP discovery and HID on an encrypted ACL.
 //!
-//! Construct only for the selected, encrypted ACL handle. A new session listens
-//! for device-initiated connections. Call `start` to initiate control followed
-//! by interrupt. Both directions of both channels must configure before Ready.
+//! On an encrypted ACL handle, `discover` searches SDP and closes its channel
+//! before delivering the result. Use `for_hid` with the discovered PSMs
+//! to accept device-initiated connections, or call `start` to initiate control
+//! followed by interrupt. Both channels configure in both directions before Ready.
 //! The profile sends complete HIDP packets and interprets their report payloads.
 //! Route incoming fragments by handle, and poll one outgoing fragment per HCI
 //! credit. The caller owns transport retries, negotiation deadlines and HCI
 //! disconnects. Drop the session on link loss, including before handle reuse.
 
 extern crate alloc;
+#[path = "sdp.rs"]
+pub mod sdp;
 
 use self::alloc::{collections::VecDeque, vec::Vec};
 
@@ -45,6 +48,7 @@ pub enum Error {
     InvalidFragment,
     MalformedSignal,
     InvalidHidp,
+    InvalidPsm,
     NotOpen,
     MtuExceeded,
     QueueFull,
@@ -54,6 +58,7 @@ pub enum Error {
 pub enum CloseReason {
     Local,
     Peer,
+    MalformedSdp,
     ConnectionRefused(u16),
     ConfigurationFailed(u16),
     CommandRejected(u16),
@@ -62,6 +67,7 @@ pub enum CloseReason {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
+    Discovered(Option<sdp::HidService>),
     Ready,
     Control(Vec<u8>),
     Interrupt(Vec<u8>),
@@ -132,7 +138,27 @@ impl Channel {
     }
 }
 
+enum Profile {
+    Hid([u16; 2]),
+    Sdp(sdp::Client),
+    SdpComplete(Option<sdp::HidService>),
+}
+
+impl Profile {
+    fn cids(&self) -> &'static [u16] {
+        match self {
+            Self::Hid(_) => &LOCAL_CID,
+            Self::Sdp(_) | Self::SdpComplete(_) => &[0x0042],
+        }
+    }
+
+    fn channel(&self, cid: u16) -> Option<usize> {
+        self.cids().iter().position(|&local| local == cid)
+    }
+}
+
 pub struct L2capSession {
+    profile: Profile,
     handle: u16,
     local_mtu: u16,
     channels: [Channel; 2],
@@ -163,12 +189,37 @@ fn mtu_option(mtu: u16) -> [u8; 4] {
     [1, 2, lo, hi]
 }
 
-fn local_channel(cid: u16) -> Option<usize> {
-    LOCAL_CID.iter().position(|&local| local == cid)
-}
-
 impl L2capSession {
     pub fn new(handle: u16, local_mtu: u16) -> Result<Self, Error> {
+        Self::with_profile(handle, local_mtu, Profile::Hid(PSM))
+    }
+
+    /// Start the SDP client on an encrypted link. The result is delivered only
+    /// after its channel has been closed. An empty HID search yields None.
+    pub fn discover(handle: u16, local_mtu: u16) -> Result<Self, Error> {
+        let mut session = Self::with_profile(handle, local_mtu, Profile::Sdp(Default::default()))?;
+        session.start()?;
+        Ok(session)
+    }
+
+    /// Construct a HID session using the two PSMs advertised in the SDP record.
+    pub fn for_hid(
+        handle: u16,
+        local_mtu: u16,
+        control_psm: u16,
+        interrupt_psm: u16,
+    ) -> Result<Self, Error> {
+        if !sdp::valid_hid_psms(control_psm, interrupt_psm) {
+            return Err(Error::InvalidPsm);
+        }
+        Self::with_profile(
+            handle,
+            local_mtu,
+            Profile::Hid([control_psm, interrupt_psm]),
+        )
+    }
+
+    fn with_profile(handle: u16, local_mtu: u16, profile: Profile) -> Result<Self, Error> {
         if handle > 0x0eff {
             return Err(Error::InvalidHandle);
         }
@@ -176,6 +227,7 @@ impl L2capSession {
             return Err(Error::InvalidMtu);
         }
         Ok(Self {
+            profile,
             handle,
             local_mtu,
             channels: core::array::from_fn(|_| Channel::new(local_mtu)),
@@ -192,7 +244,12 @@ impl L2capSession {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.ready
+        self.ready && matches!(self.profile, Profile::Hid(_))
+    }
+
+    /// Includes the one-byte HIDP header on the configured interrupt channel.
+    pub fn interrupt_tx_mtu(&self) -> Option<u16> {
+        self.is_ready().then_some(self.channels[INTERRUPT].tx_mtu)
     }
 
     /// Idempotent, including if an inbound control connection is configuring.
@@ -205,6 +262,11 @@ impl L2capSession {
     }
 
     pub fn disconnect(&mut self) -> Result<(), Error> {
+        // The caller can cancel discovery while its final SDP disconnect is
+        // in flight. A late acknowledgement must not publish that result.
+        if !self.closed && matches!(self.profile, Profile::SdpComplete(_)) {
+            self.profile = Profile::Sdp(sdp::Client::default());
+        }
         self.begin_close(CloseReason::Local)
     }
 
@@ -247,6 +309,9 @@ impl L2capSession {
     }
 
     fn send_hid(&mut self, index: usize, packet: &[u8]) -> Result<(), Error> {
+        if !matches!(self.profile, Profile::Hid(_)) {
+            return Err(Error::NotOpen);
+        }
         let channel = &self.channels[index];
         if self.closing.is_some() || !channel.open() || (index == INTERRUPT && !self.ready) {
             return Err(Error::NotOpen);
@@ -337,10 +402,17 @@ impl L2capSession {
         if self.closing.is_some() {
             return self.advance_close();
         }
-        if self.channels.iter().all(Channel::open) {
+        let count = self.profile.cids().len();
+        if self.channels[..count].iter().all(Channel::open) {
             if !self.ready {
                 self.ready = true;
-                self.events.push_back(Event::Ready);
+                if let Profile::Sdp(client) = &mut self.profile {
+                    let channel = &self.channels[CONTROL];
+                    let packet = client.request(channel.rx_mtu, &[]);
+                    self.enqueue(channel.peer, &packet)?;
+                } else {
+                    self.events.push_back(Event::Ready);
+                }
             }
         } else if self.active_open {
             let index = if self.channels[CONTROL].open() {
@@ -349,7 +421,16 @@ impl L2capSession {
                 CONTROL
             };
             if self.channels[index].idle() {
-                self.request(index, CONNECT_REQ, &words(&[PSM[index], LOCAL_CID[index]]))?;
+                let psm = match self.profile {
+                    Profile::Hid(psms) => psms[index],
+                    Profile::Sdp(_) => 1,
+                    Profile::SdpComplete(_) => return Err(Error::NotOpen),
+                };
+                self.request(
+                    index,
+                    CONNECT_REQ,
+                    &words(&[psm, self.profile.cids()[index]]),
+                )?;
             }
         }
         Ok(())
@@ -372,14 +453,14 @@ impl L2capSession {
         if self.closed {
             return Ok(());
         }
-        for index in [INTERRUPT, CONTROL] {
+        for index in (0..self.profile.cids().len()).rev() {
             self.cancel_unsent_connect(index);
             let ch = &self.channels[index];
             if ch.idle() {
                 continue;
             }
             if ch.peer != 0 && !ch.pending.is_some_and(|r| r.code == DISCONNECT_REQ) {
-                let payload = words(&[ch.peer, LOCAL_CID[index]]);
+                let payload = words(&[ch.peer, self.profile.cids()[index]]);
                 self.request(index, DISCONNECT_REQ, &payload)?;
             }
             // If a connection is pending, wait for its CID before disconnecting.
@@ -394,8 +475,14 @@ impl L2capSession {
         self.ready = false;
         self.rx = None;
         self.events.clear();
-        self.events
-            .push_back(Event::Closed(self.closing.expect("closing session")));
+        let reason = self.closing.expect("closing session");
+        let event = match &mut self.profile {
+            Profile::SdpComplete(result) if reason == CloseReason::Local => {
+                Event::Discovered(result.take())
+            }
+            _ => Event::Closed(reason),
+        };
+        self.events.push_back(event);
     }
 
     /// Supply the unshifted PB and the HCI ACL payload for this handle.
@@ -436,7 +523,7 @@ impl L2capSession {
             if cid == SIGNAL_CID && len > usize::from(SIGNAL_MTU) {
                 return self.discard_signal(OversizedSignal::new(len), body, pb);
             }
-            let mtu = match local_channel(cid) {
+            let mtu = match self.profile.channel(cid) {
                 Some(index) => self.channels[index].rx_mtu,
                 None => MAX_MTU,
             };
@@ -481,7 +568,7 @@ impl L2capSession {
         if cid == SIGNAL_CID {
             return self.receive_signals(packet);
         }
-        let Some(index) = local_channel(cid) else {
+        let Some(index) = self.profile.channel(cid) else {
             return Ok(());
         };
         if self.closing.is_some()
@@ -489,6 +576,18 @@ impl L2capSession {
             || (index == INTERRUPT && !self.ready)
         {
             return Err(Error::NotOpen);
+        }
+        if let Profile::Sdp(client) = &mut self.profile {
+            let channel = &self.channels[index];
+            return match client.response(packet, channel.rx_mtu) {
+                Ok(sdp::Step::Wait) => Ok(()),
+                Ok(sdp::Step::Request(next)) => self.enqueue(channel.peer, &next),
+                Ok(sdp::Step::Done(result)) => {
+                    self.profile = Profile::SdpComplete(result);
+                    self.begin_close(CloseReason::Local)
+                }
+                Err(()) => self.begin_close(CloseReason::MalformedSdp),
+            };
         }
         check_hidp(index, false, packet)?;
         // Reserve a slot for Ready while only the control channel is open.
@@ -555,7 +654,11 @@ impl L2capSession {
     }
 
     fn connect_request(&mut self, id: u8, psm: u16, peer: u16) -> Result<(), Error> {
-        let Some(index) = PSM.iter().position(|&value| value == psm) else {
+        let index = match &self.profile {
+            Profile::Hid(psms) => psms.iter().position(|&value| value == psm),
+            _ => None,
+        };
+        let Some(index) = index else {
             return self.signal(CONNECT_RSP, id, &words(&[0, peer, 2, 0]));
         };
         let allocated = self.channels.iter().any(|ch| ch.peer == peer);
@@ -580,7 +683,11 @@ impl L2capSession {
         } else {
             0
         };
-        let local = if result == 0 { LOCAL_CID[index] } else { 0 };
+        let local = if result == 0 {
+            self.profile.cids()[index]
+        } else {
+            0
+        };
         self.signal(CONNECT_RSP, id, &words(&[local, peer, result, 0]))?;
         if result != 0 || duplicate {
             return Ok(());
@@ -606,7 +713,7 @@ impl L2capSession {
             self.channels[index].pending = None;
             return self.begin_close(CloseReason::ConnectionRefused(result));
         }
-        if word(data, 2) != LOCAL_CID[index] {
+        if word(data, 2) != self.profile.cids()[index] {
             return Ok(());
         }
         let peer = word(data, 0);
@@ -633,7 +740,11 @@ impl L2capSession {
 
     fn config_request(&mut self, id: u8, data: &[u8]) -> Result<(), Error> {
         let cid = word(data, 0);
-        let Some(index) = local_channel(cid).filter(|&i| self.channels[i].peer != 0) else {
+        let Some(index) = self
+            .profile
+            .channel(cid)
+            .filter(|&i| self.channels[i].peer != 0)
+        else {
             return self.signal(REJECT, id, &words(&[2, cid, 0]));
         };
         let flags = word(data, 2) & 1;
@@ -687,7 +798,7 @@ impl L2capSession {
     }
 
     fn config_response(&mut self, id: u8, data: &[u8]) -> Result<(), Error> {
-        let Some(index) = local_channel(word(data, 0)) else {
+        let Some(index) = self.profile.channel(word(data, 0)) else {
             return Ok(());
         };
         let ch = &mut self.channels[index];
@@ -753,7 +864,10 @@ impl L2capSession {
         } else {
             (word(data, 2), word(data, 0))
         };
-        let index = local_channel(local).filter(|&i| self.channels[i].peer != 0);
+        let index = self
+            .profile
+            .channel(local)
+            .filter(|&i| self.channels[i].peer != 0);
         if code == DISCONNECT_REQ && index.is_none() {
             return self.signal(REJECT, id, &words(&[2, local, peer]));
         }
@@ -796,6 +910,9 @@ impl L2capSession {
             .is_some_and(|r| r.code == DISCONNECT_REQ)
         {
             self.channels[index] = Channel::new(self.local_mtu);
+            if matches!(self.profile, Profile::SdpComplete(_)) {
+                self.closing = Some(CloseReason::CommandRejected(reason));
+            }
         } else {
             self.channels[index].pending = None;
         }
@@ -1106,15 +1223,16 @@ mod tests {
         for outbound in [false, true] {
             let mut s = open(outbound);
             s.send_control(&[0x52, 0x01, 0x37]).unwrap();
-            let out = [0xa2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0x30];
+            // The HIDP header selects the transaction. L2CAP preserves the opaque body.
+            let out = [0xa2, 0x46, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xff];
             s.send_interrupt(&out).unwrap();
             assert_eq!(
                 s.poll_acl(64).unwrap().data,
                 pdu(PEER[CONTROL], &[0x52, 0x01, 0x37])
             );
             assert_eq!(s.poll_acl(64).unwrap().data, pdu(PEER[INTERRUPT], &out));
-            let mut input = vec![0x18; 50];
-            input[..2].copy_from_slice(&[0xa1, 0x30]);
+            let mut input = vec![0x5a; 50];
+            input[..2].copy_from_slice(&[0xa1, 0x47]);
             s.receive_acl(2, &pdu(LOCAL_CID[INTERRUPT], &input))
                 .unwrap();
             assert_eq!(s.poll_event(), Some(Event::Interrupt(input)));
@@ -1167,7 +1285,7 @@ mod tests {
     #[test]
     fn fragmented_reports_at_every_boundary_and_credit_sized_output() {
         let mut s = open(false);
-        let data = [0xa1, 0x30, 1, 2, 3, 4, 5, 6, 7, 8];
+        let data = [0xa1, 0x47, 1, 2, 3, 4, 5, 6, 7, 8];
         let frame = pdu(LOCAL_CID[1], &data);
         for n in 1..frame.len() {
             s.receive_acl(2, &frame[..n]).unwrap();
@@ -1193,7 +1311,8 @@ mod tests {
     #[test]
     fn malformed_fragments_discard_partial_and_fresh_start_recovers() {
         let mut s = open(false);
-        let frame = pdu(LOCAL_CID[1], &[0xa1, 0x31]);
+        let input = [0xa1, 0x48];
+        let frame = pdu(LOCAL_CID[1], &input);
         assert_eq!(s.receive_acl(1, &[0]), Err(Error::InvalidFragment));
         s.receive_acl(2, &frame[..4]).unwrap();
         assert_eq!(s.receive_acl(1, &[1, 2, 3]), Err(Error::InvalidFragment));
@@ -1212,7 +1331,7 @@ mod tests {
         );
         s.receive_acl(2, &frame[..3]).unwrap();
         s.receive_acl(2, &frame).unwrap();
-        assert_eq!(s.poll_event(), Some(Event::Interrupt(vec![0xa1, 0x31])));
+        assert_eq!(s.poll_event(), Some(Event::Interrupt(input.to_vec())));
         assert!(s.poll_event().is_none());
     }
 
