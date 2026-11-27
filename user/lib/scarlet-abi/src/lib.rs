@@ -741,6 +741,14 @@ pub const SCTL_SOCKET_GET_WRITE_TIMEOUT_MS: u32 = 0x5353_000F;
 /// value. Reading the value clears it.
 pub const SCTL_SOCKET_TAKE_ERROR: u32 = 0x5353_0010;
 
+/// Connected local stream peer snapshot at connect/listen. Output is eight bytes:
+/// effective principal (u32 LE), then flags (u32 LE). No handle or authority is transferred.
+pub const SCTL_LOCAL_PEER_CREDENTIALS: u32 = 0x5353_0011;
+/// The peer has a Shield security subject.
+pub const LOCAL_PEER_CONFINED: u32 = 1;
+/// The peer held MANAGE_DEVICES. Its Shield subject may further restrict its use.
+pub const LOCAL_PEER_MANAGE_DEVICES: u32 = 2;
+
 /// Interrupted system call.
 pub const ERRNO_EINTR: i32 = 4;
 pub const ERRNO_ECANCELED: i32 = 125;

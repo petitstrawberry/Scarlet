@@ -104,6 +104,7 @@ pub(crate) fn datagram_source_address(name: &str) -> LocalSocketAddress {
 /// not consult the sender's current task or manufacture a privileged identity.
 #[derive(Clone, Debug)]
 pub struct SocketCredentials {
+    manages_devices: bool,
     pub process_id: usize,
     namespace: Option<Arc<crate::task::namespace::TaskNamespace>>,
     local_id: usize,
@@ -113,6 +114,7 @@ pub struct SocketCredentials {
 impl PartialEq for SocketCredentials {
     fn eq(&self, other: &Self) -> bool {
         self.process_id == other.process_id
+            && self.manages_devices == other.manages_devices
             && self.identity == other.identity
             && self.local_id == other.local_id
             && match (&self.subject, &other.subject) {
@@ -144,6 +146,7 @@ impl SocketCredentials {
     pub(crate) fn unknown() -> Self {
         use crate::shield::identity::*;
         Self {
+            manages_devices: false,
             process_id: 0,
             subject: None,
             namespace: None,
@@ -638,6 +641,7 @@ impl LocalSocket {
             }
         };
         SocketCredentials {
+            manages_devices: creds.permits(crate::shield::identity::MANAGE_DEVICES),
             subject: task.security_subject.read().clone(),
             process_id: task.get_thread_group_id(),
             local_id: task
@@ -2091,6 +2095,23 @@ impl Selectable for LocalSocket {
 impl ControlOps for LocalSocket {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            scarlet_abi::SCTL_LOCAL_PEER_CREDENTIALS => {
+                let peer = self.peer_credentials().ok_or("no connected peer")?;
+                let task = crate::task::mytask().ok_or("no current task")?;
+                let mut flags = 0u32;
+                if peer.subject.is_some() {
+                    flags |= scarlet_abi::LOCAL_PEER_CONFINED;
+                }
+                if peer.manages_devices {
+                    flags |= scarlet_abi::LOCAL_PEER_MANAGE_DEVICES;
+                }
+                let mut output = [0; 8];
+                output[..4].copy_from_slice(&peer.identity.principal.0.to_le_bytes());
+                output[4..].copy_from_slice(&flags.to_le_bytes());
+                crate::library::std::usercopy::copy_to_user(&task, arg, &output)
+                    .map_err(|_| "invalid peer credential output")?;
+                Ok(0)
+            }
             crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
                 let enabled = arg != 0;
                 self.set_nonblocking(enabled);
@@ -2125,6 +2146,10 @@ impl ControlOps for LocalSocket {
 
     fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
         alloc::vec![
+            (
+                scarlet_abi::SCTL_LOCAL_PEER_CREDENTIALS,
+                "Get local peer credentials"
+            ),
             (
                 crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
                 "Set non-blocking mode",
@@ -2197,6 +2222,7 @@ mod tests {
         let ns = crate::task::namespace::TaskNamespace::new_root("credential-snapshot".into());
         ns.register_mapping(7, 42);
         let first = SocketCredentials {
+            manages_devices: false,
             subject: None,
             process_id: 42,
             namespace: Some(ns.clone()),

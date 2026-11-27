@@ -12,6 +12,57 @@ SWS discovers `/dev/gamepad0` through `/dev/gamepad7`. Its input environment
 advertises gamepad presence with capability bit `1 << 4`, independently of
 keyboard presence. SWS owns optional menu navigation and key repeat.
 
+## Pair a Bluetooth gamepad
+
+On a system with a Classic Bluetooth adapter, log in as root at the serial
+console and run `btctl`. The Bluetooth bundle installs a system service
+that `stemd` starts with physical-seat management authority. The service
+authenticates the calling account and accepts an unconfined root session.
+The CLI also authenticates the service before sending a command.
+
+The default adapter is `/dev/bluetooth0`. To select another numbered
+adapter, put its path before the command, for example
+`btctl --device /dev/bluetooth1 status`.
+
+Put the controller in pairing mode and check that the adapter reports
+`ready=true`. Scan waits for discovery to finish and lists each peer's MAC
+and name. Use the MAC exactly as printed in place of the example below.
+`btctl` converts it to HCI wire order.
+
+```sh
+btctl status
+btctl scan
+btctl pair 01:23:45:67:89:AB
+```
+
+Pairing establishes the link. For a first-generation `Joy-Con (L)` or
+`Joy-Con (R)`, look for `connected=true encrypted=true profile-ready=true`.
+`encrypted` reports link encryption. `profile-ready` means the HID profile
+has registered the half as a native `/dev/gamepadN`. A generic peer can
+have an encrypted link with `profile-ready=false`. The adapter handles
+one active peer at a time.
+
+When `pair` prints `bond saved`, the service has stored the link key in a
+root-owned mode-`0600` file at `/etc/bluetooth-<ADAPTER>-<PEER>.bond`.
+Both addresses use uppercase display order with the colons removed. The
+final status shows `key-readable=false` after the service consumes the key.
+Link-key bytes stay out of service replies and terminal output.
+
+Keep `/etc` on persistent storage to reuse the bond after reboot. The
+service rejects symlinks, permissive bond files, and storage whose ownership
+or ACLs it cannot verify. If the link is established but key export or
+storage fails, the command reports the failure and exits nonzero.
+
+To end the current link and later reconnect with the saved bond on the
+same adapter, run the following commands. `status` shows the active peer
+and the controller's `last-error` code, with `0x0` indicating success.
+
+```sh
+btctl disconnect
+btctl connect 01:23:45:67:89:AB
+btctl status
+```
+
 ## Menu policy
 
 The left stick and first hat navigate with arrow keys. The default confirm

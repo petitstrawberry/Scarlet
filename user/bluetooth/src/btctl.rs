@@ -1,6 +1,8 @@
 #[cfg(not(any(target_os = "scarlet", test)))]
 compile_error!("btctl requires a Scarlet Native target");
 
+mod broker;
+
 use scarlet_abi::{bluetooth as bt, fs as vfs};
 use scarlet_os::Handle;
 use scarlet_sys::{Syscall, syscall1, syscall2, syscall3, syscall4};
@@ -35,6 +37,7 @@ fn display_address([f, e, d, c, b, a]: bt::Address) -> String {
     format!("{a:02X}:{b:02X}:{c:02X}:{d:02X}:{e:02X}:{f:02X}")
 }
 
+#[derive(Clone, Copy)]
 enum Command {
     Status,
     Scan,
@@ -108,7 +111,7 @@ fn status(handle: &Handle) -> Result<bt::Record> {
     Ok(record)
 }
 
-fn print_status(r: &bt::Record) {
+fn status_text(r: &bt::Record) -> String {
     let has = |bit| flags(r) & bit != 0;
     let peer = r[bt::PEER].try_into().unwrap();
     let peer = if peer == [0; 6] {
@@ -116,23 +119,20 @@ fn print_status(r: &bt::Record) {
     } else {
         display_address(peer)
     };
-    println!(
-        "adapter={} ready={} busy={} scanning={} found={} generation={}",
+    format!(
+        "adapter={} ready={} busy={} scanning={} found={} generation={}\npeer={peer} connected={} encrypted={} profile-ready={} key-readable={} last-error={:#x}",
         display_address(r[bt::ADAPTER].try_into().unwrap()),
         has(bt::READY),
         has(bt::BUSY),
         has(bt::SCANNING),
         count(r),
         generation(r),
-    );
-    println!(
-        "peer={peer} connected={} encrypted={} profile-ready={} key-readable={} last-error={:#x}",
         has(bt::CONNECTED),
         has(bt::ENCRYPTED),
         has(bt::PROFILE_READY),
         has(bt::KEY_READABLE),
         last_error(r),
-    );
+    )
 }
 
 fn complete(r: &bt::Record, expected: u32) -> Result<bool> {
@@ -153,7 +153,7 @@ fn start_and_wait(handle: &Handle, op: u32, request: &mut bt::Record) -> Result<
     request[bt::KEY].zeroize();
     if let Err(error) = submitted {
         if let Ok(state) = status(handle) {
-            print_status(&state);
+            return Err(format!("{error}\n{}", status_text(&state)));
         }
         return Err(error);
     }
@@ -183,7 +183,8 @@ fn scan_row(r: &bt::Record) -> Result<String> {
     Ok(format!("{id}  {:?}", String::from_utf8_lossy(bytes)))
 }
 
-fn scan(handle: &Handle) -> Result<()> {
+fn scan(handle: &Handle) -> Result<String> {
+    let mut listing = String::new();
     let state = start_and_wait(handle, bt::SCAN_START, &mut [0; bt::RECORD_SIZE])?;
     let total = count(&state);
     for index in 0..total {
@@ -191,10 +192,14 @@ fn scan(handle: &Handle) -> Result<()> {
         row[bt::GENERATION].copy_from_slice(&state[bt::GENERATION]);
         row[bt::INDEX].copy_from_slice(&index.to_le_bytes());
         control(handle, bt::SCAN_RESULT, &mut row)?;
-        println!("{}", scan_row(&row)?);
+        listing.push_str(&scan_row(&row)?);
+        listing.push('\n');
+        if listing.len() + 32 > broker::MAX_REPLY {
+            return Err("scan listing exceeds the service response limit".into());
+        }
     }
-    println!("{total} device(s) found");
-    Ok(())
+    listing.push_str(&format!("{total} device(s) found"));
+    Ok(listing)
 }
 
 mod bonds {
@@ -369,7 +374,7 @@ mod bonds {
     }
 }
 
-fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<()> {
+fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<String> {
     let initial = status(handle)?;
     let adapter: bt::Address = initial[bt::ADAPTER].try_into().unwrap();
     let store = bonds::Store::open(adapter, peer)?;
@@ -397,16 +402,23 @@ fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<()> {
         control(handle, bt::READ_KEY, &mut request)
             .and_then(|()| store.save_key(&request))
             .map_err(|e| format!("paired, but could not save the bond: {e}"))?;
-        println!("bond saved for {}", display_address(peer));
+        request.zeroize();
+        let saved_state = status(handle).map_err(|e| {
+            format!(
+                "bond saved for {}, but status refresh failed: {e}",
+                display_address(peer)
+            )
+        })?;
+        return Ok(format!(
+            "bond saved for {}\n{}",
+            display_address(peer),
+            status_text(&saved_state)
+        ));
     }
-    print_status(&state);
-    Ok(())
+    Ok(status_text(&state))
 }
 
-fn run() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let words: Vec<_> = args.iter().map(String::as_str).collect();
-    let (path, command) = parse(&words)?;
+fn direct(path: &str, command: Command) -> Result<String> {
     let device = CString::new(path).map_err(|_| "invalid device path")?;
     let access = if matches!(command, Command::Status) {
         vfs::VFS_O_RDONLY
@@ -416,18 +428,33 @@ fn run() -> Result<()> {
     let handle = open_at(vfs::CURRENT_DIRECTORY, &device, access, 0)
         .map_err(|e| format!("open {path}: {e}"))?;
     match command {
-        Command::Status => print_status(&status(&handle)?),
-        Command::Scan => scan(&handle)?,
-        Command::Pair(peer) => link(&handle, peer, true)?,
-        Command::Connect(peer) => link(&handle, peer, false)?,
+        Command::Status => Ok(status_text(&status(&handle)?)),
+        Command::Scan => scan(&handle),
+        Command::Pair(peer) => link(&handle, peer, true),
+        Command::Connect(peer) => link(&handle, peer, false),
         Command::Disconnect => {
             let state = start_and_wait(&handle, bt::DISCONNECT, &mut [0; bt::RECORD_SIZE])?;
-            print_status(&state);
             if flags(&state) & bt::CONNECTED != 0 {
                 return Err("controller still reports an active link".into());
             }
+            Ok(status_text(&state))
         }
     }
+}
+
+fn run() -> Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let words: Vec<_> = args.iter().map(String::as_str).collect();
+    if words == ["--serve"] {
+        return broker::serve();
+    }
+    let (path, command) = parse(&words)?;
+    let response = if let Some(adapter) = broker::adapter_number(path) {
+        broker::invoke(adapter, command, || direct(path, command))?
+    } else {
+        direct(path, command)?
+    };
+    println!("{response}");
     Ok(())
 }
 

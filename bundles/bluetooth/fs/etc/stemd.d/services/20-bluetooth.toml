@@ -1,0 +1,3 @@
+[service.bluetooth]
+exec = "/bin/btctl --serve"
+depends = []

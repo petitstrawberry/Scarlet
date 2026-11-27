@@ -4,3 +4,8 @@ source = "../../user/bluetooth"
 package = "scarlet-bluetooth"
 bin = "btctl"
 to = "/bin/btctl"
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"

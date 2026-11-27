@@ -76,7 +76,7 @@ fn exercise(address: &str, right: bool) {
     assert!(gamepads().is_empty(), "gamepad present before pairing");
     let result = btctl(&["pair", address]);
     assert!(result.contains(&format!(
-        "peer={address} connected=true encrypted=true profile-ready=true"
+        "peer={address} connected=true encrypted=true profile-ready=true key-readable=false"
     )));
     assert!(result.contains(&format!("bond saved for {address}")));
 
