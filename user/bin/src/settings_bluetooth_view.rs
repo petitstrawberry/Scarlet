@@ -148,9 +148,9 @@ impl BluetoothPage {
             panel.feedback.clone()
         };
         let empty_discovery = if inventory.scanned {
-            "No new devices found. Check pairing mode and search again."
+            "No new devices found."
         } else {
-            "Search to see nearby devices."
+            ""
         };
         settings_page(vstack! {
             with_feedback(hstack! {
@@ -158,16 +158,13 @@ impl BluetoothPage {
                 self.button(&panel, Action::Refresh, "Refresh"),
             }.spacing(12.0), global_feedback).padding_insets(EdgeInsets::symmetric(0.0, 16.0)),
             settings_section(vstack! {
-                settings_note("Put your device in pairing mode, then search. Choose Pair beside the device you want."),
+                settings_note("Put your device in pairing mode before searching."),
                 self.button(&panel, Action::Scan, if inventory.scanned { "Search again" } else { "Search for devices" }),
                 Text::new("Discovered devices").font_size(14.0),
                 self.group(&panel, |d| !d.saved && !d.connected, empty_discovery),
             }.spacing(10.0).alignment(Alignment::Leading), "Pair new device", 16.0),
             settings_section(self.group(&panel, |d| d.connected, "No devices connected."), "Connected devices", 16.0),
-            settings_section(with_feedback(self.group(&panel, |d| d.saved && !d.connected, "No offline paired devices."),
-                if inventory.devices.iter().any(|d| d.saved && !d.connected) {
-                    "Wake a paired device to reconnect automatically, or choose Connect.".into()
-                } else { String::new() }), "Paired devices · Offline", 16.0),
+            settings_section(self.group(&panel, |d| d.saved && !d.connected, "No offline paired devices."), "Paired devices · Offline", 16.0),
         }.spacing(14.0).alignment(Alignment::Leading))
     }
 }

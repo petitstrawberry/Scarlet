@@ -188,11 +188,11 @@ fn open_destination_tracks_external_reconnect_and_disconnect() {
         pipeline.handle_event(&Event::Mouse(event));
     }
     let (labels, _) = frame(&mut pipeline, &app.bluetooth);
+    let gamepad = "02:00:00:00:00:10";
     assert!(
-        labels.iter().any(|l| l.contains("Wake a paired device")),
+        labels.windows(3).any(|s| s == ["Fixture gamepad", gamepad, "Connect"]),
         "{labels:?}"
     );
-    let gamepad = "02:00:00:00:00:10";
     let broker = scarlet_bluetooth::Client::new(0);
     for online in [true, false] {
         if online {
