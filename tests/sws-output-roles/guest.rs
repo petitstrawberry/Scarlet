@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use sws_client::Connection;
-use sws_protocol::outputs::{OutputRole, OutputSnapshot, OutputTransaction};
+use sws_protocol::outputs::{OutputExperience, OutputRole, OutputSnapshot, OutputTransaction};
 
 #[allow(dead_code)]
 #[path = "../../user/bin/src/settings_display_editor.rs"]
@@ -76,6 +76,38 @@ fn edit_role(conn: &Connection, id: u32, role: OutputRole, revert: bool) {
     editor.finish_apply(Some(reply), String::new());
     assert_eq!(editor.selected_config().unwrap().role, role);
     assert!(!editor.dirty);
+}
+
+// Exercise the installed CLI against the same SWS snapshot consumed by Settings.
+fn check_displayctl(conn: &Connection, selected: u32, other: u32) {
+    let before = conn.outputs().unwrap();
+    let id = selected.to_string();
+    let other_tablet = conn.output_context(other).unwrap().tablet;
+    for (mode, preference) in [
+        ("tablet", OutputExperience::Tablet),
+        ("auto", OutputExperience::Auto),
+    ] {
+        assert!(
+            Command::new("/bin/displayctl")
+                .args(["experience", mode, "--output", &id])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let current = conn.outputs().unwrap();
+        let mut expected = before.configuration.clone();
+        expected
+            .iter_mut()
+            .find(|entry| entry.id == selected)
+            .unwrap()
+            .experience = preference;
+        assert_eq!(current.configuration, expected);
+        assert_eq!(
+            conn.output_context(selected).unwrap().tablet,
+            mode == "tablet"
+        );
+        assert_eq!(conn.output_context(other).unwrap().tablet, other_tablet);
+    }
 }
 
 fn reject_stale(conn: &Connection, old: OutputSnapshot, current: &OutputSnapshot) {
@@ -186,6 +218,7 @@ fn main() {
     // Bind Cocoa to the requested native scanout before the first marker paints.
     wait_for_host("outputs-ready");
     assert!(initial.configuration.iter().all(|c| c.role == Extend));
+    check_displayctl(&conn, external, panel);
     edit_role(&conn, panel, Disabled, true);
     let red = [221, 43, 91];
     let green = [30, 197, 89];

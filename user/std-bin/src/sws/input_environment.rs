@@ -1,11 +1,9 @@
-//! Physical input state and the legacy protocol view of each output's Experience.
+//! Physical input state and the applied Tablet experience for each output.
 
 use std::collections::BTreeMap;
-use std::env;
 use std::sync::Mutex;
-use sws_protocol::outputs::OutputExperience;
 use sws_protocol::{
-    WindowingMode, input_environment_known_flags as known, input_environment_state_flags as flags,
+    input_environment_known_flags as known, input_environment_state_flags as flags,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +24,6 @@ impl Snapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputPolicy {
     pub id: u32,
-    pub experience: OutputExperience,
     pub tablet: bool,
 }
 
@@ -58,17 +55,10 @@ impl EnvironmentState {
             .iter()
             .find(|p| Some(p.id) == output)
             .or(self.outputs.first());
-        let mut known_flags = known::TABLET_MODE
-            | known::WINDOWING_MODE
-            | known::TABLET_MODE_OVERRIDE_ACTIVE
-            | known::WINDOWING_MODE_OVERRIDE_ACTIVE;
+        let mut known_flags = known::TABLET_MODE;
         let mut state_flags = 0;
         if policy.is_some_and(|p| p.tablet) {
-            state_flags |= flags::TABLET_MODE | flags::FOCUSED_WINDOWING;
-        }
-        if policy.is_some_and(|p| p.experience != OutputExperience::Auto) {
-            state_flags |=
-                flags::TABLET_MODE_OVERRIDE_ACTIVE | flags::WINDOWING_MODE_OVERRIDE_ACTIVE;
+            state_flags |= flags::TABLET_MODE;
         }
         if let Some(tablet) = self.hardware_tablet {
             known_flags |= known::HARDWARE_TABLET_MODE;
@@ -117,15 +107,6 @@ pub fn client_snapshot(client: usize) -> Snapshot {
     state.snapshot(state.clients.get(&client).copied())
 }
 
-pub fn client_output(client: usize) -> Option<u32> {
-    let state = STATE.lock().expect("input environment");
-    state
-        .clients
-        .get(&client)
-        .copied()
-        .filter(|id| state.outputs.iter().any(|p| p.id == *id))
-}
-
 pub fn forget_client(client: usize) {
     STATE
         .lock()
@@ -169,83 +150,6 @@ pub fn update_capabilities(flags: u32) -> bool {
     true
 }
 
-/// Parse a startup tablet-mode override.
-///
-/// # Arguments
-///
-/// * `value` - Environment value to parse, without any variable-name prefix.
-///
-/// # Returns
-///
-/// `Some(true)` for tablet values, `Some(false)` for laptop values, and
-/// `None` for an unrecognized value.
-pub fn parse_tablet_mode_override(value: &str) -> Option<bool> {
-    let value = value.trim();
-    if ["1", "true", "yes", "on", "tablet"]
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
-    {
-        Some(true)
-    } else if ["0", "false", "no", "off", "laptop"]
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
-    {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// Parse a startup windowing-mode override.
-///
-/// # Arguments
-///
-/// * `value` - Environment value to parse.
-///
-/// # Returns
-///
-/// A forced mode for `focused` or `freeform`; `None` keeps posture-derived
-/// policy and also covers `auto` and unrecognized values.
-pub fn parse_windowing_mode_override(value: &str) -> Option<WindowingMode> {
-    let value = value.trim();
-    if ["focused", "focus", "tablet"]
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
-    {
-        Some(WindowingMode::Focused)
-    } else if ["freeform", "floating", "desktop"]
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
-    {
-        Some(WindowingMode::Freeform)
-    } else {
-        None
-    }
-}
-
-/// Legacy startup defaults seed the primary output until a saved profile is applied.
-pub fn startup_experience() -> OutputExperience {
-    let mode = env::var("SCARLET_TABLET_WINDOWING")
-        .ok()
-        .as_deref()
-        .and_then(parse_windowing_mode_override);
-    let tablet = mode.map(|m| m == WindowingMode::Focused).or_else(|| {
-        env::var("SCARLET_TABLET_MODE")
-            .ok()
-            .as_deref()
-            .and_then(parse_tablet_mode_override)
-    });
-    legacy_experience(tablet)
-}
-
-pub fn legacy_experience(tablet: Option<bool>) -> OutputExperience {
-    match tablet {
-        Some(true) => OutputExperience::Tablet,
-        Some(false) => OutputExperience::Desktop,
-        None => OutputExperience::Auto,
-    }
-}
-
 /// Encode a snapshot in SWS protocol field order.
 ///
 /// # Arguments
@@ -277,12 +181,10 @@ mod tests {
         state.outputs = vec![
             OutputPolicy {
                 id: 0,
-                experience: OutputExperience::Desktop,
                 tablet: false,
             },
             OutputPolicy {
                 id: 8,
-                experience: OutputExperience::Tablet,
                 tablet: true,
             },
         ];
@@ -290,21 +192,23 @@ mod tests {
         let external = state.set_client_output(7, 8).unwrap();
         assert_eq!(external.generation, primary.generation + 1);
         assert_eq!(state.set_client_output(7, 8), None);
+        assert_eq!(primary.state_flags, flags::HARDWARE_TABLET_MODE);
         assert_eq!(
-            primary.state_flags & (flags::TABLET_MODE | flags::FOCUSED_WINDOWING),
-            0
-        );
-        assert_eq!(
-            external.state_flags & (flags::TABLET_MODE | flags::FOCUSED_WINDOWING),
-            flags::TABLET_MODE | flags::FOCUSED_WINDOWING
+            external.state_flags,
+            flags::HARDWARE_TABLET_MODE | flags::TABLET_MODE
         );
         for view in [primary, external] {
-            assert!(view.hardware_tablet_mode());
-            assert_ne!(view.known_flags & known::LID_CLOSED, 0);
-            assert_eq!(view.state_flags & flags::LID_CLOSED, 0);
+            assert_eq!(
+                view.known_flags,
+                known::TABLET_MODE | known::HARDWARE_TABLET_MODE | known::LID_CLOSED
+            );
             assert_eq!(view.capability_flags, state.capabilities);
-            assert_eq!(protocol_payload(view).len(), 16);
         }
+        // Generation 2, known bits 0/1/5, applied Tablet and folded, direct touch.
+        assert_eq!(
+            protocol_payload(external),
+            [2, 0, 0, 0, 0x23, 0, 0, 0, 0x21, 0, 0, 0, 1, 0, 0, 0]
+        );
         state.outputs.pop();
         assert_eq!(state.snapshot(Some(8)), state.snapshot(None));
     }
@@ -315,7 +219,6 @@ mod tests {
         let previous = std::mem::replace(&mut *STATE.lock().unwrap(), EnvironmentState::new());
         let outputs = vec![OutputPolicy {
             id: 0,
-            experience: OutputExperience::Tablet,
             tablet: true,
         }];
         assert!(update_outputs(
@@ -339,23 +242,5 @@ mod tests {
         assert_ne!(unknown.state_flags & flags::TABLET_MODE, 0);
         assert_eq!(unknown.capability_flags, 7);
         *STATE.lock().unwrap() = previous;
-    }
-
-    #[test]
-    fn legacy_setters_share_the_output_policy() {
-        assert_eq!(legacy_experience(Some(true)), OutputExperience::Tablet);
-        assert_eq!(legacy_experience(Some(false)), OutputExperience::Desktop);
-        assert_eq!(legacy_experience(None), OutputExperience::Auto);
-        let mut state = EnvironmentState::new();
-        state.outputs.push(OutputPolicy {
-            id: 0,
-            experience: OutputExperience::Auto,
-            tablet: false,
-        });
-        assert_eq!(state.snapshot(None).state_flags, 0);
-        assert_eq!(
-            state.snapshot(None).known_flags & known::HARDWARE_TABLET_MODE,
-            0
-        );
     }
 }

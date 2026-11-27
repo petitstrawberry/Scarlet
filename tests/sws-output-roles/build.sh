@@ -17,7 +17,7 @@ stage="$scratch/staging"
 target=aarch64-unknown-scarlet
 export CARGO_TARGET_DIR="$scratch/target"
 cargo build --locked --release --manifest-path .cargo/Cargo.toml --target "$target" \
-    --config "$project/.scarlet/sgfx/userspace.toml" -p scarlet-std-bin --bin sws
+    --config "$project/.scarlet/sgfx/userspace.toml" -p scarlet-std-bin --bin sws --bin displayctl
 cargo build --locked --release --manifest-path "$here/Cargo.toml" --target "$target"
 "$repo/tests/loader-smoke/build-kernel.sh" --output "$scratch/kernel"
 kernel="$scratch/kernel/target/aarch64-unknown-none-elf/debug/scarlet-loader-smoke-kernel"
@@ -27,7 +27,7 @@ base="$project/.scarlet/staging"
 cp "$base/initramfs/init" "$stage/init"
 cp "$base/rootfs/bin/scarlet-ld" "$stage/bin/"
 cp "$base"/rootfs/lib/sgfx/{libsgfx_scarlet_virgl.so,scarlet-virgl.sgfx-driver} "$stage/lib/sgfx/"
-cp "$CARGO_TARGET_DIR/$target/release/"{sws,sws-output-roles} "$stage/bin/"
+cp "$CARGO_TARGET_DIR/$target/release/"{sws,displayctl,sws-output-roles} "$stage/bin/"
 printf '[output]\nscale = 1.0\n' > "$stage/etc/sws/config.toml"
 python3 - "$repo" "$stage" "$scratch" <<'PY'
 from pathlib import Path

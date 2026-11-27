@@ -1320,7 +1320,7 @@ impl Application for VideoPlayerApp {
             return;
         }
         self.fit_window = false;
-        if current_input_environment().windowing_mode() != Some(scarlet_ui::WindowingMode::Focused)
+        if current_input_environment().tablet_mode() != Some(true)
             && let Ok((width, height)) = window.get_screen_size()
         {
             let decoration = scarlet_ui::views::WindowContentLayout::new(true).decoration_size();

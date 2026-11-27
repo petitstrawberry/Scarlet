@@ -131,7 +131,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4802af3f0191dbd6a13d0293fc63670fcb346f61" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -277,12 +277,6 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "sensor-dump"
 to = "/bin/sensor-dump"
-
-[[layers]]
-kind = "cargo"
-source = "../../user/std-bin"
-bin = "tabletctl"
-to = "/bin/tabletctl"
 
 [[layers]]
 kind = "cargo"

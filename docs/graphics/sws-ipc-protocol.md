@@ -135,9 +135,9 @@ are relative to the end of `menu_titles`:
 | 68 | 4 | activation-token length | u32, zero = absent |
 | 72 | N | activation token | opaque bytes |
 
-SWS snapshots the current output, workarea, and system windowing mode; clamps
-the chosen surface extent to the supplied limits; and only then allocates SHM.
-In focused mode, eligible resizable normal windows receive a first buffer whose
+SWS snapshots the target display’s workarea and applied Experience, clamps the
+surface extent to the supplied limits, and allocates SHM. In Tablet experience,
+eligible resizable normal windows receive a first buffer whose
 managed geometry already matches the workarea. Fixed-size and finite-maximum
 compatibility windows retain a constrained preferred size and remain floating.
 
@@ -1234,9 +1234,6 @@ only when the matching known bit is set.
 |-----|---------------------------|---------|
 | `0x01` | `TABLET_MODE` | The client's display is using Tablet experience. |
 | `0x02` | `LID_CLOSED` | The physical lid is closed. |
-| `0x04` | `FOCUSED_WINDOWING` | Windowing is focused on this display. |
-| `0x08` | `TABLET_MODE_OVERRIDE_ACTIVE` | This display has an explicit Experience preference. |
-| `0x10` | `WINDOWING_MODE_OVERRIDE_ACTIVE` | Same preference, exposed for legacy windowing clients. |
 | `0x20` | `HARDWARE_TABLET_MODE` | The physical tablet switch reports tablet posture. |
 
 The registered input panel follows the active editor's display. For other
@@ -1273,15 +1270,9 @@ tablet readers contribute `FINE_POINTER`, and `/dev/keyboardN` contributes
 the snapshot generation. `PEN` remains clear until the input ABI can distinguish
 a pen reliably.
 
-`SCARLET_TABLET_WINDOWING` and `SCARLET_TABLET_MODE` seed the primary
-display's initial Experience preference. A recognized windowing value takes
-precedence over the tablet-mode value. A matching saved display profile takes
-precedence over both. SWS reports physical posture from the switch device.
-
-The legacy `SET_TABLET_MODE_OVERRIDE` and `SET_WINDOWING_MODE_OVERRIDE`
-requests change the client's output Experience preference through the same
-persisted display configuration used by Settings. Tablet and Focused select
-Tablet. Laptop and Freeform select Desktop. Clearing either selects Auto.
+Settings and `displayctl experience` set the per-output preference through
+the SWS output configuration transaction. SWS restores it from the matching saved display profile.
+The default is Automatic.
 
 ##### SBus mirror
 
@@ -1453,8 +1444,8 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 - The frame header has no version field. `GET_CAPABILITIES` reports the current
   protocol version; version 3 adds compositor-provided cursor icons and live
   cursor-theme selection, and version 4 adds managed window geometry distinct
-  from the composited surface. Version 5 adds system mode overrides; version 6
-  adds atomic configured-window creation; version 7 adds exclusive workspace
+  from the composited surface. The override requests introduced in version 5
+  are retired. Version 6 adds atomic configured-window creation; version 7 adds exclusive workspace
   control; version 8 adds compositor-paced frame callbacks plus suspended
   window state; and version 9 adds persistent extension pools, reusable buffer
   objects, atomic external commits, and explicit release. Optional features

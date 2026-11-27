@@ -3037,7 +3037,7 @@ impl Compositor {
             auto_remove_empty_workspaces,
         );
         workspace_manager.attach_output(PRIMARY_OUTPUT_ID, &primary_display_key);
-        let mut primary_output = Output::new(
+        let primary_output = Output::new(
             PRIMARY_OUTPUT_ID,
             OutputRect::new(0, 0, pixel_width, pixel_height),
             output_scale_milli,
@@ -3057,7 +3057,6 @@ impl Compositor {
         )
         .with_metadata(primary_metadata);
 
-        primary_output.experience = input_environment::startup_experience();
         workspace_manager
             .apply_output_experience(
                 PRIMARY_OUTPUT_ID,
@@ -3074,21 +3073,10 @@ impl Compositor {
         input_environment::update_outputs(
             vec![input_environment::OutputPolicy {
                 id: PRIMARY_OUTPUT_ID,
-                experience: primary_output.experience,
                 tablet,
             }],
             None,
             None,
-        );
-        super::ipc::set_window_creation_environment(
-            screen_width,
-            screen_height,
-            None,
-            if tablet {
-                sws_protocol::WindowingMode::Focused
-            } else {
-                sws_protocol::WindowingMode::Freeform
-            },
         );
         if let Some([editor, panel]) = login_clients {
             ipc_server.start_login_clients(editor, panel)?;
@@ -3250,7 +3238,6 @@ impl Compositor {
                     self.cancel_primary_experience_gestures();
                 }
                 self.publish_input_environment(None, None);
-                self.publish_window_creation_environment();
                 self.apply_workspace_presentation_policy();
             }
         }
@@ -3904,7 +3891,6 @@ impl Compositor {
                 .set_workarea(0, workarea_y, new_width, workarea_height);
             self.reflow_maximized_windows_to_workarea();
         }
-        self.publish_window_creation_environment();
         if self.output_is_tablet(self.outputs.primary_id()) {
             self.apply_workspace_presentation_policy();
         }
@@ -4895,7 +4881,6 @@ impl Compositor {
                     self.touch_desktop().height(),
                 );
                 self.publish_input_environment(None, None);
-                self.publish_window_creation_environment();
                 self.refresh_input_panel();
             }
             if let Err(error) = self.sync_enabled_outputs() {
@@ -8922,7 +8907,6 @@ impl Compositor {
         }
         self.publish_input_environment(tablet, lid);
         if changed {
-            self.publish_window_creation_environment();
             self.apply_workspace_presentation_policy();
             self.publish_workspace_state();
         }
@@ -13175,19 +13159,6 @@ impl Compositor {
         )
     }
 
-    fn publish_window_creation_environment(&self) {
-        super::ipc::set_window_creation_environment(
-            self.outputs.desktop_primary().width(),
-            self.outputs.desktop_primary().height(),
-            self.workarea,
-            if self.output_is_tablet(self.outputs.desktop_primary().id) {
-                sws_protocol::WindowingMode::Focused
-            } else {
-                sws_protocol::WindowingMode::Freeform
-            },
-        );
-    }
-
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         let independent = matches!(
             &event,
@@ -13364,7 +13335,6 @@ impl Compositor {
                     workarea,
                     placement,
                     activated,
-                    focused: context.tablet,
                     client_scale_milli: requested
                         .map_or(self.output_scale_milli(), |context| context.scale_milli),
                 });
@@ -13668,7 +13638,6 @@ impl Compositor {
                             self.workarea = Some(area);
                             self.window_manager
                                 .set_workarea(area.0, area.1, area.2, area.3);
-                            self.publish_window_creation_environment();
                         }
                         println!(
                             "[Compositor] Updated workarea for taskbar #{}: y={}, height={}",
@@ -15432,7 +15401,6 @@ impl Compositor {
                 self.outputs.get_mut(primary).unwrap().workarea = self.workarea;
                 // Notify window manager about workarea change
                 self.window_manager.set_workarea(x, y, width, height);
-                self.publish_window_creation_environment();
                 self.reflow_maximized_windows_to_workarea();
                 if self.output_is_tablet(self.outputs.desktop_primary().id) {
                     self.apply_workspace_presentation_policy();
@@ -15639,24 +15607,6 @@ impl Compositor {
                             .to_vec(),
                     );
                 }
-            }
-            IpcEvent::SetTabletModeOverride {
-                client_id,
-                request_id,
-                tablet_mode,
-            } => {
-                self.set_legacy_experience(client_id, request_id, tablet_mode);
-            }
-            IpcEvent::SetWindowingModeOverride {
-                client_id,
-                request_id,
-                windowing_mode,
-            } => {
-                self.set_legacy_experience(
-                    client_id,
-                    request_id,
-                    windowing_mode.map(|mode| mode == sws_protocol::WindowingMode::Focused),
-                );
             }
             IpcEvent::RegisterSystemShell {
                 client_id,

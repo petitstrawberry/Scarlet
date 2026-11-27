@@ -54,17 +54,17 @@ path = "../../user/lib/sws-client-c"
 [[sections.initramfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "73005007792d31b8e242144f23412fb667652ccd"
-resolved_rev = "73005007792d31b8e242144f23412fb667652ccd"
+git_ref = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+resolved_rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 package = "scarlet-ui-window-c"
 lib = "scarlet_ui_window"
 to = "/lib/libscarlet_ui_window.so"
-hash = "sha256:b598438ccd261eef1dd85d8b55987e9a057d447e7df766bd0b459a9ebd67fade"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "73005007792d31b8e242144f23412fb667652ccd"
+rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
@@ -545,17 +545,17 @@ path = "../../user/lib/sws-client-c"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "73005007792d31b8e242144f23412fb667652ccd"
-resolved_rev = "73005007792d31b8e242144f23412fb667652ccd"
+git_ref = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+resolved_rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 package = "scarlet-ui-window-c"
 lib = "scarlet_ui_window"
 to = "/lib/libscarlet_ui_window.so"
-hash = "sha256:b598438ccd261eef1dd85d8b55987e9a057d447e7df766bd0b459a9ebd67fade"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "73005007792d31b8e242144f23412fb667652ccd"
+rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1190,18 +1190,18 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "73005007792d31b8e242144f23412fb667652ccd"
-resolved_rev = "73005007792d31b8e242144f23412fb667652ccd"
+git_ref = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+resolved_rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
 to = "/bin/widget-factory"
-hash = "sha256:53c0dbf953fa4eccf071e05498da93469479a285deca300bb240956b995ef0b2"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "73005007792d31b8e242144f23412fb667652ccd"
+rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1414,16 +1414,6 @@ kind = "cargo"
 bin = "sensor-dump"
 to = "/bin/sensor-dump"
 hash = "sha256:6d83c012f8c432f1b0e406409be33b4a1e6d96b3f3f83a160175a72874a863a7"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = "../../user/std-bin"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-bin = "tabletctl"
-to = "/bin/tabletctl"
-hash = "sha256:e4758edc68848fccac48d3dc13c6be3aa02fc49f330fd9063078222272b9c595"
 
 [sections.rootfs.layers.source]
 type = "path"

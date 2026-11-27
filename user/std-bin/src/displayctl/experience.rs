@@ -1,54 +1,43 @@
 //! Inspect physical posture and configure a display's desktop or tablet experience.
 
 use core::time::Duration;
-use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use sws_client::{Connection, Error, Event, InputEnvironment};
 use sws_protocol::error_codes;
 use sws_protocol::outputs::{
-    OutputDescriptor, OutputEvent, OutputExperience, OutputSnapshot, OutputTransaction,
+    OutputDescriptor, OutputEvent, OutputExperience, OutputRole, OutputSnapshot, OutputTransaction,
 };
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "tabletctl",
-    version,
-    about = "Inspect posture and configure display experience"
-)]
-struct Cli {
-    /// Display ID. Defaults to the active desktop, preferring a built-in display.
-    #[arg(long, global = true, value_name = "ID")]
+#[derive(Debug, Args)]
+pub struct Target {
+    /// Display ID from 'displayctl outputs'. Defaults to the built-in or primary desktop.
+    #[arg(long, value_name = "ID")]
     output: Option<u32>,
-    #[command(subcommand)]
-    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
-    /// List connected display IDs for --output.
+pub enum Command {
+    /// List connected compositor output IDs and their roles.
     Outputs,
-    /// Print hardware posture, applied experience, policy, and input devices.
-    Status,
-    /// Print status and follow changes to the display and its input environment.
-    Watch,
-    /// Set the display's Experience preference in Settings.
-    #[command(visible_aliases = ["posture", "windowing"])]
+    /// Show the display's configured and applied experience and the physical posture.
+    Status(Target),
+    /// Follow changes to the display and its input environment.
+    Watch(Target),
+    /// Set the selected display's Experience preference in Settings.
     Experience {
         #[arg(value_enum)]
         mode: ExperienceArgument,
+        #[command(flatten)]
+        target: Target,
     },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum ExperienceArgument {
-    /// Follow the posture sensor on a built-in display. External displays use Desktop.
+pub enum ExperienceArgument {
+    /// Follow the built-in display's posture sensor. External displays use Desktop.
     Auto,
-    /// Use desktop presentation (also accepts laptop or freeform).
-    #[value(aliases = ["laptop", "freeform"])]
     Desktop,
-    /// Use tablet presentation (also accepts focused).
-    #[value(alias = "focused")]
     Tablet,
 }
 
@@ -77,11 +66,19 @@ fn request_error(error: Error) -> String {
 
 fn target(snapshot: &OutputSnapshot, requested: Option<u32>) -> Result<&OutputDescriptor, String> {
     if let Some(id) = requested {
-        return snapshot
+        let output = snapshot
             .outputs
             .iter()
             .find(|output| output.id == id)
-            .ok_or_else(|| format!("output {id} is disconnected or unknown"));
+            .ok_or_else(|| format!("output {id} is disconnected or unknown"))?;
+        if !snapshot
+            .configuration
+            .iter()
+            .any(|config| config.id == id && config.role == OutputRole::Extend)
+        {
+            return Err(format!("output {id} has no independent desktop"));
+        }
+        return Ok(output);
     }
     sws_protocol::outputs::extended_primary(&snapshot.outputs, &snapshot.configuration)
         .and_then(|id| snapshot.outputs.iter().find(|output| output.id == id))
@@ -134,27 +131,15 @@ fn status(
     } else {
         "compositor"
     };
-    let (experience, windowing) = if tablet {
-        ("tablet", "focused")
-    } else {
-        ("desktop", "freeform")
-    };
-    let posture_source = if hardware.is_some() {
-        "hardware"
-    } else {
-        "unknown"
-    };
+    let experience = if tablet { "tablet" } else { "desktop" };
     Ok(format!(
-        "output={} name={:?} posture={} experience={} experience_source={} configured={} posture_source={} windowing={} windowing_source={} generation={} output_generation={} direct_touch={} fine_pointer={} keyboard={} pen={}",
+        "output={} name={:?} posture={} experience={} experience_source={} configured={} generation={} output_generation={} direct_touch={} fine_pointer={} keyboard={} pen={}",
         output.id,
         output.name,
         posture,
         experience,
         source,
         configured,
-        posture_source,
-        windowing,
-        source,
         environment.generation,
         snapshot.generation,
         environment.has_direct_touch(),
@@ -177,21 +162,39 @@ fn read_status(
     status(snapshot, output, environment, context.tablet)
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+pub fn run(command: Command) -> Result<(), String> {
+    if !cfg!(target_os = "scarlet") {
+        return Err("this utility requires Scarlet OS".into());
+    }
     let connection = Connection::connect_default().map_err(request_error)?;
     let mut snapshot = connection.outputs().map_err(request_error)?;
-    match cli.command.unwrap_or(Command::Status) {
+    match command {
         Command::Outputs => {
             for output in &snapshot.outputs {
+                let role = snapshot
+                    .configuration
+                    .iter()
+                    .find(|entry| entry.id == output.id)
+                    .map(|entry| match entry.role {
+                        OutputRole::Extend => "extend",
+                        OutputRole::Mirror => "mirror",
+                        OutputRole::Disabled => "disabled",
+                    })
+                    .unwrap_or("unknown");
                 println!(
-                    "output={} name={:?} internal={} primary={}",
-                    output.id, output.name, output.internal, output.primary
+                    "output={} name={:?} internal={} primary={} role={}",
+                    output.id, output.name, output.internal, output.primary, role
                 );
             }
         }
-        Command::Status => println!("{}", read_status(&connection, &snapshot, cli.output)?),
-        Command::Experience { mode } => {
-            let id = target(&snapshot, cli.output)?.id;
+        Command::Status(selected) => {
+            println!("{}", read_status(&connection, &snapshot, selected.output)?)
+        }
+        Command::Experience {
+            mode,
+            target: selected,
+        } => {
+            let id = target(&snapshot, selected.output)?.id;
             snapshot = connection
                 .configure_outputs(transaction(snapshot, id, mode.into())?)
                 .map_err(request_error)?;
@@ -202,8 +205,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 ))?
             );
         }
-        Command::Watch => {
-            let mut previous = read_status(&connection, &snapshot, cli.output)?;
+        Command::Watch(selected) => {
+            let mut previous = read_status(&connection, &snapshot, selected.output)?;
             println!("{previous}");
             loop {
                 connection
@@ -222,7 +225,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 }
                 if changed {
                     snapshot = connection.outputs().map_err(request_error)?;
-                    let current = read_status(&connection, &snapshot, cli.output)?;
+                    let current = read_status(&connection, &snapshot, selected.output)?;
                     if previous != current {
                         println!("{current}");
                         previous = current;
@@ -232,16 +235,6 @@ fn run(cli: Cli) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn main() -> ExitCode {
-    match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("tabletctl: {error}");
-            ExitCode::FAILURE
-        }
-    }
 }
 
 #[cfg(test)]
@@ -299,23 +292,25 @@ mod tests {
 
     #[test]
     fn setters_preserve_other_outputs_and_use_the_settings_generation() {
-        for (command, argument, experience) in [
-            ("experience", "desktop", OutputExperience::Desktop),
-            ("posture", "tablet", OutputExperience::Tablet),
-            ("posture", "laptop", OutputExperience::Desktop),
-            ("posture", "auto", OutputExperience::Auto),
-            ("windowing", "focused", OutputExperience::Tablet),
-            ("windowing", "freeform", OutputExperience::Desktop),
-            ("windowing", "auto", OutputExperience::Auto),
+        use crate::{Cli, Command::Session};
+        use clap::Parser;
+        for (argument, experience) in [
+            ("auto", OutputExperience::Auto),
+            ("desktop", OutputExperience::Desktop),
+            ("tablet", OutputExperience::Tablet),
         ] {
-            let cli =
-                Cli::try_parse_from(["tabletctl", command, argument, "--output", "8"]).unwrap();
-            let Some(Command::Experience { mode }) = cli.command else {
-                panic!("setter")
+            let cli = Cli::try_parse_from(["displayctl", "experience", argument, "--output", "8"])
+                .unwrap();
+            let Session(Command::Experience {
+                mode,
+                target: selected,
+            }) = cli.command
+            else {
+                panic!("expected experience");
             };
             assert_eq!(OutputExperience::from(mode), experience);
             let snapshot = displays();
-            let id = target(&snapshot, cli.output).unwrap().id;
+            let id = target(&snapshot, selected.output).unwrap().id;
             assert_eq!(id, 8);
             let update = transaction(snapshot.clone(), id, mode.into()).unwrap();
             let mut expected = snapshot.configuration;
@@ -331,6 +326,9 @@ mod tests {
         assert_eq!(target(&snapshot, None).unwrap().id, 3);
         snapshot.configuration[0].role = OutputRole::Disabled;
         assert_eq!(target(&snapshot, None).unwrap().id, 8);
+        assert!(target(&snapshot, Some(3)).is_err());
+        snapshot.configuration[0].role = OutputRole::Mirror;
+        assert!(target(&snapshot, Some(3)).is_err());
         snapshot.configuration[0].role = OutputRole::Extend;
         snapshot.outputs[1].internal = false;
         assert_eq!(target(&snapshot, None).unwrap().id, 8);

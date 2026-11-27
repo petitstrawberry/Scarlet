@@ -896,8 +896,8 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "879bedaaf34a10fe156f93449406396092da55f9"
-resolved_rev = "879bedaaf34a10fe156f93449406396092da55f9"
+git_ref = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
+resolved_rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
@@ -907,7 +907,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "879bedaaf34a10fe156f93449406396092da55f9"
+rev = "1a442db8b2786f9031689b7d7fb78fd49d407ca5"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1120,16 +1120,6 @@ kind = "cargo"
 bin = "sensor-dump"
 to = "/bin/sensor-dump"
 hash = "sha256:326c2c4bc54117ecbe3f3a3c4318d94082966d440354d392e6ba5e03804282f2"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = "../../user/std-bin"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-bin = "tabletctl"
-to = "/bin/tabletctl"
-hash = "sha256:023170eabbc636c1dc27e282c4b72778eab47f39204213375ec4efef747d119f"
 
 [sections.rootfs.layers.source]
 type = "path"

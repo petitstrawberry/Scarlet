@@ -143,15 +143,6 @@ impl Capabilities {
         self.capabilities & protocol::capabilities::TOUCH_INPUT != 0
     }
 
-    /// Whether the server accepts legacy requests to set an output's experience.
-    ///
-    /// # Returns
-    ///
-    /// `true` when the mode-override setters may be requested.
-    pub const fn supports_system_mode_overrides(self) -> bool {
-        self.capabilities & protocol::capabilities::SYSTEM_MODE_OVERRIDES != 0
-    }
-
     /// Whether SWS can configure initial size before allocating the first buffer.
     ///
     /// # Returns
@@ -3409,26 +3400,6 @@ fn input_environment_event(
     })
 }
 
-fn input_environment_from_server_message(
-    message: ServerMessage,
-) -> Result<InputEnvironment, Error> {
-    match message {
-        ServerMessage::InputEnvironmentChanged {
-            generation,
-            known_flags,
-            state_flags,
-            capability_flags,
-        } => Ok(InputEnvironment {
-            generation,
-            known_flags,
-            state_flags,
-            capability_flags,
-        }),
-        ServerMessage::Error { code } => Err(Error::ServerError(code)),
-        _ => Err(Error::InvalidResponse),
-    }
-}
-
 fn decode_workspace_response(
     response: Response,
     expected: ServerMessage,
@@ -3611,19 +3582,6 @@ mod pointer_lock_tests {
     }
 
     #[test]
-    fn capability_reports_system_mode_override_support() {
-        let mut capabilities = Capabilities {
-            protocol_version: protocol::SWS_PROTOCOL_VERSION,
-            capabilities: 0,
-            compositor_epoch: 1,
-            compositor_backend: protocol::compositor_backends::CPU,
-        };
-        assert!(!capabilities.supports_system_mode_overrides());
-        capabilities.capabilities |= protocol::capabilities::SYSTEM_MODE_OVERRIDES;
-        assert!(capabilities.supports_system_mode_overrides());
-    }
-
-    #[test]
     fn capability_reports_configured_window_creation_support() {
         let mut capabilities = Capabilities {
             protocol_version: protocol::SWS_PROTOCOL_VERSION,
@@ -3763,40 +3721,6 @@ impl Connection {
             ServerMessage::Error { code } => Err(Error::ServerError(code)),
             _ => Err(Error::InvalidResponse),
         }
-    }
-
-    /// Set the Experience preference on this client's display. An explicit
-    /// output binding takes precedence over an owned window. An unbound
-    /// connection without windows uses the primary display.
-    ///
-    /// `Some(true)` selects Tablet, `Some(false)` selects Desktop, and `None`
-    /// selects Auto. Returns the resulting input environment for this client.
-    pub fn set_tablet_mode_override(
-        &self,
-        tablet_mode: Option<bool>,
-    ) -> Result<InputEnvironment, Error> {
-        if !self.get_capabilities()?.supports_system_mode_overrides() {
-            return Err(Error::SystemModeOverrideUnsupported);
-        }
-        let payload = protocol::payload_set_tablet_mode_override(tablet_mode);
-        let response = self.request(protocol::client_msg::SET_TABLET_MODE_OVERRIDE, &payload)?;
-        input_environment_from_server_message(response.message())
-    }
-
-    /// Set the same output preference as [`Self::set_tablet_mode_override`].
-    ///
-    /// Focused selects Tablet, Freeform selects Desktop, and `None` selects
-    /// Auto. Returns the resulting input environment for this client.
-    pub fn set_windowing_mode_override(
-        &self,
-        windowing_mode: Option<protocol::WindowingMode>,
-    ) -> Result<InputEnvironment, Error> {
-        if !self.get_capabilities()?.supports_system_mode_overrides() {
-            return Err(Error::SystemModeOverrideUnsupported);
-        }
-        let payload = protocol::payload_set_windowing_mode_override(windowing_mode);
-        let response = self.request(protocol::client_msg::SET_WINDOWING_MODE_OVERRIDE, &payload)?;
-        input_environment_from_server_message(response.message())
     }
 
     /// Claim the exclusive system-shell role and obtain the live workspace state.

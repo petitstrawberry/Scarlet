@@ -328,12 +328,15 @@ impl Compositor {
         posture: Option<Option<bool>>,
         lid: Option<Option<bool>>,
     ) {
-        let outputs = self
-            .outputs
-            .desktops()
+        let primary = self.outputs.desktop_primary();
+        let outputs = std::iter::once(primary)
+            .chain(
+                self.outputs
+                    .desktops()
+                    .filter(|output| output.id != primary.id),
+            )
             .map(|output| input_environment::OutputPolicy {
                 id: output.id,
-                experience: output.experience,
                 tablet: self.output_is_tablet(output.id),
             })
             .collect();
@@ -369,41 +372,6 @@ impl Compositor {
             self.outputs.bump_generation();
         }
         changed
-    }
-
-    pub(super) fn set_legacy_experience(
-        &mut self,
-        client: usize,
-        request: u8,
-        tablet: Option<bool>,
-    ) {
-        let id =
-            input_environment::client_output(client).unwrap_or(self.outputs.desktop_primary().id);
-        let experience = input_environment::legacy_experience(tablet);
-        let mut configuration = self.outputs.snapshot().configuration;
-        let result = match configuration.iter_mut().find(|entry| entry.id == id) {
-            Some(entry) if entry.experience == experience => Ok(()),
-            Some(entry) => {
-                entry.experience = experience;
-                self.install_output_configuration(&configuration, true)
-            }
-            None => Err(sws_protocol::error_codes::UNKNOWN_OUTPUT),
-        };
-        match result {
-            Ok(()) => send_response_to_client(
-                client,
-                sws_protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
-                request,
-                input_environment::protocol_payload(input_environment::client_snapshot(client))
-                    .to_vec(),
-            ),
-            Err(code) => send_response_to_client(
-                client,
-                sws_protocol::server_msg::ERROR,
-                request,
-                sws_protocol::payload_error(code).to_vec(),
-            ),
-        }
     }
 
     pub(super) fn restore_output_configuration(&mut self) {
@@ -692,7 +660,6 @@ impl Compositor {
             }
         }
         self.update_desktop_workarea();
-        self.publish_window_creation_environment();
         self.reflow_maximized_windows_to_workarea();
         self.full_redraw_needed = true;
         self.confine_cursor_to_outputs();
@@ -930,7 +897,6 @@ impl Compositor {
                     self.workarea = Some(area);
                     self.window_manager
                         .set_workarea(area.0, area.1, area.2, area.3);
-                    self.publish_window_creation_environment();
                 }
                 self.apply_workspace_presentation_policy();
                 Ok(OutputEvent::Applied)

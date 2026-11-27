@@ -163,23 +163,22 @@ Automatic follows the physical tablet switch on a built-in display. It uses
 Desktop on an external display or when the switch is unavailable. Explicit
 Desktop and Tablet preferences apply regardless of posture.
 
-`tabletctl` uses the same SWS transaction as Settings. Both update the live
+`displayctl` uses the same SWS transaction as Settings. Both update the live
 display and save the layout in `/etc/sws/config.toml` for monitor combinations
 with unique identities. An ambiguous monitor combination gets the live update
 for the session.
 
 ```sh
-tabletctl outputs
-tabletctl --output 1 experience tablet
-tabletctl --output 1 status
-tabletctl --output 1 watch
-tabletctl --output 1 experience auto
+displayctl outputs
+displayctl experience tablet --output 1
+displayctl status --output 1
+displayctl watch --output 1
+displayctl experience auto --output 1
 ```
 
-Without `--output ID`, tabletctl selects the built-in display, then falls back
-to the primary display. The legacy commands `posture tablet` and
-`windowing focused` select Tablet. `posture laptop` and `windowing freeform`
-select Desktop. Both legacy commands accept `auto` to restore Automatic.
+Without `--output ID`, displayctl selects the built-in desktop when active,
+then the active primary desktop. Only extended outputs have an independent
+Experience preference to apply.
 
 In status and watch output, `posture` reports the physical switch
 (`tablet`, `laptop`, or `unknown`). `configured` reports the selected

@@ -163,7 +163,6 @@ fn capability_version_bits_and_payload_are_independent_of_package_version() {
             capabilities::CURSOR_THEMES,
             capabilities::INPUT_ENVIRONMENT,
             capabilities::WINDOW_GEOMETRY,
-            capabilities::SYSTEM_MODE_OVERRIDES,
             capabilities::CONFIGURED_WINDOW_CREATION,
             capabilities::WORKSPACE_SHELL,
             capabilities::FRAME_CALLBACKS,
@@ -172,9 +171,7 @@ fn capability_version_bits_and_payload_are_independent_of_package_version() {
             capabilities::GAMEPAD_INPUT,
             capabilities::TOUCH_INPUT,
         ],
-        [
-            1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
-        ],
+        [1, 2, 4, 8, 16, 32, 128, 256, 512, 1024, 2048, 4096, 8192],
     );
     // Unknown feature bits survive decoding; they must not become known support.
     let bytes = [

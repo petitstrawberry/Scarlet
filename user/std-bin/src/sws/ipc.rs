@@ -597,7 +597,6 @@ pub(super) struct WindowCreationTarget {
     pub workarea: Option<(i32, i32, u32, u32)>,
     pub placement: protocol::WindowPlacement,
     pub activated: bool,
-    pub focused: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -605,56 +604,7 @@ struct WindowCreationEnvironment {
     screen_width: u32,
     screen_height: u32,
     workarea: Option<(i32, i32, u32, u32)>,
-    windowing_mode: protocol::WindowingMode,
-}
-
-impl WindowCreationEnvironment {
-    const fn initial() -> Self {
-        Self {
-            screen_width: 1,
-            screen_height: 1,
-            workarea: None,
-            windowing_mode: protocol::WindowingMode::Freeform,
-        }
-    }
-}
-
-static WINDOW_CREATION_ENVIRONMENT: Mutex<WindowCreationEnvironment> =
-    Mutex::new(WindowCreationEnvironment::initial());
-
-/// Publish the compositor state used for atomic initial window configuration.
-///
-/// # Arguments
-///
-/// * `screen_width` - Current physical output width.
-/// * `screen_height` - Current physical output height.
-/// * `workarea` - Current managed workarea, when a shell reserved one.
-/// * `windowing_mode` - Windowing projection of the primary output for legacy creation.
-///
-/// # Returns
-///
-/// This function does not return a value.
-pub fn set_window_creation_environment(
-    screen_width: u32,
-    screen_height: u32,
-    workarea: Option<(i32, i32, u32, u32)>,
-    windowing_mode: protocol::WindowingMode,
-) {
-    *WINDOW_CREATION_ENVIRONMENT
-        .lock()
-        .expect("SWS window-creation environment mutex poisoned") = WindowCreationEnvironment {
-        screen_width: screen_width.max(1),
-        screen_height: screen_height.max(1),
-        workarea,
-        windowing_mode,
-    };
-}
-
-fn set_pending_window_creation_workarea(x: i32, y: i32, width: u32, height: u32) {
-    WINDOW_CREATION_ENVIRONMENT
-        .lock()
-        .expect("SWS window-creation environment mutex poisoned")
-        .workarea = Some((x, y, width.max(1), height.max(1)));
+    tablet: bool,
 }
 
 fn configured_initial_surface_extent(
@@ -670,7 +620,7 @@ fn configured_initial_surface_extent(
     let (mut width, mut height) = limits.clamp(requested_width, requested_height);
     let tablet_workspace_root = window_type == protocol::window_types::NORMAL
         && resizable
-        && environment.windowing_mode == protocol::WindowingMode::Focused
+        && environment.tablet
         && limits.max_width == 0
         && limits.max_height == 0;
     if tablet_workspace_root {
@@ -706,7 +656,6 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::CURSOR_THEMES
         | protocol::capabilities::INPUT_ENVIRONMENT
         | protocol::capabilities::WINDOW_GEOMETRY
-        | protocol::capabilities::SYSTEM_MODE_OVERRIDES
         | protocol::capabilities::CONFIGURED_WINDOW_CREATION
         | protocol::capabilities::WORKSPACE_SHELL
         | protocol::capabilities::FRAME_CALLBACKS
@@ -3177,11 +3126,7 @@ fn client_thread_main(
                         workarea: creation
                             .workarea
                             .map(|(_, _, width, height)| (0, 0, pixels(width), pixels(height))),
-                        windowing_mode: if creation.focused {
-                            protocol::WindowingMode::Focused
-                        } else {
-                            protocol::WindowingMode::Freeform
-                        },
+                        tablet: creation.context.tablet,
                     };
                     let Some(extent) = configured_initial_surface_extent(
                         width,
@@ -4247,7 +4192,6 @@ fn client_thread_main(
                     "[ClientThread {}] SetWorkarea: x={}, y={}, width={}, height={}",
                     client_id, x, y, width, height
                 );
-                set_pending_window_creation_workarea(x, y, width, height);
                 push_ipc_event(IpcEvent::SetWorkarea {
                     x,
                     y,
@@ -4401,22 +4345,6 @@ fn client_thread_main(
                     );
                     break;
                 }
-            }
-            Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode }) => {
-                subscribe_input_environment(client_id);
-                push_ipc_event(IpcEvent::SetTabletModeOverride {
-                    client_id,
-                    request_id,
-                    tablet_mode,
-                });
-            }
-            Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode }) => {
-                subscribe_input_environment(client_id);
-                push_ipc_event(IpcEvent::SetWindowingModeOverride {
-                    client_id,
-                    request_id,
-                    windowing_mode,
-                });
             }
             Ok(ClientMessageRef::RegisterSystemShell { full_app_menus }) => {
                 if claim_system_shell(client_id, full_app_menus) {
@@ -5481,20 +5409,6 @@ pub enum IpcEvent {
         target_app_id: Vec<u8>,
     },
 
-    /// Legacy tablet spelling of an output Experience change.
-    SetTabletModeOverride {
-        client_id: usize,
-        request_id: u8,
-        tablet_mode: Option<bool>,
-    },
-
-    /// Legacy windowing spelling of an output Experience change.
-    SetWindowingModeOverride {
-        client_id: usize,
-        request_id: u8,
-        windowing_mode: Option<protocol::WindowingMode>,
-    },
-
     /// Query active application metadata, respecting the receiver's menu limit.
     GetActiveApp {
         client_id: usize,
@@ -5553,7 +5467,7 @@ mod tests {
             screen_width: 1920,
             screen_height: 1080,
             workarea: Some((0, 40, 1920, 1040)),
-            windowing_mode: protocol::WindowingMode::Focused,
+            tablet: true,
         };
         assert_eq!(
             configured_initial_surface_extent(
@@ -5574,7 +5488,7 @@ mod tests {
             screen_width: 2160,
             screen_height: 1440,
             workarea: Some((0, 64, 2160, 1376)),
-            windowing_mode: protocol::WindowingMode::Focused,
+            tablet: true,
         };
         let configuration = protocol::InitialWindowConfiguration {
             size_limits: protocol::WindowSizeLimits {
@@ -5610,7 +5524,7 @@ mod tests {
             screen_width: 1920,
             screen_height: 1080,
             workarea: Some((0, 40, 1920, 1040)),
-            windowing_mode: protocol::WindowingMode::Freeform,
+            tablet: false,
         };
         assert_eq!(
             configured_initial_surface_extent(
@@ -5624,7 +5538,7 @@ mod tests {
             Some((320, 240))
         );
 
-        environment.windowing_mode = protocol::WindowingMode::Focused;
+        environment.tablet = true;
         let mut finite = configuration();
         finite.size_limits.max_width = 900;
         finite.size_limits.max_height = 700;
