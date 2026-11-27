@@ -9,6 +9,10 @@ edition = "2024"
 name = "btctl"
 path = "src/btctl.rs"
 
+[[bin]]
+name = "joycond"
+path = "src/joycond.rs"
+
 [dependencies]
 scarlet-abi = { path = "../lib/scarlet-abi" }
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }

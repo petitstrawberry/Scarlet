@@ -1,0 +1,3 @@
+[service.joycond]
+exec = "/bin/joycond"
+depends = []

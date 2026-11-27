@@ -1406,7 +1406,6 @@ fn gamepad_device_reader(device: InputDevice, path: &str, index: u8) {
     let source = KeyboardSource::Gamepad(index);
     let input_source = InputSourceId::new(InputSourceClass::Gamepad);
     let config = super::config::read_sws_config().unwrap_or_default();
-    let mut navigation = gamepad::Navigation::new(gamepad::Config::parse(&config));
     // The /dev index may be reused while an old reset is still in flight.
     // Bind the client-visible gamepad ID to this reader instance instead.
     let mut snapshot = gamepad::Snapshot::new(
@@ -1414,10 +1413,11 @@ fn gamepad_device_reader(device: InputDevice, path: &str, index: u8) {
     );
     for code in 0..6 {
         if let Ok(axis) = device.absolute_axis(code) {
-            navigation.set_axis_range(code, axis.minimum, axis.maximum);
             snapshot.set_axis_range(code, axis.minimum, axis.maximum);
         }
     }
+    let mut navigation =
+        gamepad::Navigation::from_snapshot(gamepad::Config::parse(&config), &snapshot);
     println!("[GamepadThread] Opened {} for menu navigation", path);
     let _capability_registration = register_live_capabilities(environment_capabilities::GAMEPAD);
     loop {

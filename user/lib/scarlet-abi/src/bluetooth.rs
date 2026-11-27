@@ -1,4 +1,4 @@
-//! Native Bluetooth controller V1, one adapter and at most one active peer per handle.
+//! Native Bluetooth controller V1, one adapter with multiple simultaneous Classic links.
 //! Each command borrows a writable, zero-initialized 288-byte record for the duration
 //! of HandleControl. Fill only the specified inputs. Success returns 0. The kernel
 //! zeroes unspecified output, especially KEY on every command except READ_KEY.
@@ -15,11 +15,24 @@
 //! SCAN_RESULT takes GENERATION and zero-based INDEX, returns PEER and NAME_LEN
 //! bytes of NAME (no terminator). Reject stale generations and out-of-range indices.
 //! PAIR takes PEER. CONNECT takes PEER and optionally KEY_SUPPLIED, KEY_TYPE and
-//! KEY. DISCONNECT targets the active link. ENCRYPTED and PROFILE_READY report
-//! negotiated link state independently. Successful PAIR may set KEY_READABLE.
+//! KEY. DISCONNECT requires exactly one live link. DISCONNECT_PEER takes PEER.
+//! ENCRYPTED and PROFILE_READY describe the negotiated link state.
+//! Successful PAIR may set KEY_READABLE.
 //! READ_KEY takes pairing GENERATION and PEER and returns KEY_TYPE and KEY.
 //! Restrict key export to the authorized pairing caller and matching generation
-//! and peer. Clear KEY_READABLE when that key is no longer available.
+//! and peer. Operations on other peers leave the key available.
+//!
+//! LINKS returns COUNT of connected links and a link snapshot GENERATION.
+//! LINK_RESULT takes that GENERATION and zero-based INDEX. Retry LINKS on a
+//! stale generation. Each row returns ADAPTER, PEER, NAME_LEN/NAME, FLAGS,
+//! LAST_ERROR and the same link snapshot GENERATION.
+//! PEER_STATUS takes PEER and returns the same fields with that peer's most
+//! recent operation GENERATION. It remains available after failure or loss
+//! until the bounded history evicts the inactive peer. BUSY, CONNECTED,
+//! ENCRYPTED, PROFILE_READY and KEY_READABLE describe only that peer.
+//! PAIR, CONNECT and both disconnect commands echo the selected PEER.
+//! DISCONNECT_PEER returns the accepted operation GENERATION like PAIR and
+//! CONNECT. Poll PEER_STATUS for that generation and a clear BUSY bit.
 
 use core::ops::Range;
 
@@ -30,6 +43,10 @@ pub const PAIR: u32 = 0x4254_0004;
 pub const CONNECT: u32 = 0x4254_0005;
 pub const DISCONNECT: u32 = 0x4254_0006;
 pub const READ_KEY: u32 = 0x4254_0007;
+pub const LINKS: u32 = 0x4254_0008;
+pub const LINK_RESULT: u32 = 0x4254_0009;
+pub const PEER_STATUS: u32 = 0x4254_000a;
+pub const DISCONNECT_PEER: u32 = 0x4254_000b;
 
 pub const RECORD_SIZE: usize = 288;
 pub type Record = [u8; RECORD_SIZE];

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot Scarlet with a test-only H4 radio, then run the shipped btctl and SWS navigation policy."""
+"""Boot Scarlet with a test-only H4 radio, then exercise btctl, joycond and SWS navigation."""
 import argparse
 import importlib.util
 import json
@@ -22,7 +22,10 @@ def build(out):
         with (out / log).open("w") as destination:
             result = subprocess.run(cmd, cwd=ROOT, env=env, stdout=destination, stderr=subprocess.STDOUT)
         if result.returncode:
-            raise RuntimeError((out / log).read_text()[-4000:])
+            lines = (out / log).read_text().splitlines()
+            first = next((i for i, line in enumerate(lines) if line.startswith("error")), None)
+            excerpt = lines[-30:] if first is None else lines[first:first + 30]
+            raise RuntimeError(f"Build failed ({log}):\n" + "\n".join(excerpt))
 
     spec = json.loads((ROOT / "kernel/targets/aarch64-unknown-none-elf.json").read_text())
     spec.pop("pre-link-args")
@@ -53,7 +56,7 @@ def boot(out):
     stage = out / "stage"
     for name in ["bin", "dev", "etc", "mnt/newroot", "root", "tmp"]:
         (stage / name).mkdir(mode=0o755, parents=True, exist_ok=True)
-    for name in ["init", "bin/scarlet-ld", "bin/btctl", "bin/bluetooth-qa"]:
+    for name in ["init", "bin/scarlet-ld", "bin/btctl", "bin/joycond", "bin/bluetooth-qa"]:
         binary = out / "user/aarch64-unknown-scarlet/release" / Path(name).name
         (stage / name).write_bytes(binary.read_bytes())
         (stage / name).chmod(0o755)
@@ -80,12 +83,18 @@ def boot(out):
     with log.open("wb") as serial, subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=serial,
                                                     stderr=subprocess.STDOUT) as qemu:
         try:
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 180
+            reported = 0
             while time.monotonic() < deadline:
-                lines = log.read_text(errors="replace").splitlines()
-                if "BLUETOOTH_QEMU_PASS" in lines:
-                    print("\n".join(line for line in lines if line.startswith(("BT_QA_", "BLUETOOTH_"))))
-                    return
+                output = log.read_text(errors="replace")
+                lines = output.splitlines()
+                complete = len(lines) if output.endswith("\n") else max(0, len(lines) - 1)
+                for line in lines[reported:complete]:
+                    if line.startswith(("BT_QA_", "BLUETOOTH_")):
+                        print(line, flush=True)
+                    if line == "BLUETOOTH_QEMU_PASS":
+                        return
+                reported = complete
                 if qemu.poll() is not None or any("panicked at" in line or "[panic]" in line for line in lines):
                     break
                 time.sleep(0.1)

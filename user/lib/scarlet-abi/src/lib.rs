@@ -10,6 +10,7 @@ pub mod bluetooth;
 pub mod data_model;
 pub mod environment;
 pub mod fs;
+pub mod gamepad;
 pub mod gpu_timestamp;
 pub mod hypervisor;
 pub mod native_scalar;

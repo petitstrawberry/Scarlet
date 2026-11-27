@@ -5,6 +5,8 @@
 
 extern crate alloc;
 
+mod snapshots;
+
 use crate::sync::IrqSpinLock;
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -26,24 +28,36 @@ static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 // SWS probes gamepad0 through gamepad7. All native gamepad constructors
 // reserve from the same pool, including the permanent rail controller.
 const GAMEPAD_SLOTS: usize = 8;
-static USED_GAMEPADS: IrqSpinLock<[bool; GAMEPAD_SLOTS]> = IrqSpinLock::new([false; GAMEPAD_SLOTS]);
+type Slots = IrqSpinLock<[bool; GAMEPAD_SLOTS]>;
+static USED_GAMEPADS: Slots = Slots::new([false; GAMEPAD_SLOTS]);
+static LEFT_JOYCONS: Slots = Slots::new([false; GAMEPAD_SLOTS]);
+static RIGHT_JOYCONS: Slots = Slots::new([false; GAMEPAD_SLOTS]);
 // Preserve the infallible constructor for permanent devices beyond the scan range.
 static EXTRA_GAMEPAD_COUNTER: AtomicUsize = AtomicUsize::new(GAMEPAD_SLOTS);
 
-struct GamepadSlot(usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoyConSide {
+    Left,
+    Right,
+}
+
+struct GamepadSlot {
+    index: usize,
+    pool: &'static Slots,
+}
 
 impl GamepadSlot {
-    fn reserve() -> Option<Self> {
-        let mut used = USED_GAMEPADS.lock();
+    fn reserve(pool: &'static Slots) -> Option<Self> {
+        let mut used = pool.lock();
         let index = used.iter().position(|&occupied| !occupied)?;
         used[index] = true;
-        Some(Self(index))
+        Some(Self { index, pool })
     }
 }
 
 impl Drop for GamepadSlot {
     fn drop(&mut self) {
-        USED_GAMEPADS.lock()[self.0] = false;
+        self.pool.lock()[self.index] = false;
     }
 }
 
@@ -74,6 +88,7 @@ const EVENT_QUEUE_CAPACITY: usize = 256;
 struct EventQueue {
     events: VecDeque<InputEvent>,
     attachment: Attachment,
+    history: Option<snapshots::History>,
     /// Drop the remainder of the interrupted input frame before accepting a new one.
     discard_until_syn_report: bool,
 }
@@ -83,6 +98,7 @@ impl EventQueue {
         Self {
             events: VecDeque::with_capacity(EVENT_QUEUE_CAPACITY),
             attachment,
+            history: None,
             discard_until_syn_report: false,
         }
     }
@@ -203,6 +219,7 @@ pub struct InputDeviceMetadata {
     kind: InputDeviceKind,
     capabilities: u32,
     absolute_axes: Vec<AbsoluteAxisInfo>,
+    gamepad_buttons: Option<Vec<u16>>,
     multitouch_slot_count: Option<u16>,
     switch_capabilities: u32,
 }
@@ -223,9 +240,15 @@ impl InputDeviceMetadata {
             kind,
             capabilities,
             absolute_axes: Vec::new(),
+            gamepad_buttons: None,
             multitouch_slot_count: None,
             switch_capabilities: 0,
         }
+    }
+
+    pub(super) fn with_gamepad_buttons(mut self, buttons: &[u16]) -> Self {
+        self.gamepad_buttons = Some(buttons.to_vec());
+        self
     }
 
     /// Add a validated absolute-axis range.
@@ -381,10 +404,10 @@ impl EventDevice {
             "touchscreen" => TOUCHSCREEN_COUNTER.fetch_add(1, Ordering::SeqCst),
             "switch" => SWITCH_COUNTER.fetch_add(1, Ordering::SeqCst),
             "gamepad" => {
-                slot = GamepadSlot::reserve();
+                slot = GamepadSlot::reserve(&USED_GAMEPADS);
                 slot.as_ref().map_or_else(
                     || EXTRA_GAMEPAD_COUNTER.fetch_add(1, Ordering::Relaxed),
-                    |s| s.0,
+                    |s| s.index,
                 )
             }
             "buttons" => BUTTONS_COUNTER.fetch_add(1, Ordering::SeqCst),
@@ -402,12 +425,82 @@ impl EventDevice {
     pub(crate) fn new_removable_gamepad(
         metadata: InputDeviceMetadata,
     ) -> Result<Self, &'static str> {
-        let slot = GamepadSlot::reserve().ok_or("All discoverable gamepad slots are occupied")?;
-        Ok(Self::named(
-            alloc::format!("gamepad{}", slot.0),
-            metadata,
-            Attachment::Removable { _slot: slot },
+        Self::removable("gamepad", &USED_GAMEPADS, metadata).map(|(_, device)| device)
+    }
+
+    pub(super) fn logical_gamepad(
+        metadata: InputDeviceMetadata,
+    ) -> Result<(usize, Self), &'static str> {
+        let (slot, device) = Self::removable("gamepad", &USED_GAMEPADS, metadata)?;
+        device.queue.lock().history = Some(snapshots::History::default());
+        Ok((slot, device))
+    }
+
+    fn removable(
+        prefix: &str,
+        pool: &'static Slots,
+        metadata: InputDeviceMetadata,
+    ) -> Result<(usize, Self), &'static str> {
+        let slot =
+            GamepadSlot::reserve(pool).ok_or("All discoverable slots of this type are occupied")?;
+        let index = slot.index;
+        Ok((
+            index,
+            Self::named(
+                alloc::format!("{prefix}{index}"),
+                metadata,
+                Attachment::Removable { _slot: slot },
+            ),
         ))
+    }
+
+    /// Publish a physical half under its side-specific name. Seed a complete
+    /// input snapshot before registration so even the first open has state.
+    pub fn new_removable_joycon(
+        side: JoyConSide,
+        metadata: InputDeviceMetadata,
+    ) -> Result<Self, &'static str> {
+        if metadata.kind != InputDeviceKind::Gamepad {
+            return Err("Raw Joy-Con requires gamepad metadata");
+        }
+        let (prefix, pool) = match side {
+            JoyConSide::Left => ("joycon-left", &LEFT_JOYCONS),
+            JoyConSide::Right => ("joycon-right", &RIGHT_JOYCONS),
+        };
+        let (_, device) = Self::removable(prefix, pool, metadata)?;
+        device.queue.lock().history = Some(snapshots::History::joycon());
+        Ok(device)
+    }
+
+    /// Take the newest pending player number for this physical endpoint.
+    pub fn take_joycon_player(&self) -> Option<u8> {
+        let mut q = self.queue.lock();
+        if q.detached() {
+            return None;
+        }
+        q.history.as_mut()?.player.as_mut()?.pending.take()
+    }
+
+    /// Install the physical producer's notification before publishing its node.
+    /// The callback can take the pending assignment or wake a sleeping worker.
+    pub fn set_joycon_player_notify(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        let (previous, pending) = {
+            let mut q = self.queue.lock();
+            if q.detached() {
+                return;
+            }
+            let Some(player) = q.history.as_mut().and_then(|h| h.player.as_mut()) else {
+                return;
+            };
+            (
+                player.notify.replace(notify.clone()),
+                player.pending.is_some(),
+            )
+        };
+        drop(previous);
+        if pending {
+            notify();
+        }
     }
 
     fn named(name: String, metadata: InputDeviceMetadata, attachment: Attachment) -> Self {
@@ -427,14 +520,16 @@ impl EventDevice {
 
     /// Called by the producer after its final frame and registry removal.
     /// Open descriptors retain this queue while a new producer can reuse its name.
-    pub(crate) fn detach_gamepad(&self) {
-        {
+    pub fn detach_gamepad(&self) {
+        let notify = {
             let mut queue = self.queue.lock();
             if !matches!(queue.attachment, Attachment::Removable { .. }) {
                 return;
             }
             queue.attachment = Attachment::Detached;
-        }
+            queue.history.as_mut().and_then(|h| h.player.take())
+        };
+        drop(notify);
         self.waker.wake_all();
     }
 
@@ -497,6 +592,13 @@ impl EventDevice {
             if q.detached() {
                 return;
             }
+            if q.history.is_some() {
+                if q.push_snapshot(events, time) {
+                    drop(q);
+                    self.waker.wake_all();
+                }
+                return;
+            }
             // Joy-Con batches are complete state snapshots. Make room for the
             // whole snapshot, especially the final neutral frame on unplug.
             if matches!(q.attachment, Attachment::Removable { .. })
@@ -540,6 +642,10 @@ impl EventDevice {
     /// shared nonblocking flag. An empty queue returns zero.
     pub(super) fn drain_records(&self, buffer: &mut [u8]) -> usize {
         let mut queue = self.queue.lock();
+        if queue.history.is_some() {
+            // Snapshot history is consumed exclusively through per-open cursors.
+            return 0;
+        }
         let mut count = 0;
         for record in buffer.chunks_exact_mut(InputEvent::size()) {
             let Some(event) = queue.events.pop_front() else {
@@ -562,11 +668,16 @@ fn encode_event(event: InputEvent, record: &mut [u8]) {
 // Implement Device trait for device registration
 impl Device for EventDevice {
     fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
-        let removable = match self.queue.lock().attachment {
+        let q = self.queue.lock();
+        let removable = match q.attachment {
             Attachment::Permanent { .. } => false,
             Attachment::Removable { .. } => true,
             Attachment::Detached => return Err("Input device detached"),
         };
+        if q.history.is_some() {
+            return Ok(Arc::new(snapshots::Reader::new(self.clone(), &q)));
+        }
+        drop(q);
         if removable {
             // This descriptor observes hangup on its original queue even after
             // another gamepad takes its name.
@@ -619,6 +730,9 @@ impl CharDevice for EventDevice {
         }
         let mut next = || {
             let mut q = self.queue.lock();
+            if q.history.is_some() {
+                return Some(Err(StreamError::NotSupported));
+            }
             if let Some(event) = q.events.pop_front() {
                 encode_event(event, &mut buffer[..InputEvent::size()]);
                 Some(Ok(InputEvent::size()))
@@ -765,6 +879,20 @@ impl ControlOps for EventDevice {
             SCTL_INPUT_GET_KIND => Ok(i32::from(self.metadata.kind as u8)),
             SCTL_INPUT_GET_CAPABILITIES => i32::try_from(self.metadata.capabilities)
                 .map_err(|_| "Input capability mask exceeds control return range"),
+            SCTL_INPUT_HAS_EVENT_CODE if self.metadata.gamepad_buttons.is_some() => {
+                let packed = u32::try_from(arg).map_err(|_| "Invalid event selector")?;
+                let code = packed as u16;
+                Ok(i32::from(match packed >> 16 {
+                    0 => code == SYN_REPORT,
+                    1 => self
+                        .metadata
+                        .gamepad_buttons
+                        .as_ref()
+                        .is_some_and(|keys| keys.contains(&code)),
+                    3 => self.metadata.axis(code).is_some(),
+                    _ => false,
+                }))
+            }
             SCTL_INPUT_GET_ABS_MIN | SCTL_INPUT_GET_ABS_MAX => {
                 let code = u16::try_from(arg).map_err(|_| "Invalid absolute axis code")?;
                 if code > ABS_MAX {
@@ -800,7 +928,7 @@ impl ControlOps for EventDevice {
     }
 
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
-        alloc::vec![
+        let mut commands = alloc::vec![
             (SCTL_INPUT_GET_KIND, "Get input device kind"),
             (SCTL_INPUT_GET_CAPABILITIES, "Get input device capabilities",),
             (SCTL_INPUT_GET_ABS_MIN, "Get absolute axis minimum"),
@@ -811,7 +939,11 @@ impl ControlOps for EventDevice {
                 "Get switch capabilities"
             ),
             (SCTL_INPUT_GET_SWITCH_STATE, "Get switch state"),
-        ]
+        ];
+        if self.metadata.gamepad_buttons.is_some() {
+            commands.push((SCTL_INPUT_HAS_EVENT_CODE, "Query gamepad control support"));
+        }
+        commands
     }
 }
 impl MemoryMappingOps for EventDevice {

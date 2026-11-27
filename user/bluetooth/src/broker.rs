@@ -1,6 +1,6 @@
 //! One request per connected stream. Both ends authenticate the kernel's immutable
 //! peer snapshot before exchanging commands. Only the service opens a numbered
-//! adapter and translates the five public verbs to device controls.
+//! adapter and translates public commands to device controls.
 use super::{Command, Result, direct};
 use scarlet_os::socket::{Socket, SocketError};
 use std::io::{Read, Write};
@@ -68,7 +68,9 @@ fn encode(adapter: u32, command: Command) -> [u8; 11] {
         Command::Scan => (2, [0; 6]),
         Command::Pair(peer) => (3, peer),
         Command::Connect(peer) => (4, peer),
-        Command::Disconnect => (5, [0; 6]),
+        Command::Disconnect(None) => (5, [0; 6]),
+        Command::Devices => (6, [0; 6]),
+        Command::Disconnect(Some(peer)) => (7, peer),
     };
     let mut request = [0; 11];
     request[0] = verb;
@@ -77,18 +79,20 @@ fn encode(adapter: u32, command: Command) -> [u8; 11] {
     request
 }
 
-fn dispatch(request: [u8; 11]) -> Result<String> {
+fn decode(request: [u8; 11]) -> Result<(u32, Command)> {
     let peer = request[5..].try_into().unwrap();
     let command = match request[0] {
         1 if peer == [0; 6] => Command::Status,
         2 if peer == [0; 6] => Command::Scan,
         3 if peer != [0; 6] && peer != [255; 6] => Command::Pair(peer),
         4 if peer != [0; 6] && peer != [255; 6] => Command::Connect(peer),
-        5 if peer == [0; 6] => Command::Disconnect,
+        5 if peer == [0; 6] => Command::Disconnect(None),
+        6 if peer == [0; 6] => Command::Devices,
+        7 if peer != [0; 6] && peer != [255; 6] => Command::Disconnect(Some(peer)),
         _ => return Err("invalid Bluetooth service request".into()),
     };
     let adapter = u32::from_le_bytes(request[1..5].try_into().unwrap());
-    direct(&format!("/dev/bluetooth{adapter}"), command)
+    Ok((adapter, command))
 }
 
 fn ipc_error(e: std::io::Error) -> String {
@@ -104,7 +108,9 @@ fn handle(mut socket: Socket) -> Result<()> {
     }
     let mut request = [0; 11];
     socket.read_exact(&mut request).map_err(ipc_error)?;
-    let (status, message) = match dispatch(request) {
+    let response = decode(request)
+        .and_then(|(adapter, command)| direct(&format!("/dev/bluetooth{adapter}"), command));
+    let (status, message) = match response {
         Ok(text) => (0, text),
         Err(text) => (1, text),
     };
@@ -180,8 +186,44 @@ pub(super) fn invoke(
 
 #[cfg(test)]
 mod tests {
-    use super::Peer;
+    use super::{Command, Peer, decode, encode};
+    use crate::parse;
     use scarlet_abi::{LOCAL_PEER_CONFINED as CONFINED, LOCAL_PEER_MANAGE_DEVICES as MANAGE};
+
+    #[test]
+    fn public_commands_keep_wire_verbs_and_mac_order() {
+        let mac = "A1:B2:C3:D4:E5:F6";
+        let peer = [0xf6, 0xe5, 0xd4, 0xc3, 0xb2, 0xa1];
+        for (args, verb, address) in [
+            (&["status"][..], 1, [0; 6]),
+            (&["scan"], 2, [0; 6]),
+            (&["pair", mac], 3, peer),
+            (&["connect", mac], 4, peer),
+            (&["disconnect"], 5, [0; 6]),
+            (&["devices"], 6, [0; 6]),
+            (&["disconnect", mac], 7, peer),
+        ] {
+            let (_, command) = parse(args).unwrap();
+            let adapter = 0x11223344;
+            let frame = encode(adapter, command);
+            assert_eq!(frame[..5], [verb, 0x44, 0x33, 0x22, 0x11]);
+            assert_eq!(frame[5..], address);
+            assert_eq!(decode(frame), Ok((adapter, command)));
+        }
+    }
+
+    #[test]
+    fn disconnect_cannot_downgrade_an_invalid_target_to_the_implicit_form() {
+        let mut frame = encode(0, Command::Disconnect(None));
+        frame[5..].fill(1);
+        assert!(decode(frame).is_err());
+        for address in [[0; 6], [255; 6]] {
+            assert!(decode(encode(0, Command::Disconnect(Some(address)))).is_err());
+        }
+        assert!(parse(&["disconnect", "00:00:00:00:00:00"]).is_err());
+        assert!(parse(&["disconnect", "FF:FF:FF:FF:FF:FF"]).is_err());
+        assert!(parse(&["devices", "extra"]).is_err());
+    }
 
     #[test]
     fn login_and_service_have_distinct_authority_requirements() {

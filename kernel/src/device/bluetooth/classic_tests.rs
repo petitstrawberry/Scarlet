@@ -612,3 +612,317 @@ fn authentication_failure_discards_staged_key_and_closes_acl() {
     assert!(h.poll().is_none());
     assert_eq!(h.sm.reconnect(PAD), Err(Error::MissingKey));
 }
+
+const SECOND_HANDLE: u16 = 0x456;
+const SECOND_KEY: [u8; 16] = [0xa7; 16];
+
+impl Host {
+    fn expect_key(&mut self, addr: Address, key: [u8; 16]) {
+        let reply = self.cmd(KEY_REPLY);
+        assert_eq!(reply.params()[..6], addr);
+        assert_eq!(reply.params()[6..], key);
+        self.addressed_ack(KEY_REPLY, addr);
+    }
+
+    fn bond_up(&mut self, addr: Address, handle: u16, key: [u8; 16]) {
+        self.sm.provide_link_key(addr, key);
+        self.sm.reconnect(addr).unwrap();
+        assert_eq!(self.cmd(CREATE).params()[..6], addr);
+        self.status(CREATE, 0);
+        self.connected(addr, handle);
+        assert_eq!(self.cmd(AUTHENTICATE).params(), handle.to_le_bytes());
+        self.status(AUTHENTICATE, 0);
+        self.event(0x17, &addr);
+        self.expect_key(addr, key);
+        let [lo, hi] = handle.to_le_bytes();
+        self.event(6, &[0, lo, hi]);
+        assert_eq!(self.cmd(ENCRYPT).params(), &[lo, hi, 1]);
+        self.status(ENCRYPT, 0);
+        self.event(8, &[0, lo, hi, 1]);
+        assert!(
+            matches!(self.poll(), Some(Action::LinkUp { address, handle: h }) if (address, h) == (addr, handle))
+        );
+    }
+
+    fn resolve_name(&mut self, addr: Address, name: &[u8]) {
+        assert_eq!(self.cmd(REMOTE_NAME).params()[..6], addr);
+        self.status(REMOTE_NAME, 0);
+        self.name(addr, name);
+    }
+
+    fn expect_credits(&mut self, expected: u16, count: u16) {
+        assert!(
+            matches!(self.poll(), Some(Action::AclCredits { handle, packets }) if (handle, packets) == (expected, count))
+        );
+    }
+
+    fn two_named_peers() -> Self {
+        let mut h = Self::ready();
+        h.bond_up(PAD, HANDLE, KEY);
+        h.resolve_name(PAD, b"Left");
+        assert_eq!(h.peer().address, PAD);
+        h.bond_up(OTHER, SECOND_HANDLE, SECOND_KEY);
+        h.resolve_name(OTHER, b"Right");
+        assert_eq!(h.peer().address, OTHER);
+        h
+    }
+}
+
+#[test]
+fn two_encrypted_peers_use_addressed_keys_shared_command_credits_and_individual_acl_counts() {
+    let mut h = Host::two_named_peers();
+    assert_eq!(h.sm.disconnect(), Err(Error::Busy));
+    assert_eq!(h.sm.connect(PAD), Err(Error::Busy));
+    assert_eq!(h.sm.disconnect_peer([99; 6]), Err(Error::UnknownPeer));
+
+    h.event(0x17, &OTHER);
+    h.event(0x17, &PAD);
+    let first = h.cmd(KEY_REPLY);
+    assert_eq!(first.params()[..6], OTHER);
+    assert_eq!(first.params()[6..], SECOND_KEY);
+    assert!(h.poll().is_none());
+    assert_eq!(
+        h.sm.on_event(h.now, 0x0e, &[1, 0x0b, 4, 0, 1, 2, 3, 4, 5, 6]),
+        Err(Error::MalformedEvent)
+    );
+    assert!(h.poll().is_none());
+    let mut result = [0; 7];
+    result[1..].copy_from_slice(&OTHER);
+    h.complete(KEY_REPLY, 0, &result);
+    assert!(h.poll().is_none());
+    h.complete(0, 2, &[]);
+    h.expect_key(PAD, KEY);
+
+    h.new_key(OTHER, 6);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkKey {
+            address: OTHER,
+            key: KEY,
+            key_type: 6
+        })
+    ));
+    // An overflowing count for the second handle must not partially credit the first.
+    assert_eq!(
+        h.sm.on_event(
+            h.now,
+            0x13,
+            &[3, 0x23, 1, 3, 0, 0x56, 4, 255, 255, 0x56, 4, 1, 0]
+        ),
+        Err(Error::MalformedEvent)
+    );
+    assert!(h.poll().is_none());
+    h.event(0x13, &[3, 0x56, 4, 2, 0, 0x23, 1, 3, 0, 0x56, 4, 1, 0]);
+    h.expect_credits(HANDLE, 3);
+    h.expect_credits(SECOND_HANDLE, 3);
+
+    h.sm.disconnect_peer(OTHER).unwrap();
+    assert_eq!(h.sm.next_deadline_ms(), Some(0));
+    assert_eq!(h.cmd(DISCONNECT).params(), &[0x56, 4, 0x13]);
+    h.sm.disconnect_peer(OTHER).unwrap();
+    h.status(DISCONNECT, 0);
+    assert!(h.poll().is_none());
+    h.event(5, &[0, 0x56, 4, 0x16]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkDown {
+            address: OTHER,
+            handle: SECOND_HANDLE,
+            reason: Reason::LocalDisconnect,
+        })
+    ));
+    assert_eq!(h.sm.disconnect_peer(OTHER), Err(Error::UnknownPeer));
+    h.event(0x17, &OTHER);
+    assert_eq!(h.cmd(NO_KEY).params(), &OTHER);
+    h.addressed_ack(NO_KEY, OTHER);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    h.event(0x13, &[2, 0x56, 4, 2, 0, 0x23, 1, 1, 0]);
+    h.expect_credits(HANDLE, 1);
+    assert!(h.poll().is_none());
+}
+
+#[test]
+fn encryption_loss_and_teardown_timeout_isolate_the_handle_until_physical_disconnect() {
+    let mut h = Host::two_named_peers();
+    h.event(8, &[0, 0x23, 1, 0]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkDown {
+            address: PAD,
+            handle: HANDLE,
+            reason: Reason::EncryptionLost
+        })
+    ));
+    assert_eq!(h.cmd(DISCONNECT).params(), &[0x23, 1, 0x13]);
+    h.status(DISCONNECT, 0);
+    h.event(0x13, &[2, 0x23, 1, 1, 0, 0x56, 4, 2, 0]);
+    h.expect_credits(HANDLE, 1);
+    h.expect_credits(SECOND_HANDLE, 2);
+    h.now = h.sm.next_deadline_ms().unwrap();
+    assert!(h.poll().is_none());
+    assert_eq!(h.sm.next_deadline_ms(), None);
+    assert_eq!(h.sm.reconnect(PAD), Err(Error::Busy));
+    h.event(0x17, &PAD);
+    assert_eq!(h.cmd(NO_KEY).params(), &PAD);
+    h.addressed_ack(NO_KEY, PAD);
+    h.event(0x13, &[1, 0x23, 1, 1, 0]);
+    h.expect_credits(HANDLE, 1);
+    h.event(0x17, &OTHER);
+    h.expect_key(OTHER, SECOND_KEY);
+    h.event(5, &[0, 0x23, 1, 0x13]);
+    assert!(h.poll().is_none());
+    h.sm.reconnect(PAD).unwrap();
+    assert_eq!(h.cmd(CREATE).params()[..6], PAD);
+}
+
+#[test]
+fn pairing_deadline_and_failed_command_ack_do_not_revoke_another_peers_key_reply() {
+    let mut h = Host::ready();
+    h.bond_up(PAD, HANDLE, KEY);
+    h.resolve_name(PAD, b"Left");
+    h.peer();
+    h.sm.connect(OTHER).unwrap();
+    h.cmd(CREATE);
+    h.status(CREATE, 0);
+    h.connected(OTHER, SECOND_HANDLE);
+    h.cmd(AUTHENTICATE);
+    h.status(AUTHENTICATE, 0);
+    h.new_key(OTHER, 4);
+    h.now = PAIR_MS - 1;
+    h.event(0x31, &OTHER);
+    h.cmd(IO_REPLY);
+    h.event(0x17, &PAD);
+    h.now = PAIR_MS;
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ConnectionFailed {
+            address: OTHER,
+            reason: Reason::Timeout
+        })
+    ));
+    assert!(h.poll().is_none());
+    h.complete(IO_REPLY, 1, &[0x0c]);
+    h.expect_key(PAD, KEY);
+    assert_eq!(h.cmd(DISCONNECT).params(), &[0x56, 4, 0x13]);
+    h.status(DISCONNECT, 0x0c);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    h.event(5, &[0, 0x56, 4, 0x13]);
+    assert!(h.poll().is_none());
+    assert_eq!(h.sm.reconnect(OTHER), Err(Error::MissingKey));
+}
+
+#[test]
+fn preempted_link_name_resumes_and_cannot_name_or_disconnect_the_other_peer() {
+    let mut h = Host::ready();
+    h.bond_up(PAD, HANDLE, KEY);
+    assert_eq!(h.cmd(REMOTE_NAME).params()[..6], PAD);
+    h.status(REMOTE_NAME, 0);
+    h.sm.connect(OTHER).unwrap();
+    assert_eq!(h.cmd(NAME_CANCEL).params(), &PAD);
+    h.addressed_ack(NAME_CANCEL, PAD);
+    h.event(7, &[2, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(h.cmd(CREATE).params()[..6], OTHER);
+    h.status(CREATE, 0);
+    h.connected(OTHER, SECOND_HANDLE);
+    h.cmd(AUTHENTICATE);
+    h.status(AUTHENTICATE, 0);
+    h.new_key(OTHER, 4);
+    h.event(6, &[0, 0x56, 4]);
+    h.cmd(ENCRYPT);
+    h.status(ENCRYPT, 0);
+    h.event(8, &[0, 0x56, 4, 1]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkKey { address: OTHER, .. })
+    ));
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkUp {
+            address: OTHER,
+            handle: SECOND_HANDLE
+        })
+    ));
+    h.resolve_name(PAD, b"Left");
+    assert_eq!(h.cmd(REMOTE_NAME).params()[..6], OTHER);
+    h.status(REMOTE_NAME, 0);
+    let p = h.peer();
+    assert_eq!(
+        (p.address, p.name.unwrap().as_bytes()),
+        (PAD, b"Left".as_slice())
+    );
+    h.name(PAD, b"Late");
+    h.event(5, &[0, 0x23, 1, 8]);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkDown { address: PAD, .. })
+    ));
+    assert!(h.poll().is_none());
+    h.name(OTHER, b"Right");
+    let p = h.peer();
+    assert_eq!(
+        (p.address, p.name.unwrap().as_bytes()),
+        (OTHER, b"Right".as_slice())
+    );
+}
+
+#[test]
+fn full_link_table_preserves_active_keys_and_controller_fault_ends_every_live_acl() {
+    let mut h = Host::ready();
+    for id in 1..=MAX_LINKS as u8 {
+        h.bond_up([id; 6], u16::from(id), [id; 16]);
+        h.resolve_name([id; 6], b"Known");
+        h.peer();
+    }
+    assert_eq!(h.sm.connect([42; 6]), Err(Error::Busy));
+    for id in 11..=22 {
+        h.sm.provide_link_key([id; 6], [id; 16]);
+    }
+    for id in 1..=MAX_LINKS as u8 {
+        h.event(0x17, &[id; 6]);
+        h.expect_key([id; 6], [id; 16]);
+    }
+    h.scan();
+    h.event(1, &[0]);
+    assert!(matches!(h.poll(), Some(Action::InquiryComplete(Ok(())))));
+    h.event(0x10, &[7]);
+    for id in 1..=MAX_LINKS as u8 {
+        assert!(
+            matches!(h.poll(), Some(Action::LinkDown { address, handle, reason: Reason::HardwareError(7) })
+            if address == [id; 6] && handle == u16::from(id))
+        );
+    }
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ControllerFault(Reason::HardwareError(7)))
+    ));
+    assert_eq!(h.sm.disconnect_peer(PAD), Err(Error::NotReady));
+}
+
+#[test]
+fn local_close_timeout_is_per_peer_and_addressed_retry_waits_for_physical_completion() {
+    let mut h = Host::two_named_peers();
+    h.sm.disconnect_peer(PAD).unwrap();
+    h.cmd(DISCONNECT);
+    h.status(DISCONNECT, 0);
+    h.now = h.sm.next_deadline_ms().unwrap();
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkDown {
+            address: PAD,
+            handle: HANDLE,
+            reason: Reason::Timeout
+        })
+    ));
+    assert!(h.poll().is_none());
+    h.sm.disconnect_peer(PAD).unwrap();
+    assert_eq!(h.cmd(DISCONNECT).params(), &[0x23, 1, 0x13]);
+    h.status(DISCONNECT, 0);
+    h.event(0x13, &[1, 0x23, 1, 2, 0]);
+    h.expect_credits(HANDLE, 2);
+    h.event(5, &[0, 0x23, 1, 0x16]);
+    assert!(h.poll().is_none());
+    h.event(0x17, &OTHER);
+    h.expect_key(OTHER, SECOND_KEY);
+}

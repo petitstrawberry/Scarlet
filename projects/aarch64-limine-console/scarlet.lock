@@ -409,6 +409,17 @@ type = "path"
 path = "../../user/bluetooth"
 
 [[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-bluetooth"
+bin = "joycond"
+to = "/bin/joycond"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bluetooth"
+
+[[sections.rootfs.layers]]
 kind = "script"
 to = "/etc/ssl/certs/ca-certificates.crt"
 hash = ""

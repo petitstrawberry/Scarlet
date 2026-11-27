@@ -998,7 +998,7 @@ fn check_hidp(index: usize, outgoing: bool, data: &[u8]) -> Result<(), Error> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::alloc::vec;
     use super::*;

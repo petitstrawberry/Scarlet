@@ -283,6 +283,7 @@ pub(super) enum Frame {
 pub(super) struct Navigation {
     config: Config,
     axes: [Axis; 2],
+    stick_x_code: u16,
     hat: [i32; 2],
     buttons: [bool; 3],
     held: [bool; 8],
@@ -293,20 +294,29 @@ impl Navigation {
         Self {
             config,
             axes: [Axis::default(); 2],
+            stick_x_code: 0,
             hat: [0; 2],
             buttons: [false; 3],
             held: [false; 8],
             desynced: false,
         }
     }
-    pub(super) fn set_axis_range(&mut self, code: u16, min: i32, max: i32) {
-        if code < 2 && min < max {
-            self.axes[code as usize] = Axis {
-                min,
-                max,
-                direction: 0,
-            };
+    pub(super) fn from_snapshot(config: Config, snapshot: &Snapshot) -> Self {
+        let mut navigation = Self::new(config);
+        // A pad with only a right stick can still navigate menus. Raw input
+        // retains its right-stick identity, including on a two-stick pad.
+        if snapshot.ranges[..2] == [None, None]
+            && snapshot.ranges[3..5].iter().all(Option::is_some)
+        {
+            navigation.stick_x_code = 3;
         }
+        for (i, axis) in navigation.axes.iter_mut().enumerate() {
+            if let Some((min, max)) = snapshot.ranges[navigation.stick_x_code as usize + i] {
+                axis.min = min;
+                axis.max = max;
+            }
+        }
+        navigation
     }
     pub(super) fn consume(&mut self, type_: u16, code: u16, value: i32) -> Frame {
         if type_ == 0 && code == 3 {
@@ -327,7 +337,8 @@ impl Navigation {
             return Frame::None;
         }
         match (type_, code) {
-            (3, 0 | 1) => self.axes[code as usize].update(value),
+            (3, c) if c == self.stick_x_code => self.axes[0].update(value),
+            (3, c) if c == self.stick_x_code + 1 => self.axes[1].update(value),
             (3, 0x10 | 0x11) => self.hat[(code - 0x10) as usize] = value.clamp(-1, 1),
             (1, _) if value == 0 || value == 1 => {
                 for (n, button) in [self.config.confirm, self.config.cancel, MODE]
@@ -458,8 +469,9 @@ mod tests {
     }
     #[test]
     fn stick_deadzone_hysteresis_and_hat_share_navigation_ownership() {
-        let mut n = Navigation::new(Config::default());
-        n.set_axis_range(0, 0, 4095);
+        let mut snapshot = Snapshot::new(1);
+        snapshot.set_axis_range(0, 0, 4095);
+        let mut n = Navigation::from_snapshot(Config::default(), &snapshot);
         n.consume(3, 0, 2400);
         assert_eq!(finish(&mut n), Frame::None);
         n.consume(3, 0, 2800);
@@ -473,6 +485,24 @@ mod tests {
         assert_eq!(finish(&mut n), Frame::Keys(std::vec![(106, 0)]));
         n.consume(3, 0, 1200);
         assert_eq!(finish(&mut n), Frame::Keys(std::vec![(105, 1)]));
+    }
+    #[test]
+    fn right_only_stick_navigates_but_a_full_pad_keeps_its_right_stick_independent() {
+        let mut snapshot = Snapshot::new(1);
+        snapshot.set_axis_range(3, 0, 4095);
+        snapshot.set_axis_range(4, 0, 4095);
+        let mut nav = Navigation::from_snapshot(Config::default(), &snapshot);
+        nav.consume(3, 3, 4095);
+        assert_eq!(finish(&mut nav), Frame::Keys(std::vec![(106, 1)]));
+        nav.consume(3, 3, 2048);
+        assert_eq!(finish(&mut nav), Frame::Keys(std::vec![(106, 0)]));
+        snapshot.set_axis_range(0, 0, 4095);
+        snapshot.set_axis_range(1, 0, 4095);
+        let mut nav = Navigation::from_snapshot(Config::default(), &snapshot);
+        nav.consume(3, 3, 4095);
+        assert_eq!(finish(&mut nav), Frame::None);
+        nav.consume(3, 0, 0);
+        assert_eq!(finish(&mut nav), Frame::Keys(std::vec![(105, 1)]));
     }
     #[test]
     fn dropped_frame_releases_state_and_recovers_from_next_snapshot() {

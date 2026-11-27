@@ -95,7 +95,8 @@ fn serve(controller: &Controller) -> Result<(), &'static str> {
         let now = crate::time::current_time_ns() / 1_000_000;
         let request = {
             let mut state = shared.state.lock();
-            shared.queued.store(false, Ordering::Release);
+            // Consume published work before checking requests and HID output mailboxes.
+            shared.queued.swap(false, Ordering::Acquire);
             state.request.take()
         };
         if let Some(op) = request {
