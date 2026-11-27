@@ -1,8 +1,8 @@
 //! Basic-mode BR/EDR L2CAP for SDP discovery and HID on an encrypted ACL.
 //!
 //! On an encrypted ACL handle, `discover` searches SDP and closes its channel
-//! before delivering the result. Use `for_hid` with the discovered PSMs
-//! to accept device-initiated connections, or call `start` to initiate control
+//! before delivering the result. After checking the descriptor, call
+//! `open_discovered_hid` to complete pending peer opens or initiate control
 //! followed by interrupt. Both channels configure in both directions before Ready.
 //! The profile sends complete HIDP packets and interprets their report payloads.
 //! Route incoming fragments by handle, and poll one outgoing fragment per HCI
@@ -89,6 +89,13 @@ struct Request {
     id: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct IncomingConnect {
+    id: u8,
+    psm: u16,
+    peer: u16,
+}
+
 struct ConfigReply {
     id: u8,
     request: Vec<u8>,
@@ -142,6 +149,7 @@ enum Profile {
     Hid([u16; 2]),
     Sdp(sdp::Client),
     SdpComplete(Option<sdp::HidService>),
+    AwaitingHid([u16; 2]),
 }
 
 impl Profile {
@@ -149,6 +157,7 @@ impl Profile {
         match self {
             Self::Hid(_) => &LOCAL_CID,
             Self::Sdp(_) | Self::SdpComplete(_) => &[0x0042],
+            Self::AwaitingHid(_) => &[],
         }
     }
 
@@ -162,6 +171,8 @@ pub struct L2capSession {
     handle: u16,
     local_mtu: u16,
     channels: [Channel; 2],
+    // At most one pending request per PSM and two per encrypted ACL.
+    deferred: Vec<IncomingConnect>,
     last_id: u8,
     active_open: bool,
     ready: bool,
@@ -231,6 +242,7 @@ impl L2capSession {
             handle,
             local_mtu,
             channels: core::array::from_fn(|_| Channel::new(local_mtu)),
+            deferred: Vec::new(),
             last_id: 0,
             active_open: false,
             ready: false,
@@ -254,11 +266,33 @@ impl L2capSession {
 
     /// Idempotent, including if an inbound control connection is configuring.
     pub fn start(&mut self) -> Result<(), Error> {
-        if self.closing.is_some() {
+        if self.closing.is_some() || matches!(self.profile, Profile::AwaitingHid(_)) {
             return Err(Error::NotOpen);
         }
         self.active_open = true;
         self.advance()
+    }
+
+    /// The profile has validated the discovered report descriptor. Resolve each
+    /// pending transaction on this same ACL using the PSMs from its SDP record.
+    pub fn open_discovered_hid(&mut self) -> Result<(), Error> {
+        let Profile::AwaitingHid(psms) = self.profile else {
+            return Err(Error::NotOpen);
+        };
+        if self.closing.is_some() {
+            return Err(Error::NotOpen);
+        }
+        self.profile = Profile::Hid(psms);
+        let mut pending = core::mem::take(&mut self.deferred);
+        // Control must be established before interrupt, even if both are waiting.
+        pending.sort_unstable_by_key(|req| req.psm == psms[INTERRUPT]);
+        for req in pending {
+            self.connect_request(req.id, req.psm, req.peer)?;
+        }
+        if self.channels[CONTROL].idle() {
+            self.start()?;
+        }
+        Ok(())
     }
 
     pub fn disconnect(&mut self) -> Result<(), Error> {
@@ -270,9 +304,9 @@ impl L2capSession {
         self.begin_close(CloseReason::Local)
     }
 
-    /// Closed is delivered after the final signaling reply has been polled for HCI.
+    /// Deliver closure and discovery after the final signaling reply has been polled for HCI.
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.closed && !self.tx.is_empty() {
+        if (self.closed || matches!(self.profile, Profile::AwaitingHid(_))) && !self.tx.is_empty() {
             return None;
         }
         self.events.pop_front()
@@ -424,7 +458,9 @@ impl L2capSession {
                 let psm = match self.profile {
                     Profile::Hid(psms) => psms[index],
                     Profile::Sdp(_) => 1,
-                    Profile::SdpComplete(_) => return Err(Error::NotOpen),
+                    Profile::SdpComplete(_) | Profile::AwaitingHid(_) => {
+                        return Err(Error::NotOpen);
+                    }
                 };
                 self.request(
                     index,
@@ -445,6 +481,20 @@ impl L2capSession {
             let mut first = self.tx_offset != 0;
             self.tx
                 .retain(|pdu| core::mem::take(&mut first) || word(pdu, 2) == SIGNAL_CID);
+        }
+        if !self.awaiting_discovery() {
+            let result = if matches!(
+                self.profile,
+                Profile::SdpComplete(None) | Profile::AwaitingHid(_)
+            ) || reason == CloseReason::MalformedSdp
+            {
+                2 // PSM not supported
+            } else {
+                4 // Discovery canceled or failed
+            };
+            for req in core::mem::take(&mut self.deferred) {
+                self.signal(CONNECT_RSP, req.id, &words(&[0, req.peer, result, 0]))?;
+            }
         }
         self.advance_close()
     }
@@ -471,17 +521,25 @@ impl L2capSession {
     }
 
     fn finish_close(&mut self) {
-        self.closed = true;
         self.ready = false;
-        self.rx = None;
         self.events.clear();
         let reason = self.closing.expect("closing session");
         let event = match &mut self.profile {
             Profile::SdpComplete(result) if reason == CloseReason::Local => {
-                Event::Discovered(result.take())
+                if let Some(service) = result.take() {
+                    self.profile =
+                        Profile::AwaitingHid([service.control_psm, service.interrupt_psm]);
+                    self.active_open = false;
+                    self.closing = None;
+                    self.events.push_back(Event::Discovered(Some(service)));
+                    return;
+                }
+                Event::Discovered(None)
             }
             _ => Event::Closed(reason),
         };
+        self.closed = true;
+        self.rx = None;
         self.events.push_back(event);
     }
 
@@ -654,6 +712,9 @@ impl L2capSession {
     }
 
     fn connect_request(&mut self, id: u8, psm: u16, peer: u16) -> Result<(), Error> {
+        if self.awaiting_discovery() && (PSM.contains(&psm) || sdp::dynamic_psm(psm)) {
+            return self.defer_connect(IncomingConnect { id, psm, peer });
+        }
         let index = match &self.profile {
             Profile::Hid(psms) => psms.iter().position(|&value| value == psm),
             _ => None,
@@ -696,6 +757,39 @@ impl L2capSession {
         self.connected(index, peer)
     }
 
+    fn awaiting_discovery(&self) -> bool {
+        matches!(
+            (&self.profile, self.closing),
+            (Profile::Sdp(_) | Profile::AwaitingHid(_), None)
+                | (Profile::SdpComplete(Some(_)), Some(CloseReason::Local))
+        )
+    }
+
+    fn defer_connect(&mut self, req: IncomingConnect) -> Result<(), Error> {
+        let result = if req.peer < 0x40 {
+            6
+        } else if self.deferred.contains(&req) {
+            1 // Retransmission of the same pending request.
+        } else if self.channels.iter().any(|ch| ch.peer == req.peer)
+            || self.deferred.iter().any(|r| r.peer == req.peer)
+        {
+            7
+        } else if self.deferred.len() == 2
+            || self
+                .deferred
+                .iter()
+                .any(|r| r.psm == req.psm || r.id == req.id)
+        {
+            4
+        } else {
+            self.deferred.push(req);
+            1
+        };
+        // A pending response does not establish a channel. Assign its local
+        // CID only when the service and descriptor have both been validated.
+        self.signal(CONNECT_RSP, req.id, &words(&[0, req.peer, result, 0]))
+    }
+
     fn connect_response(&mut self, id: u8, data: &[u8]) -> Result<(), Error> {
         let request = Some(Request {
             code: CONNECT_REQ,
@@ -717,7 +811,10 @@ impl L2capSession {
             return Ok(());
         }
         let peer = word(data, 0);
-        if peer < 0x40 || self.channels.iter().any(|ch| ch.peer == peer) {
+        if peer < 0x40
+            || self.channels.iter().any(|ch| ch.peer == peer)
+            || self.deferred.iter().any(|r| r.peer == peer)
+        {
             return Err(Error::MalformedSignal);
         }
         self.connected(index, peer)

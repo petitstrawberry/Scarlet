@@ -1814,6 +1814,7 @@ dependencies = [
  "scarlet-desktop-config 1.0.0",
  "scarlet-ui",
  "scarlet-ui-macros",
+ "sws-protocol 1.0.0",
 ]
 
 [[package]]
@@ -1888,7 +1889,7 @@ dependencies = [
  "scarlet-ui-renderer-sgfx",
  "sgfx",
  "sws-client",
- "sws-protocol",
+ "sws-protocol 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00)",
 ]
 
 [[package]]
@@ -2234,8 +2235,12 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00#9531dfe3ad00856095b132b694b442528317ae00"
 dependencies = [
  "scarlet-os",
- "sws-protocol",
+ "sws-protocol 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=9531dfe3ad00856095b132b694b442528317ae00)",
 ]
+
+[[package]]
+name = "sws-protocol"
+version = "1.0.0"
 
 [[package]]
 name = "sws-protocol"

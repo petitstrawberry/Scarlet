@@ -5,6 +5,7 @@ use scarlet_ui::view::ViewClone;
 use scarlet_ui::views::containers::ViewTuple;
 
 const SETTINGS_NOTE_FONT_SIZE: f32 = 12.0;
+static BLUETOOTH_WATCH_STARTED: AtomicBool = AtomicBool::new(false);
 static NETWORK_ENTRY_SELECTED: AtomicBool = AtomicBool::new(false);
 
 fn wrap_settings_note(value: impl Into<String>) -> String {
@@ -451,7 +452,9 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
 
 pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
     let network_app = original.clone();
-    let bluetooth_app = original.clone();
+    let bluetooth = original.bluetooth.clone();
+    let bluetooth_page_state = bluetooth.clone();
+    let bluetooth_entry = bluetooth.clone();
     let app = original.clone();
     let display_app = original.clone();
     let audio_app = original.clone();
@@ -462,13 +465,29 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
         NavigationLink::new("Display", move || DisplayPage(display_app.clone())),
         NavigationLink::new("Audio", move || audio_page(audio_app.clone())),
         NavigationLink::new("Network", move || network_page(network_app.clone())),
-        NavigationLink::new("Bluetooth", move || BluetoothPage(bluetooth_app.clone())),
+        NavigationLink::new("Bluetooth", move || BluetoothPage(bluetooth_page_state.clone()))
+            .on_select(move || settings_bluetooth::run(&bluetooth_entry, settings_bluetooth::Action::Refresh)),
         NavigationLink::new("Input", move || input_page(input_app.clone())),
         NavigationLink::new("Shell & Status", move || status_page(status_app.clone()))
             .on_select(move || original.refresh_status_preferences()),
         NavigationLink::new("About", about_page)
             .custom_header(scarlet_ui::NavigationHeader::title("About This System")),
     };
+    if !BLUETOOTH_WATCH_STARTED.swap(true, AtomicOrdering::AcqRel) {
+        let selected = navigation.selected_index_state().clone();
+        let index = navigation
+            .links()
+            .iter()
+            .position(|link| link.label() == "Bluetooth");
+        thread::spawn(move || {
+            loop {
+                thread::sleep(std::time::Duration::from_secs(3));
+                if Some(selected.get()) == index {
+                    settings_bluetooth::poll(&bluetooth);
+                }
+            }
+        });
+    }
     if std::env::args().any(|arg| arg == "--network")
         && !NETWORK_ENTRY_SELECTED.swap(true, AtomicOrdering::AcqRel)
     {
@@ -480,62 +499,9 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
         .frame(f32::INFINITY, f32::INFINITY)
 }
 
-#[derive(Clone)]
-struct BluetoothPage(SettingsApp);
-
-impl View for BluetoothPage {
-    fn create_element(&self) -> Box<dyn Element> {
-        if !self.0.bluetooth.get().loaded {
-            settings_bluetooth::run(&self.0, settings_bluetooth::Action::Refresh);
-        }
-        Box::new(scarlet_ui::element::ComponentElement::new_with_builder(
-            self.clone(),
-            |page| Box::new(bluetooth_page(&page.0)),
-        ))
-    }
-
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        vec![&self.0.bluetooth, &self.0.bluetooth_index]
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-}
-
-fn bluetooth_page(app: &SettingsApp) -> impl View + Clone {
-    use settings_bluetooth::{Action, run};
-    let panel = app.bluetooth.get();
-    let labels = panel.devices.iter().map(|device| device.label()).collect();
-    let selected = panel.devices.get(app.bluetooth_index.get());
-    let action = selected.map(|device| device.action());
-    let scan = app.clone();
-    let refresh = app.clone();
-    let change = app.clone();
-    settings_page(vstack! {
-        settings_section(vstack! {
-            settings_note(panel.adapter),
-            hstack! {
-                Button::new("Find devices").enabled(panel.ready && !panel.busy)
-                    .on_click(move || run(&scan, Action::Scan)),
-                Button::new("Refresh").enabled(!panel.busy)
-                    .on_click(move || run(&refresh, Action::Refresh)),
-            }.spacing(8.0),
-        }.spacing(12.0).alignment(Alignment::Leading), "Bluetooth adapter", 16.0),
-        settings_section(with_feedback(vstack! {
-            settings_row(Select::new(labels, app.bluetooth_index.clone())
-                .width(350.0).enabled(!panel.busy && !panel.devices.is_empty())
-                .placeholder(if panel.devices.is_empty() { "No devices" } else { "Choose a device" }), "Device"),
-            Button::new(action.map_or("Connect", |a| a.button()))
-                .enabled(panel.ready && !panel.busy && action.is_some())
-                .on_click(move || {
-                    if let Some(action) = action {
-                        run(&change, action);
-                    }
-                }),
-        }.spacing(12.0).alignment(Alignment::Leading), panel.feedback), "Devices", 16.0),
-    }.spacing(18.0).alignment(Alignment::Leading))
-}
+#[path = "settings_bluetooth_view.rs"]
+mod bluetooth_view;
+pub(super) use bluetooth_view::BluetoothPage;
 
 pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
     let scan = app.clone();

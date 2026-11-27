@@ -6,9 +6,9 @@
 //! returned command exactly once, in order. A transport failure or `ControllerFault` requires
 //! resetting the transport/controller and starting a fresh instance (discard old events).
 //!
-//! Discovery retains eight distinct peers per scan. Only an explicit selection initiates an
-//! ACL. `connect` permits SSP Just Works for that attempt, and `reconnect` uses the
-//! caller-provisioned SSP bond. An encrypted link of unknown name gets a separate name lookup.
+//! Discovery retains eight distinct peers per scan. An explicit `connect` permits SSP
+//! Just Works. Outgoing and peer-initiated reconnections use an existing SSP bond.
+//! An encrypted link of unknown name gets a separate name lookup.
 //! The upper layer owns profile selection, key persistence and ACL packet accounting.
 
 pub type Address = [u8; 6];
@@ -109,6 +109,7 @@ pub enum Action {
     Command(Command),
     Ready(ControllerInfo),
     PeerFound(Peer),
+    IncomingAcl(Address),
     InquiryComplete(Result<(), Reason>),
     /// The upper layer owns persistence. Call provide_link_key to authorize future reuse.
     LinkKey {
@@ -143,6 +144,7 @@ const INQUIRY_CANCEL: u16 = 0x0402;
 const CREATE: u16 = 0x0405;
 const DISCONNECT: u16 = 0x0406;
 const CREATE_CANCEL: u16 = 0x0408;
+const ACCEPT: u16 = 0x0409;
 const REJECT: u16 = 0x040a;
 const KEY_REPLY: u16 = 0x040b;
 const NO_KEY: u16 = 0x040c;
@@ -159,6 +161,7 @@ const NO_PASSKEY: u16 = 0x042f;
 const NO_OOB: u16 = 0x0433;
 const NO_IO: u16 = 0x0434;
 const EVENT_MASK: u16 = 0x0c01;
+const WRITE_SCAN_ENABLE: u16 = 0x0c1a;
 const RESET: u16 = 0x0c03;
 const INQUIRY_MODE: u16 = 0x0c45;
 const SSP_MODE: u16 = 0x0c56;
@@ -250,6 +253,8 @@ struct Seen {
 enum Phase {
     Queued,
     Paging,
+    AcceptQueued,
+    Accepting,
     CancelPage,
     Authenticating,
     Encrypting,
@@ -296,6 +301,8 @@ pub struct Classic {
     terminal: Option<Reason>,
     info: ControllerInfo,
     inquiry_mode: u8,
+    page_scan: bool,
+    pub(super) accept_saved: bool,
     credits: u8,
     credit_deadline: Option<u64>,
     commands: Queue<Queued, { MAX_LINKS * 2 }>,
@@ -325,6 +332,8 @@ impl Classic {
             terminal: None,
             info: ControllerInfo::default(),
             inquiry_mode: 2,
+            page_scan: false,
+            accept_saved: false,
             credits: 1,
             credit_deadline: None,
             commands,
@@ -359,6 +368,25 @@ impl Classic {
     /// Select a bonded peer. Never consent to a fresh pairing on this attempt.
     pub fn reconnect(&mut self, addr: Address) -> Result<(), Error> {
         self.select(addr, false)
+    }
+
+    /// Arm a peer-initiated ACL only after the adapter owner matched its saved bond.
+    pub(super) fn accept_incoming(&mut self, addr: Address, key: [u8; 16]) -> Result<(), Error> {
+        if !self.page_scan || self.link(addr).is_some() {
+            return Err(Error::Busy);
+        }
+        self.provide_link_key(addr, key);
+        if let Err(error) = self.select(addr, false) {
+            self.clear_link_key(addr);
+            return Err(error);
+        }
+        self.link_mut(addr).unwrap().phase = Phase::AcceptQueued;
+        self.enqueue(Owner::Link(addr), Command::addressed(ACCEPT, addr, &[1]));
+        Ok(())
+    }
+
+    pub(super) fn reject_incoming(&mut self, addr: Address) {
+        self.enqueue(Owner::Other, Command::addressed(REJECT, addr, &[0x0f]));
     }
 
     fn link(&self, addr: Address) -> Option<&Link> {
@@ -406,6 +434,28 @@ impl Classic {
             })
             .expect("one more bond slot than active links");
         self.keys[slot] = Some((addr, key));
+    }
+
+    pub(super) fn clear_link_key(&mut self, address: Address) {
+        if let Some(slot) = self
+            .keys
+            .iter_mut()
+            .find(|slot| slot.as_ref().is_some_and(|(addr, _)| *addr == address))
+        {
+            if let Some((_, key)) = slot {
+                zeroize::Zeroize::zeroize(key);
+            }
+            *slot = None;
+        }
+    }
+
+    pub(super) fn evict_key(&mut self, address: Address) -> Result<(), Error> {
+        // A failed disconnect can leave an ACL quarantined until its HCI terminal event.
+        if self.link(address).is_some() {
+            return Err(Error::Busy);
+        }
+        self.clear_link_key(address);
+        Ok(())
     }
 
     /// Cancel this peer's attempt or close its ACL. Drain poll immediately.
@@ -585,6 +635,15 @@ impl Classic {
     }
 
     fn planned(&self) -> Option<Queued> {
+        // A sleeping bonded peripheral can page the host when woken. Page scan
+        // keeps the adapter connectable without making it discoverable.
+        let listen = self.ready && self.accept_saved;
+        if listen != self.page_scan {
+            return Some(Queued {
+                command: Command::new(WRITE_SCAN_ENABLE, &[if listen { 2 } else { 0 }]),
+                owner: Owner::Other,
+            });
+        }
         let selecting = self
             .links
             .iter()
@@ -635,6 +694,7 @@ impl Classic {
 
     fn sent(&mut self, owner: Owner, command: &Command, now: u64) {
         match command.opcode {
+            WRITE_SCAN_ENABLE => self.page_scan = command.params()[0] != 0,
             INQUIRY => {
                 self.scan = Scan::Inquiry;
                 self.scan_deadline = Some(now.saturating_add(INQUIRY_MS));
@@ -675,6 +735,12 @@ impl Classic {
             CREATE => {
                 if let Some(l) = self.link_mut(address(command.params())) {
                     l.phase = Phase::Paging;
+                    l.deadline = Some(now.saturating_add(PAGE_MS));
+                }
+            }
+            ACCEPT => {
+                if let Some(l) = self.link_mut(address(command.params())) {
+                    l.phase = Phase::Accepting;
                     l.deadline = Some(now.saturating_add(PAGE_MS));
                 }
             }
@@ -796,7 +862,7 @@ impl Classic {
                 let addr = l.address;
                 if matches!(
                     l.phase,
-                    Phase::Closing | Phase::CancelPage | Phase::Disconnecting
+                    Phase::Closing | Phase::CancelPage | Phase::Disconnecting | Phase::Accepting
                 ) {
                     self.quarantine(addr, Reason::Timeout);
                 } else {
@@ -835,6 +901,15 @@ impl Classic {
         }
         if phase == Phase::Queued {
             self.end_link(addr, reason);
+            return;
+        }
+        if phase == Phase::AcceptQueued {
+            self.end_link(addr, reason);
+            self.reject_incoming(addr);
+            return;
+        }
+        if phase == Phase::Accepting {
+            self.quarantine(addr, reason);
             return;
         }
         self.cancel_link_name(addr);
@@ -943,15 +1018,16 @@ impl Classic {
             0x02 | 0x22 | 0x2f => self.inquiry_results(code, p)?,
             0x03 if p.len() == 11 => self.connection_complete(now_ms, p)?,
             0x04 if p.len() == 10 => {
-                // Outgoing-only policy, including when the incoming address matches our selection.
-                self.enqueue(
-                    Owner::Other,
-                    Command::addressed(
-                        if p[9] == 1 { REJECT } else { REJECT_SYNC },
-                        address(p),
-                        &[0x0f],
-                    ),
-                );
+                let addr = address(p);
+                if p[9] == 1 {
+                    if self.page_scan {
+                        self.emit(Action::IncomingAcl(addr));
+                    } else {
+                        self.reject_incoming(addr);
+                    }
+                } else {
+                    self.enqueue(Owner::Other, Command::addressed(REJECT_SYNC, addr, &[0x0f]));
+                }
             }
             0x05 if p.len() == 4 => {
                 let handle = word(&p[1..]);
@@ -1048,6 +1124,7 @@ impl Classic {
                 opcode,
                 INQUIRY
                     | CREATE
+                    | ACCEPT
                     | DISCONNECT
                     | REJECT
                     | REJECT_SYNC
@@ -1076,6 +1153,8 @@ impl Classic {
                 // Cancellation can race the terminal procedure event. Keep its deadline.
                 (Owner::Discovery, NAME_CANCEL | INQUIRY_CANCEL) => (),
                 (Owner::Link(addr), CREATE) => self.end_link(addr, reason),
+                (Owner::Link(addr), ACCEPT) => self.end_link(addr, reason),
+                (Owner::Other, WRITE_SCAN_ENABLE) => self.fail(reason),
                 (Owner::Link(addr), DISCONNECT) if status == 0x02 => self.end_link(addr, reason),
                 (Owner::Link(addr), DISCONNECT) => self.quarantine(addr, reason),
                 (Owner::Link(_), CREATE_CANCEL) => (),
@@ -1302,7 +1381,7 @@ impl Classic {
             l.handle.is_none()
                 && matches!(
                     l.phase,
-                    Phase::Paging | Phase::CancelPage | Phase::Quarantined
+                    Phase::Paging | Phase::Accepting | Phase::CancelPage | Phase::Quarantined
                 )
         });
         if status != 0 {

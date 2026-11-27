@@ -105,11 +105,11 @@ impl Profile {
     fn drive(
         &mut self,
         now: u64,
-        handle: u16,
         transport: HidTransport,
         name: Option<Name>,
         wake: &HidWake,
         can_transmit: bool,
+        mut set_reconnect_mode: impl FnMut(u8),
     ) -> bool {
         if self.deadline.is_some_and(|due| now >= due) {
             if matches!(self.stage, Stage::Closing) {
@@ -126,21 +126,13 @@ impl Profile {
                     if matches!(self.stage, Stage::Discovering) =>
                 {
                     // The SDP channel has closed. Only a valid HID record authorizes its PSMs.
-                    if !hid::valid_report_descriptor(&service.report_descriptor) {
-                        return false;
+                    if !hid::valid_report_descriptor(&service.report_descriptor)
+                        || self.channels.open_discovered_hid().is_err()
+                    {
+                        self.close(now);
+                        continue;
                     }
-                    let Ok(mut channels) = L2capSession::for_hid(
-                        handle,
-                        l2cap::DEFAULT_MTU,
-                        service.control_psm,
-                        service.interrupt_psm,
-                    ) else {
-                        return false;
-                    };
-                    if channels.start().is_err() {
-                        return false;
-                    }
-                    self.channels = channels;
+                    set_reconnect_mode(service.reconnect_mode);
                     self.stage = Stage::Opening(service);
                     self.deadline = Some(now.saturating_add(PROFILE_TIMEOUT_MS));
                 }
@@ -268,7 +260,20 @@ impl Host {
                 if let Some(key) = key {
                     self.classic.provide_link_key(addr, *key);
                 }
-                (addr, self.classic.reconnect(addr))
+                let result = self.classic.reconnect(addr);
+                if result.is_err() {
+                    self.classic.clear_link_key(addr);
+                }
+                (addr, result)
+            }
+            Request::EvictKey(addr) => {
+                let result = self.classic.evict_key(addr);
+                if result.is_ok() {
+                    let mut state = self.shared.state.lock();
+                    state.remove_bond(addr);
+                    state.ended(addr, 0);
+                }
+                (addr, result)
             }
             Request::Disconnect(addr) => {
                 let result = self.classic.disconnect_peer(addr);
@@ -320,6 +325,7 @@ impl Host {
 
     pub fn drive(&mut self, transport: &dyn H4Transport, now: u64) -> Result<(), &'static str> {
         self.repoll = false;
+        self.classic.accept_saved = self.shared.state.lock().has_bonds();
         while let Some(action) = self.classic.poll(now) {
             match action {
                 Action::Command(command) => {
@@ -339,6 +345,11 @@ impl Host {
                     );
                     self.shared.state.lock().ready(info.address);
                 }
+                Action::IncomingAcl(addr) => self
+                    .shared
+                    .state
+                    .lock()
+                    .begin_incoming(addr, &mut self.classic),
                 Action::PeerFound(peer) => {
                     self.shared.state.lock().update_peer(peer);
                     if let Some(name) = peer.name
@@ -385,6 +396,7 @@ impl Host {
                     handle,
                     reason,
                 } => {
+                    self.classic.clear_link_key(address);
                     if let Some(i) = self
                         .links
                         .iter()
@@ -401,6 +413,7 @@ impl Host {
                     }
                 }
                 Action::ConnectionFailed { address, reason } => {
+                    self.classic.clear_link_key(address);
                     self.shared.state.lock().ended(address, error_code(reason))
                 }
                 Action::AclCredits { handle, packets } => self.buffers.completed(handle, packets),
@@ -417,14 +430,12 @@ impl Host {
                 controller: self.controller.address,
                 peer: link.address,
             };
-            let keep = profile.drive(
-                now,
-                link.handle,
-                location,
-                link.name,
-                &self.wake,
-                can_transmit,
-            );
+            let keep = profile.drive(now, location, link.name, &self.wake, can_transmit, |mode| {
+                self.shared
+                    .state
+                    .lock()
+                    .set_hid_reconnect_mode(link.address, mode)
+            });
             let ready = keep && profile.active();
             if !keep {
                 link.profile = None;

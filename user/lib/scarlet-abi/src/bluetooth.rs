@@ -15,7 +15,8 @@
 //! SCAN_RESULT takes GENERATION and zero-based INDEX, returns PEER and NAME_LEN
 //! bytes of NAME (no terminator). Reject stale generations and out-of-range indices.
 //! PAIR takes PEER. CONNECT takes PEER and optionally KEY_SUPPLIED, KEY_TYPE and
-//! KEY. DISCONNECT requires exactly one live link. DISCONNECT_PEER takes PEER.
+//! KEY. Without KEY_SUPPLIED, CONNECT may reuse the registered bond for PEER.
+//! DISCONNECT requires exactly one live link. DISCONNECT_PEER takes PEER.
 //! PAIR and CONNECT complete on an authenticated, encrypted ACL. Successful
 //! PAIR may set KEY_READABLE immediately. PROFILE_READY reports whether a
 //! discovered HID service has configured its control and interrupt channels.
@@ -34,6 +35,8 @@
 //! PAIR, CONNECT and both disconnect commands echo the selected PEER.
 //! DISCONNECT_PEER returns the accepted operation GENERATION like PAIR and
 //! CONNECT. Poll PEER_STATUS for that generation and a clear BUSY bit.
+//! EVICT_KEY takes PEER and completes the same way. It only succeeds once the
+//! peer has no outstanding attempt or physical link. An absent key is success.
 
 use core::ops::Range;
 
@@ -48,6 +51,10 @@ pub const LINKS: u32 = 0x4254_0008;
 pub const LINK_RESULT: u32 = 0x4254_0009;
 pub const PEER_STATUS: u32 = 0x4254_000a;
 pub const DISCONNECT_PEER: u32 = 0x4254_000b;
+pub const EVICT_KEY: u32 = 0x4254_000c;
+/// Register a saved SSP bond for peer-initiated, authenticated connections.
+/// PEER, KEY_TYPE, KEY and optional ADAPTER are inputs. Synchronous, idempotent.
+pub const REGISTER_BOND: u32 = 0x4254_000d;
 
 pub const RECORD_SIZE: usize = 288;
 pub type Record = [u8; RECORD_SIZE];
@@ -61,9 +68,16 @@ pub const ADAPTER: Range<usize> = 16..22;
 pub const PEER: Range<usize> = 22..28;
 pub const NAME_LEN: usize = 28;
 pub const KEY_TYPE: usize = 29;
-// Bytes 30..32 are reserved (zero).
+/// STATUS, LINK_RESULT and PEER_STATUS, from the remote HID SDP record.
+pub const HID_RECONNECT_MODE: usize = 30;
+pub const HID_RECONNECT_DEVICE: u8 = 1;
+pub const HID_RECONNECT_HOST: u8 = 2;
+// Byte 31 is reserved (zero).
 pub const KEY: Range<usize> = 32..48;
 pub const NAME: Range<usize> = 48..RECORD_SIZE;
+/// STATUS only, in place of NAME. Changes each time a controller becomes ready,
+/// including resets that retain the same Bluetooth address and device path.
+pub const ADAPTER_GENERATION: Range<usize> = 48..56;
 
 pub const READY: u32 = 1 << 0;
 pub const BUSY: u32 = 1 << 1;

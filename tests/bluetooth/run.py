@@ -64,6 +64,10 @@ def boot(out):
     users.write_text("qa:1001:1001::$2b$12$L6Bc/AlTQHyd9liGgGEZyOFLPHNgyxeEPfgYfBCVxJ7JIlwxyVU3u\n"
                      "locked:1002:1002::!\n")
     users.chmod(0o600)
+    # A legacy synthetic bond exists before the daemon or any UI client starts.
+    bond = stage / "etc/bluetooth-020000000001-020000000020.bond"
+    bond.write_bytes(bytes([4]) + bytes([0x20]) * 16)
+    bond.chmod(0o600)
     smoke.create_initramfs(stage, out / "initramfs.cpio")
     # btctl verifies the inode permissions protecting /etc and its bond files.
     # Use a private ext2 root as on the console. Archive-only cpio metadata
@@ -73,7 +77,7 @@ def boot(out):
         stream.truncate(48 * 1024 * 1024)
     subprocess.run(["mke2fs", "-q", "-F", "-t", "ext2", "-b", "4096",
                     "-E", "root_owner=0:0", "-d", str(stage), str(disk)], check=True)
-    for path in ["/etc", "/etc/scarlet-users"]:
+    for path in ["/etc", "/etc/scarlet-users", f"/etc/{bond.name}"]:
         for field in ["uid", "gid"]:
             subprocess.run(["debugfs", "-w", "-R", f"set_inode_field {path} {field} 0", str(disk)],
                            check=True, stdout=subprocess.DEVNULL)

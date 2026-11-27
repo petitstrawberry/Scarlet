@@ -40,7 +40,7 @@ impl Peer {
     }
 }
 
-const PEERS: [Peer; 2] = [
+const PEERS: [Peer; 3] = [
     Peer {
         address: "02:00:00:00:00:10",
         name: "Fixture gamepad",
@@ -53,9 +53,15 @@ const PEERS: [Peer; 2] = [
         bonded: false,
         connected: false,
     },
+    Peer {
+        address: "02:00:00:00:00:30",
+        name: "Fixture headphones",
+        bonded: true,
+        connected: true,
+    },
 ];
 
-static ADAPTER: Mutex<Option<[Peer; 2]>> = Mutex::new(None);
+static ADAPTER: Mutex<Option<[Peer; 3]>> = Mutex::new(None);
 
 pub fn initialize(empty: bool) {
     *ADAPTER.lock().unwrap() = (!empty).then_some(PEERS);
@@ -68,7 +74,7 @@ impl Client {
         Self(adapter)
     }
 
-    fn with_peers<T>(&self, f: impl FnOnce(&mut [Peer; 2]) -> Result<T>) -> Result<T> {
+    fn with_peers<T>(&self, f: impl FnOnce(&mut [Peer; 3]) -> Result<T>) -> Result<T> {
         let mut adapter = ADAPTER.lock().unwrap();
         let peers = adapter
             .as_mut()
@@ -86,14 +92,8 @@ impl Client {
             })
         })
     }
-    pub fn bonded(&self) -> Result<Vec<Address>> {
-        self.with_peers(|peers| {
-            Ok(peers
-                .iter()
-                .filter(|p| p.bonded)
-                .map(|p| p.address)
-                .collect())
-        })
+    pub fn saved(&self) -> Result<Vec<DiscoveredPeer>> {
+        self.with_peers(|peers| Ok(peers.iter().filter(|p| p.bonded).map(Peer::row).collect()))
     }
     pub fn list(&self) -> Result<Vec<ConnectedPeer>> {
         self.with_peers(|peers| {
@@ -129,6 +129,13 @@ impl Client {
                 return Err("Pair this fixture device first".into());
             }
             p.connected = true;
+            Ok(())
+        })
+    }
+    pub fn forget(&self, address: Address) -> Result<()> {
+        self.change(address, |p| {
+            p.connected = false;
+            p.bonded = false;
             Ok(())
         })
     }

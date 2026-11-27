@@ -1,13 +1,15 @@
 #[cfg(not(any(target_os = "scarlet", test)))]
 compile_error!("btctl requires a Scarlet Native target");
 
+mod bonds;
 mod broker;
+mod reconnect;
 mod reply;
 use reply::Reply;
 
 use scarlet_abi::{bluetooth as bt, fs as vfs};
 use scarlet_bluetooth::{
-    Address, ConnectedPeer, DiscoveredPeer, Status,
+    Address, ConnectedPeer, DiscoveredPeer, HidReconnectMode, Status,
     protocol::{self, Command},
 };
 use scarlet_os::Handle;
@@ -18,7 +20,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
-const USAGE: &str = "usage: btctl [--device PATH | /dev/PATH] status|scan|devices|bonded|pair MAC|connect MAC|disconnect [MAC]";
+const USAGE: &str = "usage: btctl [--device PATH | /dev/PATH] status|scan|devices|bonded|saved|pair MAC|connect MAC|disconnect [MAC]|forget MAC|unpair MAC";
 const DEFAULT_DEVICE: &str = "/dev/bluetooth0";
 type Result<T> = std::result::Result<T, String>;
 
@@ -33,6 +35,8 @@ fn parse<'a>(args: &[&'a str]) -> Result<(&'a str, Command)> {
         ["scan"] => Command::Scan,
         ["devices"] => Command::Devices,
         ["bonded"] => Command::Bonded,
+        ["saved"] => Command::Saved,
+        ["forget" | "unpair", mac] => Command::Forget(mac.parse::<Address>()?.0),
         ["pair", mac] => Command::Pair(mac.parse::<Address>()?.0),
         ["connect", mac] => Command::Connect(mac.parse::<Address>()?.0),
         ["disconnect"] => Command::Disconnect(None),
@@ -119,6 +123,19 @@ fn public_status(adapter: &bt::Record, peer: &bt::Record) -> Status {
         profile_ready: peer_flags & bt::PROFILE_READY != 0,
         key_readable: peer_flags & bt::KEY_READABLE != 0,
         last_error: last_error(peer),
+        hid_reconnect_mode: None,
+    }
+}
+
+fn hid_mode(peer: &bt::Record) -> Option<HidReconnectMode> {
+    match peer[bt::HID_RECONNECT_MODE] {
+        0 if flags(peer) & bt::PROFILE_READY != 0 => Some(HidReconnectMode::None),
+        bt::HID_RECONNECT_DEVICE => Some(HidReconnectMode::Device),
+        bt::HID_RECONNECT_HOST => Some(HidReconnectMode::Host),
+        bits if bits == bt::HID_RECONNECT_HOST | bt::HID_RECONNECT_DEVICE => {
+            Some(HidReconnectMode::Any)
+        }
+        _ => None,
     }
 }
 
@@ -129,8 +146,19 @@ fn complete(r: &bt::Record, expected: u32) -> Result<bool> {
     if flags(r) & (bt::BUSY | bt::SCANNING) != 0 {
         return Ok(false);
     }
-    if last_error(r) != 0 {
-        return Err(format!("controller last-error={:#x}", last_error(r)));
+    let error = last_error(r);
+    if error != 0 {
+        let hint = match error {
+            0x04 => " (Page Timeout). Wake the device, bring it within range and retry.",
+            0x05 => {
+                " (Authentication Failure). If it persists, forget the bond on both devices and pair again."
+            }
+            0x06 => {
+                " (PIN or Key Missing). Put the peer in pairing mode and pair again to save a new key."
+            }
+            _ => "",
+        };
+        return Err(format!("controller last-error={error:#04x}{hint}"));
     }
     Ok(true)
 }
@@ -193,12 +221,11 @@ fn indexed_record(snapshot: &bt::Record, index: u16) -> bt::Record {
     row
 }
 
-fn scan(handle: &Handle) -> Result<Vec<DiscoveredPeer>> {
+fn scan_results(handle: &Handle, state: &bt::Record) -> Result<Vec<DiscoveredPeer>> {
     let mut listing = Vec::new();
-    let state = start_and_wait(handle, bt::SCAN_START, &mut [0; bt::RECORD_SIZE])?;
-    let total = count(&state);
+    let total = count(state);
     for index in 0..total {
-        let mut row = indexed_record(&state, index);
+        let mut row = indexed_record(state, index);
         control(handle, bt::SCAN_RESULT, &mut row)?;
         let address = Address(record_peer(&row).ok_or("invalid discovery address")?);
         listing.push(DiscoveredPeer {
@@ -214,16 +241,23 @@ fn scan(handle: &Handle) -> Result<Vec<DiscoveredPeer>> {
 fn devices(mut ctl: impl FnMut(u32, &mut bt::Record) -> Result<()>) -> Result<Vec<ConnectedPeer>> {
     let mut snapshot = [0; bt::RECORD_SIZE];
     ctl(bt::LINKS, &mut snapshot)?;
+    device_rows(&mut snapshot, ctl)
+}
+
+fn device_rows(
+    snapshot: &mut bt::Record,
+    mut ctl: impl FnMut(u32, &mut bt::Record) -> Result<()>,
+) -> Result<Vec<ConnectedPeer>> {
     for _ in 0..3 {
-        let token = generation(&snapshot);
-        let total = count(&snapshot);
+        let token = generation(snapshot);
+        let total = count(snapshot);
         let mut listing = Vec::new();
         for index in 0..total {
-            let mut row = indexed_record(&snapshot, index);
+            let mut row = indexed_record(snapshot, index);
             if let Err(error) = ctl(bt::LINK_RESULT, &mut row) {
                 snapshot.fill(0);
-                ctl(bt::LINKS, &mut snapshot)?;
-                if generation(&snapshot) != token {
+                ctl(bt::LINKS, snapshot)?;
+                if generation(snapshot) != token {
                     break;
                 }
                 return Err(error);
@@ -241,283 +275,27 @@ fn devices(mut ctl: impl FnMut(u32, &mut bt::Record) -> Result<()>) -> Result<Ve
                 profile_ready: flags(&row) & bt::PROFILE_READY != 0,
                 key_readable: flags(&row) & bt::KEY_READABLE != 0,
                 last_error: last_error(&row),
+                hid_reconnect_mode: hid_mode(&row),
             });
         }
-        if generation(&snapshot) == token {
+        if generation(snapshot) == token {
             return Ok(listing);
         }
     }
     Err("connected peers kept changing; retry btctl devices".into())
 }
 
-mod bonds {
-    use super::*;
-
-    fn check_access(handle: &Handle, directory: bool) -> Result<()> {
-        let access = scarlet_os::shield::inode_access(handle)
-            .map_err(|_| "cannot verify bond storage ownership, mode and ACL")?;
-        let forbidden = if directory { 0o022 } else { 0o7177 };
-        if access.owner != 0 || access.has_acl != 0 || access.mode & forbidden != 0 {
-            return Err("unsafe bond storage ownership, permissions or ACL".into());
-        }
-        // O_DIRECTORY already checked directories. A key, stage or lock must be
-        // a regular file with no additional hard links.
-        if !directory {
-            let meta = handle
-                .as_file()
-                .map_err(|_| "expected a bond storage file")?
-                .metadata()
-                .map_err(|_| "cannot inspect bond storage file")?;
-            if !meta.is_file() || meta.link_count != 1 {
-                return Err("bond storage requires a singly linked regular file".into());
-            }
-        }
-        Ok(())
-    }
-
-    fn sync(handle: &Handle) -> Result<()> {
-        // SAFETY: the descriptor remains open through this scalar operation.
-        let rc = unsafe { syscall1(Syscall::FileSync, handle.as_raw() as usize) } as isize;
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(format!("bond storage sync failed ({rc})"))
-        }
-    }
-
-    fn open_file(dir: &Handle, name: &str, flags: u32) -> Result<Option<Handle>> {
-        let component = CString::new(name).unwrap();
-        match open_at(dir.as_raw() as usize, &component, flags, 0o600) {
-            Ok(file) => {
-                check_access(&file, false)?;
-                Ok(Some(file))
-            }
-            Err(e) if e.raw_os_error() == Some(vfs::ERRNO_ENOENT) => Ok(None),
-            Err(e) => Err(format!("open /etc/{name}: {e}")),
-        }
-    }
-
-    fn directory() -> Result<Handle> {
-        let root = open_at(vfs::CURRENT_DIRECTORY, c"/", vfs::VFS_O_DIRECTORY, 0)
-            .map_err(|e| format!("open bond storage root: {e}"))?;
-        check_access(&root, true)?;
-        let dir = open_at(root.as_raw() as usize, c"etc", vfs::VFS_O_DIRECTORY, 0)
-            .map_err(|e| format!("open /etc for bond storage: {e}"))?;
-        check_access(&dir, true)?;
-        Ok(dir)
-    }
-
-    fn component(peer: Address) -> String {
-        peer.to_string().replace(':', "")
-    }
-
-    fn bonded_peer(name: &str, prefix: &str) -> Option<Address> {
-        let mac = name.strip_prefix(prefix)?.strip_suffix(".bond")?;
-        if mac.len() != 12
-            || !mac
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
-        {
-            return None;
-        }
-        let mut bytes = [0; 6];
-        for (i, byte) in bytes.iter_mut().rev().enumerate() {
-            *byte = u8::from_str_radix(&mac[2 * i..2 * i + 2], 16).ok()?;
-        }
-        (bytes != [0; 6] && bytes != [255; 6]).then_some(Address(bytes))
-    }
-
-    pub fn list(adapter: bt::Address) -> Result<Vec<Address>> {
-        if adapter == [0; 6] {
-            return Err("controller has no adapter address for bond storage".into());
-        }
-        let dir = directory()?;
-        let prefix = format!("bluetooth-{}-", component(Address(adapter)));
-        let mut peers = Vec::new();
-        // / and /etc were both verified. Reopen each candidate relative to the checked
-        // directory and check its metadata without reading a single key octet.
-        for entry in std::fs::read_dir("/etc").map_err(|e| format!("list bond directory: {e}"))? {
-            let entry = entry.map_err(|e| format!("read bond directory entry: {e}"))?;
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(peer) = bonded_peer(name, &prefix) else {
-                continue;
-            };
-            let Some(file) = open_file(&dir, name, vfs::VFS_O_RDONLY)? else {
-                continue;
-            };
-            let size = file
-                .as_file()
-                .map_err(|_| "invalid bond file")?
-                .metadata()
-                .map_err(|_| "cannot inspect bond length")?
-                .size;
-            if size != 17 {
-                return Err("invalid bond file length".into());
-            }
-            peers.push(peer);
-            // A JSON address uses at least 13 bytes plus a delimiter.
-            if peers.len() > protocol::MAX_REPLY / 14 {
-                return Err("bond listing exceeds the service response limit".into());
-            }
-        }
-        peers.sort_unstable();
-        Ok(peers)
-    }
-
-    // Root-owned /etc is supplied by the base image. All children are flat and
-    // generated exclusively from numeric BD_ADDRs. Each file holds type || 16 HCI octets.
-    pub struct Store {
-        dir: Handle,
-        adapter: String,
-        name: String,
-    }
-
-    impl Store {
-        pub fn open(adapter: bt::Address, peer: bt::Address) -> Result<Self> {
-            if adapter == [0; 6] {
-                return Err("controller has no adapter address for bond storage".into());
-            }
-            let dir = directory()?;
-            let adapter = component(Address(adapter));
-            let peer = component(Address(peer));
-            let name = format!("bluetooth-{adapter}-{peer}.bond");
-            Ok(Self { dir, adapter, name })
-        }
-
-        pub fn supply_key(&self, request: &mut bt::Record) -> Result<()> {
-            let Some(file) = open_file(&self.dir, &self.name, vfs::VFS_O_RDONLY)? else {
-                return Ok(());
-            };
-            let stream = file.as_stream().map_err(|_| "cannot read bond file")?;
-            let mut bytes = Zeroizing::new([0; 18]);
-            stream
-                .read_exact(&mut bytes[..17])
-                .map_err(|_| "invalid or unreadable bond file")?;
-            if stream
-                .read(&mut bytes[17..])
-                .map_err(|_| "cannot finish reading bond file")?
-                != 0
-            {
-                return Err("invalid bond file length".into());
-            }
-            request[bt::KEY_TYPE] = bytes[0];
-            request[bt::KEY].copy_from_slice(&bytes[1..17]);
-            request[bt::FLAGS].copy_from_slice(&bt::KEY_SUPPLIED.to_le_bytes());
-            Ok(())
-        }
-
-        pub fn lock(&self, pairing: bool) -> Result<Option<Handle>> {
-            let name = format!(".bluetooth-{}.lock", self.adapter);
-            let flags = if pairing {
-                vfs::VFS_O_CREAT | vfs::VFS_O_RDWR
-            } else {
-                vfs::VFS_O_RDONLY
-            };
-            let Some(lock) = open_file(&self.dir, &name, flags)? else {
-                return if pairing {
-                    Err("cannot create bond storage lock".into())
-                } else {
-                    Ok(None)
-                };
-            };
-            // SAFETY: FileLock borrows this live handle. A nonblocking exclusive (pair)
-            // or shared (connect) lock lasts through radio completion and bond installation.
-            let operation = if pairing { 2 | 4 } else { 1 | 4 };
-            let rc =
-                unsafe { syscall2(Syscall::FileLock, lock.as_raw() as usize, operation) } as isize;
-            if rc != 0 {
-                return Err(format!("cannot lock adapter bond storage ({rc})"));
-            }
-            if pairing {
-                // Reject unsafe files before changing the peer's bond.
-                open_file(&self.dir, &self.name, vfs::VFS_O_RDONLY)?;
-                open_file(&self.dir, &format!(".{}.new", self.name), vfs::VFS_O_WRONLY)?;
-            }
-            Ok(Some(lock))
-        }
-
-        pub fn save_key(&self, r: &bt::Record) -> Result<()> {
-            // The stable adapter lock serializes this staging name. Reopen and
-            // validate a stage left by an interrupted pair before modifying it.
-            let stage = format!(".{}.new", self.name);
-            let file = open_file(&self.dir, &stage, vfs::VFS_O_WRONLY | vfs::VFS_O_CREAT)?
-                .ok_or("cannot create bond staging file")?;
-            let old = CString::new(format!("/etc/{stage}")).unwrap();
-            let new = CString::new(format!("/etc/{}", self.name)).unwrap();
-            let install = (|| -> Result<()> {
-                file.as_file()
-                    .map_err(|_| "invalid staging file")?
-                    .truncate(0)
-                    .map_err(|_| "cannot truncate bond staging file")?;
-                let stream = file
-                    .as_stream()
-                    .map_err(|_| "cannot open bond staging stream")?;
-                stream
-                    .write_all(std::slice::from_ref(&r[bt::KEY_TYPE]))
-                    .and_then(|()| stream.write_all(&r[bt::KEY]))
-                    .map_err(|_| "cannot write bond staging file")?;
-                sync(&file)?;
-                file.close().map_err(|_| "cannot close bond staging file")?;
-                // SAFETY: both C strings live through the call and name children of
-                // the validated root-owned /etc. Atomic replacement stays on one filesystem.
-                let rc = unsafe {
-                    syscall3(
-                        Syscall::VfsRenameWithStatus,
-                        old.as_ptr() as usize,
-                        new.as_ptr() as usize,
-                        0,
-                    )
-                } as isize;
-                if rc != 0 {
-                    return Err(format!("cannot install bond file ({rc})"));
-                }
-                Ok(())
-            })();
-            if install.is_err() {
-                std::fs::remove_file(format!("/etc/{stage}"))
-                    .map_err(|e| format!("bond installation and staging cleanup failed: {e}"))?;
-            }
-            install?;
-            sync(&self.dir)
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn only_installed_canonical_bonds_for_this_adapter_match() {
-            let prefix = "bluetooth-020000000001-";
-            let parse = |file| bonded_peer(file, prefix);
-            assert_eq!(
-                parse("bluetooth-020000000001-AABBCCDDEEFF.bond"),
-                Some("AA:BB:CC:DD:EE:FF".parse().unwrap())
-            );
-            for name in [
-                "bluetooth-020000000002-AABBCCDDEEFF.bond",
-                ".bluetooth-020000000001-AABBCCDDEEFF.bond.new",
-                "bluetooth-020000000001-FFFFFFFFFFFF.bond",
-                "bluetooth-020000000001-000000000000.bond",
-                "bluetooth-020000000001-aaBBCCDDEEFF.bond",
-                "bluetooth-020000000001-0123.bond",
-            ] {
-                assert_eq!(parse(name), None);
-            }
-        }
-    }
-}
-
 fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<Status> {
     let initial = status(handle, None)?;
     let adapter: bt::Address = initial[bt::ADAPTER].try_into().unwrap();
-    let store = bonds::Store::open(adapter, peer)?;
+    let store = bonds::Store::locked(adapter)?;
     let mut request = Zeroizing::new([0; bt::RECORD_SIZE]);
     request[bt::PEER].copy_from_slice(&peer);
-    let _lock = store.lock(pair)?;
-    if !pair {
-        store.supply_key(&mut request)?;
+    if pair {
+        store.check_pair(Address(peer))?;
+    } else {
+        store.load_key(Address(peer), &mut request)?;
+        request[bt::FLAGS].copy_from_slice(&bt::KEY_SUPPLIED.to_le_bytes());
     }
     let op = if pair { bt::PAIR } else { bt::CONNECT };
     let state = start_and_wait(handle, op, &mut request)?;
@@ -536,9 +314,15 @@ fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<Status> {
         request[bt::GENERATION].copy_from_slice(&state[bt::GENERATION]);
         request[bt::PEER].copy_from_slice(&peer);
         control(handle, bt::READ_KEY, &mut request)
-            .and_then(|()| store.save_key(&request))
+            .and_then(|()| store.save_key(Address(peer), &request))
             .map_err(|e| format!("paired, but could not save the bond: {e}"))?;
         request.zeroize();
+        store
+            .register(handle, Address(peer))
+            .map_err(|e| format!("bond saved, but automatic reconnect registration failed: {e}"))?;
+        store
+            .remember(Address(peer), peer_name(&state)?.as_deref())
+            .map_err(|e| format!("bond saved, but could not save the device name: {e}"))?;
         return status(handle, target)
             .and_then(|state| completion_status(handle, target, &state))
             .map_err(|e| {
@@ -548,6 +332,7 @@ fn link(handle: &Handle, peer: bt::Address, pair: bool) -> Result<Status> {
                 )
             });
     }
+    store.remember(Address(peer), peer_name(&state)?.as_deref())?;
     completion_status(handle, target, &state)
 }
 
@@ -557,7 +342,10 @@ fn completion_status(
     state: &bt::Record,
 ) -> Result<Status> {
     if target.is_some() {
-        Ok(public_status(&status(handle, None)?, state))
+        Ok(Status {
+            hid_reconnect_mode: hid_mode(state),
+            ..public_status(&status(handle, None)?, state)
+        })
     } else {
         Ok(public_status(state, state))
     }
@@ -566,12 +354,19 @@ fn completion_status(
 fn disconnect(handle: &Handle, target: Option<bt::Address>) -> Result<Status> {
     let mut request = [0; bt::RECORD_SIZE];
     let op = if let Some(peer) = target {
+        reconnect::cancel(
+            status(handle, None)?[bt::ADAPTER].try_into().unwrap(),
+            Address(peer),
+        );
         request[bt::PEER].copy_from_slice(&peer);
         bt::DISCONNECT_PEER
     } else {
         bt::DISCONNECT
     };
     let state = start_and_wait(handle, op, &mut request)?;
+    if let Some(peer) = record_peer(&request) {
+        reconnect::cancel(state[bt::ADAPTER].try_into().unwrap(), Address(peer));
+    }
     if flags(&state) & bt::CONNECTED != 0 {
         return Err("controller still reports the peer connected".into());
     }
@@ -583,11 +378,68 @@ fn disconnect(handle: &Handle, target: Option<bt::Address>) -> Result<Status> {
     completion_status(handle, target, &state)
 }
 
+fn saved(handle: &Handle) -> Result<Vec<DiscoveredPeer>> {
+    let state = status(handle, None)?;
+    let adapter = state[bt::ADAPTER].try_into().unwrap();
+    let store = bonds::Store::locked(adapter)?;
+    let mut listing = Vec::new();
+    let mut discovery = None;
+    for address in bonds::list(adapter)? {
+        // PEER_STATUS includes names resolved after pairing, even after disconnect.
+        // An older bond may have no controller history at all.
+        let recent = status(handle, Some(address.0))
+            .ok()
+            .map(|row| peer_name(&row))
+            .transpose()?
+            .flatten();
+        let mut name = store.name(address)?;
+        let mut observed = recent;
+        if name.is_none() && observed.is_none() && flags(&state) & bt::SCANNING == 0 {
+            if discovery.is_none() {
+                discovery = Some(scan_results(handle, &state)?);
+            }
+            observed = discovery
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|row| row.address == address)
+                .and_then(|row| row.name.clone());
+        }
+        if observed.is_some() && observed != name {
+            store.remember(address, observed.as_deref())?;
+            name = observed;
+        }
+        listing.push(DiscoveredPeer { address, name });
+    }
+    Ok(listing)
+}
+
+fn forget(handle: &Handle, peer: bt::Address) -> Result<()> {
+    let state = status(handle, None)?;
+    let adapter: bt::Address = state[bt::ADAPTER].try_into().unwrap();
+    reconnect::cancel(adapter, Address(peer));
+    let store = bonds::Store::locked(adapter)?;
+    let live = devices(|op, row| control(handle, op, row))?;
+    if live.iter().any(|row| row.address == Address(peer)) {
+        disconnect(handle, Some(peer))?;
+    }
+    let mut request = [0; bt::RECORD_SIZE];
+    request[bt::PEER].copy_from_slice(&peer);
+    let done = start_and_wait(handle, bt::EVICT_KEY, &mut request)?;
+    if record_peer(&request) != Some(peer)
+        || done[bt::ADAPTER] != adapter
+        || flags(&done) & (bt::CONNECTED | bt::ENCRYPTED | bt::KEY_READABLE) != 0
+    {
+        return Err("controller did not confirm key eviction for the requested peer".into());
+    }
+    store.forget(Address(peer))
+}
+
 fn direct(path: &str, command: Command) -> Result<Reply> {
     let device = CString::new(path).map_err(|_| "invalid device path")?;
     let access = if matches!(
         command,
-        Command::Status | Command::Devices | Command::Bonded
+        Command::Status | Command::Devices | Command::Bonded | Command::Saved
     ) {
         vfs::VFS_O_RDONLY
     } else {
@@ -598,14 +450,41 @@ fn direct(path: &str, command: Command) -> Result<Reply> {
     match command {
         Command::Status => {
             let state = status(&handle, None)?;
-            Ok(Reply::Status(public_status(&state, &state)))
+            let mut summary = public_status(&state, &state);
+            if let Some(peer) = record_peer(&state) {
+                summary.hid_reconnect_mode = status(&handle, Some(peer))
+                    .ok()
+                    .filter(|row| flags(row) & bt::CONNECTED != 0)
+                    .and_then(|row| hid_mode(&row));
+            }
+            Ok(Reply::Status(summary))
         }
-        Command::Devices => devices(|op, record| control(&handle, op, record)).map(Reply::Devices),
+        Command::Devices => {
+            let rows = devices(|op, record| control(&handle, op, record))?;
+            if rows.iter().any(|row| row.name.is_some()) {
+                let state = status(&handle, None)?;
+                let store = bonds::Store::locked(state[bt::ADAPTER].try_into().unwrap())?;
+                store.remember_connected(&rows)?;
+            }
+            Ok(Reply::Devices(rows))
+        }
         Command::Bonded => {
             let state = status(&handle, None)?;
             bonds::list(state[bt::ADAPTER].try_into().unwrap()).map(Reply::Bonded)
         }
-        Command::Scan => scan(&handle).map(Reply::Scan),
+        Command::Saved => saved(&handle).map(Reply::Saved),
+        Command::Forget(peer) => forget(&handle, peer).map(Reply::Forgotten),
+        Command::Scan => {
+            let state = start_and_wait(&handle, bt::SCAN_START, &mut [0; bt::RECORD_SIZE])?;
+            let rows = scan_results(&handle, &state)?;
+            if rows.iter().any(|row| row.name.is_some()) {
+                let store = bonds::Store::locked(state[bt::ADAPTER].try_into().unwrap())?;
+                for row in &rows {
+                    store.remember(row.address, row.name.as_deref())?;
+                }
+            }
+            Ok(Reply::Scan(rows))
+        }
         Command::Pair(peer) => link(&handle, peer, true).map(Reply::Status),
         Command::Connect(peer) => link(&handle, peer, false).map(Reply::Status),
         Command::Disconnect(target) => disconnect(&handle, target).map(Reply::Status),
@@ -643,6 +522,21 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_errors_retain_controller_codes_and_specific_recovery() {
+        let mut record = [0; bt::RECORD_SIZE];
+        for (code, hint) in [
+            (0x04u32, "Wake the device"),
+            (0x05, "Authentication Failure"),
+            (0x06, "pair again"),
+            (0x123, ""),
+        ] {
+            record[bt::LAST_ERROR].copy_from_slice(&code.to_le_bytes());
+            let error = complete(&record, 0).unwrap_err();
+            assert!(error.contains(&format!("{code:#04x}")) && error.contains(hint));
+        }
+    }
 
     #[test]
     fn devices_discards_partial_snapshots_after_a_remote_disconnect() {

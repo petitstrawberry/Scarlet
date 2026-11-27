@@ -19,6 +19,8 @@ pub enum Command {
     Scan,
     Devices,
     Bonded,
+    Saved,
+    Forget(bt::Address),
     Pair(bt::Address),
     Connect(bt::Address),
     Disconnect(Option<bt::Address>),
@@ -64,6 +66,8 @@ pub fn encode(adapter: u32, command: Command) -> [u8; 11] {
         Command::Disconnect(None) => (5, [0; 6]),
         Command::Devices => (6, [0; 6]),
         Command::Bonded => (8, [0; 6]),
+        Command::Saved => (9, [0; 6]),
+        Command::Forget(peer) => (10, peer),
         Command::Disconnect(Some(peer)) => (7, peer),
     };
     let mut request = [0; 11];
@@ -83,6 +87,8 @@ pub fn decode(request: [u8; 11]) -> Result<(u32, Command, bool)> {
         5 if peer == [0; 6] => Command::Disconnect(None),
         6 if peer == [0; 6] => Command::Devices,
         8 if peer == [0; 6] => Command::Bonded,
+        9 if peer == [0; 6] => Command::Saved,
+        10 if peer != [0; 6] && peer != [255; 6] => Command::Forget(peer),
         7 if peer != [0; 6] && peer != [255; 6] => Command::Disconnect(Some(peer)),
         _ => return Err("invalid Bluetooth service request".into()),
     };

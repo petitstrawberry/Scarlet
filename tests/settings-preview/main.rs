@@ -18,6 +18,38 @@ use std::thread;
 #[path = "../../user/bin/src/settings_views.rs"]
 mod settings_views;
 use settings_views::*;
+// Only the data model is shared with Display. All service callbacks stay local.
+#[allow(dead_code)]
+#[path = "../../user/bin/src/settings_display_editor.rs"]
+mod settings_display_editor;
+mod settings_displays {
+    use super::*;
+    pub(super) use settings_display_editor::{Editor, SCALES};
+    pub(super) fn canvas(_: State<Editor>) -> impl View + Clone {
+        Text::new("Display arrangement unavailable in this fixture")
+    }
+    pub(super) fn apply(editor: &State<Editor>) {
+        editor.update(|e| e.status = "Fixture display settings applied.".into());
+    }
+}
+extern crate self as scarlet_os;
+mod wireless_service {
+    pub const SCAN: u8 = 2;
+    pub const CONNECT: u8 = 3;
+    pub const DISCONNECT: u8 = 4;
+    pub const FORGET: u8 = 5;
+    #[derive(Clone)]
+    pub struct Network {
+        pub ssid: Vec<u8>,
+        pub signal: i32,
+        pub frequency: u32,
+    }
+}
+#[derive(Clone)]
+struct Interface {
+    label: String,
+    detail: String,
+}
 #[derive(Clone, Debug)]
 struct CursorThemeInfo {
     name: String,
@@ -93,7 +125,28 @@ fn system_description() -> (String, String, String, String) {
 #[derive(Clone, View)]
 struct SettingsApp {
     bluetooth: State<settings_bluetooth::Panel>,
-    bluetooth_index: State<usize>,
+    display_editor: State<settings_displays::Editor>,
+    display_output_index: State<usize>,
+    display_role_index: State<usize>,
+    display_scale_index: State<usize>,
+    display_experience_index: State<usize>,
+    display_resolution_index: State<usize>,
+    wifi_networks: State<Vec<wireless_service::Network>>,
+    wifi_index: State<usize>,
+    wifi_ssid: State<String>,
+    wifi_password: State<String>,
+    wifi_status: State<String>,
+    wifi_show_password: State<bool>,
+    wifi_can_scan: State<bool>,
+    network_interfaces: State<Vec<Interface>>,
+    network_index: State<usize>,
+    network_method: State<usize>,
+    network_address: State<String>,
+    network_gateway: State<String>,
+    network_dns: State<String>,
+    network_metric: State<String>,
+    network_status: State<String>,
+    network_routes: State<String>,
     background_style_index: State<usize>,
     background_preset_index: State<usize>,
     background_status: State<String>,
@@ -140,7 +193,10 @@ impl SettingsApp {
     fn fixture(empty: bool) -> Self {
         scarlet_bluetooth::initialize(empty);
         let app = Self::default();
-        app.bluetooth_index.set(usize::MAX);
+        app.display_editor
+            .update(|editor| editor.status = "No fixture display connected.".into());
+        app.network_routes
+            .set("No fixture network interfaces.".into());
         app.red_value.set(40.0);
         app.green_value.set(40.0);
         app.blue_value.set(50.0);
@@ -219,6 +275,16 @@ impl SettingsApp {
     fn set_display_brightness_percent(&self, value: u32) {
         self.display_brightness_status
             .set(format!("Fixture brightness: {value}%"));
+    }
+    fn select_network(&self, index: usize) {
+        self.network_index.set(index);
+    }
+    fn apply_network(&self) {
+        self.network_status
+            .set("Fixture network settings applied.".into());
+    }
+    fn wifi_action(&self, _: u8) {
+        self.wifi_status.set("No fixture Wi-Fi adapter.".into());
     }
     fn set_output_scale(&self, _: usize) {
         self.output_scale_status
@@ -301,3 +367,6 @@ fn main() {
     let mut app = SettingsApp::fixture(std::env::args().any(|a| a == "--empty"));
     app.run().unwrap();
 }
+
+#[cfg(test)]
+mod bluetooth_ui;

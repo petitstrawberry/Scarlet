@@ -7,6 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
+sws-protocol = { path = "../../user/lib/sws-protocol", default-features = false, features = ["std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "f34c25e335ae77d2fc3bceb999421e95c56c1618", default-features = false, features = ["std", "platform-winit"] }
 scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "f34c25e335ae77d2fc3bceb999421e95c56c1618" }
 scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config", default-features = false, features = ["std"] }

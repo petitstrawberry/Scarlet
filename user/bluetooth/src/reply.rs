@@ -7,6 +7,8 @@ use std::fmt::Write;
 pub(crate) enum Reply {
     Status(Status),
     Scan(Vec<DiscoveredPeer>),
+    Saved(Vec<DiscoveredPeer>),
+    Forgotten(()),
     Devices(Vec<ConnectedPeer>),
     Bonded(Vec<Address>),
 }
@@ -28,7 +30,7 @@ fn peer_text(
 }
 
 pub(crate) fn status_text(s: &Status) -> String {
-    format!(
+    let mut text = format!(
         "adapter={} ready={} busy={} scanning={} found={} generation={}\n{}",
         s.adapter,
         s.ready,
@@ -44,7 +46,11 @@ pub(crate) fn status_text(s: &Status) -> String {
             s.key_readable,
             s.last_error
         )
-    )
+    );
+    if let Some(mode) = s.hid_reconnect_mode {
+        write!(text, " hid-reconnect-mode={mode}").unwrap();
+    }
+    text
 }
 
 fn name_text(name: Option<&str>) -> String {
@@ -63,15 +69,25 @@ impl Reply {
                 }
                 text.push_str(&status_text(s));
             }
-            Self::Scan(rows) => {
+            Self::Scan(rows) | Self::Saved(rows) => {
                 for row in rows {
                     writeln!(text, "{}  {}", row.address, name_text(row.name.as_deref())).unwrap();
                 }
-                write!(text, "{} device(s) found", rows.len()).unwrap();
+                let verb = if matches!(self, Self::Saved(_)) {
+                    "saved"
+                } else {
+                    "found"
+                };
+                write!(text, "{} device(s) {verb}", rows.len()).unwrap();
+            }
+            Self::Forgotten(()) => {
+                if let Command::Forget(peer) = cmd {
+                    write!(text, "forgot {}", Address(peer)).unwrap();
+                }
             }
             Self::Devices(rows) => {
                 for row in rows {
-                    writeln!(
+                    write!(
                         text,
                         "{} name={}",
                         peer_text(
@@ -85,6 +101,10 @@ impl Reply {
                         name_text(row.name.as_deref())
                     )
                     .unwrap();
+                    if let Some(mode) = row.hid_reconnect_mode {
+                        write!(text, " hid-reconnect-mode={mode}").unwrap();
+                    }
+                    text.push('\n');
                 }
                 write!(text, "{} device(s) connected", rows.len()).unwrap();
             }

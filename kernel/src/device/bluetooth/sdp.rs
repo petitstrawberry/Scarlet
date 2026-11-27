@@ -23,6 +23,8 @@ pub struct DeviceId {
 pub struct HidService {
     pub control_psm: u16,
     pub interrupt_psm: u16,
+    /// Bit 0: device initiates reconnect. Bit 1: host can initiate reconnect.
+    pub reconnect_mode: u8,
     pub report_descriptor: Vec<u8>,
     pub device_id: Option<DeviceId>,
 }
@@ -232,6 +234,14 @@ impl<'a> Record<'a> {
         self.get(id)?.ok_or(())
     }
 
+    fn boolean(&self, id: u16, default: bool) -> Result<bool, ()> {
+        match self.get(id)? {
+            None => Ok(default),
+            Some(Element { kind: 5, data: [v] }) => Ok(*v != 0),
+            _ => Err(()),
+        }
+    }
+
     fn has_class(&self, uuid: u16) -> Result<bool, ()> {
         let mut list = self.require(1)?.sequence()?;
         let mut found = false;
@@ -280,6 +290,8 @@ impl<'a> Record<'a> {
         Ok(HidService {
             control_psm,
             interrupt_psm,
+            reconnect_mode: u8::from(self.boolean(0x0205, true)?)
+                | (u8::from(self.boolean(0x020d, false)?) << 1),
             report_descriptor: report.ok_or(())?.to_vec(),
             device_id: None,
         })
@@ -290,11 +302,7 @@ impl<'a> Record<'a> {
         if !matches!(vendor_id_source, 1 | 2) {
             return Err(());
         }
-        let primary = match self.get(0x204)? {
-            None => false,
-            Some(Element { kind: 5, data: [v] }) => *v != 0,
-            _ => return Err(()),
-        };
+        let primary = self.boolean(0x204, false)?;
         Ok((
             DeviceId {
                 vendor_id_source,
@@ -326,9 +334,13 @@ fn hid_psm(list: Element<'_>) -> Result<Option<u16>, ()> {
 
 pub(super) fn valid_hid_psms(control: u16, interrupt: u16) -> bool {
     fn valid(psm: u16, assigned: u16) -> bool {
-        psm == assigned || (psm >= 0x1001 && psm & 0x0101 == 1)
+        psm == assigned || dynamic_psm(psm)
     }
     control != interrupt && valid(control, 0x11) && valid(interrupt, 0x13)
+}
+
+pub(super) fn dynamic_psm(psm: u16) -> bool {
+    psm >= 0x1001 && psm & 0x0101 == 1
 }
 
 #[cfg(all(test, not(target_os = "none")))]

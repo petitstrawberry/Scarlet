@@ -25,16 +25,34 @@ fn protocol(psm: u16) -> Vec<u8> {
     seq(&[seq(&[uuid(0x100), num(psm)]), seq(&[uuid(0x11)])])
 }
 fn hid_record(control: u16, interrupt: u16, descriptor: &[u8]) -> Vec<u8> {
-    seq(&[
+    hid_with_flags(control, interrupt, descriptor, None, None)
+}
+fn hid_with_flags(
+    control: u16,
+    interrupt: u16,
+    descriptor: &[u8],
+    reconnect: Option<Vec<u8>>,
+    connectable: Option<Vec<u8>>,
+) -> Vec<u8> {
+    let mut attrs = vec![
         num(1),
         seq(&[uuid(HID)]),
         num(4),
         protocol(control),
         num(0x0d),
         seq(&[protocol(interrupt)]),
+    ];
+    if let Some(value) = reconnect {
+        attrs.extend([num(0x0205), value]);
+    }
+    attrs.extend([
         num(0x206),
         seq(&[seq(&[vec![8, 0x22], variable(4, descriptor)])]),
-    ])
+    ]);
+    if let Some(value) = connectable {
+        attrs.extend([num(0x020d), value]);
+    }
+    seq(&attrs)
 }
 fn identity(source: u16, primary: bool) -> Vec<u8> {
     seq(&[
@@ -88,6 +106,25 @@ fn query(id: u16, class: u16, token: &[u8]) -> Vec<u8> {
     ];
     out.extend_from_slice(token);
     out
+}
+
+#[test]
+fn hid_reconnect_mode_uses_sdp_booleans_and_profile_defaults() {
+    let boolean = |value: bool| vec![0x28, u8::from(value)];
+    for device in [None, Some(false), Some(true)] {
+        for host in [None, Some(false), Some(true)] {
+            let bytes = hid_with_flags(0x11, 0x13, &[1], device.map(boolean), host.map(boolean));
+            let service = Record::take(&mut bytes.as_slice()).unwrap().hid().unwrap();
+            assert_eq!(
+                service.reconnect_mode,
+                u8::from(device.unwrap_or(true)) | (u8::from(host.unwrap_or(false)) << 1)
+            );
+        }
+    }
+    for (device, host) in [(Some(num(1)), None), (None, Some(num(0)))] {
+        let bytes = hid_with_flags(0x11, 0x13, &[1], device, host);
+        assert!(Record::take(&mut bytes.as_slice()).unwrap().hid().is_err());
+    }
 }
 
 #[test]
@@ -249,15 +286,19 @@ fn l2cap_pdu(cid: u16, data: &[u8]) -> Vec<u8> {
     ]
     .concat()
 }
-fn signal(session: &mut L2capSession, code: u8, id: u8, params: &[u16]) {
+fn command(code: u8, id: u8, params: &[u16]) -> Vec<u8> {
     let params: Vec<u8> = params.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let body = [
+    [
         &[code, id][..],
         &(params.len() as u16).to_le_bytes(),
         &params,
     ]
-    .concat();
-    session.receive_acl(2, &l2cap_pdu(1, &body)).unwrap();
+    .concat()
+}
+fn signal(session: &mut L2capSession, code: u8, id: u8, params: &[u16]) {
+    session
+        .receive_acl(2, &l2cap_pdu(1, &command(code, id, params)))
+        .unwrap();
 }
 fn pop_signal(session: &mut L2capSession, code: u8, params: &[u16]) -> u8 {
     let packet = session.poll_acl(1024).unwrap().data;
@@ -273,6 +314,9 @@ fn pop_signal(session: &mut L2capSession, code: u8, params: &[u16]) -> u8 {
 }
 const LOCAL: u16 = 0x42;
 const PEER: u16 = 0x87;
+const REPORT_DESCRIPTOR: &[u8] = &[
+    0x06, 0x00, 0xff, 0x09, 0x02, 0xa1, 0x01, 0x75, 8, 0x95, 1, 0x81, 2, 0xc0,
+];
 
 fn configured_sdp(handle: u16) -> L2capSession {
     let mut s = L2capSession::discover(handle, DEFAULT_MTU).unwrap();
@@ -295,17 +339,17 @@ fn configured_sdp(handle: u16) -> L2capSession {
 fn simultaneous_acl_discovery_closes_before_publishing_and_uses_discovered_psms() {
     let mut hid = configured_sdp(5);
     let mut other = configured_sdp(6);
-    // Neither SDP session accepts an inbound HID connection during discovery.
+    // A pending open belongs to the ACL on which the peer sent it.
     signal(&mut other, 2, 8, &[0x11, 0x99]);
-    assert_eq!(pop_signal(&mut other, 3, &[0, 0x99, 2, 0]), 8);
-    let descriptor = [0x06, 0, 0xff, 0x09, 1];
-    let records = seq(&[hid_record(0x1001, 0x1003, &descriptor)]);
+    assert_eq!(pop_signal(&mut other, 3, &[0, 0x99, 1, 0]), 8);
+    let records = seq(&[hid_record(0x1001, 0x1003, REPORT_DESCRIPTOR)]);
     let yes = l2cap_pdu(LOCAL, &response(1, &records, &[]));
     let no = l2cap_pdu(LOCAL, &response(1, &seq(&[]), &[]));
     hid.receive_acl(2, &yes[..3]).unwrap();
     other.receive_acl(2, &no[..2]).unwrap();
     hid.receive_acl(1, &yes[3..]).unwrap();
     other.receive_acl(1, &no[2..]).unwrap();
+    assert_eq!(pop_signal(&mut other, 3, &[0, 0x99, 2, 0]), 8);
     let id = pop_signal(&mut other, 6, &[PEER, LOCAL]);
     assert!(other.poll_event().is_none());
     signal(&mut other, 7, id, &[PEER, LOCAL]);
@@ -323,15 +367,19 @@ fn simultaneous_acl_discovery_closes_before_publishing_and_uses_discovered_psms(
     let id = pop_signal(&mut hid, 6, &[PEER, LOCAL]);
     signal(&mut hid, 7, id.wrapping_add(1), &[PEER, LOCAL]);
     assert!(hid.poll_event().is_none());
-    signal(&mut hid, 7, id, &[PEER, LOCAL]);
+    // A peer can bundle an inbound open after the SDP disconnect response.
+    let cmds = [command(7, id, &[PEER, LOCAL]), command(2, 9, &[0x11, 0x99])].concat();
+    hid.receive_acl(2, &l2cap_pdu(1, &cmds)).unwrap();
+    assert!(hid.poll_event().is_none());
+    assert_eq!(pop_signal(&mut hid, 3, &[0, 0x99, 1, 0]), 9);
     let Some(Event::Discovered(Some(service))) = hid.poll_event() else {
         panic!("discovery incomplete")
     };
     assert_eq!(service.device_id.unwrap().vendor_id_source, 1);
-    assert_eq!(service.report_descriptor, descriptor);
-    let mut hid =
-        L2capSession::for_hid(5, DEFAULT_MTU, service.control_psm, service.interrupt_psm).unwrap();
-    hid.start().unwrap();
+    assert_eq!(service.report_descriptor, REPORT_DESCRIPTOR);
+    hid.open_discovered_hid().unwrap();
+    // SDP advertises dynamic PSMs, so the assigned control PSM is refused.
+    assert_eq!(pop_signal(&mut hid, 3, &[0, 0x99, 2, 0]), 9);
     for (psm, local, peer) in [(0x1001, 0x40, 0x90), (0x1003, 0x41, 0x91)] {
         let id = pop_signal(&mut hid, 2, &[psm, local]);
         signal(&mut hid, 3, id, &[peer, local, 0, 0]);
@@ -342,6 +390,87 @@ fn simultaneous_acl_discovery_closes_before_publishing_and_uses_discovered_psms(
     }
     assert_eq!(hid.poll_event(), Some(Event::Ready));
     assert_eq!(hid.interrupt_tx_mtu(), Some(100));
+}
+
+fn accepted_hid_channel(s: &mut L2capSession, id: u8, local: u16, peer: u16) -> u8 {
+    assert_eq!(pop_signal(s, 3, &[local, peer, 0, 0]), id);
+    pop_signal(s, 4, &[peer, 0, 0x0201, DEFAULT_MTU])
+}
+
+#[test]
+fn waking_peer_initiates_hid_channels_while_sdp_is_in_flight() {
+    for (control, interrupt, early_interrupt) in [(0x11, 0x13, false), (0x1003, 0x1001, true)] {
+        let mut s = configured_sdp(5);
+        signal(&mut s, 2, 40, &[control, 0x90]);
+        assert_eq!(pop_signal(&mut s, 3, &[0, 0x90, 1, 0]), 40);
+        let records = seq(&[hid_record(control, interrupt, REPORT_DESCRIPTOR)]);
+        s.receive_acl(2, &l2cap_pdu(LOCAL, &response(1, &records, &[])))
+            .unwrap();
+        assert_eq!(
+            s.poll_acl(1024).unwrap().data,
+            l2cap_pdu(PEER, &query(2, PNP, &[]))
+        );
+        s.receive_acl(2, &l2cap_pdu(LOCAL, &response(2, &seq(&[]), &[])))
+            .unwrap();
+        let close = pop_signal(&mut s, 6, &[PEER, LOCAL]);
+        if early_interrupt {
+            // Discovery also covers the interval waiting for the SDP disconnect response.
+            signal(&mut s, 2, 41, &[interrupt, 0x91]);
+            assert_eq!(pop_signal(&mut s, 3, &[0, 0x91, 1, 0]), 41);
+        }
+        assert!(s.poll_event().is_none());
+        assert!(s.poll_acl(1024).is_none());
+        signal(&mut s, 7, close, &[PEER, LOCAL]);
+        let Some(Event::Discovered(Some(service))) = s.poll_event() else {
+            panic!("missing HID service");
+        };
+        assert_eq!(service.report_descriptor, REPORT_DESCRIPTOR);
+        assert!(!s.is_ready());
+        assert!(s.poll_acl(1024).is_none());
+        s.open_discovered_hid().unwrap();
+        let ctrl_cfg = accepted_hid_channel(&mut s, 40, 0x40, 0x90);
+        let intr_cfg = early_interrupt.then(|| accepted_hid_channel(&mut s, 41, 0x41, 0x91));
+        signal(&mut s, 5, ctrl_cfg, &[0x40, 0, 0]);
+        signal(&mut s, 4, 42, &[0x40, 0]);
+        pop_signal(&mut s, 5, &[0x90, 0, 0]);
+        assert!(s.poll_event().is_none());
+        assert!(s.poll_acl(1024).is_none());
+        let intr_cfg = intr_cfg.unwrap_or_else(|| {
+            signal(&mut s, 2, 41, &[interrupt, 0x91]);
+            accepted_hid_channel(&mut s, 41, 0x41, 0x91)
+        });
+        signal(&mut s, 5, intr_cfg, &[0x41, 0, 0]);
+        signal(&mut s, 4, 43, &[0x41, 0]);
+        pop_signal(&mut s, 5, &[0x91, 0, 0]);
+        assert_eq!(s.poll_event(), Some(Event::Ready));
+        s.receive_acl(2, &l2cap_pdu(0x41, &[0xa1, 0x03])).unwrap();
+        assert_eq!(s.poll_event(), Some(Event::Interrupt(vec![0xa1, 0x03])));
+    }
+}
+
+#[test]
+fn pending_opens_are_bounded_and_receive_final_refusals_on_cancel() {
+    let mut s = configured_sdp(5);
+    for (id, psm, peer, result) in [
+        (10, 0x11, 1, 6),    // Invalid CID.
+        (11, 0x11, PEER, 7), // SDP's CID.
+        (12, 0x0f, 0x90, 2), // Assigned to another service.
+        (13, 0x11, 0x90, 1),
+        (13, 0x11, 0x90, 1), // Retransmission uses the same slot.
+        (14, 0x11, 0x91, 4), // Second request for the same PSM.
+        (15, 0x13, 0x90, 7), // Same CID on a different PSM.
+        (16, 0x13, 0x91, 1),
+        (17, 0x1001, 0x92, 4), // Both slots occupied.
+    ] {
+        signal(&mut s, 2, id, &[psm, peer]);
+        assert_eq!(pop_signal(&mut s, 3, &[0, peer, result, 0]), id);
+    }
+    s.disconnect().unwrap(); // Also used when the profile deadline expires.
+    assert_eq!(pop_signal(&mut s, 3, &[0, 0x90, 4, 0]), 13);
+    assert_eq!(pop_signal(&mut s, 3, &[0, 0x91, 4, 0]), 16);
+    let id = pop_signal(&mut s, 6, &[PEER, LOCAL]);
+    signal(&mut s, 7, id, &[PEER, LOCAL]);
+    assert_eq!(s.poll_event(), Some(Event::Closed(CloseReason::Local)));
 }
 
 #[test]

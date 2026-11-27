@@ -965,7 +965,6 @@ fn save_timezone(zone: &str) -> core::result::Result<(), TimezoneCommitError> {
 #[derive(View, Clone)]
 struct SettingsApp {
     bluetooth: State<settings_bluetooth::Panel>,
-    bluetooth_index: State<usize>,
     display_editor: State<settings_displays::Editor>,
     display_output_index: State<usize>,
     display_role_index: State<usize>,
@@ -1069,7 +1068,6 @@ impl SettingsApp {
         let (output_scale_index, output_scale_status) = load_output_scale();
         let app = Self {
             bluetooth: State::new(StateId::new(126), settings_bluetooth::Panel::default()),
-            bluetooth_index: State::new(StateId::new(127), usize::MAX),
             display_editor: State::new(StateId::new(120), settings_displays::Editor::new()),
             display_output_index: State::new(StateId::new(121), 0),
             display_role_index: State::new(StateId::new(125), 0),

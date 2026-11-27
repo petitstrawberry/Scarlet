@@ -927,3 +927,65 @@ fn local_close_timeout_is_per_peer_and_addressed_retry_waits_for_physical_comple
     h.event(0x17, &OTHER);
     h.expect_key(OTHER, SECOND_KEY);
 }
+
+#[test]
+fn outgoing_page_timeout_releases_the_operation_and_preserves_incoming_listen() {
+    let mut h = Host::ready();
+    h.sm.accept_saved = true;
+    h.cmd(WRITE_SCAN_ENABLE);
+    h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
+    h.sm.provide_link_key(PAD, KEY);
+    h.sm.reconnect(PAD).unwrap();
+    h.cmd(CREATE);
+    h.status(CREATE, 0);
+    let mut failed = [0; 11];
+    failed[0] = 4;
+    failed[3..9].copy_from_slice(&PAD);
+    failed[9] = 1;
+    h.event(3, &failed);
+    assert!(matches!(
+        h.poll(),
+        Some(Action::ConnectionFailed {
+            address: PAD,
+            reason: Reason::Hci(4)
+        })
+    ));
+    assert!(h.poll().is_none());
+    assert!(h.sm.accept_incoming(PAD, KEY).is_ok());
+}
+
+#[test]
+fn remote_wake_uses_registered_key_and_requires_encryption() {
+    let mut h = Host::ready();
+    assert!(h.sm.accept_incoming(PAD, KEY).is_err());
+    h.sm.accept_saved = true;
+    assert_eq!(h.cmd(WRITE_SCAN_ENABLE).params(), &[2]);
+    h.complete(WRITE_SCAN_ENABLE, 1, &[0]);
+    let mut req = [0; 10];
+    req[..6].copy_from_slice(&OTHER);
+    req[9] = 1;
+    h.event(4, &req);
+    assert!(matches!(h.poll(), Some(Action::IncomingAcl(OTHER))));
+    h.sm.reject_incoming(OTHER);
+    h.cmd(REJECT);
+    h.status(REJECT, 0);
+    req[..6].copy_from_slice(&PAD);
+    h.event(4, &req);
+    assert!(matches!(h.poll(), Some(Action::IncomingAcl(PAD))));
+    h.sm.accept_incoming(PAD, KEY).unwrap();
+    h.cmd(ACCEPT);
+    h.status(ACCEPT, 0);
+    h.connected(PAD, HANDLE);
+    h.cmd(AUTHENTICATE);
+    h.status(AUTHENTICATE, 0);
+    h.event(0x17, &PAD);
+    h.expect_key(PAD, KEY);
+    h.secure();
+    assert!(matches!(
+        h.poll(),
+        Some(Action::LinkUp {
+            address: PAD,
+            handle: HANDLE
+        })
+    ));
+}

@@ -12,6 +12,12 @@ pub const UNPLUG: u32 = 0x4251_0030;
 pub const CONNECTION_REQUESTS: u32 = 0x4251_0040;
 pub const OPEN_CHANNELS: u32 = 0x4251_0050;
 pub const OUTPUT_COUNT: u32 = 0x4251_0060;
+pub const FAIL_DISCONNECT: u32 = 0x4251_0070;
+pub const WAKE: u32 = 0x4251_0080;
+pub const PAGE_SCAN_ENABLED: u32 = 0x4251_0090;
+pub const REJECTED_PAGES: u32 = 0x4251_00a0;
+pub const CONTROLLER_FAULT: u32 = 0x4251_00b0;
+pub const HOST_PAGES: u32 = 0x4251_00c0;
 
 // Numbered keyboard input plus two vendor-defined Output reports.
 pub const DESCRIPTOR: &[u8] = &[

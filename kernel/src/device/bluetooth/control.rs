@@ -14,7 +14,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     any::Any,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use scarlet_abi::bluetooth as abi;
 use zeroize::Zeroizing;
@@ -24,6 +24,7 @@ pub(super) enum Request {
     Pair(Address),
     Connect(Address, Option<Zeroizing<[u8; 16]>>),
     Disconnect(Address),
+    EvictKey(Address),
 }
 
 // Retain recent operation results even when a connection attempt never reached LinkUp.
@@ -35,6 +36,7 @@ struct PeerState {
     generation: u32,
     flags: u32,
     error: u32,
+    hid_reconnect_mode: u8,
     pairing_owner: usize,
     key: Option<(u8, Zeroizing<[u8; 16]>)>,
 }
@@ -83,6 +85,8 @@ pub(super) struct State {
     selected: Option<Address>,
     generation: u32,
     link_generation: u32,
+    adapter_generation: u64,
+    bonds: alloc::collections::BTreeMap<Address, Zeroizing<[u8; 16]>>,
 }
 
 fn next_generation(value: u32) -> u32 {
@@ -109,6 +113,8 @@ impl State {
             selected: None,
             generation: 0,
             link_generation: 1,
+            adapter_generation: 0,
+            bonds: Default::default(),
         }
     }
 
@@ -117,6 +123,8 @@ impl State {
     }
 
     pub fn ready(&mut self, adapter: Address) {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        self.adapter_generation = NEXT.fetch_add(1, Ordering::Relaxed);
         self.adapter = adapter;
         self.flags = abi::READY;
         self.error = 0;
@@ -150,6 +158,7 @@ impl State {
 
     pub fn connected(&mut self, address: Address) {
         if let Some(peer) = self.peer_mut(address) {
+            peer.hid_reconnect_mode = 0;
             peer.flags = abi::CONNECTED | abi::ENCRYPTED;
             self.finish_peer(address, 0);
         }
@@ -168,6 +177,15 @@ impl State {
             self.error = error;
         }
         self.changed();
+    }
+
+    pub fn set_hid_reconnect_mode(&mut self, address: Address, mode: u8) {
+        if let Some(peer) = self.peer_mut(address)
+            && peer.hid_reconnect_mode != mode
+        {
+            peer.hid_reconnect_mode = mode;
+            self.changed();
+        }
     }
 
     pub fn profile_ready(&mut self, address: Address, ready: bool) {
@@ -205,6 +223,7 @@ impl State {
     }
 
     pub fn lost_controller(&mut self) {
+        self.bonds.clear();
         self.request = None;
         self.adapter = [0; 6];
         self.selected = None;
@@ -272,6 +291,30 @@ impl State {
         Ok(Some(address))
     }
 
+    pub fn has_bonds(&self) -> bool {
+        !self.bonds.is_empty()
+    }
+
+    pub fn begin_incoming(&mut self, address: Address, classic: &mut super::classic::Classic) {
+        if self.target(abi::CONNECT, address).is_ok()
+            && let Some(key) = self.bonds.get(&address)
+            && classic.accept_incoming(address, **key).is_ok()
+        {
+            self.begin(
+                abi::CONNECT,
+                Some(address),
+                0,
+                next_generation(self.generation),
+            );
+        } else {
+            classic.reject_incoming(address);
+        }
+    }
+
+    pub fn remove_bond(&mut self, address: Address) {
+        self.bonds.remove(&address);
+    }
+
     // Called under the same lock as target(), after the reply buffer was checked.
     fn begin(&mut self, cmd: u32, target: Option<Address>, owner: usize, generation: u32) {
         self.selected = target;
@@ -294,6 +337,7 @@ impl State {
                 flags: 0,
                 error: 0,
                 generation,
+                hid_reconnect_mode: 0,
                 pairing_owner: 0,
                 key: None,
             });
@@ -321,6 +365,7 @@ impl State {
         let flags = (self.flags & abi::READY) | peer.flags_for(owner);
         output[abi::FLAGS].copy_from_slice(&flags.to_le_bytes());
         output[abi::LAST_ERROR].copy_from_slice(&peer.error.to_le_bytes());
+        output[abi::HID_RECONNECT_MODE] = peer.hid_reconnect_mode;
         write_name(output, peer.name);
     }
 }
@@ -420,6 +465,25 @@ impl ControlOps for Endpoint {
         let mut state = self.shared.state.lock();
         let mut reply_generation = state.generation;
         match cmd {
+            abi::REGISTER_BOND => {
+                let expected: Address = input[abi::ADAPTER].try_into().unwrap();
+                if state.flags & abi::READY == 0
+                    || (expected != [0; 6] && expected != state.adapter)
+                    || addr == [0; 6]
+                    || addr == [255; 6]
+                    || addr == state.adapter
+                    || !matches!(input[abi::KEY_TYPE], 4 | 5 | 6 | 7 | 8)
+                {
+                    return Err("invalid saved Bluetooth bond");
+                }
+                copy_to_user(&task, arg, &output[..]).map_err(|_| "invalid Bluetooth output")?;
+                let key = Zeroizing::new(input[abi::KEY].try_into().unwrap());
+                state.bonds.insert(addr, key);
+                self.shared.queued.store(true, Ordering::Release);
+                drop(state);
+                self.shared.wake.wake_one();
+                return Ok(0);
+            }
             abi::STATUS => {
                 let peer = state
                     .selected
@@ -433,7 +497,10 @@ impl ControlOps for Endpoint {
                         flags |= peer.flags_for(self.id) & abi::KEY_READABLE;
                     }
                     output[abi::PEER].copy_from_slice(&peer.address);
+                    output[abi::HID_RECONNECT_MODE] = peer.hid_reconnect_mode;
                 }
+                output[abi::ADAPTER_GENERATION]
+                    .copy_from_slice(&state.adapter_generation.to_le_bytes());
                 output[abi::FLAGS].copy_from_slice(&flags.to_le_bytes());
                 output[abi::ADAPTER].copy_from_slice(&state.adapter);
                 output[abi::COUNT].copy_from_slice(&(state.peers.len() as u16).to_le_bytes());
@@ -477,15 +544,22 @@ impl ControlOps for Endpoint {
                 peer.read_key(self.id, generation, &mut output)?;
                 reply_generation = generation;
             }
-            abi::SCAN_START | abi::PAIR | abi::CONNECT | abi::DISCONNECT | abi::DISCONNECT_PEER => {
+            abi::SCAN_START
+            | abi::PAIR
+            | abi::CONNECT
+            | abi::DISCONNECT
+            | abi::DISCONNECT_PEER
+            | abi::EVICT_KEY => {
                 let target = state.target(cmd, addr)?;
                 let request = match (cmd, target) {
                     (abi::SCAN_START, None) => Request::Scan,
                     (abi::PAIR, Some(addr)) => Request::Pair(addr),
+                    (abi::EVICT_KEY, Some(addr)) => Request::EvictKey(addr),
                     (abi::CONNECT, Some(addr)) => {
                         let flags = u32::from_le_bytes(input[abi::FLAGS].try_into().unwrap());
                         let key = (flags & abi::KEY_SUPPLIED != 0)
-                            .then(|| Zeroizing::new(input[abi::KEY].try_into().unwrap()));
+                            .then(|| Zeroizing::new(input[abi::KEY].try_into().unwrap()))
+                            .or_else(|| state.bonds.get(&addr).cloned());
                         Request::Connect(addr, key)
                     }
                     (_, Some(addr)) => Request::Disconnect(addr),

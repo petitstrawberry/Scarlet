@@ -50,6 +50,8 @@ fn attributes(service: u16, supported: bool) -> Vec<u8> {
                 sequence(&[protocols(0x0013)]),
                 uint(0x0206),
                 sequence(&[sequence(&[vec![0x08, 0x22], report])]),
+                uint(0x020d), // HIDNormallyConnectable, plus the default device-initiated role
+                vec![0x28, 1],
             ]);
         }
         DEVICE_ID => fields.extend([

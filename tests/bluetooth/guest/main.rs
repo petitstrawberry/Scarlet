@@ -1,5 +1,5 @@
 //! Production Bluetooth broker, SDP, generic HID input and raw report checks.
-use scarlet_abi::{fs::VFS_O_RDWR, hidraw};
+use scarlet_abi::{bluetooth as bt, fs::VFS_O_RDWR, hidraw};
 use scarlet_bluetooth::{Address, Client};
 use scarlet_os::{Handle, InputDevice, Socket, handle::capability::StreamError};
 use std::{
@@ -13,9 +13,15 @@ use std::{
 mod wire;
 
 const ADDR: [&str; 2] = ["02:00:00:00:00:10", "02:00:00:00:00:20"];
+const OTHER_KEY: &str = "/etc/bluetooth-020000000001-020000000020.bond";
+const OTHER_NAME_FILE: &str = "/etc/bluetooth-020000000001-020000000020.name";
 
 fn wait<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    wait_for(what, Duration::from_secs(8), &mut check)
+}
+
+fn wait_for<T>(what: &str, timeout: Duration, mut check: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(value) = check() {
             return value;
@@ -170,6 +176,7 @@ fn login_client(mode: &str) {
     assert_eq!(status.adapter, Address(wire::ADAPTER));
     if mode == "pair" {
         assert!(client.bonded().unwrap().is_empty());
+        assert!(client.saved().unwrap().is_empty());
         assert_eq!(client.status().unwrap().generation, status.generation);
         assert!(
             client
@@ -182,6 +189,12 @@ fn login_client(mode: &str) {
         assert!(paired.connected && paired.encrypted && !paired.key_readable);
         return;
     }
+    if mode == "forget" {
+        client.forget(other).unwrap();
+        assert!(client.connect(other).unwrap_err().contains("no saved key"));
+        assert_eq!(client.bonded().unwrap(), [Address(wire::HID_ADDR)]);
+        return;
+    }
     assert_eq!(mode, "reconnect");
     assert_eq!(client.list().unwrap().len(), 2);
     let down = client.disconnect(Some(other)).unwrap();
@@ -189,6 +202,13 @@ fn login_client(mode: &str) {
     let saved = client.bonded().unwrap();
     assert_eq!(saved.len(), 2);
     assert!(saved.contains(&other));
+    assert!(
+        client
+            .saved()
+            .unwrap()
+            .iter()
+            .any(|p| p.address == other && p.name.as_deref() == Some(wire::OTHER_NAME))
+    );
     assert_eq!(client.status().unwrap().generation, down.generation);
     assert!(
         client
@@ -197,7 +217,8 @@ fn login_client(mode: &str) {
             .iter()
             .all(|peer| peer.address != other)
     );
-    assert!(std::fs::File::open("/etc/bluetooth-020000000001-020000000020.bond").is_err());
+    assert!(std::fs::File::open(OTHER_KEY).is_err());
+    assert!(std::fs::File::open(OTHER_NAME_FILE).is_err());
     let up = client.connect(other).unwrap();
     assert_eq!(up.peer, Some(other));
     assert!(up.connected && up.encrypted);
@@ -213,20 +234,193 @@ fn as_login(mode: &str) {
     );
 }
 
+fn keyless_reconnect_fails(peer: bt::Address) {
+    // Exercise the kernel directly, bypassing the broker's missing-file check.
+    let controller = Handle::open("/dev/bluetooth0", VFS_O_RDWR as usize).unwrap();
+    let mut row = [0; bt::RECORD_SIZE];
+    row[bt::PEER].copy_from_slice(&peer);
+    let ctl =
+        |op, row: &mut bt::Record| unsafe { controller.control(op, row.as_mut_ptr() as usize) };
+    assert_eq!(ctl(bt::CONNECT, &mut row), Ok(0));
+    let generation = row[bt::GENERATION].to_vec();
+    wait("keyless reconnect rejected", || {
+        row.fill(0);
+        row[bt::PEER].copy_from_slice(&peer);
+        assert_eq!(ctl(bt::PEER_STATUS, &mut row), Ok(0));
+        assert_eq!(row[bt::GENERATION], generation);
+        let flags = u32::from_le_bytes(row[bt::FLAGS].try_into().unwrap());
+        if flags & bt::BUSY != 0 {
+            return None;
+        }
+        assert_eq!(flags & (bt::CONNECTED | bt::ENCRYPTED), 0);
+        assert_ne!(row[bt::LAST_ERROR], [0; 4]);
+        Some(())
+    });
+}
+
+fn registration_after_reset(radio: &Handle) {
+    let controller = Handle::open("/dev/bluetooth0", VFS_O_RDWR as usize).unwrap();
+    let ctl = |op, row: &mut bt::Record| {
+        unsafe { controller.control(op, row.as_mut_ptr() as usize) }.unwrap()
+    };
+    let epoch = || {
+        let mut row = [0; bt::RECORD_SIZE];
+        assert_eq!(ctl(bt::STATUS, &mut row), 0);
+        (u32::from_le_bytes(row[bt::FLAGS].try_into().unwrap()) & bt::READY != 0)
+            .then(|| u64::from_le_bytes(row[bt::ADAPTER_GENERATION].try_into().unwrap()))
+    };
+    let before = epoch().unwrap();
+    let scanning = || radio_get(radio, wire::PAGE_SCAN_ENABLED, wire::OTHER, 0) != 0;
+    // Withdraw only the controller registration, leaving the boot bond on disk.
+    // A worker that rereads keys on idle polls would re-enable page scan here.
+    let mut request = [0; bt::RECORD_SIZE];
+    request[bt::PEER].copy_from_slice(&wire::OTHER_ADDR);
+    assert_eq!(ctl(bt::EVICT_KEY, &mut request), 0);
+    wait("key evicted from idle controller", || {
+        (!scanning()).then_some(())
+    });
+    thread::sleep(Duration::from_secs(6));
+    assert!(!scanning(), "idle poll re-registered a key");
+    radio_get(radio, wire::CONTROLLER_FAULT, wire::OTHER, 0);
+    wait("adapter reinitialized", || epoch().filter(|e| *e != before));
+    wait("bond restored on new controller generation", || {
+        scanning().then_some(())
+    });
+}
+
+fn saved_and_forget(radio: &Handle) {
+    let client = Client::new(0);
+    let key_id = || {
+        Handle::open(OTHER_KEY, 0)
+            .unwrap()
+            .as_file()
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .file_id
+    };
+    let id = key_id();
+    assert_eq!(
+        std::fs::read_to_string(OTHER_NAME_FILE).unwrap(),
+        wire::OTHER_NAME
+    );
+    std::fs::remove_file(OTHER_NAME_FILE).unwrap(); // Original 17-byte bond, no sidecar.
+    let generation = client.status().unwrap().generation;
+    let saved = btctl(&["saved"]);
+    assert!(saved.contains(&format!("{}  \"{}\"", ADDR[1], wire::OTHER_NAME)));
+    assert_eq!(
+        std::fs::read_to_string(OTHER_NAME_FILE).unwrap(),
+        wire::OTHER_NAME
+    );
+    assert_eq!(key_id(), id);
+    assert_eq!(client.status().unwrap().generation, generation);
+
+    as_login("forget");
+    assert!(std::fs::metadata(OTHER_KEY).is_err() && std::fs::metadata(OTHER_NAME_FILE).is_err());
+    keyless_reconnect_fails(wire::OTHER_ADDR);
+    // Allow the manual-disconnect cooldown and a full registration pass.
+    // HID is still registered, so the controller is listening on the air.
+    thread::sleep(Duration::from_secs(6));
+    let rejected = radio_get(radio, wire::REJECTED_PAGES, wire::OTHER, 0);
+    assert_eq!(radio_get(radio, wire::WAKE, wire::OTHER, 0), 1);
+    wait("forgotten peer's incoming page rejected", || {
+        (radio_get(radio, wire::REJECTED_PAGES, wire::OTHER, 0) > rejected).then_some(())
+    });
+    assert_eq!(client.list().unwrap()[0].address, Address(wire::HID_ADDR));
+
+    // A failed HCI disconnect leaves a physical ACL quarantined. Both the
+    // initial request and an immediate retry must fail and preserve the bond.
+    let hid = Address(wire::HID_ADDR);
+    radio_get(radio, wire::FAIL_DISCONNECT, wire::HID, 0);
+    assert!(client.forget(hid).is_err());
+    assert!(client.forget(hid).is_err());
+    assert_eq!(client.bonded().unwrap(), [hid]);
+    radio_get(radio, wire::UNPLUG, wire::HID, 0);
+    wait("physical detach and eviction", || client.forget(hid).ok());
+    assert!(btctl(&["unpair", ADDR[0]]).contains("forgot"));
+    assert!(client.saved().unwrap().is_empty());
+    keyless_reconnect_fails(wire::HID_ADDR);
+    println!(
+        "BT_QA_FORGET_PASS named offline bonds, legacy migration, failed disconnect, retry and key eviction"
+    );
+}
+
+fn host_reconnect(radio: &Handle) {
+    let client = Client::new(0);
+    let hid = Address(wire::HID_ADDR);
+    assert!(btctl(&["devices"]).contains("hid-reconnect-mode=any"));
+    let pages = || radio_get(radio, wire::HOST_PAGES, wire::HID, 0);
+    thread::sleep(Duration::from_secs(6)); // the broker has observed the live SDP mode
+    let before = pages();
+    let lost = Instant::now();
+    radio_get(radio, wire::UNPLUG, wire::HID, 0);
+    wait_for("outgoing HID host retry", Duration::from_secs(45), || {
+        (pages() > before).then_some(())
+    });
+    assert!(lost.elapsed() >= Duration::from_secs(30));
+    verify_description(&raw());
+    assert!(
+        client
+            .list()
+            .unwrap()
+            .iter()
+            .any(|p| p.address == hid && p.encrypted)
+    );
+    thread::sleep(Duration::from_secs(6));
+    client.disconnect(Some(hid)).unwrap();
+    let down = pages();
+    thread::sleep(Duration::from_secs(41)); // loss observation, 30 s delay and dispatch
+    assert_eq!(pages(), down, "explicit disconnect started a host retry");
+    assert_eq!(client.list().unwrap().len(), 1);
+    client.connect(hid).unwrap();
+    verify_description(&raw());
+    println!(
+        "BT_QA_HOST_RETRY_PASS HID host/any loss triggered delayed authenticated paging, explicit disconnect stayed offline"
+    );
+}
+
 fn main() {
     if let Some(mode) = std::env::args().nth(1) {
         return login_client(&mode);
     }
     let mut broker = Command::new("/bin/btctl").arg("--serve").spawn().unwrap();
     let radio = Handle::open("/dev/bt-qa-radio", 0).unwrap();
+    // No IPC client has contacted the broker. The boot image contains only a
+    // legacy key for OTHER; page scan proves registration ran autonomously.
+    wait("startup bond registration", || {
+        (radio_get(&radio, wire::PAGE_SCAN_ENABLED, wire::OTHER, 0) == 1).then_some(())
+    });
+    registration_after_reset(&radio);
     broker_ready();
     wait("initialized adapter", || {
         btctl(&["status"]).contains("ready=true").then_some(())
     });
+    let client = Client::new(0);
+    let legacy = &client.saved().unwrap()[0];
+    assert_eq!(legacy.address, Address(wire::OTHER_ADDR));
+    assert!(legacy.name.is_none());
     let scan = btctl(&["scan"]);
     for (name, mac) in [wire::HID_NAME, wire::OTHER_NAME].into_iter().zip(ADDR) {
         assert!(scan.contains(&format!("{mac}  \"{name}\"")));
     }
+    assert_eq!(
+        std::fs::read_to_string(OTHER_NAME_FILE).unwrap(),
+        wire::OTHER_NAME
+    );
+    std::fs::remove_file(OTHER_NAME_FILE).unwrap();
+    assert_eq!(
+        client.saved().unwrap()[0].name.as_deref(),
+        Some(wire::OTHER_NAME)
+    );
+    assert_eq!(
+        std::fs::read_to_string(OTHER_NAME_FILE).unwrap(),
+        wire::OTHER_NAME
+    );
+    client.forget(Address(wire::OTHER_ADDR)).unwrap();
+    wait("unregister boot bond", || {
+        (radio_get(&radio, wire::PAGE_SCAN_ENABLED, wire::OTHER, 0) == 0).then_some(())
+    });
+    println!("BT_QA_REGISTER_PASS broker restored a legacy bond before first client contact");
 
     as_login("locked");
     as_login("pair");
@@ -285,16 +479,19 @@ fn main() {
     });
     assert!(btctl(&["devices"]).contains("1 device(s) connected"));
     assert!(btctl(&["devices"]).contains(ADDR[1]));
-    link(wire::HID, false);
+    assert_eq!(radio_get(&radio, wire::WAKE, wire::HID, 0), 1);
+    // There is no client connect request: the saved peripheral initiates this ACL.
     let replacement = raw();
     verify_description(&replacement);
     assert!(btctl(&["devices"]).contains("2 device(s) connected"));
     assert!(broker.try_wait().unwrap().is_none());
     println!(
-        "BT_QA_RECONNECT_PASS a new HID endpoint reused the path while the old handle stayed detached"
+        "BT_QA_RECONNECT_PASS saved HID peer initiated an encrypted reconnect while the other link stayed up"
     );
     as_login("reconnect");
+    host_reconnect(&radio);
     assert!(btctl(&["bonded"]).contains("2 device(s) bonded"));
+    saved_and_forget(&radio);
     let policy = scarlet_os::shield::Policy::create(&[(1, "app")], &[]).unwrap();
     policy.apply(1).unwrap();
     assert!(

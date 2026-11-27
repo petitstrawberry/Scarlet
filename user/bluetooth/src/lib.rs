@@ -60,6 +60,29 @@ pub struct Status {
     /// Whether the controller offers a key to the privileged pairing handle.
     pub key_readable: bool,
     pub last_error: u32,
+    /// Reconnection roles advertised by the remote Classic HID service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hid_reconnect_mode: Option<HidReconnectMode>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HidReconnectMode {
+    None,
+    Device,
+    Host,
+    Any,
+}
+
+impl fmt::Display for HidReconnectMode {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(match self {
+            Self::None => "none",
+            Self::Device => "device",
+            Self::Host => "host",
+            Self::Any => "any",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -77,6 +100,8 @@ pub struct ConnectedPeer {
     /// Whether the controller offers a key to the privileged pairing handle.
     pub key_readable: bool,
     pub last_error: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hid_reconnect_mode: Option<HidReconnectMode>,
 }
 
 use protocol::Command;
@@ -112,6 +137,16 @@ impl Client {
     /// Locally saved peers for this adapter, including offline peers. Does not start inquiry.
     pub fn bonded(&self) -> Result<Vec<Address>> {
         self.request(Command::Bonded)
+    }
+
+    /// Saved bonds and their last known names, including offline peers. Does not start inquiry.
+    pub fn saved(&self) -> Result<Vec<DiscoveredPeer>> {
+        self.request(Command::Saved)
+    }
+
+    /// Disconnect the peer and remove its local key and name. Safe to retry.
+    pub fn forget(&self, peer: Address) -> Result<()> {
+        self.request(Command::Forget(peer.0))
     }
 
     pub fn scan(&self) -> Result<Vec<DiscoveredPeer>> {

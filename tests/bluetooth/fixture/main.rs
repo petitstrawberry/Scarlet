@@ -84,6 +84,9 @@ struct Peer {
     authenticated: bool,
     encrypted: bool,
     bonded: bool,
+    fail_disconnect: bool,
+    rejected_pages: u16,
+    host_pages: u16,
     local_control: u16,
     local_interrupt: u16,
     // Remote channel IDs deliberately differ by peer. Local channel IDs can legally coincide.
@@ -105,6 +108,9 @@ impl Peer {
             authenticated: false,
             encrypted: false,
             bonded: false,
+            fail_disconnect: false,
+            rejected_pages: 0,
+            host_pages: 0,
             local_control: 0,
             local_interrupt: 0,
             remote_control: remote,
@@ -258,6 +264,7 @@ impl Peer {
 }
 
 struct Controller {
+    page_scan: bool,
     rx: Wire,
     peers: [Peer; 2],
     wake: Option<Arc<Waker>>,
@@ -266,6 +273,7 @@ impl Controller {
     fn new() -> Self {
         Self {
             rx: Wire::default(),
+            page_scan: false,
             peers: [
                 Peer::new(wire::HID_ADDR, 0x123, 0x83),
                 Peer::new(wire::OTHER_ADDR, 0x234, 0x93),
@@ -277,6 +285,11 @@ impl Controller {
         let rx = &mut self.rx;
         match op {
             0x0c03 | 0x0c01 | 0x0c56 | 0x0c45 => rx.complete(op, &[0]),
+            0x0c1a => {
+                assert!(matches!(data, [0] | [2]));
+                self.page_scan = data == [2];
+                rx.complete(op, &[0]);
+            }
             0x1009 => rx.complete(op, &[&[0], wire::ADAPTER.as_slice()].concat()),
             0x1005 => rx.complete(op, &[0, 32, 0, 0, 1, 0, 0, 0]),
             0x0401 => {
@@ -301,6 +314,10 @@ impl Controller {
                     .iter_mut()
                     .find(|p| p.handle == Some(h))
                     .expect("unknown handle");
+                if op == 0x0406 && core::mem::take(&mut p.fail_disconnect) {
+                    rx.event(0x0f, &[0x0c, 1, op as u8, (op >> 8) as u8]);
+                    return;
+                }
                 rx.accepted(op);
                 match op {
                     0x0411 => rx.event(0x17, &p.address),
@@ -334,7 +351,16 @@ impl Controller {
                         result[7..7 + name.len()].copy_from_slice(name.as_bytes());
                         rx.event(7, &result);
                     }
-                    0x0405 => {
+                    0x040a => {
+                        p.rejected_pages += 1;
+                        rx.accepted(op);
+                    }
+                    0x0405 | 0x0409 => {
+                        if op == 0x0409 {
+                            assert_eq!(&data[6..], &[1]);
+                        } else {
+                            p.host_pages += 1;
+                        }
                         rx.accepted(op);
                         p.connected(rx);
                     }
@@ -424,7 +450,12 @@ impl ControlOps for Radio {
     fn control(&self, cmd: u32, arg: usize) -> Result<i32, &'static str> {
         let (result, wake) = {
             let mut controller = self.0.lock();
-            let Controller { peers, rx, wake } = &mut *controller;
+            let Controller {
+                peers,
+                rx,
+                wake,
+                page_scan,
+            } = &mut *controller;
             let p = &mut peers[(cmd & 1) as usize];
             let result = match cmd & !1 {
                 wire::SEND_INPUT if p.encrypted && p.local_interrupt != 0 => {
@@ -441,6 +472,22 @@ impl ControlOps for Radio {
                     return Ok(i32::from(p.local_control != 0) + i32::from(p.local_interrupt != 0));
                 }
                 wire::OUTPUT_COUNT => return Ok(p.output_count as i32),
+                wire::FAIL_DISCONNECT if p.encrypted => {
+                    p.fail_disconnect = true;
+                    return Ok(0);
+                }
+                wire::PAGE_SCAN_ENABLED => return Ok(i32::from(*page_scan)),
+                wire::CONTROLLER_FAULT => {
+                    *page_scan = false;
+                    rx.event(0x10, &[1]);
+                    0
+                }
+                wire::REJECTED_PAGES => return Ok(i32::from(p.rejected_pages)),
+                wire::HOST_PAGES => return Ok(i32::from(p.host_pages)),
+                wire::WAKE if *page_scan && p.handle.is_none() => {
+                    rx.event(0x04, &[&p.address[..], &[0, 5, 0, 1]].concat());
+                    1
+                }
                 wire::UNPLUG if p.encrypted => {
                     p.lost(rx, 0x08);
                     0
