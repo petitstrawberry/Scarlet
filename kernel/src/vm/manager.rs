@@ -222,7 +222,11 @@ struct InnerVmm {
 
 impl VirtualMemoryManager {
     #[cfg(all(feature = "hosted", target_os = "ios"))]
-    pub(crate) fn resize_signed_heap(&self, address: usize, limit: usize) -> Option<Result<usize, &'static str>> {
+    pub(crate) fn resize_signed_heap(
+        &self,
+        address: usize,
+        limit: usize,
+    ) -> Option<Result<usize, &'static str>> {
         let mapping = self.mapping_transaction();
         let image = self.hosted_image();
         if !image.has_signed_mapping() {
@@ -469,7 +473,10 @@ impl VirtualMemoryManager {
     /// Pin a fork snapshot while the current mappings and their allocation
     /// registry are protected together. A later unmap may remove the parent
     /// VMA, but cannot release backing retained by this snapshot.
-    pub(crate) fn fork_snapshot(&self, _child: &Self) -> Result<Vec<VirtualMemoryMap>, &'static str> {
+    pub(crate) fn fork_snapshot(
+        &self,
+        _child: &Self,
+    ) -> Result<Vec<VirtualMemoryMap>, &'static str> {
         use crate::object::capability::memory_mapping::anon_owner::ForkCowPageOwner;
         let _transaction = self.mapping_update();
         #[cfg(feature = "hosted")]
@@ -735,7 +742,8 @@ impl VirtualMemoryManager {
 
         let _transaction = self.mapping_update();
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        self.hosted_image().validate_data_mapping(map.vmarea, map.permissions)?;
+        self.hosted_image()
+            .validate_data_mapping(map.vmarea, map.permissions)?;
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         self.hosted_image().validate_data_backing(&map)?;
         let mut g = self.write_inner();
@@ -846,10 +854,12 @@ impl VirtualMemoryManager {
         let permissions = prot | VirtualMemoryPermission::User as usize;
         let _transaction = self.mapping_update();
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        self.hosted_image().validate_data_mapping(vmarea, permissions)?;
+        self.hosted_image()
+            .validate_data_mapping(vmarea, permissions)?;
         let mut g = self.write_inner();
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        g.execution.validate_data_change(vmarea, g.memmap.values())?;
+        g.execution
+            .validate_data_change(vmarea, g.memmap.values())?;
         self.record_inner_writer(WRITE_SITE_PROTECT);
         let keys: Vec<usize> = g
             .memmap
@@ -864,7 +874,8 @@ impl VirtualMemoryManager {
             let start = map.vmarea.start.max(vmarea.start);
             let end = map.vmarea.end.min(vmarea.end);
             #[cfg(all(feature = "hosted", target_os = "ios"))]
-            g.execution.validate_data_mapping(MemoryArea::new(start, end), permissions)?;
+            g.execution
+                .validate_data_mapping(MemoryArea::new(start, end), permissions)?;
             if start != covered_until
                 || (!VirtualMemoryPermission::User.contained_in(map.permissions)
                     && !(linux_private && map.permissions == 0))
@@ -1149,7 +1160,10 @@ impl VirtualMemoryManager {
                 last.vmarea.end.min(remove_end | (granule - 1))
             });
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        if g.execution.validate_data_change(MemoryArea::new(remove_start, remove_end), g.memmap.values()).is_err() {
+        if g.execution
+            .validate_data_change(MemoryArea::new(remove_start, remove_end), g.memmap.values())
+            .is_err()
+        {
             return Vec::new();
         }
         let removed_maps = Self::remove_memory_map_range_locked(&mut g, remove_start, remove_end);
@@ -1182,7 +1196,8 @@ impl VirtualMemoryManager {
         let mut g = self.write_inner();
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         if new_len != old_len {
-            g.execution.validate_data_change(MemoryArea::new(new_end + 1, old_end), g.memmap.values())?;
+            g.execution
+                .validate_data_change(MemoryArea::new(new_end + 1, old_end), g.memmap.values())?;
         }
         self.record_inner_writer(WRITE_SITE_REMOVE_RANGE);
         let first = g
@@ -1338,11 +1353,20 @@ impl VirtualMemoryManager {
         let destination_end = destination + new_len - 1;
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         {
-            g.execution.validate_data_change(MemoryArea::new(source, source_end), g.memmap.values())
-                .and_then(|()| g.execution.validate_data_mapping(
-                    MemoryArea::new(destination, destination_end), first.permissions))
-                .and_then(|()| g.execution.validate_data_mapping(
-                    MemoryArea::new(destination + old_len, destination_end), first.permissions))
+            g.execution
+                .validate_data_change(MemoryArea::new(source, source_end), g.memmap.values())
+                .and_then(|()| {
+                    g.execution.validate_data_mapping(
+                        MemoryArea::new(destination, destination_end),
+                        first.permissions,
+                    )
+                })
+                .and_then(|()| {
+                    g.execution.validate_data_mapping(
+                        MemoryArea::new(destination + old_len, destination_end),
+                        first.permissions,
+                    )
+                })
                 .map_err(|_| RelocationError::UnsupportedMapping)?;
         }
         let tail = VirtualMemoryMap {
@@ -1386,7 +1410,8 @@ impl VirtualMemoryManager {
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         if destination != source {
             self.hosted_image().retire_data_aliases(source, source_end);
-            self.hosted_image().retire_data_aliases(destination, destination_end);
+            self.hosted_image()
+                .retire_data_aliases(destination, destination_end);
         }
         Ok(destination)
     }
@@ -1458,8 +1483,12 @@ impl VirtualMemoryManager {
         {
             let target = MemoryArea::new(destination, destination_end);
             let source_range = MemoryArea::new(source, source_end);
-            g.execution.validate_data_mapping(source_range, first.permissions)
-                .and_then(|()| g.execution.validate_data_change(source_range, g.memmap.values()))
+            g.execution
+                .validate_data_mapping(source_range, first.permissions)
+                .and_then(|()| {
+                    g.execution
+                        .validate_data_change(source_range, g.memmap.values())
+                })
                 .and_then(|()| g.execution.validate_data_mapping(target, first.permissions))
                 .and_then(|()| g.execution.validate_data_change(target, g.memmap.values()))
                 .map_err(|_| RelocationError::UnsupportedMapping)?;
@@ -1483,7 +1512,8 @@ impl VirtualMemoryManager {
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         {
             self.hosted_image().retire_data_aliases(source, source_end);
-            self.hosted_image().retire_data_aliases(destination, destination_end);
+            self.hosted_image()
+                .retire_data_aliases(destination, destination_end);
         }
         Ok(replaced)
     }
@@ -1950,7 +1980,8 @@ impl VirtualMemoryManager {
         inner.last_search_cache = None;
         drop(inner);
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        self.hosted_image().retire_data_aliases(page_vaddr, page_end);
+        self.hosted_image()
+            .retire_data_aliases(page_vaddr, page_end);
         drop(current);
         Ok(true)
     }
@@ -2343,7 +2374,10 @@ impl VirtualMemoryManager {
                     continue;
                 };
                 #[cfg(all(feature = "hosted", target_os = "ios"))]
-                if g.execution.validate_data_mapping(MemoryArea::new(old_end + 1, new_end), map_permissions).is_err() {
+                if g.execution
+                    .validate_data_mapping(MemoryArea::new(old_end + 1, new_end), map_permissions)
+                    .is_err()
+                {
                     continue;
                 }
                 let overlaps_next = match g
@@ -2425,7 +2459,8 @@ impl VirtualMemoryManager {
     /// * `vaddr_end` - End of virtual address range (inclusive)
     fn unmap_range_from_mmu(&self, vaddr_start: usize, vaddr_end: usize) {
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        self.hosted_image().retire_data_aliases(vaddr_start, vaddr_end);
+        self.hosted_image()
+            .retire_data_aliases(vaddr_start, vaddr_end);
         let asid = self.get_asid();
         if asid == 0 || !is_asid_used(asid) {
             return;
@@ -2544,10 +2579,11 @@ impl VirtualMemoryManager {
         if let Some(allowed) = self.hosted_image().signed_instruction(vaddr) {
             return allowed;
         }
-        self.legacy_mapping_transaction().is_some_and(|transaction| {
-            self.translate_with_access(&transaction, vaddr, AccessOp::Instruction, true)
-                .is_some()
-        })
+        self.legacy_mapping_transaction()
+            .is_some_and(|transaction| {
+                self.translate_with_access(&transaction, vaddr, AccessOp::Instruction, true)
+                    .is_some()
+            })
     }
 
     fn translate_with_access(
@@ -2652,13 +2688,18 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `base` - New base address for mmap operations
     #[cfg(all(feature = "hosted", target_os = "ios"))]
-    pub(crate) fn set_mmap_window(&self, range: core::ops::Range<usize>) -> Result<(), &'static str> {
+    pub(crate) fn set_mmap_window(
+        &self,
+        range: core::ops::Range<usize>,
+    ) -> Result<(), &'static str> {
         let mut inner = self.write_inner();
         let base = inner.placement.base(range.start, range.end, false)?;
         inner.mmap_base = base;
         inner.mmap_anchor = range.start;
         inner.mmap_limit = range.end;
-        inner.mmap_occupied_until.store(base, core::sync::atomic::Ordering::Relaxed);
+        inner
+            .mmap_occupied_until
+            .store(base, core::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -2694,7 +2735,12 @@ impl VirtualMemoryManager {
     pub(crate) fn inherit_layout(&self, source: &Self) {
         let (placement, anchor, base, limit) = {
             let parent = source.inner.read();
-            (parent.placement, parent.mmap_anchor, parent.mmap_base, parent.mmap_limit)
+            (
+                parent.placement,
+                parent.mmap_anchor,
+                parent.mmap_base,
+                parent.mmap_limit,
+            )
         };
         let mut child = self.write_inner();
         child.placement = placement;
@@ -2928,12 +2974,14 @@ impl VirtualMemoryManager {
 
         let _transaction = self.mapping_update();
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        self.hosted_image().validate_data_mapping(map.vmarea, map.permissions)?;
+        self.hosted_image()
+            .validate_data_mapping(map.vmarea, map.permissions)?;
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         self.hosted_image().validate_data_backing(&map)?;
         let mut g = self.write_inner();
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        g.execution.validate_data_change(map.vmarea, g.memmap.values())?;
+        g.execution
+            .validate_data_change(map.vmarea, g.memmap.values())?;
         self.record_inner_writer(WRITE_SITE_ADD_FIXED);
         let overlapping_keys: alloc::vec::Vec<usize> = g
             .memmap

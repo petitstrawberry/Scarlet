@@ -509,7 +509,8 @@ fn exec_options(task: &Task, address: usize, spawning: bool) -> Result<ExecOptio
         let extended = EnvironmentSpawn::encoded_size(model);
         if model.read_u32(&bytes, 0).ok() == Some(extended as u32) {
             let tail = address.checked_add(base).ok_or("invalid options")?;
-            copy_from_user(task, tail, &mut bytes[base..extended]).map_err(|_| "invalid options")?;
+            copy_from_user(task, tail, &mut bytes[base..extended])
+                .map_err(|_| "invalid options")?;
         }
         let options =
             EnvironmentSpawn::decode(model, &bytes).map_err(|_| "unsupported spawn options")?;
@@ -778,7 +779,10 @@ mod tests {
         record.flags = 0;
         record.handle_count = HandleTable::MAX_HANDLES + 1;
         write_options(&task, address, &record);
-        assert_eq!(exec_options(&task, address, false).err(), Some("too many handles"));
+        assert_eq!(
+            exec_options(&task, address, false).err(),
+            Some("too many handles")
+        );
 
         // A null-terminated empty record now straddles the page boundary.
         record.argv = 0;

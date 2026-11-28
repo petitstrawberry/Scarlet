@@ -139,7 +139,13 @@ impl Image {
     pub(crate) fn signed_instruction(&self, address: usize) -> Option<bool> {
         let local = self.local.lock().unwrap();
         let image = local.as_ref()?;
-        Some(image.text.lock().unwrap().contains_guest_instruction(address as u64))
+        Some(
+            image
+                .text
+                .lock()
+                .unwrap()
+                .contains_guest_instruction(address as u64),
+        )
     }
 
     pub(crate) fn signed_text_size(&self) -> Option<usize> {

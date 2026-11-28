@@ -2504,8 +2504,8 @@ impl HomeGridLayout {
         let minimum_cell_width = interpolate(78.0, 128.0);
         let preferred_cell_width = interpolate(92.0, 128.0);
         let column_spacing = interpolate(8.0, 20.0);
-        let columns = (((available_width + column_spacing)
-            / (minimum_cell_width + column_spacing)) as usize)
+        let columns = (((available_width + column_spacing) / (minimum_cell_width + column_spacing))
+            as usize)
             .max(1);
         Self {
             columns,
@@ -4694,11 +4694,11 @@ mod tests {
     use super::{
         ControlCenterPresentation, HOME_BUTTON_WIDTH, HomeApplication, HomeGridLayout,
         LEADING_CONTROLS_SPACING, MENU_BAR_OUTER_PADDING, MenuTree, OVERVIEW_NAVIGATION_ROWS,
-        OVERVIEW_SEPARATOR_HEIGHT, OVERVIEW_SYSTEM_ROWS, OVERVIEW_VERTICAL_PADDING, OverviewGeometry, ShellLayout,
-        StatusItemId, StatusItemTokens, StatusPresentation, StatusProviderSnapshot, TaskMenuEntry,
-        TaskMenuItem, WindowSnapshot, WorkspaceCommand, application_drawer_accepts_keyboard,
-        build_window_model, control_center_body_position, filter_home_applications,
-        menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
+        OVERVIEW_SEPARATOR_HEIGHT, OVERVIEW_SYSTEM_ROWS, OVERVIEW_VERTICAL_PADDING,
+        OverviewGeometry, ShellLayout, StatusItemId, StatusItemTokens, StatusPresentation,
+        StatusProviderSnapshot, TaskMenuEntry, TaskMenuItem, WindowSnapshot, WorkspaceCommand,
+        application_drawer_accepts_keyboard, build_window_model, control_center_body_position,
+        filter_home_applications, menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
         overview_app_menu_indices, overview_page_bounds, overview_page_capacity,
         overview_page_count, overview_window_status, passive_clock_control, scale_u32,
         set_state_if_changed, status_bar_menu_items, status_bar_resize_needed, status_item_label,

@@ -572,10 +572,16 @@ impl MemoryMappingOps for AudioPcmMapping {
         offset: usize,
         length: usize,
     ) -> Result<MemoryMappingInfo, &'static str> {
-        if offset.checked_add(length).is_none_or(|end| end > self.length) {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.length)
+        {
             return Err("PCM mmap range exceeds the admitted mapping");
         }
-        let offset = self.offset.checked_add(offset).ok_or("PCM mmap offset overflow")?;
+        let offset = self
+            .offset
+            .checked_add(offset)
+            .ok_or("PCM mmap offset overflow")?;
         self.backing.get_mapping_info(offset, length)
     }
 
@@ -615,7 +621,10 @@ impl AudioPcmRing {
             .ok_or("Failed to allocate PCM ring")?;
         Ok(Self {
             params,
-            backing: Arc::new(AudioPcmBacking { pages, mapped_bytes }),
+            backing: Arc::new(AudioPcmBacking {
+                pages,
+                mapped_bytes,
+            }),
             app_ptr_frames: 0,
             submitted_ptr_frames: 0,
             hw_ptr_frames: 0,

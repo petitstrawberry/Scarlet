@@ -831,7 +831,8 @@ impl AbiModule for ScarletAbi {
     ) -> Result<(), &'static str> {
         #[cfg(all(feature = "hosted", target_os = "ios"))]
         {
-            let tls = crate::hosted::signed_exec::prepare(file_object, argv, envp, task, trapframe)?;
+            let tls =
+                crate::hosted::signed_exec::prepare(file_object, argv, envp, task, trapframe)?;
             *self.elf_tls.write() = tls.map(Arc::new);
             Ok(())
         }

@@ -4,19 +4,14 @@ mod admission_cache;
 mod boundary;
 #[cfg(not(target_os = "ios"))]
 mod data_access;
-mod stop_profile;
 #[cfg(target_os = "ios")]
 pub(super) mod in_process;
+mod stop_profile;
 #[cfg(target_os = "ios")]
 pub(super) use in_process::InterruptTarget;
 
 use crate::vm::vmem::{VirtualMemoryMap, VirtualMemoryPermission as Perm};
-use crate::{
-    arch::Trapframe,
-    sched::scheduler,
-    task::Task,
-    vm::vmem::MappingOrigin,
-};
+use crate::{arch::Trapframe, sched::scheduler, task::Task, vm::vmem::MappingOrigin};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     fmt,
@@ -220,7 +215,10 @@ impl Image {
         }
     }
 
-    pub(crate) fn fork_into(&self, child: &crate::vm::manager::VirtualMemoryManager) -> Result<(), &'static str> {
+    pub(crate) fn fork_into(
+        &self,
+        child: &crate::vm::manager::VirtualMemoryManager,
+    ) -> Result<(), &'static str> {
         let image = child.hosted_image();
         image.set_guest_page_size(self.guest_page_size());
         *image.code.lock().unwrap() = self.code.lock().unwrap().clone();
@@ -558,10 +556,7 @@ impl Session {
 
 /// Translate a VMA snapshot into the resident, permission-checked backing
 /// that a hosted executor can publish while the guest is parked.
-fn visit_resident_extents(
-    m: &VirtualMemoryMap,
-    mut visit: impl FnMut(usize, u64, usize, usize),
-) {
+fn visit_resident_extents(m: &VirtualMemoryMap, mut visit: impl FnMut(usize, u64, usize, usize)) {
     use crate::environment::PAGE_SIZE;
     use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 
@@ -572,15 +567,22 @@ fn visit_resident_extents(
             m.vmarea.size() / PAGE_SIZE,
             &mut |page, count, pa| {
                 let address = m.vm_start + page * PAGE_SIZE;
-                let read = AccessKind { op: AccessOp::Load, vaddr: address, size: Some(1) };
+                let read = AccessKind {
+                    op: AccessOp::Load,
+                    vaddr: address,
+                    size: Some(1),
+                };
                 // A private copy must be committed by the shared VM fault path
                 // before any access that requires it can be published.
                 if !m.is_shared && owner.private_fault_requires_copy(&read) {
                     return;
                 }
-                let mut perms = owner.fault_page_permissions(&read, m.permissions)
-                    & m.maximum_permissions;
-                let write = AccessKind { op: AccessOp::Store, ..read };
+                let mut perms =
+                    owner.fault_page_permissions(&read, m.permissions) & m.maximum_permissions;
+                let write = AccessKind {
+                    op: AccessOp::Store,
+                    ..read
+                };
                 if !m.is_shared && owner.private_fault_requires_copy(&write) {
                     perms &= !(Perm::Write as usize);
                 }
@@ -588,7 +590,12 @@ fn visit_resident_extents(
             },
         );
     } else if m.pmarea.start != 0 {
-        visit(m.vmarea.start, m.pmarea.start, m.vmarea.size(), m.permissions);
+        visit(
+            m.vmarea.start,
+            m.pmarea.start,
+            m.vmarea.size(),
+            m.permissions,
+        );
     }
 }
 

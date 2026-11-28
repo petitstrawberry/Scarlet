@@ -8,9 +8,9 @@ mod memory;
 #[cfg(target_os = "ios")]
 pub(crate) mod signed_exec;
 
-pub use interrupts::raise_external as raise_external_interrupt;
 #[cfg(target_os = "ios")]
 pub use execution::in_process::install_signed_text;
+pub use interrupts::raise_external as raise_external_interrupt;
 #[cfg(target_os = "ios")]
 pub use signed_exec::register_signed_image;
 

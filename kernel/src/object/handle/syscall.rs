@@ -43,7 +43,10 @@ pub fn sys_handle_query(trapframe: &mut Trapframe) -> usize {
     // repr(C) and no padding. Copy it through the task's writable mapping.
     const _: () = assert!(size_of::<KernelObjectInfo>() == 20);
     let bytes = unsafe {
-        core::slice::from_raw_parts((&raw const info).cast::<u8>(), size_of::<KernelObjectInfo>())
+        core::slice::from_raw_parts(
+            (&raw const info).cast::<u8>(),
+            size_of::<KernelObjectInfo>(),
+        )
     };
     copy_to_user(&task, info_ptr, bytes).map_or(usize::MAX, |()| 0)
 }

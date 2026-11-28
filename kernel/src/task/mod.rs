@@ -3138,7 +3138,10 @@ impl Task {
             .data_size
             .store(self.data_size.load(Ordering::SeqCst), Ordering::SeqCst);
         #[cfg(all(feature = "hosted", target_os = "ios"))]
-        let text_size = child.vm_manager.hosted_image().signed_text_size()
+        let text_size = child
+            .vm_manager
+            .hosted_image()
+            .signed_text_size()
             .unwrap_or_else(|| self.text_size.load(Ordering::SeqCst));
         #[cfg(not(all(feature = "hosted", target_os = "ios")))]
         let text_size = self.text_size.load(Ordering::SeqCst);
