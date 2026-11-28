@@ -34,6 +34,7 @@ pub(super) fn record(task: &Task, frame: &Trapframe, interrupted: bool) {
             _ => frame.elr,
         };
         *c.samples.entry((task.get_id(), kind, site)).or_default() += 1;
+        #[cfg(not(target_os = "ios"))]
         if kind == 0x24 && c.total % 16384 < 64 {
             let far = super::data_access::data_address(frame.far_el1);
             if let Some(m) = task.vm_manager.search_memory_map(far) {

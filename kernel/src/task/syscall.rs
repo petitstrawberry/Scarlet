@@ -404,9 +404,9 @@ pub fn sys_thread_exit_cleanup(trapframe: &mut Trapframe) -> usize {
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
+    let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.lock().store(trapframe);
-    let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
     let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
     let child_arg = trapframe.get_arg(3); // Fourth argument: argument to pass to function (closure pointer)

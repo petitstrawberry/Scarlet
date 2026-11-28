@@ -36,7 +36,7 @@ cargo test --locked --manifest-path projects/aarch64-user-macos-full/bsp/Cargo.t
 The tests cover migration between host threads, shared RAM aliases and
 invalidation, vCPU timer and IPI state, host wall-clock and entropy setup, and
 run permit retirement during mapping changes and worker termination. The
-SMP test runs Scarlet kernel tasks after all vCPUs are online with 2, 4, and
+hosted CPU test runs Scarlet kernel tasks after all vCPUs are online with 1, 2, 4, and
 16 vCPUs. Each task completes a durable root block batch through the hosted
 IRQ path and checks timer wakeups and IPI acknowledgements. Runtime tests
 hold a secondary CPU at the startup gate and exercise failures on both sides

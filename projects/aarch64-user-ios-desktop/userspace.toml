@@ -1,0 +1,3 @@
+# Share the iOS ABI flags and consume the stock SGFX bundle's native linkage.
+# Each image prepares this generated file before compiling its guest packages.
+include = ["../aarch64-user-ios-minimum/userspace.toml", ".scarlet/sgfx/userspace.toml"]

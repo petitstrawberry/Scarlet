@@ -13,6 +13,7 @@ default = ["ui", "wayland-decoration"]
 ui = ["dep:scarlet-ui", "dep:scarlet-ui-macros", "dep:sgfx"]
 wayland-decoration = ["dep:scarlet-ui-core"]
 hosted-init-layout = []
+ios-init-pie = []
 
 [[bin]]
 name = "init"

@@ -1,0 +1,84 @@
+schema_version = 2
+
+[project]
+name = "scarlet-aarch64-user-ios-minimum"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = { hosted = true, network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = false }
+
+[userspace]
+cargo-config = "userspace.toml"
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-user-ios-minimum.cpio"
+
+[[images.initramfs.layers]]
+kind = "copy"
+source = "initramfs"
+to = "/"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/cli-utils/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "userprogram"
+bin = "init"
+default-features = false
+features = ["ios-init-pie"]
+replace = true
+to = "/init"
+
+[[images.initramfs.layers]]
+kind = "script"
+source = "tools/build_fixture.sh"
+to = "/lib/libboot-check.so"
+
+[[images.initramfs.layers]]
+kind = "script"
+source = "tools/build_fixture.sh"
+to = "/lib/libboot-check-alt.so"
+
+[[images.initramfs.layers]]
+kind = "script"
+source = "tools/build_fixture.sh"
+to = "/bin/boot-check"
+
+[images.rootfs]
+console-root = true
+format = "ext2"
+output = ".scarlet/images/rootfs-aarch64-user-ios-minimum.ext2"
+min-size-mib = 16
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "../../bundles/base/fs"
+to = "/"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs"
+to = "/"
+
+[[images.rootfs.layers]]
+kind = "script"
+source = "../../tools/install-ca-certificates.sh"
+to = "/etc/ssl/certs/ca-certificates.crt"
+
+[hooks.post-image]
+command = "tools/package_image.sh"
+
+[runner]
+command = "tools/run_ios.sh"

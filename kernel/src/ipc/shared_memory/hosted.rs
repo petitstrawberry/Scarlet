@@ -21,6 +21,7 @@ struct Inner {
     permissions: usize,
     backing: Option<Arc<SharedBacking>>,
     limit: usize,
+    granule: usize,
     state: IrqRwSpinLock<State>,
     resize: Mutex<()>,
 }
@@ -34,8 +35,16 @@ struct State {
 
 impl SharedMemory {
     pub fn new(size: usize, permissions: usize) -> Result<Self, &'static str> {
+        Self::new_with_granule(size, permissions, PAGE_SIZE)
+    }
+
+    pub(in crate::ipc) fn new_with_granule(
+        size: usize,
+        permissions: usize,
+        granule: usize,
+    ) -> Result<Self, &'static str> {
         let size = size
-            .checked_next_multiple_of(PAGE_SIZE)
+            .checked_next_multiple_of(granule)
             .filter(|&size| size != 0)
             .ok_or("Invalid hosted shared memory size")?;
         let backing = SharedBacking::new(size)?;
@@ -44,6 +53,7 @@ impl SharedMemory {
             size,
             permissions,
             SHARED_OBJECT_LIMIT,
+            granule,
             Some(backing),
         ))
     }
@@ -54,7 +64,7 @@ impl SharedMemory {
     /// The caller must keep the entire range valid until the last handle and
     /// mapping owner has been released.
     pub unsafe fn from_paddr(paddr: u64, size: usize, permissions: usize) -> Self {
-        Self::with_backing(paddr, size, permissions, size, None)
+        Self::with_backing(paddr, size, permissions, size, PAGE_SIZE, None)
     }
 
     fn with_backing(
@@ -62,6 +72,7 @@ impl SharedMemory {
         size: usize,
         permissions: usize,
         limit: usize,
+        granule: usize,
         backing: Option<Arc<SharedBacking>>,
     ) -> Self {
         Self {
@@ -70,6 +81,7 @@ impl SharedMemory {
                 permissions,
                 backing,
                 limit,
+                granule,
                 state: IrqRwSpinLock::new(State {
                     publication_generation: 0,
                     size,
@@ -187,7 +199,7 @@ impl SharedMemoryObject for SharedMemory {
 
     fn resize(&self, size: usize) -> Result<(), &'static str> {
         let size = size
-            .checked_next_multiple_of(PAGE_SIZE)
+            .checked_next_multiple_of(self.inner.granule)
             .filter(|&size| size <= self.inner.limit)
             .ok_or("Hosted shared memory limit exceeded")?;
         let _resize = self.inner.resize.lock();

@@ -1,28 +1,33 @@
-//! Native guest execution for a scheduled Task in its address-space worker.
+//! Native guest execution and trap dispatch for a scheduled Task.
 mod admission_cache;
+#[cfg(not(target_os = "ios"))]
 mod boundary;
+#[cfg(not(target_os = "ios"))]
 mod data_access;
+#[cfg(target_os = "ios")]
+pub(super) mod in_process;
 mod stop_profile;
+#[cfg(target_os = "ios")]
+pub(super) use in_process::InterruptTarget;
 
-use crate::{
-    arch::Trapframe,
-    sched::scheduler,
-    task::Task,
-    vm::vmem::{MappingOrigin, VirtualMemoryPermission as Perm},
-};
+use crate::vm::vmem::{VirtualMemoryMap, VirtualMemoryPermission as Perm};
+use crate::{arch::Trapframe, sched::scheduler, task::Task, vm::vmem::MappingOrigin};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     fmt,
     ops::Range,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use scarlet_hosted_runtime::worker_context::{GuestStop, Registers};
+#[cfg(not(target_os = "ios"))]
 use scarlet_hosted_runtime::{
     run_gate::{MappingOutcome, RunGate, RunPermit, TaskId, WorkerId},
     worker::{Worker, WorkerControl, WorkerProcess, WorkerThread, identity},
-    worker_context::Registers,
     worker_memory::Protection,
 };
-use std::{io, os::fd::AsFd, sync::Mutex};
+use std::sync::Mutex;
+#[cfg(not(target_os = "ios"))]
+use std::{io, os::fd::AsFd};
 
 #[derive(Default)]
 pub(crate) struct Image {
@@ -30,7 +35,10 @@ pub(crate) struct Image {
     guest_page_size: AtomicUsize,
     code: Mutex<Vec<(MappingOrigin, Range<usize>)>>,
     file_code: Mutex<BTreeMap<MappingOrigin, Arc<[Range<usize>]>>>,
+    #[cfg(not(target_os = "ios"))]
     session: Mutex<Option<Session>>,
+    #[cfg(target_os = "ios")]
+    local: Mutex<Option<Arc<in_process::LocalImage>>>,
 }
 
 impl fmt::Debug for Image {
@@ -39,6 +47,7 @@ impl fmt::Debug for Image {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 #[derive(Clone, PartialEq, Eq)]
 struct Extent {
     origin: MappingOrigin,
@@ -80,6 +89,7 @@ impl admission_cache::Snapshot for crate::vm::vmem::VirtualMemoryMap {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 struct Session {
     interrupts: Arc<InterruptTarget>,
     worker: Worker,
@@ -93,21 +103,25 @@ struct Session {
 
 /// Follows the Scarlet Task across vCPU migration. Exec selects a new endpoint
 /// by image identity; dropping the Task closes its worker thread.
+#[cfg(not(target_os = "ios"))]
 #[derive(Default, Debug)]
 pub(crate) struct TaskThread(Mutex<Option<(WorkerId, WorkerThread)>>);
 
+#[cfg(not(target_os = "ios"))]
 struct Running {
     permit: RunPermit,
     interrupts: Arc<InterruptTarget>,
 }
 
 /// Remains valid for exactly one worker lifetime, even across an exec.
+#[cfg(not(target_os = "ios"))]
 pub(super) struct InterruptTarget {
     control: Arc<WorkerControl>,
     gate: Arc<RunGate>,
     process: Arc<WorkerProcess>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl InterruptTarget {
     pub(super) fn request(&self, permit: RunPermit) {
         if self.control.interrupt(permit).is_err() {
@@ -119,6 +133,7 @@ impl InterruptTarget {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Running {
     fn receive(
         self,
@@ -168,6 +183,7 @@ impl Image {
         self.invalidate_publication();
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn append_instruction_ranges(
         &self,
         origin: MappingOrigin,
@@ -199,11 +215,17 @@ impl Image {
         }
     }
 
-    pub(crate) fn inherit_code(&self, source: &Self) {
-        self.set_guest_page_size(source.guest_page_size());
-        let code = source.code.lock().unwrap().clone();
-        *self.code.lock().unwrap() = code;
-        *self.file_code.lock().unwrap() = source.file_code.lock().unwrap().clone();
+    pub(crate) fn fork_into(
+        &self,
+        child: &crate::vm::manager::VirtualMemoryManager,
+    ) -> Result<(), &'static str> {
+        let image = child.hosted_image();
+        image.set_guest_page_size(self.guest_page_size());
+        *image.code.lock().unwrap() = self.code.lock().unwrap().clone();
+        *image.file_code.lock().unwrap() = self.file_code.lock().unwrap().clone();
+        #[cfg(target_os = "ios")]
+        self.fork_signed_into(child)?;
+        Ok(())
     }
 
     pub(crate) fn retain_file_code(&self, map: &crate::vm::vmem::VirtualMemoryMap) {
@@ -220,6 +242,9 @@ impl Image {
     /// Force a fresh snapshot even when address, frame and final flags match.
     pub(crate) fn invalidate_code(&self, start: usize, end_inclusive: usize) {
         self.invalidate_publication();
+        #[cfg(target_os = "ios")]
+        let _ = (start, end_inclusive);
+        #[cfg(not(target_os = "ios"))]
         if let Some(session) = self.session.lock().unwrap().as_mut() {
             let first = session
                 .installed
@@ -237,6 +262,7 @@ impl Image {
 
     /// The VM transaction excludes new admissions even for a nonblocking
     /// legacy translation. Never wait for a worker under an IRQ guard.
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn try_parked(&self) -> bool {
         self.session.try_lock().is_ok_and(|session| {
             session
@@ -247,6 +273,7 @@ impl Image {
 
     /// The caller owns the VM transaction, so new guest entries cannot race
     /// this snapshot. An acknowledgement never needs that transaction.
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn quiesce(&self) {
         let mut session = self.session.lock().unwrap();
         if let Some(session) = session.as_mut() {
@@ -272,7 +299,8 @@ impl Image {
         }
     }
 
-    fn run(self: &Arc<Self>, task: &Task, tf: &mut Trapframe) -> io::Result<bool> {
+    #[cfg(not(target_os = "ios"))]
+    fn run(self: &Arc<Self>, task: &Task, tf: &mut Trapframe) -> io::Result<GuestRun> {
         let mut endpoint = task.hosted_thread.0.lock().unwrap().take();
         let running = {
             let vm = &task.vm_manager;
@@ -312,21 +340,7 @@ impl Image {
         let stop = stop?;
         *task.hosted_thread.0.lock().unwrap() = endpoint;
         let guest = stop.guest;
-        let regs = guest.registers;
-        tf.elr = regs.pc;
-        tf.sp = regs.sp;
-        tf.regs.reg = regs.x.map(|r| r as usize);
-        tf.spsr = u64::from(regs.nzcv);
-        tf.tpidr_el0 = guest.tls;
-        tf.esr_el1 = guest.esr;
-        tf.far_el1 = guest.far;
-        stop_profile::record(task, tf, guest.interrupted);
-        let mut vcpu = task.vcpu.lock();
-        vcpu.fpu_used = true;
-        vcpu.fpu.v = regs.q.map(|q| [q as u64, (q >> 64) as u64]);
-        vcpu.fpu.fpcr = u64::from(regs.fpcr);
-        vcpu.fpu.fpsr = u64::from(regs.fpsr);
-        drop(vcpu);
+        store_stop(task, tf, &guest);
         if !guest.interrupted && tf.esr_el1 >> 26 == 0x24 {
             let address = data_access::data_address(tf.far_el1);
             let tx = task.vm_manager.mapping_transaction();
@@ -359,7 +373,7 @@ impl Image {
                         stop.exclusive.as_ref(),
                         stop.fault_instruction,
                     ) {
-                        data_access::Result::Done => return Ok(true),
+                        data_access::Result::Done => return Ok(GuestRun::Resume),
                         data_access::Result::Fault(denied) => tf.far_el1 = denied as u64,
                         data_access::Result::Unsupported(word) => {
                             return Err(io::Error::other(alloc::format!(
@@ -371,11 +385,12 @@ impl Image {
                 }
             }
         }
-        Ok(guest.interrupted)
+        Ok(GuestRun::from_stop(&guest))
     }
 }
 
 /// Scan two address-ordered snapshots, advancing each cursor at most once.
+#[cfg(not(target_os = "ios"))]
 fn changed_extents<'a>(
     snapshot: &'a [(usize, Extent)],
     mut previous: &'a [(usize, Extent)],
@@ -391,6 +406,7 @@ fn changed_extents<'a>(
     })
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Session {
     fn retire(&mut self) {
         self.worker
@@ -426,13 +442,11 @@ impl Session {
                 None => Some(0),
             },
             |m| {
-                use crate::environment::PAGE_SIZE;
-                use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
                 let mut extents = Vec::new();
                 image.retain_file_code(m);
-                let mut insert = |addr, pa, len, perms| {
+                visit_resident_extents(m, |address, pa, len, perms| {
                     extents.push((
-                        addr,
+                        address,
                         Extent {
                             origin: m.mapping_origin,
                             vm_start: m.vm_start,
@@ -443,45 +457,7 @@ impl Session {
                             republish: false,
                         },
                     ));
-                };
-                if let Some(owner) = &m.owner {
-                    let first = (m.vmarea.start - m.vm_start) / PAGE_SIZE;
-                    owner.visit_resident_extents(
-                        first,
-                        m.vmarea.size() / PAGE_SIZE,
-                        &mut |page, count, pa| {
-                            let addr = m.vm_start + page * PAGE_SIZE;
-                            let access = AccessKind {
-                                op: AccessOp::Load,
-                                vaddr: addr,
-                                size: Some(1),
-                            };
-                            // The owner's resident page may still be the source
-                            // for a private copy. Let the VM commit that copy
-                            // before publishing any access that requires it.
-                            if !m.is_shared && owner.private_fault_requires_copy(&access) {
-                                return;
-                            }
-                            let mut perms = owner.fault_page_permissions(&access, m.permissions)
-                                & m.maximum_permissions;
-                            let store = AccessKind {
-                                op: AccessOp::Store,
-                                ..access
-                            };
-                            if !m.is_shared && owner.private_fault_requires_copy(&store) {
-                                perms &= !(Perm::Write as usize);
-                            }
-                            insert(addr, pa, count * PAGE_SIZE, perms);
-                        },
-                    );
-                } else if m.pmarea.start != 0 {
-                    insert(
-                        m.vmarea.start,
-                        m.pmarea.start,
-                        m.vmarea.size(),
-                        m.permissions,
-                    );
-                }
+                });
                 extents
             },
         );
@@ -557,18 +533,7 @@ impl Session {
         let generation = scheduler::get_task_pool()
             .task_generation(id)
             .expect("Running Task") as u64;
-        let regs = {
-            let vcpu = task.vcpu.lock();
-            Registers {
-                x: tf.regs.reg.map(|r| r as u64),
-                pc: tf.elr,
-                sp: tf.sp,
-                nzcv: tf.spsr as u32,
-                q: vcpu.fpu.v.map(|[lo, hi]| lo as u128 | ((hi as u128) << 64)),
-                fpcr: vcpu.fpu.fpcr as u32,
-                fpsr: vcpu.fpu.fpsr as u32,
-            }
-        };
+        let regs = load_registers(task, tf);
         let task_id = TaskId { id, generation };
         if endpoint.as_ref().is_none_or(|(id, _)| *id != self.id) {
             *endpoint = Some((self.id, self.worker.open_thread(task_id)?));
@@ -589,6 +554,98 @@ impl Session {
     }
 }
 
+/// Translate a VMA snapshot into the resident, permission-checked backing
+/// that a hosted executor can publish while the guest is parked.
+fn visit_resident_extents(m: &VirtualMemoryMap, mut visit: impl FnMut(usize, u64, usize, usize)) {
+    use crate::environment::PAGE_SIZE;
+    use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+
+    if let Some(owner) = &m.owner {
+        let first = (m.vmarea.start - m.vm_start) / PAGE_SIZE;
+        owner.visit_resident_extents(
+            first,
+            m.vmarea.size() / PAGE_SIZE,
+            &mut |page, count, pa| {
+                let address = m.vm_start + page * PAGE_SIZE;
+                let read = AccessKind {
+                    op: AccessOp::Load,
+                    vaddr: address,
+                    size: Some(1),
+                };
+                // A private copy must be committed by the shared VM fault path
+                // before any access that requires it can be published.
+                if !m.is_shared && owner.private_fault_requires_copy(&read) {
+                    return;
+                }
+                let mut perms =
+                    owner.fault_page_permissions(&read, m.permissions) & m.maximum_permissions;
+                let write = AccessKind {
+                    op: AccessOp::Store,
+                    ..read
+                };
+                if !m.is_shared && owner.private_fault_requires_copy(&write) {
+                    perms &= !(Perm::Write as usize);
+                }
+                visit(address, pa, count * PAGE_SIZE, perms);
+            },
+        );
+    } else if m.pmarea.start != 0 {
+        visit(
+            m.vmarea.start,
+            m.pmarea.start,
+            m.vmarea.size(),
+            m.permissions,
+        );
+    }
+}
+
+fn load_registers(task: &Task, tf: &Trapframe) -> Registers {
+    let vcpu = task.vcpu.lock();
+    Registers {
+        x: tf.regs.reg.map(|r| r as u64),
+        pc: tf.elr,
+        sp: tf.sp,
+        nzcv: tf.spsr as u32,
+        q: vcpu.fpu.v.map(|[lo, hi]| lo as u128 | ((hi as u128) << 64)),
+        fpcr: vcpu.fpu.fpcr as u32,
+        fpsr: vcpu.fpu.fpsr as u32,
+    }
+}
+
+fn store_stop(task: &Task, tf: &mut Trapframe, guest: &GuestStop) {
+    let regs = guest.registers;
+    tf.elr = regs.pc;
+    tf.sp = regs.sp;
+    tf.regs.reg = regs.x.map(|r| r as usize);
+    tf.spsr = u64::from(regs.nzcv);
+    tf.tpidr_el0 = guest.tls;
+    tf.esr_el1 = guest.esr;
+    tf.far_el1 = guest.far;
+    stop_profile::record(task, tf, guest.interrupted);
+    let mut vcpu = task.vcpu.lock();
+    vcpu.fpu_used = true;
+    vcpu.fpu.v = regs.q.map(|q| [q as u64, (q >> 64) as u64]);
+    vcpu.fpu.fpcr = u64::from(regs.fpcr);
+    vcpu.fpu.fpsr = u64::from(regs.fpsr);
+}
+
+enum GuestRun {
+    Trap,
+    Resume,
+    #[cfg(target_os = "ios")]
+    RetryLoader,
+}
+
+impl GuestRun {
+    fn from_stop(stop: &GuestStop) -> Self {
+        if stop.interrupted {
+            Self::Resume
+        } else {
+            Self::Trap
+        }
+    }
+}
+
 pub fn enter(tf: &mut Trapframe) -> ! {
     crate::arch::interrupt::enable_interrupts();
     loop {
@@ -602,19 +659,28 @@ pub fn enter(tf: &mut Trapframe) -> ! {
                 panic!("No owned user Task on vCPU {cpu}, current={id:?} owner={owner:?}, guest pc={:#x}",tf.elr)
             });
             let result = task.vm_manager.hosted_image().run(&task, tf);
-            if matches!(result, Ok(true)) {
-                continue;
-            }
-            if let Err(error) = result {
-                crate::println!(
-                    "[hosted] Task {} stopped at {:#x}: {}",
-                    task.get_id(),
-                    tf.elr,
-                    error
-                );
-                task.exit_group(139);
-                scheduler::schedule(tf);
-                continue;
+            match result {
+                Ok(GuestRun::Resume) => continue,
+                Ok(GuestRun::Trap) => {}
+                #[cfg(target_os = "ios")]
+                Ok(GuestRun::RetryLoader) => {
+                    // The execution lease has been dropped. The blocked stack
+                    // must not own any mapping that teardown needs to reclaim.
+                    tf.elr -= 4;
+                    task.sleep(tf, 1_000_000);
+                    continue;
+                }
+                Err(error) => {
+                    crate::println!(
+                        "[hosted] Task {} stopped at {:#x}: {}",
+                        task.get_id(),
+                        tf.elr,
+                        error
+                    );
+                    task.exit_group(139);
+                    scheduler::schedule(tf);
+                    continue;
+                }
             }
         }
         static TRACE: std::sync::LazyLock<bool> =

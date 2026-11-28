@@ -2,37 +2,37 @@
 
 unsafe extern "C" {
     #[cfg_attr(
-        target_os = "macos",
+        target_vendor = "apple",
         link_name = "\u{1}section$start$__DATA$__sc_init_early"
     )]
     #[cfg_attr(target_os = "linux", link_name = "__start_sc_init_early")]
     static EARLY_START: u8;
     #[cfg_attr(
-        target_os = "macos",
+        target_vendor = "apple",
         link_name = "\u{1}section$end$__DATA$__sc_init_early"
     )]
     #[cfg_attr(target_os = "linux", link_name = "__stop_sc_init_early")]
     static EARLY_END: u8;
     #[cfg_attr(
-        target_os = "macos",
+        target_vendor = "apple",
         link_name = "\u{1}section$start$__DATA$__sc_init_driver"
     )]
     #[cfg_attr(target_os = "linux", link_name = "__start_sc_init_driver")]
     static DRIVER_START: u8;
     #[cfg_attr(
-        target_os = "macos",
+        target_vendor = "apple",
         link_name = "\u{1}section$end$__DATA$__sc_init_driver"
     )]
     #[cfg_attr(target_os = "linux", link_name = "__stop_sc_init_driver")]
     static DRIVER_END: u8;
     #[cfg_attr(
-        target_os = "macos",
+        target_vendor = "apple",
         link_name = "\u{1}section$start$__DATA$__sc_init_late"
     )]
     #[cfg_attr(target_os = "linux", link_name = "__start_sc_init_late")]
     static LATE_START: u8;
     #[cfg_attr(
-        target_os = "macos",
+        target_vendor = "apple",
         link_name = "\u{1}section$end$__DATA$__sc_init_late"
     )]
     #[cfg_attr(target_os = "linux", link_name = "__stop_sc_init_late")]

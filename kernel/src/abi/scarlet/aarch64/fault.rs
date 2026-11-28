@@ -53,13 +53,7 @@ impl ScarletAbi {
             || !user_range(handler, 4)
             || size < 4096
             || !user_range(base, size)
-            || task
-                .vm_manager
-                .translate_to_phys_with_access(
-                    handler,
-                    crate::object::capability::memory_mapping::AccessOp::Instruction,
-                )
-                .is_none()
+            || !task.vm_manager.is_user_instruction_address(handler)
         {
             return usize::MAX;
         }

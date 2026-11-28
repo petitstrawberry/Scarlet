@@ -130,7 +130,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     }
 
     // Round up length to page boundary
-    let Some(aligned_length) = length.checked_next_multiple_of(PAGE_SIZE) else {
+    let Some(requested_length) = length.checked_next_multiple_of(PAGE_SIZE) else {
         return usize::MAX;
     };
 
@@ -139,8 +139,8 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         return handle_anonymous_mapping(
             &task,
             vaddr,
-            aligned_length,
-            aligned_length / PAGE_SIZE,
+            requested_length,
+            requested_length / PAGE_SIZE,
             prot,
             flags,
         );
@@ -162,6 +162,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let is_map_fixed = (flags & MAP_FIXED) != 0;
     let private_demand = (flags & MAP_PRIVATE) != 0 && !is_shared;
 
+    let granule = task.vm_manager.user_mapping_page_size();
+    let Some(aligned_length) = requested_length.checked_next_multiple_of(granule) else {
+        return usize::MAX;
+    };
     let placement_alignment = crate::vm::execution_page_size();
     let final_vaddr = if vaddr == 0 {
         match task
@@ -171,7 +175,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             Some(addr) => addr,
             None => return usize::MAX,
         }
-    } else if !vaddr.is_multiple_of(PAGE_SIZE) {
+    } else if !vaddr.is_multiple_of(granule) {
         return usize::MAX;
     } else {
         vaddr
@@ -212,7 +216,8 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         pmarea,
         vmarea,
         vm_start: final_vaddr,
-        mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        mapping_origin: crate::vm::vmem::MappingOrigin::new()
+            .with_tail_padding(requested_length, aligned_length),
         maximum_permissions: prepared.maximum_permissions,
         permissions: permissions | 0x08,
         is_shared,

@@ -1,0 +1,11 @@
+[build]
+target = "aarch64-apple-ios-sim"
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[target.aarch64-apple-ios-sim]
+linker = "/usr/bin/clang"
+
+[target.aarch64-apple-ios]
+linker = "/usr/bin/clang"

@@ -114,7 +114,10 @@ pub(super) fn initialize(size: usize) -> Result<PhysicalMemoryArea, &'static str
     {
         return Err("Hosted RAM overlaps reserved shared memory addresses");
     }
-    let arena = RamArena::new(RAM_BASE, size).map_err(|_| "Cannot create hosted RAM arena")?;
+    let arena = RamArena::new(RAM_BASE, size).map_err(|error| {
+        std::eprintln!("Hosted RAM arena ({size} bytes): {error}");
+        "Cannot create hosted RAM arena"
+    })?;
     let area = PhysicalMemoryArea::new(RAM_BASE, RAM_BASE + size as u64 - 1);
     let (send, receive) = mpsc::channel();
     std::thread::Builder::new()

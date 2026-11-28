@@ -62,6 +62,28 @@ pub struct HostTerminal {
 }
 
 impl HostTerminal {
+    /// Attach an application-owned console transport without changing termios.
+    #[cfg(target_os = "ios")]
+    pub fn attach_stream(
+        stream: UnixStream,
+        cpu: CpuId,
+        irq: InterruptId,
+        host_stop: impl FnOnce(io::Result<()>) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::attach_transport(
+            cpu,
+            irq,
+            || {
+                stream.set_nonblocking(true)?;
+                Ok(RawTerminal {
+                    file: File::from(std::os::fd::OwnedFd::from(stream)),
+                    saved: None,
+                })
+            },
+            host_stop,
+        )
+    }
+
     /// Use the terminal device that owns this session. On Darwin the
     /// /dev/tty forwarding device does not implement the PTY's poll interface.
     #[cfg(target_os = "macos")]
@@ -213,7 +235,8 @@ impl HostTerminal {
             .spawn(move || {
                 let mut terminal = terminal;
                 let result = if wait.recv().is_ok() {
-                    run_terminal(&mut terminal.file, wake, &worker_port)
+                    let host_escape = terminal.saved.is_some();
+                    run_terminal(&mut terminal.file, wake, &worker_port, host_escape)
                 } else {
                     Ok(false)
                 };
@@ -459,7 +482,12 @@ impl Port {
 }
 
 /// Returns true only for an explicit host stop sequence.
-fn run_terminal(file: &mut File, mut wake: UnixStream, port: &Port) -> io::Result<bool> {
+fn run_terminal(
+    file: &mut File,
+    mut wake: UnixStream,
+    port: &Port,
+    host_escape: bool,
+) -> io::Result<bool> {
     let mut output: Option<(Vec<u8>, usize)> = None;
     let mut received = VecDeque::<u8>::new();
     let mut receive_overrun = false;
@@ -536,6 +564,10 @@ fn run_terminal(file: &mut File, mut wake: UnixStream, port: &Port) -> io::Resul
                         }
                     };
                     for &byte in &bytes[..count] {
+                        if !host_escape {
+                            enqueue(byte);
+                            continue;
+                        }
                         if escaped {
                             escaped = false;
                             if byte == b'q' {
@@ -868,7 +900,7 @@ mod tests {
         let (report, stopped) = mpsc::channel();
         let worker = thread::spawn(move || {
             report
-                .send(run_terminal(&mut terminal, wake, &worker_port))
+                .send(run_terminal(&mut terminal, wake, &worker_port, true))
                 .unwrap();
         });
 

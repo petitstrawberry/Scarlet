@@ -1,5 +1,5 @@
-//! Coordinate group exit with synchronous driver transactions whose kernel
-//! stacks own hardware locks. Admission and closing share a single atomic so
+//! Coordinate group exit with synchronous kernel transactions whose stacks
+//! own kernel or driver guards. Admission and closing share a single atomic so
 //! a new transaction cannot slip between the exit check and the drain.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -17,7 +17,7 @@ impl GroupExit {
     pub(super) fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
-            drained: Waker::new_uninterruptible("thread_group_device_drain"),
+            drained: Waker::new_uninterruptible("thread_group_transaction_drain"),
         }
     }
 
@@ -32,7 +32,7 @@ impl GroupExit {
 
     pub(super) fn wait_for_transactions(&self) {
         while self.state.load(Ordering::Acquire) != CLOSING {
-            let task = super::mytask().expect("draining device transactions requires a task");
+            let task = super::mytask().expect("draining kernel transactions requires a task");
             self.drained
                 .wait_with_condition(task.get_id(), task.get_trapframe(), None, 0, || {
                     self.state.load(Ordering::Acquire) == CLOSING
@@ -57,23 +57,23 @@ impl GroupExit {
 }
 
 #[must_use]
-pub(crate) struct DeviceTransaction(super::CurrentTaskRef);
+pub(crate) struct KernelTransaction(super::CurrentTaskRef);
 
-impl Drop for DeviceTransaction {
+impl Drop for KernelTransaction {
     fn drop(&mut self) {
         self.0.group_exit.finish();
     }
 }
 
-/// Keep a userspace caller alive until a bounded synchronous device operation
-/// releases its driver guards. Kernel workers already own their lifetime.
+/// Keep a userspace caller alive until a bounded synchronous kernel operation
+/// releases its guards. Kernel workers already own their lifetime.
 /// Do not use around waits for other userspace tasks or async completion tickets.
-pub(crate) fn device_transaction() -> Result<Option<DeviceTransaction>, &'static str> {
+pub(crate) fn kernel_transaction() -> Result<Option<KernelTransaction>, &'static str> {
     let Some(task) = super::mytask().filter(|task| task.task_type == super::TaskType::User) else {
         return Ok(None);
     };
     task.group_exit.admit()?;
-    Ok(Some(DeviceTransaction(task)))
+    Ok(Some(KernelTransaction(task)))
 }
 
 #[cfg(test)]

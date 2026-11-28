@@ -1,0 +1,10 @@
+[package]
+name = "scarlet-ios-aot"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+scarlet-loader-core = { path = "../../user/lib/scarlet-loader-core" }
+sha2 = { version = "0.10", default-features = false }
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }

@@ -20,10 +20,11 @@ use crate::device::{DefaultDeviceOpen, Device, DeviceCapability, DeviceType};
 use crate::environment::PAGE_SIZE;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::mem::page::ContiguousPages;
+use crate::object::capability::memory_mapping::{MappingError, MappingRequest, PreparedMapping};
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
-use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps};
 use crate::println;
 use crate::sync::IrqGuard;
 use crate::task::mytask;
@@ -534,10 +535,71 @@ pub trait AudioDaiProvider: Send + Sync {
     }
 }
 
-struct AudioPcmRing {
-    params: AudioPcmParams,
+struct AudioPcmBacking {
     pages: ContiguousPages,
     mapped_bytes: usize,
+}
+
+impl MemoryMappingOps for AudioPcmBacking {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        if !offset.is_multiple_of(PAGE_SIZE) || !length.is_multiple_of(PAGE_SIZE) {
+            return Err("PCM mmap offset and length must be page-aligned");
+        }
+        if offset >= self.mapped_bytes || length > self.mapped_bytes - offset {
+            return Err("PCM mmap range exceeds ring size");
+        }
+        Ok(MemoryMappingInfo::new(
+            self.pages.as_paddr() + offset as u64,
+            0x3,
+            true,
+        ))
+    }
+}
+
+struct AudioPcmMapping {
+    backing: Arc<AudioPcmBacking>,
+    offset: usize,
+    length: usize,
+}
+
+impl MemoryMappingOps for AudioPcmMapping {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.length)
+        {
+            return Err("PCM mmap range exceeds the admitted mapping");
+        }
+        let offset = self
+            .offset
+            .checked_add(offset)
+            .ok_or("PCM mmap offset overflow")?;
+        self.backing.get_mapping_info(offset, length)
+    }
+
+    fn stable_physical_extent(&self, page: usize, count: usize) -> Option<u64> {
+        self.get_mapping_info(page.checked_mul(PAGE_SIZE)?, count.checked_mul(PAGE_SIZE)?)
+            .ok()
+            .map(|info| info.paddr)
+    }
+
+    #[cfg(feature = "hosted")]
+    fn publication_generation(&self) -> Option<u64> {
+        Some(0)
+    }
+}
+
+struct AudioPcmRing {
+    params: AudioPcmParams,
+    backing: Arc<AudioPcmBacking>,
     app_ptr_frames: u64,
     submitted_ptr_frames: u64,
     hw_ptr_frames: u64,
@@ -549,13 +611,20 @@ impl AudioPcmRing {
     fn new(params: AudioPcmParams) -> Result<Self, &'static str> {
         params.validate()?;
         let buffer_bytes = params.buffer_bytes().ok_or("PCM buffer size overflow")?;
-        let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
-        let page_count = mapped_bytes / PAGE_SIZE;
-        let pages = ContiguousPages::new(page_count).ok_or("Failed to allocate PCM ring")?;
+        // The ring is directly mapped into userspace, including on hosts
+        // whose native mapping granule is larger than a kernel page.
+        let granule = crate::vm::execution_page_size();
+        let mapped_bytes = buffer_bytes
+            .checked_next_multiple_of(granule)
+            .ok_or("PCM mapping size overflow")?;
+        let pages = ContiguousPages::new_aligned(mapped_bytes / PAGE_SIZE, granule)
+            .ok_or("Failed to allocate PCM ring")?;
         Ok(Self {
             params,
-            pages,
-            mapped_bytes,
+            backing: Arc::new(AudioPcmBacking {
+                pages,
+                mapped_bytes,
+            }),
             app_ptr_frames: 0,
             submitted_ptr_frames: 0,
             hw_ptr_frames: 0,
@@ -586,11 +655,12 @@ impl AudioPcmRing {
     }
 
     fn clear_data(&mut self) {
-        // SAFETY: `pages` owns `mapped_bytes` bytes backing the mmap PCM ring.
+        let mapped_bytes = self.backing.mapped_bytes;
+        // SAFETY: The backing owns the full mapped range.
         unsafe {
-            core::ptr::write_bytes(self.vaddr() as *mut u8, 0, self.mapped_bytes);
+            core::ptr::write_bytes(self.vaddr() as *mut u8, 0, mapped_bytes);
         }
-        crate::arch::clean_dcache_to_poc_range(self.vaddr(), self.mapped_bytes);
+        crate::arch::clean_dcache_to_poc_range(self.vaddr(), mapped_bytes);
     }
 
     fn discard_pending(&mut self) {
@@ -608,7 +678,7 @@ impl AudioPcmRing {
     fn buffer_info(&self) -> AudioPcmBufferInfo {
         AudioPcmBufferInfo {
             mmap_offset: 0,
-            buffer_bytes: self.mapped_bytes as u64,
+            buffer_bytes: self.backing.mapped_bytes as u64,
             frame_bytes: self.frame_bytes() as u32,
             period_bytes: self.period_bytes() as u32,
             buffer_frames: self.params.buffer_frames,
@@ -621,7 +691,7 @@ impl AudioPcmRing {
             paddr: self.paddr(),
             vaddr: self.vaddr(),
             buffer_bytes: self.buffer_bytes(),
-            mapped_bytes: self.mapped_bytes,
+            mapped_bytes: self.backing.mapped_bytes,
         }
     }
 
@@ -642,11 +712,11 @@ impl AudioPcmRing {
     }
 
     fn paddr(&self) -> u64 {
-        self.pages.as_paddr()
+        self.backing.pages.as_paddr()
     }
 
     fn vaddr(&self) -> usize {
-        self.pages.as_vaddr()
+        self.backing.pages.as_vaddr()
     }
 
     fn commit_frames(&mut self, frames: u32) -> Result<(), &'static str> {
@@ -1237,33 +1307,34 @@ impl ControlOps for AudioCharDevice {
 }
 
 impl MemoryMappingOps for AudioCharDevice {
+    fn prepare_mapping(&self, request: MappingRequest) -> Result<PreparedMapping, MappingError> {
+        let backing = self
+            .ring
+            .lock()
+            .as_ref()
+            .ok_or(MappingError::Unsupported)?
+            .backing
+            .clone();
+        let mut mapping = backing.prepare_mapping(request)?;
+        // Retain the admitted allocation through unmap, even if the device
+        // is released or reconfigured while this mapping is still live.
+        mapping.owner = Some(Arc::new(AudioPcmMapping {
+            backing,
+            offset: request.offset,
+            length: mapping.length,
+        }));
+        Ok(mapping)
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
-        let _irq_guard = IrqGuard::new();
+    ) -> Result<MemoryMappingInfo, &'static str> {
         let guard = self.ring.lock();
         let ring = guard.as_ref().ok_or("PCM ring is not configured")?;
-        if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
-            return Err("PCM mmap offset and length must be page-aligned");
-        }
-        if offset >= ring.mapped_bytes {
-            return Err("PCM mmap offset exceeds ring size");
-        }
-        if length > ring.mapped_bytes - offset {
-            return Err("PCM mmap length exceeds ring size");
-        }
-        Ok(crate::object::capability::MemoryMappingInfo::new(
-            ring.paddr() + offset as u64,
-            0x3,
-            true,
-        ))
+        ring.backing.get_mapping_info(offset, length)
     }
-
-    fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
-
-    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 
     fn supports_mmap(&self) -> bool {
         let _irq_guard = IrqGuard::new();
@@ -1299,10 +1370,6 @@ impl Selectable for AudioCharDevice {
             SelectWaitOutcome::TimedOut
         }
     }
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
 }
 
 fn copy_cstr_bytes(dst: &mut [u8], src: &[u8]) {

@@ -35,7 +35,7 @@ fn hosted_schedulers_enter_tasks_after_all_cpus_are_ready() {
     }
 
     // Each boot owns its scheduler and vCPU slots for the process lifetime.
-    for count in [2, DEFAULT_VCPUS, MAX_NUM_CPUS] {
+    for count in [1, 2, DEFAULT_VCPUS, MAX_NUM_CPUS] {
         let status = Command::new(env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -92,6 +92,7 @@ fn run_kernel(count: usize) -> ! {
     scheduler::spawn_idle_task(0);
     assert_eq!(scheduler::start_scheduler(), Some(first));
     platform.start_secondary_cpus().unwrap();
+    assert!(platform.start_secondary_cpus().is_err());
     scheduler::first_switch_to_kernel_task(first);
 }
 

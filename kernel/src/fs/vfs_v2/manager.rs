@@ -39,9 +39,23 @@ const O_CLOEXEC: u32 = 0x80000;
 // Other driver callbacks and delegating helpers must not reacquire it.
 static NAMESPACE_MUTATIONS: Mutex<()> = Mutex::new(());
 
-fn lock_namespace_mutations() -> Result<MutexGuard<'static, ()>, FileSystemError> {
-    if let Some(guard) = NAMESPACE_MUTATIONS.try_lock() {
-        return Ok(guard);
+struct NamespaceGuard {
+    // Rust drops fields in declaration order. Unlock before releasing the
+    // teardown reservation.
+    _lock: MutexGuard<'static, ()>,
+    _transaction: Option<crate::task::KernelTransaction>,
+}
+
+fn lock_namespace_mutations() -> Result<NamespaceGuard, FileSystemError> {
+    // Group exit must let the owner drop the namespace lock even when it
+    // suspended in a filesystem operation on another thread's kernel stack.
+    let transaction = crate::task::kernel_transaction()
+        .map_err(|error| vfs_error(FileSystemErrorKind::Busy, error))?;
+    if let Some(lock) = NAMESPACE_MUTATIONS.try_lock() {
+        return Ok(NamespaceGuard {
+            _lock: lock,
+            _transaction: transaction,
+        });
     }
     // Some kernel callers retain an IRQ/preemption guard. They must not sleep
     // behind an I/O operation; report contention instead of deadlocking/panicking.
@@ -51,7 +65,10 @@ fn lock_namespace_mutations() -> Result<MutexGuard<'static, ()>, FileSystemError
             "VFS namespace mutation would block with preemption disabled",
         ));
     }
-    Ok(NAMESPACE_MUTATIONS.lock())
+    Ok(NamespaceGuard {
+        _lock: NAMESPACE_MUTATIONS.lock(),
+        _transaction: transaction,
+    })
 }
 
 /// Path resolution options for VFS operations

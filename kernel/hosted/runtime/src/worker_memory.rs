@@ -45,7 +45,8 @@ pub enum PatchedInstruction {
     PlatformRegister(crate::platform_register::Action),
 }
 
-pub(crate) const SYSCALL_BREAKPOINT: u32 = 0xd420_0000 | (0x5300 << 5);
+pub(crate) const SYSCALL_BREAKPOINT: u32 =
+    0xd420_0000 | ((crate::worker_context::SYSCALL_BRK as u32) << 5);
 
 pub(super) fn svc_immediate(word: u32) -> Option<u16> {
     (word & 0xffe0_001f == 0xd400_0001).then_some((word >> 5) as u16)

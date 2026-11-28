@@ -523,7 +523,12 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
     }
 
     // Create the shared memory object
-    let shmem = match SharedMemory::new(size, permissions) {
+    #[cfg(feature = "hosted")]
+    let shmem =
+        SharedMemory::new_with_granule(size, permissions, task.vm_manager.user_mapping_page_size());
+    #[cfg(not(feature = "hosted"))]
+    let shmem = SharedMemory::new(size, permissions);
+    let shmem = match shmem {
         Ok(shmem) => shmem,
         Err(_) => return usize::MAX,
     };
@@ -982,13 +987,8 @@ pub fn sys_event_handler_register_native_with_restorer(trapframe: &mut Trapframe
     if content_type > 3
         || handler_addr == 0
         || restorer_addr == 0
-        || task
-            .vm_manager
-            .translate_to_phys_with_access(
-                restorer_addr,
-                crate::object::capability::memory_mapping::AccessOp::Instruction,
-            )
-            .is_none()
+        || !task.vm_manager.is_user_instruction_address(handler_addr)
+        || !task.vm_manager.is_user_instruction_address(restorer_addr)
     {
         trapframe.increment_pc_next(&task);
         return usize::MAX;

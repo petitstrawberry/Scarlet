@@ -1850,7 +1850,11 @@ impl DisplaySurface {
                     .saturating_mul(line_length)
                     .saturating_add(x as usize * dst_bytes_per_pixel);
                 let src_off = row.saturating_mul(src_stride_bytes);
-                Self::write_row(&mut self.file, dst_off, &data[src_off..src_off + src_line_bytes])?;
+                Self::write_row(
+                    &mut self.file,
+                    dst_off,
+                    &data[src_off..src_off + src_line_bytes],
+                )?;
             }
         }
 

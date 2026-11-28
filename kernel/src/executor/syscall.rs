@@ -25,7 +25,10 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::Ordering;
-use scarlet_abi::{data_model::AbiDataModel, environment::EnvironmentExec};
+use scarlet_abi::{
+    data_model::AbiDataModel,
+    environment::{EnvironmentExec, EnvironmentSpawn, SpawnPlacement},
+};
 
 type Result<T> = core::result::Result<T, &'static str>;
 
@@ -462,6 +465,7 @@ struct ExecOptions {
     envp: Vec<String>,
     cwd: String,
     handles: Vec<HandleMapping>,
+    placement: SpawnPlacement,
 }
 fn string_array(task: &Task, address: usize) -> Result<Vec<String>> {
     let mut result = Vec::new();
@@ -494,14 +498,28 @@ fn string_array(task: &Task, address: usize) -> Result<Vec<String>> {
     }
     Err("unterminated string array")
 }
-fn exec_options(task: &Task, address: usize) -> Result<ExecOptions> {
+fn exec_options(task: &Task, address: usize, spawning: bool) -> Result<ExecOptions> {
     // Native callers currently share the kernel's model. A compatibility ABI
     // must select its own model before reaching this boundary.
     let model = AbiDataModel::NATIVE;
-    let mut bytes = [0u8; EnvironmentExec::MAX_ENCODED_SIZE];
-    let bytes = &mut bytes[..EnvironmentExec::encoded_size(model)];
-    copy_from_user(task, address, bytes).map_err(|_| "invalid options")?;
-    let options = EnvironmentExec::decode(model, bytes).map_err(|_| "unsupported exec options")?;
+    let mut bytes = [0u8; EnvironmentSpawn::MAX_ENCODED_SIZE];
+    let base = EnvironmentExec::encoded_size(model);
+    copy_from_user(task, address, &mut bytes[..base]).map_err(|_| "invalid options")?;
+    let (options, placement) = if spawning {
+        let extended = EnvironmentSpawn::encoded_size(model);
+        if model.read_u32(&bytes, 0).ok() == Some(extended as u32) {
+            let tail = address.checked_add(base).ok_or("invalid options")?;
+            copy_from_user(task, tail, &mut bytes[base..extended])
+                .map_err(|_| "invalid options")?;
+        }
+        let options =
+            EnvironmentSpawn::decode(model, &bytes).map_err(|_| "unsupported spawn options")?;
+        (options.exec, options.placement)
+    } else {
+        let options = EnvironmentExec::decode(model, &bytes[..base])
+            .map_err(|_| "unsupported exec options")?;
+        (options, SpawnPlacement::Inherit)
+    };
     if options.handle_count > HandleTable::MAX_HANDLES as u64 {
         return Err("too many handles");
     }
@@ -532,12 +550,13 @@ fn exec_options(task: &Task, address: usize) -> Result<ExecOptions> {
             text_arg(task, options.cwd.to_usize().map_err(|_| "invalid cwd")?)?
         },
         handles,
+        placement,
     })
 }
 handler!(sys_environment_exec, |task, tf| {
     let environment = environment(&task, tf.get_arg(0), false)?;
     let executable = object(&task, tf.get_arg(1))?;
-    let options = exec_options(&task, tf.get_arg(2))?;
+    let options = exec_options(&task, tf.get_arg(2), false)?;
     let abi = if tf.get_arg(3) == 0 {
         None
     } else {
@@ -563,10 +582,37 @@ handler!(sys_environment_exec, |task, tf| {
     })?;
     Ok(tf.get_return_value())
 });
+fn place_spawn_child(parent: &Task, child: &Task, placement: SpawnPlacement) -> Result<()> {
+    let session = parent.get_session_id();
+    let group = match placement {
+        SpawnPlacement::Inherit => parent.get_process_group_id(),
+        SpawnPlacement::NewProcessGroup => 0, // Assigned by TaskPool.
+        SpawnPlacement::JoinProcessGroup(group) => {
+            let group = parent
+                .get_namespace()
+                .resolve_global_id(group as usize)
+                .ok_or("unknown process group")?;
+            let leader =
+                crate::sched::scheduler::get_task_by_id(group).ok_or("unknown process group")?;
+            if leader.get_session_id() != session || leader.get_process_group_id() != group {
+                return Err("process group is outside the session or no longer exists");
+            }
+            group
+        }
+        // The unregistered child has neither a SID, PGID nor terminal.
+        // TaskPool assigns its new task ID as both SID and PGID.
+        SpawnPlacement::NewSession => return Ok(()),
+    };
+    child.set_session_id(session);
+    child.set_process_group_id(group);
+    child.set_controlling_tty(parent.get_controlling_tty().as_ref().map(Arc::downgrade));
+    Ok(())
+}
+
 handler!(sys_environment_spawn, |task, tf| {
     let environment = environment(&task, tf.get_arg(0), false)?;
     let executable = object(&task, tf.get_arg(1))?;
-    let options = exec_options(&task, tf.get_arg(2))?;
+    let options = exec_options(&task, tf.get_arg(2), true)?;
     let abi = if tf.get_arg(3) == 0 {
         None
     } else {
@@ -580,6 +626,7 @@ handler!(sys_environment_spawn, |task, tf| {
         crate::task::TaskType::User,
         task.get_namespace(),
     );
+    place_spawn_child(&task, &child, options.placement)?;
     *child.process_scope.write() = task.process_scope.read().clone();
     child.set_scheduler_affinity_config(
         task.scheduler_affinity_kind(),
@@ -597,9 +644,6 @@ handler!(sys_environment_spawn, |task, tf| {
     child.max_stack_size = task.max_stack_size;
     child.max_data_size = task.max_data_size;
     child.max_text_size = task.max_text_size;
-    child.set_session_id(task.get_session_id());
-    child.set_process_group_id(task.get_process_group_id());
-    child.set_controlling_tty(task.get_controlling_tty().as_ref().map(Arc::downgrade));
     child.set_nice(task.sched_nice.load(Ordering::Relaxed));
     child.set_core_preference(task.core_preference());
     child.init();
@@ -710,7 +754,7 @@ mod tests {
         };
         let address = base + 0x201;
         write_options(&task, address, &record);
-        let decoded = exec_options(&task, address).unwrap();
+        let decoded = exec_options(&task, address, false).unwrap();
         assert_eq!(decoded.argv, ["program"]);
         assert_eq!(decoded.envp, ["A=B"]);
         assert_eq!(decoded.cwd, "/child");
@@ -729,13 +773,16 @@ mod tests {
         record.flags = 1;
         write_options(&task, address, &record);
         assert_eq!(
-            exec_options(&task, address).err(),
+            exec_options(&task, address, false).err(),
             Some("unsupported exec options")
         );
         record.flags = 0;
         record.handle_count = HandleTable::MAX_HANDLES + 1;
         write_options(&task, address, &record);
-        assert_eq!(exec_options(&task, address).err(), Some("too many handles"));
+        assert_eq!(
+            exec_options(&task, address, false).err(),
+            Some("too many handles")
+        );
 
         // A null-terminated empty record now straddles the page boundary.
         record.argv = 0;
@@ -745,11 +792,11 @@ mod tests {
         record.handle_count = 0;
         let crossing = base + PAGE_SIZE - 13;
         write_options(&task, crossing, &record);
-        let decoded = exec_options(&task, crossing).unwrap();
+        let decoded = exec_options(&task, crossing, false).unwrap();
         assert!(decoded.argv.is_empty() && decoded.envp.is_empty() && decoded.handles.is_empty());
         assert_eq!(decoded.cwd, "/");
         assert_eq!(
-            exec_options(&task, base + 2 * PAGE_SIZE - 1).err(),
+            exec_options(&task, base + 2 * PAGE_SIZE - 1, false).err(),
             Some("invalid options")
         );
     }

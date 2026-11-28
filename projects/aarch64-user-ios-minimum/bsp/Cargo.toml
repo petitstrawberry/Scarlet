@@ -1,0 +1,22 @@
+[package]
+name = "scarlet-aarch64-user-ios-minimum-bsp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "scarlet"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+pollster = "0.4"
+vt100 = "0.16"
+wgpu = { version = "24", default-features = false, features = ["metal", "wgsl"] }
+scarlet = { path = "../../../kernel", default-features = false, features = ["hosted", "network", "user-fpu", "user-vector"] }
+scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
+scarlet-hosted-runtime = { path = "../../../kernel/hosted/runtime" }
+scarlet-hosted-sgfx-protocol = { path = "../../aarch64-user-macos-full/bsp/sgfx-protocol" }
+sgfx-backend-wgpu = { path = "../../shared/hosted/sgfx/wgpu" }
+sgfx-core = { git = "https://github.com/petitstrawberry/sgfx", rev = "3a6a987aaa5284056d4b1dcb0cd45326d30b3fe1", features = ["backend-abi"] }
+sgfx-backend-abi = { git = "https://github.com/petitstrawberry/sgfx", rev = "040dbb5cf42b75489504e1765183d37f6131f54c" }

@@ -568,7 +568,7 @@ fn terminate_current_user_exception(
 
 fn log_user_fault_memory_context(task: &crate::task::Task, trapframe: &Trapframe, vaddr: usize) {
     let brk = task.get_brk();
-    let text_size = task.text_size.load(core::sync::atomic::Ordering::SeqCst);
+    let text_size = task.text_size_bytes();
     let data_size = task.data_size.load(core::sync::atomic::Ordering::SeqCst);
     let vcpu_tls = task.vcpu.lock().get_tls_pointer();
     println!(

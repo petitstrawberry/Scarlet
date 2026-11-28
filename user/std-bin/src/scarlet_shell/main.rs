@@ -99,11 +99,6 @@ const CONSOLE_CHROME_SCENE_KEY: &str = "console-chrome";
 const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
 const HOME_SEARCH_RESULT_ROW_HEIGHT: f32 = 64.0;
-const HOME_GRID_CELL_WIDTH: f32 = 128.0;
-const HOME_GRID_COLUMN_SPACING: f32 = 20.0;
-const HOME_GRID_ICON_SIZE: u16 = 45;
-const HOME_GRID_ICON_PADDING: f32 = 12.5;
-const HOME_GRID_LABEL_SIZE: f32 = 13.0;
 const HOME_DRAWER_RESULTS_SPACING: f32 = 20.0;
 const HOME_BACKDROP_TINT: Color = Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
 const STATUS_NAVIGATION_HOVER: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.24);
@@ -2483,16 +2478,48 @@ fn filter_home_applications(applications: &[HomeApplication], query: &str) -> Ve
 }
 
 fn home_drawer_padding(width: f32) -> f32 {
-    if width < 720.0 { 16.0 } else { 20.0 }
+    (width * 0.025).clamp(12.0, 32.0)
 }
 
-fn home_grid_columns(width: f32) -> usize {
-    // Use the same usable width as the rendered drawer. Extra invisible
-    // margins would unnecessarily drop a column on narrow displays.
-    let available_width = (width - home_drawer_padding(width) * 2.0).max(1.0);
-    (((available_width + HOME_GRID_COLUMN_SPACING)
-        / (HOME_GRID_CELL_WIDTH + HOME_GRID_COLUMN_SPACING)) as usize)
-        .clamp(1, 6)
+#[derive(Clone, Copy)]
+struct HomeGridLayout {
+    columns: usize,
+    width: f32,
+    column_spacing: f32,
+    row_spacing: f32,
+    row_height: f32,
+    icon_size: u16,
+    icon_padding: f32,
+    label_size: f32,
+}
+
+impl HomeGridLayout {
+    fn new(width: f32) -> Self {
+        let available_width = (width - home_drawer_padding(width) * 2.0).max(1.0);
+        // Keep four columns at common phone widths and approach the desktop
+        // metrics gradually so expanding a window does not lose columns.
+        let desktop_fraction = ((width - 420.0) / (800.0 - 420.0)).clamp(0.0, 1.0);
+        let interpolate =
+            |compact: f32, desktop: f32| compact + (desktop - compact) * desktop_fraction;
+        let minimum_cell_width = interpolate(78.0, 128.0);
+        let preferred_cell_width = interpolate(92.0, 128.0);
+        let column_spacing = interpolate(8.0, 20.0);
+        let columns = (((available_width + column_spacing) / (minimum_cell_width + column_spacing))
+            as usize)
+            .max(1);
+        Self {
+            columns,
+            width: (columns as f32 * preferred_cell_width
+                + columns.saturating_sub(1) as f32 * column_spacing)
+                .min(available_width),
+            column_spacing,
+            row_spacing: interpolate(10.0, 18.0),
+            row_height: interpolate(86.0, 110.0),
+            icon_size: interpolate(36.0, 45.0).round() as u16,
+            icon_padding: interpolate(10.0, 12.5),
+            label_size: interpolate(12.0, 13.0),
+        }
+    }
 }
 
 fn application_drawer_accepts_keyboard(presentation: sws::ShellPresentation) -> bool {
@@ -3007,7 +3034,7 @@ impl ShellApp {
             .unwrap_or(0)
             .min(applications.len().saturating_sub(1));
         let columns = if self.home_query.get().trim().is_empty() {
-            home_grid_columns(self.screen_width.get())
+            HomeGridLayout::new(self.screen_width.get()).columns
         } else {
             1
         };
@@ -3066,7 +3093,7 @@ impl ShellApp {
         index: usize,
         application: HomeApplication,
         selected: Option<usize>,
-        row_height: f32,
+        layout: HomeGridLayout,
     ) -> impl View + Clone + use<> {
         let palette = ColorPalette::dark();
         let hovered = self.home_hovered.get() == Some(index);
@@ -3079,12 +3106,12 @@ impl ShellApp {
         } else {
             palette.window_background().with_opacity(0.0)
         };
-        let icon_tile_size = HOME_GRID_ICON_SIZE as f32 + HOME_GRID_ICON_PADDING * 2.0;
+        let icon_tile_size = layout.icon_size as f32 + layout.icon_padding * 2.0;
         let label_height =
-            graphics::measure_text_sized(&application.name, HOME_GRID_LABEL_SIZE).1 as f32;
+            graphics::measure_text_sized(&application.name, layout.label_size).1 as f32;
         let label_gap = 6.0;
         let outer_padding =
-            ((row_height - icon_tile_size - label_gap - label_height) * 0.5).max(0.0);
+            ((layout.row_height - icon_tile_size - label_gap - label_height) * 0.5).max(0.0);
         let hover_state = self.home_hovered.clone();
         let exit_state = hover_state.clone();
         let launch_app = self.clone();
@@ -3093,17 +3120,17 @@ impl ShellApp {
             Spacer::new().frame(1.0, outer_padding),
             home_style::launcher_icon(
                 &application.artwork, &application.icon,
-                HOME_GRID_ICON_SIZE, HOME_GRID_ICON_PADDING, 17.5,
+                layout.icon_size, layout.icon_padding, icon_tile_size / 4.0,
             ),
             Spacer::new().frame(1.0, label_gap),
             Text::new(application.name)
-                .font_size(HOME_GRID_LABEL_SIZE)
+                .font_size(layout.label_size)
                 .color(palette.text()),
             Spacer::new().frame(1.0, outer_padding),
         }
         .spacing(0.0)
         .alignment(Alignment::Center)
-        .frame(f32::INFINITY, row_height)
+        .frame(f32::INFINITY, layout.row_height)
         .background(background)
         .clip_radius(13.0)
         .on_hover(move || hover_state.set(Some(index)))
@@ -3206,15 +3233,17 @@ impl ShellApp {
     }
 
     fn desktop_home_content(&self) -> impl View + Clone + use<> {
-        let width = self.screen_width.get().max(320.0);
+        let width = self.screen_width.get().max(1.0);
         let height = self.screen_height.get().max(320.0);
         let shell_layout = self.shell_layout.get();
         // This surface only belongs to Home. Its geometry never changes to
         // Overview while a previous GPU image is still retained by SWS.
         let presentation = sws::ShellPresentation::Home;
         let drawer_padding = home_drawer_padding(width);
-        let columns = home_grid_columns(width);
-        let row_height = if height < 760.0 { 110.0 } else { 116.0 };
+        let mut grid_layout = HomeGridLayout::new(width);
+        if height >= 760.0 {
+            grid_layout.row_height += 6.0;
+        }
         let bar_height = shell_layout.status_bar_height() as f32;
         let work_height = (height - bar_height).max(1.0);
         // This surface is prepared while hidden. Keep its geometry identical
@@ -3236,7 +3265,7 @@ impl ShellApp {
         let drawer_header_height = 44.0;
         let drawer_body_height = (drawer_height - drawer_lip_height).max(1.0);
         let drawer_body_top_padding = if height < 760.0 { 6.0 } else { 10.0 };
-        let drawer_body_bottom_padding = drawer_padding;
+        let drawer_body_bottom_padding = drawer_padding.min(20.0);
         let drawer_content_height =
             (drawer_body_height - drawer_body_top_padding - drawer_body_bottom_padding).max(1.0);
         let grid_height =
@@ -3255,22 +3284,18 @@ impl ShellApp {
             ),
         );
         let searching = !self.home_query.get().trim().is_empty();
-        let app_grid_width = (columns as f32 * HOME_GRID_CELL_WIDTH
-            + columns.saturating_sub(1) as f32 * HOME_GRID_COLUMN_SPACING)
-            .min(drawer_content_width);
         let grid = GridView::new(
             self.home_filtered_applications.clone(),
             self.home_selected.clone(),
-            columns,
-            row_height,
+            grid_layout.columns,
+            grid_layout.row_height,
             move |index, application, selected| {
-                cell_app.home_application_cell(index, application, selected, row_height)
+                cell_app.home_application_cell(index, application, selected, grid_layout)
             },
         )
-        .spacing(HOME_GRID_COLUMN_SPACING)
-        .row_spacing(18.0)
-        .minimum_cell_width(96.0)
-        .frame(app_grid_width, grid_height);
+        .spacing(grid_layout.column_spacing)
+        .row_spacing(grid_layout.row_spacing)
+        .frame(grid_layout.width, grid_height);
         let centered_grid = hstack! {
             Spacer::new(),
             grid,
@@ -3319,6 +3344,17 @@ impl ShellApp {
         let cancel_focus = self.home_search_focused.clone();
         let cancel_app = self.clone();
         let empty_focus = self.home_search_focused.clone();
+        let drawer_header_side_width = if width < 380.0 {
+            52.0_f32
+        } else if width < 720.0 {
+            84.0
+        } else {
+            112.0
+        }
+        .min(drawer_content_width / 4.0);
+        let search_width = (width * 0.32)
+            .clamp(if width < 720.0 { 180.0 } else { 280.0 }, 460.0)
+            .min((drawer_content_width - 2.0 * drawer_header_side_width).max(1.0));
         let search = TextField::new(self.home_query.clone())
             .autofocus(
                 application_drawer_accepts_keyboard(presentation) && self.home_search_focused.get(),
@@ -3341,17 +3377,7 @@ impl ShellApp {
                 }
             })
             .on_empty(move || empty_focus.set(false))
-            .frame(
-                (width * 0.32).clamp(if width < 720.0 { 180.0 } else { 280.0 }, 460.0),
-                36.0,
-            );
-        let drawer_header_side_width = if width < 520.0 {
-            52.0
-        } else if width < 720.0 {
-            84.0
-        } else {
-            112.0
-        };
+            .frame(search_width, 36.0);
         let application_count_label = if application_count == 1 {
             String::from("1 app")
         } else {
@@ -4666,13 +4692,13 @@ mod tests {
     }
 
     use super::{
-        ControlCenterPresentation, HOME_BUTTON_WIDTH, HomeApplication, LEADING_CONTROLS_SPACING,
-        MENU_BAR_OUTER_PADDING, MenuTree, OVERVIEW_NAVIGATION_ROWS, OVERVIEW_SEPARATOR_HEIGHT,
-        OVERVIEW_SYSTEM_ROWS, OVERVIEW_VERTICAL_PADDING, OverviewGeometry, ShellLayout,
-        StatusItemId, StatusItemTokens, StatusPresentation, StatusProviderSnapshot, TaskMenuEntry,
-        TaskMenuItem, WindowSnapshot, WorkspaceCommand, application_drawer_accepts_keyboard,
-        build_window_model, control_center_body_position, filter_home_applications,
-        home_grid_columns, menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
+        ControlCenterPresentation, HOME_BUTTON_WIDTH, HomeApplication, HomeGridLayout,
+        LEADING_CONTROLS_SPACING, MENU_BAR_OUTER_PADDING, MenuTree, OVERVIEW_NAVIGATION_ROWS,
+        OVERVIEW_SEPARATOR_HEIGHT, OVERVIEW_SYSTEM_ROWS, OVERVIEW_VERTICAL_PADDING,
+        OverviewGeometry, ShellLayout, StatusItemId, StatusItemTokens, StatusPresentation,
+        StatusProviderSnapshot, TaskMenuEntry, TaskMenuItem, WindowSnapshot, WorkspaceCommand,
+        application_drawer_accepts_keyboard, build_window_model, control_center_body_position,
+        filter_home_applications, menu_bar_item_width, menu_bar_popup_x, next_home_selection_index,
         overview_app_menu_indices, overview_page_bounds, overview_page_capacity,
         overview_page_count, overview_window_status, passive_clock_control, scale_u32,
         set_state_if_changed, status_bar_menu_items, status_bar_resize_needed, status_item_label,
@@ -4926,11 +4952,8 @@ mod tests {
 
     #[test]
     fn home_grid_uses_four_direction_selection_stride() {
-        let columns = home_grid_columns(1280.0);
-        assert_eq!(columns, 6);
-        assert_eq!(home_grid_columns(2560.0), 6);
-        assert_eq!(home_grid_columns(480.0), 3);
-        assert_eq!(home_grid_columns(320.0), 2);
+        let columns = HomeGridLayout::new(402.0).columns;
+        assert_eq!(columns, 4);
         assert_eq!(next_home_selection_index(0, 20, columns, KeyCode::Right), 1);
         assert_eq!(
             next_home_selection_index(0, 20, columns, KeyCode::Down),
@@ -4940,6 +4963,30 @@ mod tests {
             next_home_selection_index(columns, 20, columns, KeyCode::Up),
             0
         );
+    }
+
+    #[test]
+    fn home_grid_fits_phone_and_desktop_widths() {
+        for (width, columns) in [
+            (230.0, 2),
+            (320.0, 3),
+            (360.0, 4),
+            (402.0, 4),
+            (480.0, 4),
+            (1280.0, 8),
+            (2560.0, 17),
+        ] {
+            let layout = HomeGridLayout::new(width);
+            assert_eq!(layout.columns, columns, "width {width}");
+            assert!(layout.width <= width - 2.0 * super::home_drawer_padding(width));
+        }
+        for width in 230..=1280 {
+            assert!(
+                HomeGridLayout::new(width as f32).columns
+                    <= HomeGridLayout::new(width as f32 + 1.0).columns,
+                "lost a column while expanding past {width}"
+            );
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ pub mod elf_loader;
 mod group_exit;
 pub mod namespace;
 pub mod process_scope;
-pub(crate) use group_exit::device_transaction;
+pub(crate) use group_exit::{KernelTransaction, kernel_transaction};
 pub mod reclaim_preference;
 pub mod resource_group;
 pub mod syscall;
@@ -933,7 +933,7 @@ pub struct Task {
 
     // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
-    #[cfg(feature = "hosted")]
+    #[cfg(all(feature = "hosted", not(target_os = "ios")))]
     pub(crate) hosted_thread: crate::hosted::execution::TaskThread,
     pub vcpu: IrqSpinLock<Vcpu>,
     /// Kernel context for context switching
@@ -1203,7 +1203,7 @@ impl Task {
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
             fixed_priority: fixed_priority::FixedPriorityState::new(),
             // IRQ spin lock fields
-            #[cfg(feature = "hosted")]
+            #[cfg(all(feature = "hosted", not(target_os = "ios")))]
             hosted_thread: Default::default(),
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
@@ -2031,8 +2031,16 @@ impl Task {
     /// The size of the task in bytes.
     pub fn get_size(&self) -> usize {
         self.stack_size.load(Ordering::SeqCst)
-            + self.text_size.load(Ordering::SeqCst)
+            + self.text_size_bytes()
             + self.data_size.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn text_size_bytes(&self) -> usize {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(bytes) = self.vm_manager.hosted_image().signed_text_size() {
+            return bytes;
+        }
+        self.text_size.load(Ordering::SeqCst)
     }
 
     /// Get the program break (NOT work in Kernel task)
@@ -2044,7 +2052,7 @@ impl Task {
         // Otherwise fallback to legacy size-based calculation for compatibility
         let brk = self.brk.load(Ordering::SeqCst);
         if brk == usize::MAX {
-            self.text_size.load(Ordering::SeqCst) + self.data_size.load(Ordering::SeqCst)
+            self.text_size_bytes() + self.data_size.load(Ordering::SeqCst)
         } else {
             brk
         }
@@ -2089,6 +2097,12 @@ impl Task {
     }
 
     fn set_brk_locked(&self, brk: usize) -> Result<(), &'static str> {
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        if let Some(data_size) = self.vm_manager.resize_signed_heap(brk, self.max_data_size) {
+            self.data_size.store(data_size?, Ordering::Relaxed);
+            self.brk.store(brk, Ordering::SeqCst);
+            return Ok(());
+        }
         let prev_brk = self.get_brk();
         // The byte-granular program break is independent of the granule at
         // which the execution platform can install and retire heap backing.
@@ -2898,7 +2912,7 @@ impl Task {
 
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child without cloning lists
-            let memmaps = self.vm_manager.fork_snapshot()?;
+            let memmaps = self.vm_manager.fork_snapshot(&child.vm_manager)?;
             after_snapshot();
             for mmap in memmaps {
                 if mmap
@@ -3123,9 +3137,15 @@ impl Task {
         child
             .data_size
             .store(self.data_size.load(Ordering::SeqCst), Ordering::SeqCst);
-        child
-            .text_size
-            .store(self.text_size.load(Ordering::SeqCst), Ordering::SeqCst);
+        #[cfg(all(feature = "hosted", target_os = "ios"))]
+        let text_size = child
+            .vm_manager
+            .hosted_image()
+            .signed_text_size()
+            .unwrap_or_else(|| self.text_size.load(Ordering::SeqCst));
+        #[cfg(not(all(feature = "hosted", target_os = "ios")))]
+        let text_size = self.text_size.load(Ordering::SeqCst);
+        child.text_size.store(text_size, Ordering::SeqCst);
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
@@ -3457,8 +3477,8 @@ impl Task {
             }
             return;
         }
-        // A sibling can be asleep in the display or EC driver with a hardware
-        // mutex on its kernel stack. Let it retire the transaction before
+        // A sibling can be asleep with a kernel or driver guard on its stack.
+        // Let it retire the transaction before
         // closing shared handles or discarding that stack.
         self.group_exit.wait_for_transactions();
         self.begin_exit();

@@ -5,8 +5,14 @@ pub(crate) mod execution;
 pub(crate) mod file_mapping;
 pub(crate) mod interrupts;
 mod memory;
+#[cfg(target_os = "ios")]
+pub(crate) mod signed_exec;
 
+#[cfg(target_os = "ios")]
+pub use execution::in_process::install_signed_text;
 pub use interrupts::raise_external as raise_external_interrupt;
+#[cfg(target_os = "ios")]
+pub use signed_exec::register_signed_image;
 
 use alloc::sync::Arc;
 use core::ffi::c_void;
@@ -17,7 +23,7 @@ use crate::{
     random::{EntropySource, RandomManager},
 };
 
-pub const DEFAULT_VCPUS: usize = 4;
+pub const DEFAULT_VCPUS: usize = if cfg!(target_os = "ios") { 1 } else { 4 };
 
 /// Minimum protection granule available to a hosted native executable.
 pub(crate) fn executable_page_size() -> usize {
@@ -98,8 +104,12 @@ fn prepare_secondary(cpu_id: usize) -> Result<usize, &'static str> {
 
 /// Initialize the host allocator boundary, vCPU identity, PMM, and initcalls.
 pub fn prepare(cpu_count: usize, ram_bytes: usize) -> Result<Platform, &'static str> {
-    if !(2..=MAX_NUM_CPUS).contains(&cpu_count) {
+    if !(1..=MAX_NUM_CPUS).contains(&cpu_count) {
         return Err("Hosted vCPU count is outside Scarlet's supported range");
+    }
+    #[cfg(target_os = "ios")]
+    if cpu_count != 1 {
+        return Err("iOS hosted Scarlet requires one vCPU");
     }
     #[cfg(target_os = "linux")]
     if scarlet_hosted_runtime::ram::host_page_size().ok() != Some(crate::environment::PAGE_SIZE) {
@@ -113,6 +123,8 @@ pub fn prepare(cpu_count: usize, ram_bytes: usize) -> Result<Platform, &'static 
     RandomManager::register_entropy_source(Arc::new(HostEntropy));
     crate::initcall::early::early_initcall_call();
     crate::initcall::driver::driver_initcall_call();
+    #[cfg(target_os = "ios")]
+    execution::in_process::prepare()?;
     Ok(Platform {
         _bsp: bsp,
         cpu_count,

@@ -1,0 +1,14 @@
+{
+  "rootfs/bin/myrica": {
+    "sha256": "5d3bfd3d0a637105bb7e22905816d4abfbe34f535f4ea479dbb0a38642f0bd0c",
+    "reason": "Pinned stock prebuilt is fixed-address ET_EXEC; needs an iOS-compatible PIE release."
+  },
+  "rootfs/bin/myrica-vulkan-probe": {
+    "sha256": "0f8d515b5807051f7009395418ccfb34ffb58866c815bbcdde6a57f955b43f10",
+    "reason": "Pinned stock prebuilt is fixed-address ET_EXEC; needs an iOS-compatible PIE release."
+  },
+  "rootfs/applications/kureha-code.app/bin/kureha-code": {
+    "sha256": "0d07ec6a1c35dbbc1581c697513eb0e4292ac1eabe059bdfa21737da0a96675f",
+    "reason": "Pinned stock prebuilt lacks 16 KiB load-segment alignment; needs an iOS-compatible release."
+  }
+}

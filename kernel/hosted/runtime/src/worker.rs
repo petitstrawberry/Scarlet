@@ -3,9 +3,9 @@
 use crate::{
     run_gate::{RunPermit, TaskId},
     worker_channel::{receive_backing, send_backing},
-    worker_context::Registers,
+    worker_context::{GuestStop, Registers},
     worker_memory::{Mapping, Protection},
-    worker_thread::{GuestStop, Interrupt, Thread},
+    worker_thread::{Interrupt, Thread},
 };
 use std::{
     collections::BTreeMap,
