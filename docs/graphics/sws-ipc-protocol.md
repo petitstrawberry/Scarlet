@@ -135,9 +135,9 @@ are relative to the end of `menu_titles`:
 | 68 | 4 | activation-token length | u32, zero = absent |
 | 72 | N | activation token | opaque bytes |
 
-SWS snapshots the current output, workarea, and system windowing mode; clamps
-the chosen surface extent to the supplied limits; and only then allocates SHM.
-In focused mode, eligible resizable normal windows receive a first buffer whose
+SWS snapshots the target display’s workarea and applied Experience, clamps the
+surface extent to the supplied limits, and allocates SHM. In Tablet experience,
+eligible resizable normal windows receive a first buffer whose
 managed geometry already matches the workarea. Fixed-size and finite-maximum
 compatibility windows retain a constrained preferred size and remain floating.
 
@@ -1228,12 +1228,19 @@ environment changes. `generation` is a monotonically increasing snapshot
 generation.
 
 `known_flags` and `state_flags` use the same bits. A state bit is meaningful
-only when the matching known bit is set:
+only when the matching known bit is set.
 
-| Bit | Constant | Meaning |
-|-----|----------|---------|
-| `0x01` | `TABLET_MODE` | Tablet-mode state is known / device is in tablet mode. |
-| `0x02` | `LID_CLOSED` | Lid-closed state is known / lid is closed. |
+| Bit | Constant in `state_flags` | Meaning |
+|-----|---------------------------|---------|
+| `0x01` | `TABLET_MODE` | The client's display is using Tablet experience. |
+| `0x02` | `LID_CLOSED` | The physical lid is closed. |
+| `0x20` | `HARDWARE_TABLET_MODE` | The physical tablet switch reports tablet posture. |
+
+The registered input panel follows the active editor's display. For other
+clients SWS uses the explicit output binding, then a window owned by the
+client (the focused window takes precedence), then the primary display.
+Clients can read the physical switch independently of that display's policy.
+The existing 16-byte snapshot carries both values.
 
 `capability_flags` describes currently available input devices:
 
@@ -1243,8 +1250,10 @@ only when the matching known bit is set:
 | `0x02` | `FINE_POINTER` | A fine pointer device is present. |
 | `0x04` | `KEYBOARD` | A keyboard is present. |
 | `0x08` | `PEN` | A pen device is present. |
+| `0x10` | `GAMEPAD` | A gamepad is present. |
+| `0x20` | `EXTERNAL_KEYBOARD` | A keyboard external to the chassis is present. |
 
-##### Runtime source and test override
+##### Runtime source and startup defaults
 
 SWS reads convertible posture from Scarlet event devices named
 `/dev/switchN`. The device exposes Linux-style `EV_SW` frames; SWS samples
@@ -1261,15 +1270,14 @@ tablet readers contribute `FINE_POINTER`, and `/dev/keyboardN` contributes
 the snapshot generation. `PEN` remains clear until the input ABI can distinguish
 a pen reliably.
 
-`SCARLET_TABLET_MODE` provides an initial posture for development hosts without
-a switch device. The values `1`, `true`, `yes`, `on`, and `tablet` enable tablet
-mode; `0`, `false`, `no`, `off`, and `laptop` disable it. Matching is
-case-insensitive. Invalid or absent values leave the posture unknown. This is a
-startup override only: a later hardware posture report is authoritative.
+Settings and `displayctl experience` set the per-output preference through
+the SWS output configuration transaction. SWS restores it from the matching saved display profile.
+The default is Automatic.
 
 ##### SBus mirror
 
-The same state is available to non-window-system services over SBus:
+Non-window-system services can read the primary display's projection and the
+physical input state over SBus.
 
 | Field | Value |
 |-------|-------|
@@ -1436,8 +1444,8 @@ The Extension API allows specialized bridge servers (like the Wayland bridge) to
 - The frame header has no version field. `GET_CAPABILITIES` reports the current
   protocol version; version 3 adds compositor-provided cursor icons and live
   cursor-theme selection, and version 4 adds managed window geometry distinct
-  from the composited surface. Version 5 adds system mode overrides; version 6
-  adds atomic configured-window creation; version 7 adds exclusive workspace
+  from the composited surface. The override requests introduced in version 5
+  are retired. Version 6 adds atomic configured-window creation; version 7 adds exclusive workspace
   control; version 8 adds compositor-paced frame callbacks plus suspended
   window state; and version 9 adds persistent extension pools, reusable buffer
   objects, atomic external commits, and explicit release. Optional features

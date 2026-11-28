@@ -376,9 +376,9 @@ impl Drop for CapabilityRegistration {
 }
 
 fn publish_capabilities(flags: u32) {
-    if let Some(snapshot) = super::input_environment::update_capabilities(flags) {
-        super::ipc::broadcast_input_environment_changed(snapshot);
-        super::input_environment_sbus::queue_state_changed(snapshot);
+    if super::input_environment::update_capabilities(flags) {
+        super::ipc::broadcast_input_environment_changed();
+        super::input_environment_sbus::queue_state_changed();
     }
 }
 

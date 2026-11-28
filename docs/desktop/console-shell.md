@@ -176,13 +176,12 @@ surface visibility and focus.
 
 ## Session window management
 
-While the console shell surface is registered, SWS uses its existing Focused
-windowing policy. A confirmed top-level application scene fills an empty
-workspace or opens a new single-scene workspace when the current one is
-occupied, using the tablet launch path. Transient children stay with their
-parent. Activating an existing app selects its existing workspace. Home is the
-session switcher; apps use the available workspace area instead of floating
-windows requiring pointer resizing.
+Each output's Experience preference controls window management in a console
+session. A Tablet output uses focused windowing. A confirmed top-level
+application scene fills an empty workspace or opens a new single-scene
+workspace when the current one is occupied. A Desktop output uses freeform
+windowing. Transient children stay with their parent, and activating an app
+selects its workspace.
 
 A pending scene stays hidden in the compositor while it receives permission to
 submit its first frame. Suspension and frame callbacks must both permit that
@@ -192,12 +191,6 @@ After a suspended surface becomes visible again, ScarletUI schedules a complete
 presentation of its retained scene even if the application state is unchanged.
 This supplies the frame SWS awaits when Home returns from a workspace, without
 waiting for a key or pointer event or rebuilding the artwork caches.
-
-This session policy does not report a tablet posture or invent controller
-capabilities. SWS retains hardware posture and user windowing overrides while
-console is active. Removing the console shell surface restores that policy
-through the existing desktop/tablet conversion path. The normal desktop shell
-continues to use its existing window-management behavior.
 
 ## Design references
 

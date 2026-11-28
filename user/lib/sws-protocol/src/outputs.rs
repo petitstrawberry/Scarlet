@@ -2,6 +2,18 @@
 //!
 //! Scanout modes are physical pixels. Positions and desktop rectangles are
 //! logical pixels; scaling never changes the native scanout allocation.
+//!
+//! With `OUTPUT_ROLES`, Get (11) and Apply (12) opt a connection into full
+//! connector snapshots for both replies and notifications. Snapshot event 0
+//! and transaction bodies start with generation and count. Bit 31 of count
+//! selects six little-endian words per configuration (id, x, y, scale_milli,
+//! experience, role). Snapshot descriptors still precede the configurations.
+//! Legacy Get (0) and Apply (1) use the original five-word records. Send
+//! [`encode_legacy_event`] until opt-in, and merge an [`OutputRequest::ApplyLegacy`]
+//! against the same generation before validation.
+//!
+//! Each monitor's TOML profile entry stores its last extend x/y and a `role`
+//! string (`extend`, `mirror`, `disabled`). A missing role means `extend`.
 use std::{string::String, vec::Vec};
 
 pub type OutputId = u32;
@@ -12,6 +24,30 @@ pub const MAX_OUTPUTS: usize = 16;
 pub const MIN_SCALE_MILLI: u32 = 250;
 pub const MAX_SCALE_MILLI: u32 = 8000;
 pub const MAX_CONNECTOR_KEY_BYTES: usize = 128;
+
+/// Stable numeric role values on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum OutputRole {
+    #[default]
+    Extend = 0,
+    /// Reproduce the internal extended desktop, or the active extended primary.
+    Mirror = 1,
+    Disabled = 2,
+}
+
+impl TryFrom<u32> for OutputRole {
+    type Error = crate::ProtocolError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Extend),
+            1 => Ok(Self::Mirror),
+            2 => Ok(Self::Disabled),
+            _ => Err(crate::ProtocolError::MalformedPayload),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -112,10 +148,12 @@ pub struct OutputDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputConfiguration {
     pub id: OutputId,
+    /// Saved extend position, including while mirroring or disabled.
     pub x: i32,
     pub y: i32,
     pub scale_milli: u32,
     pub experience: OutputExperience,
+    pub role: OutputRole,
 }
 
 /// A clipped rectangle in an output's native scanout image. These values must
@@ -217,6 +255,60 @@ pub struct OutputTransaction {
     pub configuration: Vec<OutputConfiguration>,
 }
 
+impl OutputTransaction {
+    /// Reconstruct a complete transaction from a legacy extended-desktop view.
+    /// The server checks the base generation against this snapshot before merging,
+    /// then applies normal layout validation to the result.
+    pub fn merge_legacy(&self, current: &OutputSnapshot) -> Result<Self, LayoutError> {
+        let extended = current
+            .configuration
+            .iter()
+            .filter(|c| c.role == OutputRole::Extend);
+        if self.configuration.len() != extended.count() {
+            return Err(LayoutError::MissingOutput);
+        }
+        // Legacy clients may normalize around the primary advertised in their
+        // snapshot. Anchor the visible group at that connector's live position
+        // so its geometry stays in the same coordinate system as parked outputs.
+        let primary = extended_primary(&current.outputs, &current.configuration)
+            .ok_or(LayoutError::NoExtendedOutput)?;
+        let live = current
+            .configuration
+            .iter()
+            .find(|c| c.id == primary)
+            .ok_or(LayoutError::MissingOutput)?;
+        let submitted = self
+            .configuration
+            .iter()
+            .find(|c| c.id == primary)
+            .ok_or(LayoutError::MissingOutput)?;
+        let dx = i64::from(live.x) - i64::from(submitted.x);
+        let dy = i64::from(live.y) - i64::from(submitted.y);
+        let mut configuration = current.configuration.clone();
+        for entry in &mut configuration {
+            if entry.role == OutputRole::Extend {
+                let update = self
+                    .configuration
+                    .iter()
+                    .find(|c| c.id == entry.id)
+                    .ok_or(LayoutError::MissingOutput)?;
+                *entry = OutputConfiguration {
+                    x: i32::try_from(i64::from(update.x) + dx)
+                        .map_err(|_| LayoutError::CoordinatesOverflow)?,
+                    y: i32::try_from(i64::from(update.y) + dy)
+                        .map_err(|_| LayoutError::CoordinatesOverflow)?,
+                    role: entry.role,
+                    ..*update
+                };
+            }
+        }
+        Ok(Self {
+            base_generation: self.base_generation,
+            configuration,
+        })
+    }
+}
+
 /// A connection's initial output metrics. Native dimensions are physical;
 /// desktop origin and extent are logical. They are negotiated before creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,8 +322,12 @@ pub struct OutputContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputRequest {
+    /// Opt in to snapshots containing all connectors and their roles.
     Get,
     Apply(OutputTransaction),
+    /// Legacy peers can see and update the extended portion of the desktop.
+    GetLegacy,
+    ApplyLegacy(OutputTransaction),
     Workspace(OutputId),
     ApplyWorkspace {
         output: OutputId,
@@ -305,15 +401,20 @@ pub fn encode_request(request: &OutputRequest) -> Vec<u8> {
                 put(&mut out, word);
             }
         }
-        OutputRequest::Get => put(&mut out, 0),
+        OutputRequest::GetLegacy => put(&mut out, 0),
+        OutputRequest::Get => put(&mut out, 11),
         OutputRequest::GetBacklight => put(&mut out, 9),
         OutputRequest::SetBacklight(percent) => {
             put(&mut out, 10);
             put(&mut out, u32::from(*percent));
         }
         OutputRequest::Apply(transaction) => {
-            put(&mut out, 1);
+            put(&mut out, 12);
             out.extend(encode_transaction(transaction));
+        }
+        OutputRequest::ApplyLegacy(transaction) => {
+            put(&mut out, 1);
+            out.extend(transaction_bytes(transaction, ConfigFormat::Legacy));
         }
         OutputRequest::Workspace(id) => {
             put(&mut out, 2);
@@ -354,11 +455,15 @@ pub fn encode_request(request: &OutputRequest) -> Vec<u8> {
 pub fn decode_request(bytes: &[u8]) -> Result<OutputRequest, crate::ProtocolError> {
     let mut r = Reader { bytes, offset: 0 };
     let request = match r.word()? {
-        0 => OutputRequest::Get,
-        1 => {
-            let value = decode_transaction(&bytes[r.offset..])?;
-            r.offset = bytes.len();
-            OutputRequest::Apply(value)
+        0 => OutputRequest::GetLegacy,
+        11 => OutputRequest::Get,
+        opcode @ (1 | 12) => {
+            let (value, format) = r.transaction()?;
+            match (opcode, format) {
+                (1, ConfigFormat::Legacy) => OutputRequest::ApplyLegacy(value),
+                (12, ConfigFormat::Roles) => OutputRequest::Apply(value),
+                _ => return Err(crate::ProtocolError::MalformedPayload),
+            }
         }
         2 => OutputRequest::Workspace(r.word()?),
         3 => {
@@ -473,6 +578,29 @@ pub fn encode_event(event: &OutputEvent) -> Vec<u8> {
     out
 }
 
+/// Encode replies and notifications for clients that have never requested roles.
+/// Their parser validates every advertised rectangle as part of one desktop.
+pub fn encode_legacy_event(event: &OutputEvent) -> Vec<u8> {
+    let OutputEvent::Snapshot(snapshot) = event else {
+        return encode_event(event);
+    };
+    let primary = extended_primary(&snapshot.outputs, &snapshot.configuration);
+    let mut desktop = snapshot.clone();
+    desktop
+        .configuration
+        .retain(|c| c.role == OutputRole::Extend);
+    desktop
+        .outputs
+        .retain(|d| desktop.configuration.iter().any(|c| c.id == d.id));
+    for output in &mut desktop.outputs {
+        output.primary = Some(output.id) == primary;
+    }
+    let mut bytes = Vec::new();
+    put(&mut bytes, 0);
+    bytes.extend(snapshot_bytes(&desktop, ConfigFormat::Legacy));
+    bytes
+}
+
 pub fn decode_event(bytes: &[u8]) -> Result<OutputEvent, crate::ProtocolError> {
     let mut r = Reader { bytes, offset: 0 };
     let event = match r.word()? {
@@ -578,6 +706,26 @@ fn put(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
+// The high count bit tags six-word records even when every role is Extend.
+// Untagged five-word records keep their original byte representation. Tagging
+// the format also makes truncated role-aware payloads unambiguously invalid.
+const ROLE_COUNT_FLAG: u32 = 1 << 31;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigFormat {
+    Legacy,
+    Roles,
+}
+
+impl ConfigFormat {
+    fn count_word(self, count: usize) -> u32 {
+        match self {
+            Self::Legacy => count as u32,
+            Self::Roles => count as u32 | ROLE_COUNT_FLAG,
+        }
+    }
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -616,10 +764,24 @@ impl<'a> Reader<'a> {
         }
         Ok(String::from(text))
     }
-    fn configs(&mut self, count: usize) -> Result<Vec<OutputConfiguration>, crate::ProtocolError> {
+    fn config_count(&mut self) -> Result<(usize, ConfigFormat), crate::ProtocolError> {
+        let word = self.word()?;
+        let count = (word & !ROLE_COUNT_FLAG) as usize;
         if count == 0 || count > MAX_OUTPUTS {
             return Err(crate::ProtocolError::MalformedPayload);
         }
+        let format = if word & ROLE_COUNT_FLAG == 0 {
+            ConfigFormat::Legacy
+        } else {
+            ConfigFormat::Roles
+        };
+        Ok((count, format))
+    }
+    fn configs(
+        &mut self,
+        count: usize,
+        format: ConfigFormat,
+    ) -> Result<Vec<OutputConfiguration>, crate::ProtocolError> {
         let mut configs = Vec::with_capacity(count);
         for _ in 0..count {
             configs.push(OutputConfiguration {
@@ -633,9 +795,25 @@ impl<'a> Reader<'a> {
                     2 => OutputExperience::Tablet,
                     _ => return Err(crate::ProtocolError::MalformedPayload),
                 },
+                role: match format {
+                    ConfigFormat::Legacy => OutputRole::Extend,
+                    ConfigFormat::Roles => OutputRole::try_from(self.word()?)?,
+                },
             });
         }
         Ok(configs)
+    }
+    fn transaction(&mut self) -> Result<(OutputTransaction, ConfigFormat), crate::ProtocolError> {
+        let base_generation = self.word()?;
+        let (count, format) = self.config_count()?;
+        let configuration = self.configs(count, format)?;
+        Ok((
+            OutputTransaction {
+                base_generation,
+                configuration,
+            },
+            format,
+        ))
     }
     fn finish(&self) -> Result<(), crate::ProtocolError> {
         if self.offset == self.bytes.len() {
@@ -646,7 +824,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn encode_configs(out: &mut Vec<u8>, configs: &[OutputConfiguration]) {
+fn encode_configs(out: &mut Vec<u8>, configs: &[OutputConfiguration], format: ConfigFormat) {
     for c in configs {
         for word in [
             c.id,
@@ -657,32 +835,40 @@ fn encode_configs(out: &mut Vec<u8>, configs: &[OutputConfiguration]) {
         ] {
             put(out, word);
         }
+        if format == ConfigFormat::Roles {
+            put(out, c.role as u32);
+        }
     }
 }
 
 pub fn encode_transaction(transaction: &OutputTransaction) -> Vec<u8> {
+    transaction_bytes(transaction, ConfigFormat::Roles)
+}
+
+fn transaction_bytes(transaction: &OutputTransaction, format: ConfigFormat) -> Vec<u8> {
     let mut out = Vec::new();
     put(&mut out, transaction.base_generation);
-    put(&mut out, transaction.configuration.len() as u32);
-    encode_configs(&mut out, &transaction.configuration);
+    put(&mut out, format.count_word(transaction.configuration.len()));
+    encode_configs(&mut out, &transaction.configuration, format);
     out
 }
+/// Read a standalone transaction body in either format. Server dispatch uses
+/// [`decode_request`] to distinguish legacy writes from explicit role changes.
 pub fn decode_transaction(bytes: &[u8]) -> Result<OutputTransaction, crate::ProtocolError> {
     let mut reader = Reader { bytes, offset: 0 };
-    let base_generation = reader.word()?;
-    let count = reader.word()? as usize;
-    let configuration = reader.configs(count)?;
+    let (transaction, _) = reader.transaction()?;
     reader.finish()?;
-    Ok(OutputTransaction {
-        base_generation,
-        configuration,
-    })
+    Ok(transaction)
 }
 
 pub fn encode_snapshot(snapshot: &OutputSnapshot) -> Vec<u8> {
+    snapshot_bytes(snapshot, ConfigFormat::Roles)
+}
+
+fn snapshot_bytes(snapshot: &OutputSnapshot, format: ConfigFormat) -> Vec<u8> {
     let mut out = Vec::new();
     put(&mut out, snapshot.generation);
-    put(&mut out, snapshot.outputs.len() as u32);
+    put(&mut out, format.count_word(snapshot.outputs.len()));
     for d in &snapshot.outputs {
         for word in [
             d.id,
@@ -702,16 +888,13 @@ pub fn encode_snapshot(snapshot: &OutputSnapshot) -> Vec<u8> {
             out.extend_from_slice(text.as_bytes());
         }
     }
-    encode_configs(&mut out, &snapshot.configuration);
+    encode_configs(&mut out, &snapshot.configuration, format);
     out
 }
 pub fn decode_snapshot(bytes: &[u8]) -> Result<OutputSnapshot, crate::ProtocolError> {
     let mut reader = Reader { bytes, offset: 0 };
     let generation = reader.word()?;
-    let count = reader.word()? as usize;
-    if count == 0 || count > MAX_OUTPUTS {
-        return Err(crate::ProtocolError::MalformedPayload);
-    }
+    let (count, format) = reader.config_count()?;
     let mut outputs = Vec::with_capacity(count);
     for _ in 0..count {
         let id = reader.word()?;
@@ -742,7 +925,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<OutputSnapshot, crate::ProtocolEr
             physical_height_mm,
         });
     }
-    let configuration = reader.configs(count)?;
+    let configuration = reader.configs(count, format)?;
     reader.finish()?;
     validate_layout(&outputs, &configuration)
         .map_err(|_| crate::ProtocolError::MalformedPayload)?;
@@ -756,6 +939,8 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<OutputSnapshot, crate::ProtocolEr
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {
     NoOutputs,
+    NoExtendedOutput,
+    NotExtended,
     TooManyOutputs,
     InvalidConnector,
     MissingPrimary,
@@ -769,10 +954,33 @@ pub enum LayoutError {
     Disconnected,
 }
 
+/// The mirror source and preferred desktop for clients using the legacy view.
+/// Ties follow connector enumeration order.
+pub fn extended_primary(
+    outputs: &[OutputDescriptor],
+    config: &[OutputConfiguration],
+) -> Option<OutputId> {
+    outputs
+        .iter()
+        .filter(|output| {
+            config
+                .iter()
+                .any(|c| c.id == output.id && c.role == OutputRole::Extend)
+        })
+        .min_by_key(|output| (!output.internal, !output.primary))
+        .map(|output| output.id)
+}
+
+struct LayoutRects {
+    all: Vec<LogicalRect>,
+    extended: Vec<usize>,
+    primary: usize,
+}
+
 fn rectangles(
     outputs: &[OutputDescriptor],
     config: &[OutputConfiguration],
-) -> Result<(Vec<LogicalRect>, usize), LayoutError> {
+) -> Result<LayoutRects, LayoutError> {
     if outputs.is_empty() {
         return Err(LayoutError::NoOutputs);
     }
@@ -784,6 +992,7 @@ fn rectangles(
     }
     let mut primary = None;
     let mut result = Vec::with_capacity(outputs.len());
+    let mut extended = Vec::new();
     for (index, output) in outputs.iter().enumerate() {
         if output.connector_key.is_empty()
             || output.connector_key.len() > MAX_CONNECTOR_KEY_BYTES
@@ -805,38 +1014,44 @@ fn rectangles(
         if matching.next().is_some() {
             return Err(LayoutError::DuplicateOutput);
         }
-        let (width, height) = output.mode.logical_size(current.scale_milli)?;
-        let rect = LogicalRect {
-            x: current.x,
-            y: current.y,
-            width,
-            height,
-        };
-        if rect.right() > i64::from(i32::MAX) || rect.bottom() > i64::from(i32::MAX) {
-            return Err(LayoutError::CoordinatesOverflow);
+        if current.role == OutputRole::Extend {
+            extended.push(index);
         }
-        result.push(rect);
+        result.push(OutputTransform::new(output.mode, *current)?.logical_rect());
     }
-    Ok((result, primary.ok_or(LayoutError::MissingPrimary)?))
+    if extended.is_empty() {
+        return Err(LayoutError::NoExtendedOutput);
+    }
+    Ok(LayoutRects {
+        all: result,
+        extended,
+        primary: primary.ok_or(LayoutError::MissingPrimary)?,
+    })
 }
 
-fn validate_rectangles(rects: &[LogicalRect], primary: usize) -> Result<(), LayoutError> {
-    for (i, rect) in rects.iter().enumerate() {
-        if rects[..i].iter().any(|other| rect.overlaps(*other)) {
+fn validate_rectangles(rects: &[LogicalRect], extended: &[usize]) -> Result<(), LayoutError> {
+    for (i, &index) in extended.iter().enumerate() {
+        if extended[..i]
+            .iter()
+            .any(|&other| rects[index].overlaps(rects[other]))
+        {
             return Err(LayoutError::Overlap);
         }
     }
     // A single connected component is stronger than requiring every monitor
     // to touch some monitor, which would permit two disconnected islands.
     let mut reached = [false; MAX_OUTPUTS];
-    reached[primary] = true;
+    reached[extended[0]] = true;
     loop {
         let mut changed = false;
-        for i in 0..rects.len() {
+        for &i in extended {
             if reached[i] {
                 continue;
             }
-            if (0..rects.len()).any(|j| reached[j] && rects[i].touches(rects[j])) {
+            if extended
+                .iter()
+                .any(|&j| reached[j] && rects[i].touches(rects[j]))
+            {
                 reached[i] = true;
                 changed = true;
             }
@@ -845,21 +1060,22 @@ fn validate_rectangles(rects: &[LogicalRect], primary: usize) -> Result<(), Layo
             break;
         }
     }
-    if reached[..rects.len()].iter().any(|r| !r) {
+    if extended.iter().any(|&i| !reached[i]) {
         return Err(LayoutError::Disconnected);
     }
     Ok(())
 }
 
 /// Validate one complete replacement before saving or applying any output.
-/// Returned rectangles follow descriptor order, independent of request order.
+/// Returned rectangles include saved extend positions for every connector in
+/// descriptor order. Only extended outputs participate in desktop topology.
 pub fn validate_layout(
     outputs: &[OutputDescriptor],
     config: &[OutputConfiguration],
 ) -> Result<Vec<LogicalRect>, LayoutError> {
-    let (rects, primary) = rectangles(outputs, config)?;
-    validate_rectangles(&rects, primary)?;
-    Ok(rects)
+    let rects = rectangles(outputs, config)?;
+    validate_rectangles(&rects.all, &rects.extended)?;
+    Ok(rects.all)
 }
 
 /// Stable topology key consists solely of monitor identities, independent of
@@ -886,17 +1102,17 @@ pub fn topology_key(outputs: &[OutputDescriptor]) -> Option<Vec<String>> {
     Some(keys)
 }
 
-/// Normalize a complete valid arrangement around its primary without changing
-/// any relative placement. Overflow rejects the whole update before mutation.
+/// Normalize around the hardware primary even while it is docked and disabled.
+/// Changing a role alone therefore preserves every connector's extend position.
 pub fn canonical_layout(
     outputs: &[OutputDescriptor],
     config: &[OutputConfiguration],
 ) -> Result<Vec<OutputConfiguration>, LayoutError> {
-    let (_, primary) = rectangles(outputs, config)?;
-    validate_layout(outputs, config)?;
+    let rects = rectangles(outputs, config)?;
+    validate_rectangles(&rects.all, &rects.extended)?;
     let origin = config
         .iter()
-        .find(|c| c.id == outputs[primary].id)
+        .find(|c| c.id == outputs[rects.primary].id)
         .ok_or(LayoutError::MissingOutput)?;
     let normalized = config
         .iter()
@@ -923,27 +1139,34 @@ pub fn snapped_position(
     moving: OutputId,
     desired: (i32, i32),
 ) -> Result<(i32, i32), LayoutError> {
-    let (mut rects, primary) = rectangles(outputs, config)?;
+    let LayoutRects {
+        all: mut rects,
+        extended,
+        ..
+    } = rectangles(outputs, config)?;
     let index = outputs
         .iter()
         .position(|o| o.id == moving)
         .ok_or(LayoutError::MissingOutput)?;
-    if rects.len() == 1 {
+    if !extended.contains(&index) {
+        return Err(LayoutError::NotExtended);
+    }
+    if extended.len() == 1 {
         return Ok((
-            i64::from(desired.0).min(i64::from(i32::MAX) - i64::from(rects[0].width)) as i32,
-            i64::from(desired.1).min(i64::from(i32::MAX) - i64::from(rects[0].height)) as i32,
+            i64::from(desired.0).min(i64::from(i32::MAX) - i64::from(rects[index].width)) as i32,
+            i64::from(desired.1).min(i64::from(i32::MAX) - i64::from(rects[index].height)) as i32,
         ));
     }
     let original = rects[index];
     let mut best: Option<(i128, i32, i32)> = None;
-    let mut evaluate = |x: i64, y: i64| {
+    let mut evaluate = |rects: &mut [LogicalRect], x: i64, y: i64| {
         let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
             return;
         };
         rects[index] = LogicalRect { x, y, ..original };
         if rects[index].right() > i64::from(i32::MAX)
             || rects[index].bottom() > i64::from(i32::MAX)
-            || validate_rectangles(&rects, primary).is_err()
+            || validate_rectangles(rects, &extended).is_err()
         {
             return;
         }
@@ -954,22 +1177,12 @@ pub fn snapped_position(
             best = Some(candidate);
         }
     };
-    evaluate(i64::from(original.x), i64::from(original.y));
-    for (other_index, other) in outputs.iter().enumerate() {
+    evaluate(&mut rects, i64::from(original.x), i64::from(original.y));
+    for &other_index in &extended {
         if other_index == index {
             continue;
         }
-        let c = config
-            .iter()
-            .find(|c| c.id == other.id)
-            .ok_or(LayoutError::MissingOutput)?;
-        let (w, h) = other.mode.logical_size(c.scale_milli)?;
-        let r = LogicalRect {
-            x: c.x,
-            y: c.y,
-            width: w,
-            height: h,
-        };
+        let r = rects[other_index];
         let left = i64::from(r.x) - i64::from(original.width);
         let right = r.right();
         let top = i64::from(r.y) - i64::from(original.height);
@@ -978,11 +1191,11 @@ pub fn snapped_position(
         let y = i64::from(desired.1).clamp(top, bottom);
         for edge_x in [left, right] {
             for edge_y in [top, y, bottom] {
-                evaluate(edge_x, edge_y);
+                evaluate(&mut rects, edge_x, edge_y);
             }
         }
         for edge_y in [top, bottom] {
-            evaluate(x, edge_y);
+            evaluate(&mut rects, x, edge_y);
         }
     }
     best.map(|(_, x, y)| (x, y))
@@ -1036,7 +1249,263 @@ mod tests {
             y,
             scale_milli: scale,
             experience: OutputExperience::Auto,
+            role: OutputRole::Extend,
         }
+    }
+
+    #[test]
+    fn role_changes_round_trip_the_extend_geometry_of_every_connector() {
+        let outputs = [
+            output(0, true, 100, 100),
+            output(1, false, 100, 100),
+            output(2, false, 100, 100),
+        ];
+        let initial = [at(2, -100, 0, 1000), at(0, 0, 0, 1000), at(1, 100, 0, 1000)];
+        let mut config = initial;
+        config[0].role = OutputRole::Mirror;
+        config[1].role = OutputRole::Disabled;
+        assert_eq!(extended_primary(&outputs, &config), Some(1));
+        let mut docked = canonical_layout(&outputs, &config).unwrap();
+        assert_eq!(docked, config);
+        let snapshot = OutputSnapshot {
+            generation: 42,
+            outputs: outputs.to_vec(),
+            configuration: docked.clone(),
+        };
+        assert_eq!(decode_snapshot(&encode_snapshot(&snapshot)), Ok(snapshot));
+        for entry in &mut docked {
+            entry.role = OutputRole::Extend;
+        }
+        assert_eq!(canonical_layout(&outputs, &docked).unwrap(), initial);
+    }
+
+    #[test]
+    fn only_extended_outputs_take_part_in_overlap_adjacency_and_snapping() {
+        let outputs = [
+            output(0, true, 100, 100),
+            output(1, false, 100, 100),
+            output(2, false, 100, 100),
+        ];
+        for role in [OutputRole::Mirror, OutputRole::Disabled] {
+            let mut config = [at(0, 0, 0, 1000), at(1, 100, 0, 1000), at(2, 200, 0, 1000)];
+            config[1].role = role;
+            // An inactive connector cannot bridge a gap or attract the moving desktop.
+            assert_eq!(
+                validate_layout(&outputs, &config),
+                Err(LayoutError::Disconnected)
+            );
+            assert_eq!(
+                snapped_position(&outputs, &config, 2, (200, 0)),
+                Ok((100, 0))
+            );
+            assert_eq!(
+                snapped_position(&outputs, &config, 1, (0, 0)),
+                Err(LayoutError::NotExtended)
+            );
+            config[2].x = 100;
+            assert!(validate_layout(&outputs, &config).is_ok());
+            config[0].role = role;
+            assert_eq!(
+                snapped_position(&outputs, &config, 2, (-700, -89)),
+                Ok((-700, -89))
+            );
+            config[2].role = role;
+            assert_eq!(
+                canonical_layout(&outputs, &config),
+                Err(LayoutError::NoExtendedOutput)
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_connectors_still_require_valid_ids_modes_and_saved_geometry() {
+        let mut outputs = [output(0, true, 100, 100), output(1, false, 100, 100)];
+        let mut config = [at(0, 0, 0, 1000), at(1, 0, 0, 1000)];
+        config[1].role = OutputRole::Disabled;
+        for (id, scale, x, error) in [
+            (2, 1000, 0, LayoutError::MissingOutput),
+            (1, 0, 0, LayoutError::InvalidScale),
+            (1, 1000, i32::MAX, LayoutError::CoordinatesOverflow),
+        ] {
+            config[1].id = id;
+            config[1].scale_milli = scale;
+            config[1].x = x;
+            assert_eq!(validate_layout(&outputs, &config), Err(error));
+        }
+        config[1].x = 0;
+        outputs[1].mode.pixel_width = 0;
+        assert_eq!(
+            validate_layout(&outputs, &config),
+            Err(LayoutError::InvalidMode)
+        );
+    }
+
+    #[test]
+    fn mirror_source_prefers_extended_internal_then_primary_then_first() {
+        let mut outputs = [
+            output(1, false, 100, 100),
+            output(2, true, 100, 100),
+            output(3, false, 100, 100),
+        ];
+        outputs[1].internal = false;
+        outputs[2].internal = true;
+        let mut config = [at(3, 100, 0, 1000), at(2, 0, 0, 1000), at(1, -100, 0, 1000)];
+        assert_eq!(extended_primary(&outputs, &config), Some(3));
+        config[0].role = OutputRole::Mirror;
+        assert_eq!(extended_primary(&outputs, &config), Some(2));
+        config[1].role = OutputRole::Disabled;
+        assert_eq!(extended_primary(&outputs, &config), Some(1));
+    }
+
+    #[test]
+    fn tagged_transactions_distinguish_explicit_extend_from_a_legacy_write() {
+        let entry = OutputConfiguration {
+            experience: OutputExperience::Tablet,
+            ..at(9, -10, 20, 1250)
+        };
+        let tx = OutputTransaction {
+            base_generation: 7,
+            configuration: std::vec![entry],
+        };
+        assert_eq!(encode_request(&OutputRequest::Get), 11u32.to_le_bytes());
+        assert_eq!(
+            encode_request(&OutputRequest::GetLegacy),
+            0u32.to_le_bytes()
+        );
+        for (opcode, count, role) in [(1u32, 1u32, None), (12, 0x8000_0001, Some(0u32))] {
+            let mut bytes = [opcode, 7, count, 9, (-10i32) as u32, 20, 1250, 2]
+                .into_iter()
+                .chain(role)
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            let request = if role.is_some() {
+                OutputRequest::Apply(tx.clone())
+            } else {
+                OutputRequest::ApplyLegacy(tx.clone())
+            };
+            assert_eq!(encode_request(&request), bytes);
+            assert_eq!(decode_request(&bytes), Ok(request));
+            assert_eq!(decode_transaction(&bytes[4..]), Ok(tx.clone()));
+            assert!(decode_request(&bytes[..bytes.len() - 4]).is_err());
+            bytes[0] = if opcode == 12 { 1 } else { 12 };
+            assert!(decode_request(&bytes).is_err());
+        }
+        for (role, word) in [(OutputRole::Mirror, 1u32), (OutputRole::Disabled, 2)] {
+            let mut tx = tx.clone();
+            tx.configuration[0].role = role;
+            let request = OutputRequest::Apply(tx);
+            let mut bytes = encode_request(&request);
+            let last_word = bytes.len() - 4;
+            assert_eq!(bytes[last_word..], word.to_le_bytes());
+            assert_eq!(decode_request(&bytes), Ok(request));
+            bytes[last_word] = 3;
+            assert!(decode_request(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_snapshots_and_writes_preserve_the_hidden_connectors() {
+        let mut snapshot = OutputSnapshot {
+            generation: 7,
+            outputs: std::vec![
+                output(0, true, 100, 100),
+                output(1, false, 100, 100),
+                output(2, false, 100, 100)
+            ],
+            configuration: std::vec![at(2, -100, 0, 1000), at(0, 0, 0, 1000), at(1, 100, 0, 1000)],
+        };
+        snapshot.configuration[0].role = OutputRole::Mirror;
+        snapshot.configuration[1].role = OutputRole::Disabled;
+        let bytes = encode_legacy_event(&OutputEvent::Snapshot(snapshot.clone()));
+        assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
+        let OutputEvent::Snapshot(legacy) = decode_event(&bytes).unwrap() else {
+            panic!("expected snapshot")
+        };
+        assert_eq!(legacy.generation, snapshot.generation);
+        assert_eq!(legacy.outputs.len(), 1);
+        assert_eq!(legacy.outputs[0].id, 1);
+        assert!(legacy.outputs[0].primary);
+        assert_eq!(legacy.configuration, [snapshot.configuration[2]]);
+        let mut tx = OutputTransaction {
+            base_generation: 7,
+            configuration: legacy.configuration,
+        };
+        tx.configuration[0].scale_milli = 1250;
+        let merged = tx.merge_legacy(&snapshot).unwrap();
+        let mut expected = snapshot.configuration.clone();
+        expected[2].scale_milli = 1250;
+        assert_eq!(merged.configuration, expected);
+        assert_eq!(merged.base_generation, 7);
+        assert!(validate_layout(&snapshot.outputs, &merged.configuration).is_ok());
+        tx.configuration[0].id = 0;
+        assert_eq!(tx.merge_legacy(&snapshot), Err(LayoutError::MissingOutput));
+    }
+
+    #[test]
+    fn legacy_primary_normalization_preserves_parked_positions_on_reenable() {
+        let mut snapshot = OutputSnapshot {
+            generation: 7,
+            outputs: std::vec![
+                output(0, true, 100, 100),
+                output(1, false, 100, 100),
+                output(2, false, 100, 100),
+                output(3, false, 100, 100),
+            ],
+            configuration: std::vec![
+                at(2, 200, -25, 1000),
+                at(0, 0, 0, 1000),
+                at(3, -100, 0, 1000),
+                at(1, 100, -25, 1000),
+            ],
+        };
+        snapshot.configuration[1].role = OutputRole::Disabled;
+        snapshot.configuration[2].role = OutputRole::Mirror;
+        let bytes = encode_legacy_event(&OutputEvent::Snapshot(snapshot.clone()));
+        let OutputEvent::Snapshot(mut view) = decode_event(&bytes).unwrap() else {
+            panic!("expected snapshot")
+        };
+        // Move output 2 above its neighbor. Legacy Settings anchors its primary at (0, 0).
+        view.configuration[0] = at(2, 100, -125, 1000);
+        let configuration = canonical_layout(&view.outputs, &view.configuration).unwrap();
+        assert_eq!(configuration, [at(2, 0, -100, 1000), at(1, 0, 0, 1000)]);
+        let tx = OutputTransaction {
+            base_generation: view.generation,
+            configuration,
+        };
+        let mut merged = tx.merge_legacy(&snapshot).unwrap().configuration;
+        let mut expected = snapshot.configuration.clone();
+        expected[0] = at(2, 100, -125, 1000);
+        assert_eq!(merged, expected);
+        for c in &mut merged {
+            c.role = OutputRole::Extend;
+        }
+        assert_eq!(
+            canonical_layout(&snapshot.outputs, &merged).unwrap(),
+            merged
+        );
+    }
+
+    #[test]
+    fn legacy_rebase_checks_the_final_coordinates() {
+        let snapshot = OutputSnapshot {
+            generation: 7,
+            outputs: std::vec![output(0, true, 100, 100), output(1, false, 100, 100)],
+            configuration: std::vec![at(0, 20, 0, 1000), at(1, 120, 0, 1000)],
+        };
+        let mut tx = OutputTransaction {
+            base_generation: 7,
+            configuration: std::vec![at(0, i32::MIN, 0, 1000), at(1, i32::MIN + 100, 0, 1000)],
+        };
+        // The translation exceeds i32, but both final positions fit.
+        assert_eq!(
+            tx.merge_legacy(&snapshot).unwrap().configuration,
+            snapshot.configuration
+        );
+        tx.configuration[1].x = 0;
+        assert_eq!(
+            tx.merge_legacy(&snapshot),
+            Err(LayoutError::CoordinatesOverflow)
+        );
     }
     #[test]
     fn posture_only_changes_the_automatic_internal_display() {

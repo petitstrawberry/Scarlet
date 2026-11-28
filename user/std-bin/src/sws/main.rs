@@ -76,10 +76,6 @@ fn main() -> ExitCode {
     println!("=== Scarlet Window Server (SWS) ===");
     println!("Initializing compositor...");
 
-    // Publish startup posture before Compositor::new starts input or IPC
-    // workers, so every consumer observes the same first-frame policy.
-    input_environment::initialize_from_env();
-
     let login = std::env::args().nth(1).as_deref() == Some("--login-seat");
     let clients = if login {
         // The parent transfers exactly two server endpoints over stdin. Only

@@ -4,7 +4,7 @@ use scarlet_ui::scene::{SceneBuilder, SceneWindowKey};
 use scarlet_ui::state::Listenable;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use sws_protocol::outputs::{OutputEvent, OutputSnapshot};
+use sws_protocol::outputs::{OutputEvent, OutputRole, OutputSnapshot};
 
 const SCENES: &[&str] = &[
     "main",
@@ -15,6 +15,18 @@ const SCENES: &[&str] = &[
     CONSOLE_CHROME_SCENE_KEY,
     volume_osd::SCENE_KEY,
 ];
+
+pub(super) fn is_desktop(snapshot: &OutputSnapshot, id: u32) -> bool {
+    snapshot
+        .configuration
+        .iter()
+        .any(|c| c.id == id && c.role == OutputRole::Extend)
+}
+
+// Output generations wrap on long-lived compositor sessions.
+pub(super) fn newer_generation(next: u32, current: u32) -> bool {
+    (next.wrapping_sub(current) as i32) > 0
+}
 
 pub(super) fn key(output: u32, local: &str) -> String {
     if output == 0 {
@@ -80,14 +92,22 @@ impl SessionBus {
             changed.fetch_add(1, Ordering::Relaxed);
         }));
     }
+    pub(super) fn set_outputs(&self, snapshot: OutputSnapshot) {
+        if self.outputs.get().as_ref() != Some(&snapshot) {
+            self.outputs.set(Some(snapshot));
+            self.topology.fetch_add(1, Ordering::Release);
+        }
+    }
     pub fn receive(&self, event: OutputEvent) {
         match event {
             OutputEvent::Snapshot(snapshot) => {
-                if self.outputs.get().as_ref() != Some(&snapshot) {
-                    let generation = snapshot.generation;
-                    self.topology
-                        .store(u64::from(generation), Ordering::Release);
-                    self.outputs.set(Some(snapshot));
+                // A synchronous query may already include a queued notification.
+                if self
+                    .outputs
+                    .get()
+                    .is_none_or(|old| newer_generation(snapshot.generation, old.generation))
+                {
+                    self.set_outputs(snapshot);
                 }
             }
             OutputEvent::Workspace { output, state } => {
@@ -166,6 +186,7 @@ impl WorkspaceMenus {
 #[derive(Clone)]
 pub(super) struct ShellSession {
     primary: ShellApp,
+    primary_active: bool,
     secondary: Vec<ShellApp>,
     bus: SessionBus,
     topology_generation: u32,
@@ -177,7 +198,7 @@ pub(super) struct ShellSession {
 }
 
 impl ShellSession {
-    pub fn new(primary: ShellApp) -> Self {
+    pub fn new(primary: ShellApp, outputs: Option<OutputSnapshot>) -> Self {
         let make_id = scarlet_ui::state::generate_state_id;
         let bus = SessionBus {
             outputs: State::new(make_id(), None),
@@ -191,10 +212,14 @@ impl ShellSession {
         bus.observe(&bus.windows);
         bus.observe(&primary.home_applications);
         bus.observe(&primary.workspace_state);
-        bus.observe(&primary.input_environment_snapshot);
-        let _ = SESSION.set(bus.clone());
+        // Older servers without an output catalog use the original single desktop.
+        let primary_active = outputs.is_none();
+        if let Some(snapshot) = outputs {
+            bus.set_outputs(snapshot);
+        }
         Self {
             primary,
+            primary_active,
             secondary: Vec::new(),
             bus,
             topology_generation: 0,
@@ -207,14 +232,14 @@ impl ShellSession {
     }
     fn app(&self, id: u32) -> Option<&ShellApp> {
         if id == 0 {
-            Some(&self.primary)
+            self.primary_active.then_some(&self.primary)
         } else {
             self.secondary.iter().find(|app| app.output_id.get() == id)
         }
     }
     fn app_mut(&mut self, id: u32) -> Option<&mut ShellApp> {
         if id == 0 {
-            Some(&mut self.primary)
+            self.primary_active.then_some(&mut self.primary)
         } else {
             self.secondary
                 .iter_mut()
@@ -239,9 +264,8 @@ impl ShellSession {
         if let Some(output) = self.scene_owners.get(&window) {
             return *output;
         }
-        self.bus
-            .endpoints
-            .get()
+        let endpoints = self.bus.endpoints.get();
+        endpoints
             .iter()
             .find_map(|endpoint| {
                 (endpoint.menu_surfaces.get().contains(&window)
@@ -253,39 +277,43 @@ impl ShellSession {
                     }))
                 .then_some(endpoint.id)
             })
+            .or_else(|| endpoints.first().map(|endpoint| endpoint.id))
             .unwrap_or(0)
     }
-    fn reconcile(&mut self) {
-        if self.bus.topology.load(Ordering::Acquire) == u64::from(self.topology_generation) {
-            return;
+    fn desktops(&self) -> impl Iterator<Item = &ShellApp> {
+        self.primary_active
+            .then_some(&self.primary)
+            .into_iter()
+            .chain(&self.secondary)
+    }
+
+    fn update_desktops(&mut self, snapshot: &OutputSnapshot) -> Vec<u32> {
+        let active = |id| is_desktop(snapshot, id);
+        self.scene_owners.retain(|_, owner| active(*owner));
+        self.filter_queries.retain(|owner, _| active(*owner));
+        let mut added = Vec::new();
+        if active(0) != self.primary_active {
+            self.primary_active = active(0);
+            if self.primary_active {
+                added.push(0);
+            } else {
+                self.primary.retire_desktop();
+            }
         }
-        let Some(snapshot) = self.bus.outputs.get() else {
-            return;
-        };
-        if snapshot.generation == self.topology_generation {
-            return;
-        }
-        self.topology_generation = snapshot.generation;
-        self.scene_owners
-            .retain(|_, owner| snapshot.outputs.iter().any(|output| output.id == *owner));
-        self.filter_queries
-            .retain(|owner, _| snapshot.outputs.iter().any(|output| output.id == *owner));
         self.secondary.retain(|app| {
-            if snapshot
-                .outputs
-                .iter()
-                .any(|output| output.id == app.output_id.get())
-            {
+            if active(app.output_id.get()) {
                 return true;
             }
-            for scene in SCENES {
-                dismiss_window(key(app.output_id.get(), scene));
-            }
+            app.retire_desktop();
             false
         });
-        let mut added = Vec::new();
+        if !active(self.bus.panel_output.get()) && self.primary.control_center_session.get().open {
+            self.primary
+                .control_center_session
+                .update(ControlCenterSession::close);
+        }
         for descriptor in &snapshot.outputs {
-            if self.app(descriptor.id).is_some() {
+            if !active(descriptor.id) || self.app(descriptor.id).is_some() {
                 continue;
             }
             let mut app =
@@ -293,6 +321,7 @@ impl ShellSession {
             // Providers and catalogs have a single owner. Per-output selection,
             // windows, menus, and workspace state remain independent.
             app.clock = self.primary.clock.clone();
+            app.volume_feedback = self.primary.volume_feedback.clone();
             app.status_snapshot = self.primary.status_snapshot.clone();
             app.console_audio = self.primary.console_audio.clone();
             app.recent_app_ids = self.primary.recent_app_ids.clone();
@@ -309,12 +338,22 @@ impl ShellSession {
             added.push(descriptor.id);
             self.secondary.push(app);
         }
-        self.bus.endpoints.set(
-            core::iter::once(&self.primary)
-                .chain(&self.secondary)
-                .map(Endpoint::of)
-                .collect(),
-        );
+        self.bus
+            .endpoints
+            .set(self.desktops().map(Endpoint::of).collect());
+        added
+    }
+
+    fn reconcile(&mut self) {
+        let generation = self.bus.topology_generation();
+        if generation == self.topology_generation {
+            return;
+        }
+        let Some(snapshot) = self.bus.outputs.get() else {
+            return;
+        };
+        self.topology_generation = generation;
+        let added = self.update_desktops(&snapshot);
         if let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") {
             for id in added.iter().copied() {
                 if let Ok(state) = connection.output_workspace(id) {
@@ -323,7 +362,7 @@ impl ShellSession {
                 }
             }
         }
-        for app in core::iter::once(&self.primary).chain(&self.secondary) {
+        for app in self.desktops() {
             let Some(config) = snapshot
                 .configuration
                 .iter()
@@ -349,13 +388,8 @@ impl ShellSession {
             );
         }
         for id in added {
-            for scene in [
-                "main",
-                HOME_BACKDROP_SCENE_KEY,
-                HOME_SCENE_KEY,
-                OVERVIEW_DRAWER_SCENE_KEY,
-            ] {
-                open_window(key(id, scene));
+            if let Some(app) = self.app(id) {
+                app.open_desktop_scenes();
             }
         }
         self.bus.changed.fetch_add(1, Ordering::Relaxed);
@@ -386,7 +420,12 @@ impl ShellSession {
         if !core::mem::take(&mut self.menus_changed) {
             return;
         }
-        for app in core::iter::once(&mut self.primary).chain(&mut self.secondary) {
+        for app in self
+            .primary_active
+            .then_some(&mut self.primary)
+            .into_iter()
+            .chain(&mut self.secondary)
+        {
             let Some(state) = app.workspace_state.get() else {
                 continue;
             };
@@ -417,41 +456,12 @@ impl ShellSession {
         let all_windows = self.bus.windows.get();
         self.menus.update_windows(&all_windows);
         self.menus_changed = true;
-        let topology = self.bus.outputs.get();
-        let physical_tablet = self
-            .primary
-            .input_environment_snapshot
-            .get()
-            .is_some_and(|environment| environment.tablet_mode == Some(true));
-        for app in core::iter::once(&self.primary).chain(&self.secondary) {
-            if let Some(snapshot) = &topology {
-                if let Some(output) = snapshot
-                    .outputs
-                    .iter()
-                    .find(|output| output.id == app.output_id.get())
-                {
-                    if let Some(config) = snapshot
-                        .configuration
-                        .iter()
-                        .find(|config| config.id == output.id)
-                    {
-                        let layout = ShellLayout::from_tablet_mode(Some(
-                            config
-                                .experience
-                                .tablet_experience(output.internal, physical_tablet),
-                        ));
-                        if app.shell_layout.get() != layout {
-                            app.open_menu_index.set(None);
-                            app.shell_layout.set(layout);
-                            app.update_workarea(
-                                app.screen_width.get() as u32,
-                                app.screen_height.get() as u32,
-                                layout,
-                            );
-                        }
-                    }
-                }
-            }
+        for app in self
+            .primary_active
+            .then_some(&self.primary)
+            .into_iter()
+            .chain(&self.secondary)
+        {
             let workspace = app.workspace_state.get();
             let filtered = all_windows
                 .iter()
@@ -493,6 +503,19 @@ impl ShellSession {
     }
 }
 
+impl ShellApp {
+    fn retire_desktop(&self) {
+        for scene in SCENES {
+            self.dismiss_scene(scene);
+        }
+        self.open_menu_index.set(None);
+        self.control_center_window.set(None);
+        self.home_window_id.set(0);
+        self.workspace_state.set(None);
+        self.workspace_commands.set(Vec::new());
+    }
+}
+
 impl View for ShellSession {
     fn create_element(&self) -> Box<dyn scarlet_ui::element::Element> {
         self.primary.create_element()
@@ -513,11 +536,7 @@ impl Scene for ShellScenes {
 }
 impl Application for ShellSession {
     fn scenes(&self) -> impl Scene {
-        ShellScenes(
-            core::iter::once(self.primary.clone())
-                .chain(self.secondary.iter().cloned())
-                .collect(),
-        )
+        ShellScenes(self.desktops().cloned().collect())
     }
     fn scene_view(&self, scene: &SceneWindowKey) -> Option<Box<dyn View>> {
         let (id, local) = self.split_key(scene)?;
@@ -529,12 +548,18 @@ impl Application for ShellSession {
         let mut dependencies = app
             .scene_listenables(&local)
             .unwrap_or_else(|| app.listenables());
-        if id == 0 && local.as_str() == "main" {
+        if local.as_str() == "main" {
             dependencies.push(&self.bus.outputs);
         }
         Some(dependencies)
     }
     fn init(&mut self) {
+        let _ = SESSION.set(self.bus.clone());
+        if self.primary_active {
+            self.primary.open_desktop_scenes();
+        } else {
+            self.reconcile();
+        }
         self.primary.init();
     }
     fn on_idle(&mut self) {
@@ -550,17 +575,19 @@ impl Application for ShellSession {
             self.receive_menu(update);
         }
         self.synchronize_menus();
-        self.primary.sync_control_center_scene();
+        if self.primary_active {
+            self.primary.sync_control_center_scene();
+        }
         for app in &mut self.secondary {
             app.sync_control_center_scene();
         }
     }
     fn on_window_created(&mut self, context: &WindowContext, window: &mut dyn PlatformWindow) {
         if let Some((id, local)) = self.local_context(context) {
-            self.scene_owners
-                .insert(context.platform_window_id as u32, id);
             if let Some(app) = self.app_mut(id) {
                 app.on_window_created(&local, window);
+                self.scene_owners
+                    .insert(context.platform_window_id as u32, id);
             }
         }
     }
@@ -628,6 +655,87 @@ impl Application for ShellSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dormant_primary_scenes_retire_and_only_reopen_on_extend() {
+        use sws_protocol::outputs::{OutputConfiguration, OutputDescriptor, OutputMode};
+        let mut snapshot = OutputSnapshot {
+            generation: 1,
+            outputs: vec![],
+            configuration: vec![],
+        };
+        for id in 0..2 {
+            snapshot.outputs.push(OutputDescriptor {
+                id,
+                connector_key: format!("port-{id}"),
+                monitor_key: format!("screen-{id}"),
+                identity_is_unique: true,
+                name: format!("Screen {id}"),
+                mode: OutputMode {
+                    pixel_width: 800,
+                    pixel_height: 600,
+                    refresh_millihz: 60_000,
+                },
+                primary: id == 0,
+                internal: id == 0,
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+            });
+            snapshot.configuration.push(OutputConfiguration {
+                id,
+                role: OutputRole::Extend,
+                x: id as i32 * 800,
+                y: 0,
+                scale_milli: 1000,
+                experience: Default::default(),
+            });
+        }
+        let app = ShellApp::new(ShellLayout::from_tablet_mode(Some(false)));
+        let mut session = ShellSession::new(app, Some(snapshot.clone()));
+        assert_eq!(session.update_desktops(&snapshot), [0, 1]);
+        session.primary.home_window_id.set(42);
+        session
+            .primary
+            .workspace_commands
+            .set(vec![WorkspaceCommand::ToggleOverview]);
+        session.primary.open_menu_index.set(Some(0));
+        let extended = snapshot.clone();
+        for role in [OutputRole::Disabled, OutputRole::Mirror] {
+            snapshot.generation += 1;
+            snapshot.configuration[0].role = role;
+            assert!(session.update_desktops(&snapshot).is_empty());
+            assert_eq!(
+                session
+                    .bus
+                    .endpoints
+                    .get()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect::<Vec<_>>(),
+                [1]
+            );
+            let mut scenes = SceneBuilder::new();
+            session.scenes().build(&mut scenes);
+            let declarations = scenes.into_declarations();
+            assert_eq!(declarations.len(), SCENES.len());
+            assert!(
+                declarations
+                    .iter()
+                    .all(|d| d.key.as_str().starts_with("output-1/"))
+            );
+            assert!(session.scene_view(&"main".into()).is_none());
+            assert!(!session.exit_when_all_windows_closed());
+        }
+        assert_eq!(session.primary.home_window_id.get(), 0);
+        assert!(session.primary.workspace_commands.get().is_empty());
+        assert!(session.primary.open_menu_index.get().is_none());
+        session.bus.receive(OutputEvent::Snapshot(snapshot.clone()));
+        session.bus.receive(OutputEvent::Snapshot(extended));
+        assert_eq!(session.bus.outputs.get(), Some(snapshot.clone()));
+        snapshot.configuration[0].role = OutputRole::Extend;
+        assert_eq!(session.update_desktops(&snapshot), [0]);
+        assert!(session.update_desktops(&snapshot).is_empty());
+    }
 
     #[test]
     fn focused_window_menu_follows_workspace_membership_without_another_focus_event() {

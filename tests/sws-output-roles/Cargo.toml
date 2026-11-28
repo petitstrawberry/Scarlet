@@ -1,0 +1,15 @@
+[package]
+name = "sws-output-roles"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+sws-client = { path = "../../user/lib/sws-client", default-features = false, features = ["std"] }
+sws-protocol = { path = "../../user/lib/sws-protocol", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "sws-output-roles"
+path = "guest.rs"

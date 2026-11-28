@@ -901,8 +901,8 @@ fn apply_input_environment(
     shell_layout: &State<ShellLayout>,
     open_menu_index: &State<Option<usize>>,
 ) {
-    // ShellSession resolves posture together with each monitor's configured
-    // experience. The listener only updates its shared environment snapshot.
+    // ShellSession gets each display's applied experience with its workarea.
+    // The listener supplies the shared physical input snapshot.
     if multi_output::session().is_some() {
         return;
     }
@@ -1509,14 +1509,14 @@ fn input_environment_snapshot(
     match environment {
         Some(environment) => InputEnvironmentSnapshot {
             available: true,
-            tablet_mode: environment.tablet_mode(),
+            hardware_tablet_mode: environment.hardware_tablet_mode(),
             touch_present: Some(environment.has_direct_touch()),
             keyboard_present: Some(environment.has_keyboard()),
             pointer_present: Some(environment.has_fine_pointer()),
         },
         None => InputEnvironmentSnapshot {
             available: false,
-            tablet_mode: None,
+            hardware_tablet_mode: None,
             touch_present: None,
             keyboard_present: None,
             pointer_present: None,
@@ -2597,6 +2597,7 @@ fn maintain_workspace_shell_role(
 ) {
     let mut audio_client = None;
     let mut visibility = volume_osd::Visibility::default();
+    let mut osd_output = 0;
     let mut registration_warning_reported = false;
     loop {
         let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") else {
@@ -2626,20 +2627,23 @@ fn maintain_workspace_shell_role(
             "[Shell] Registered workspace role at generation {}",
             snapshot.generation
         );
-        state.set(Some(snapshot.clone()));
-        if let Some(bus) = multi_output::session() {
-            if let Ok(outputs) = connection.outputs() {
-                bus.receive(sws_protocol::outputs::OutputEvent::Snapshot(outputs));
+        let scoped = multi_output::session().and_then(|bus| {
+            let outputs = connection.outputs().ok()?;
+            bus.set_outputs(outputs);
+            // A reconnect can keep the same topology while workspace selection changes.
+            for endpoint in bus.endpoints.get() {
+                if let Ok(state) = connection.output_workspace(endpoint.id) {
+                    set_state_if_changed(&endpoint.workspace, Some(state));
+                }
             }
+            Some(bus)
+        });
+        if scoped.is_none() {
+            state.set(Some(snapshot.clone()));
         }
         loop {
-            if let Some(bus) = multi_output::session() {
-                for endpoint in bus
-                    .endpoints
-                    .get()
-                    .into_iter()
-                    .filter(|endpoint| endpoint.id != 0)
-                {
+            if let Some(bus) = scoped {
+                for endpoint in bus.endpoints.get() {
                     let Some(command) = endpoint.commands.get().first().copied() else {
                         continue;
                     };
@@ -2671,7 +2675,9 @@ fn maintain_workspace_shell_role(
                     }
                 }
             }
-            if let Some(command) = commands.get().first().copied() {
+            if scoped.is_none()
+                && let Some(command) = commands.get().first().copied()
+            {
                 if let Ok(latest) = connection.get_workspace_state() {
                     snapshot = latest;
                 }
@@ -2702,7 +2708,7 @@ fn maintain_workspace_shell_role(
                 full_app_menus.set(false);
                 pending_app_menus.set(Vec::new());
                 state.set(None);
-                dismiss_window(volume_osd::SCENE_KEY);
+                dismiss_window(multi_output::key(osd_output, volume_osd::SCENE_KEY));
                 visibility = volume_osd::Visibility::default();
                 break;
             }
@@ -2755,7 +2761,7 @@ fn maintain_workspace_shell_role(
                             });
                         });
                     }
-                    sws::event::Event::WorkspaceStateChanged(updated) => {
+                    sws::event::Event::WorkspaceStateChanged(updated) if scoped.is_none() => {
                         home_trace::record(
                             0,
                             format_args!("shell-state presentation={:?}", updated.presentation),
@@ -2810,12 +2816,25 @@ fn maintain_workspace_shell_role(
                     audio_client = None;
                     feedback.set(volume_osd::Feedback::default());
                 }
-                if visibility.show(std::time::Instant::now()) {
-                    open_window(volume_osd::SCENE_KEY);
+                let output = scoped
+                    .and_then(|bus| bus.outputs.get())
+                    .and_then(|snapshot| {
+                        sws_protocol::outputs::extended_primary(
+                            &snapshot.outputs,
+                            &snapshot.configuration,
+                        )
+                    })
+                    .unwrap_or(0);
+                if visibility.show(std::time::Instant::now()) || output != osd_output {
+                    if output != osd_output {
+                        dismiss_window(multi_output::key(osd_output, volume_osd::SCENE_KEY));
+                    }
+                    osd_output = output;
+                    open_window(multi_output::key(output, volume_osd::SCENE_KEY));
                 }
             }
             if visibility.expire(std::time::Instant::now()) {
-                dismiss_window(volume_osd::SCENE_KEY);
+                dismiss_window(multi_output::key(osd_output, volume_osd::SCENE_KEY));
             }
             std::thread::sleep(Duration::from_millis(16));
         }
@@ -4088,19 +4107,6 @@ impl Application for ShellApp {
 
     fn init(&mut self) {
         println!("[Shell] Initializing Scarlet workspace shell");
-        // Pre-create the full-output Home surface at its final geometry. SWS
-        // keeps it workspace-invisible until Home/Overview is selected, so the
-        // first reveal is only a visibility change and never exposes a
-        // create-then-move or create-then-resize frame.
-        if self.mode.get() != ShellMode::Console {
-            self.open_scene(HOME_BACKDROP_SCENE_KEY);
-            self.open_scene(OVERVIEW_DRAWER_SCENE_KEY);
-        }
-        self.open_scene(HOME_SCENE_KEY);
-        if self.mode.get() == ShellMode::Console {
-            self.open_scene(CONSOLE_CHROME_SCENE_KEY);
-            enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ShowHome);
-        }
         // Screen size will be obtained by sws_client in main()
         std::thread::spawn(background::run);
         self.start_background_tasks();
@@ -4128,6 +4134,22 @@ impl Application for ShellApp {
 }
 
 impl ShellApp {
+    fn open_desktop_scenes(&self) {
+        self.open_scene("main");
+        // Pre-create the full-output Home surface at its final geometry. SWS
+        // keeps it workspace-invisible until Home/Overview is selected, so the
+        // first reveal is only a visibility change and never exposes a
+        // create-then-move or create-then-resize frame.
+        if self.mode.get() != ShellMode::Console {
+            self.open_scene(HOME_BACKDROP_SCENE_KEY);
+            self.open_scene(OVERVIEW_DRAWER_SCENE_KEY);
+        }
+        self.open_scene(HOME_SCENE_KEY);
+        if self.mode.get() == ShellMode::Console {
+            self.open_scene(CONSOLE_CHROME_SCENE_KEY);
+        }
+    }
+
     fn start_home_catalog(&self) {
         let applications = self.home_applications.clone();
         std::thread::spawn(move || refresh_home_catalog(applications));
@@ -4246,21 +4268,34 @@ impl ShellApp {
         }
     }
 
+    /// Use the same applied experience for shell chrome and reserved workarea.
+    fn sync_output_workarea(&self, conn: &sws::Connection) -> bool {
+        if multi_output::session()
+            .and_then(|bus| bus.outputs.get())
+            .is_some_and(|snapshot| !multi_output::is_desktop(&snapshot, self.output_id.get()))
+        {
+            return true;
+        }
+        let Ok(context) = conn.output_context(self.output_id.get()) else {
+            return false;
+        };
+        let layout = ShellLayout::from_tablet_mode(Some(context.tablet));
+        if self.shell_layout.get() != layout {
+            self.open_menu_index.set(None);
+            self.shell_layout.set(layout);
+        }
+        let area = layout.physical_workarea(
+            context.mode.pixel_width,
+            context.mode.pixel_height,
+            context.scale_milli,
+        );
+        let _ = conn.set_output_workarea(context.id, area.x, area.y, area.width, area.height);
+        true
+    }
+
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
-            if let Ok(context) = conn.output_context(self.output_id.get()) {
-                let workarea = layout.physical_workarea(
-                    context.mode.pixel_width,
-                    context.mode.pixel_height,
-                    context.scale_milli,
-                );
-                let _ = conn.set_output_workarea(
-                    context.id,
-                    workarea.x,
-                    workarea.y,
-                    workarea.width,
-                    workarea.height,
-                );
+            if self.sync_output_workarea(&conn) || self.output_id.get() != 0 {
                 return;
             }
             let scale_milli = query_output_scale(&conn);
@@ -4272,19 +4307,7 @@ impl ShellApp {
 
     fn update_workarea_from_screen_query(&self, fallback_width: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
-            if let Ok(context) = conn.output_context(self.output_id.get()) {
-                let workarea = layout.physical_workarea(
-                    context.mode.pixel_width,
-                    context.mode.pixel_height,
-                    context.scale_milli,
-                );
-                let _ = conn.set_output_workarea(
-                    context.id,
-                    workarea.x,
-                    workarea.y,
-                    workarea.width,
-                    workarea.height,
-                );
+            if self.sync_output_workarea(&conn) || self.output_id.get() != 0 {
                 return;
             }
             if let Ok((screen_width, screen_height)) = conn.get_screen_size() {
@@ -4537,31 +4560,35 @@ fn main() {
     println!("[Shell] Starting Scarlet workspace shell");
 
     // Get screen size from SWS before creating the app
-    let (screen_width, screen_height, shell_layout) = match connect_sws_with_screen_size_retry() {
-        Ok(SwsScreenConnection {
-            connection: conn,
-            logical_width,
-            logical_height,
-            scale_milli,
-            layout,
-            ..
-        }) => {
-            publish_workarea(
-                &conn,
-                layout,
-                scale_u32(logical_width, scale_milli),
-                scale_u32(logical_height, scale_milli),
+    let (screen_width, screen_height, shell_layout, outputs) =
+        match connect_sws_with_screen_size_retry() {
+            Ok(SwsScreenConnection {
+                connection: conn,
+                logical_width,
+                logical_height,
                 scale_milli,
-            );
-            (logical_width as f32, logical_height as f32, layout)
-        }
-        Err(()) => {
-            println!(
-                "[StatusBar] Failed to connect to SWS after retries, using default screen width 1920"
-            );
-            (1920.0, 1080.0, ShellLayout::from_tablet_mode(None))
-        }
-    };
+                layout,
+                ..
+            }) => {
+                let outputs = conn.outputs().ok();
+                if outputs.is_none() {
+                    publish_workarea(
+                        &conn,
+                        layout,
+                        scale_u32(logical_width, scale_milli),
+                        scale_u32(logical_height, scale_milli),
+                        scale_milli,
+                    );
+                }
+                (logical_width as f32, logical_height as f32, layout, outputs)
+            }
+            Err(()) => {
+                println!(
+                    "[StatusBar] Failed to connect to SWS after retries, using default screen width 1920"
+                );
+                (1920.0, 1080.0, ShellLayout::from_tablet_mode(None), None)
+            }
+        };
 
     let mut app = ShellApp::new(shell_layout);
     app.mode.set(options.mode);
@@ -4574,7 +4601,7 @@ fn main() {
     // and hidden Home surface, before the first request to open the launcher.
     app.start_home_catalog();
 
-    let mut app = multi_output::ShellSession::new(app);
+    let mut app = multi_output::ShellSession::new(app, outputs);
     match app.run() {
         Ok(_) => {
             println!("[Shell] Application exited successfully");

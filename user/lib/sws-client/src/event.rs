@@ -33,7 +33,7 @@ pub struct InputEnvironment {
 }
 
 impl InputEnvironment {
-    /// Return whether tablet-mode state is known and enabled.
+    /// Return whether the client's output is using the tablet experience.
     ///
     /// # Returns
     ///
@@ -44,6 +44,19 @@ impl InputEnvironment {
         } else {
             None
         }
+    }
+
+    /// Read the physical tablet switch, independently of display experience.
+    /// A missing switch or a compositor without this field returns `None`.
+    pub const fn hardware_tablet_mode(self) -> Option<bool> {
+        if self.known_flags & sws_protocol::input_environment_known_flags::HARDWARE_TABLET_MODE == 0
+        {
+            return None;
+        }
+        Some(
+            self.state_flags & sws_protocol::input_environment_state_flags::HARDWARE_TABLET_MODE
+                != 0,
+        )
     }
 
     /// Return whether lid-closed state is known and enabled.
@@ -57,60 +70,6 @@ impl InputEnvironment {
         } else {
             None
         }
-    }
-
-    /// Return the effective system-wide windowing policy.
-    ///
-    /// # Returns
-    ///
-    /// The current policy when reported by the compositor, otherwise `None`.
-    pub const fn windowing_mode(self) -> Option<sws_protocol::WindowingMode> {
-        if self.known_flags & sws_protocol::input_environment_known_flags::WINDOWING_MODE == 0 {
-            return None;
-        }
-        if self.state_flags & sws_protocol::input_environment_state_flags::FOCUSED_WINDOWING != 0 {
-            Some(sws_protocol::WindowingMode::Focused)
-        } else {
-            Some(sws_protocol::WindowingMode::Freeform)
-        }
-    }
-
-    /// Return whether a system-wide tablet-mode override is active.
-    ///
-    /// # Returns
-    ///
-    /// The override state when reported by the compositor, otherwise `None`.
-    pub const fn tablet_mode_override_active(self) -> Option<bool> {
-        if self.known_flags
-            & sws_protocol::input_environment_known_flags::TABLET_MODE_OVERRIDE_ACTIVE
-            == 0
-        {
-            return None;
-        }
-        Some(
-            self.state_flags
-                & sws_protocol::input_environment_state_flags::TABLET_MODE_OVERRIDE_ACTIVE
-                != 0,
-        )
-    }
-
-    /// Return whether a system-wide windowing-mode override is active.
-    ///
-    /// # Returns
-    ///
-    /// The override state when reported by the compositor, otherwise `None`.
-    pub const fn windowing_mode_override_active(self) -> Option<bool> {
-        if self.known_flags
-            & sws_protocol::input_environment_known_flags::WINDOWING_MODE_OVERRIDE_ACTIVE
-            == 0
-        {
-            return None;
-        }
-        Some(
-            self.state_flags
-                & sws_protocol::input_environment_state_flags::WINDOWING_MODE_OVERRIDE_ACTIVE
-                != 0,
-        )
     }
 
     /// Return whether a direct-touch input device is present.
@@ -146,7 +105,8 @@ impl InputEnvironment {
             != 0
     }
 
-    /// Automatic input panels require tablet posture and no external keyboard.
+    /// The panel provider receives its editor's display experience. Automatic panels
+    /// require tablet presentation, direct touch, and no external keyboard.
     pub const fn should_auto_show_input_panel(self) -> bool {
         matches!(self.tablet_mode(), Some(true))
             && self.has_direct_touch()
@@ -479,51 +439,48 @@ mod tests {
     use super::InputEnvironment;
 
     #[test]
-    fn input_panel_tracks_posture_and_external_keyboard_hotplug() {
+    fn input_panel_tracks_editor_experience_and_input_devices_independently_of_posture() {
         use sws_protocol::{
             input_environment_capability_flags as caps, input_environment_known_flags as known,
             input_environment_state_flags as state,
         };
         let mut environment = InputEnvironment {
             generation: 1,
-            known_flags: known::TABLET_MODE,
-            state_flags: 0,
+            known_flags: known::TABLET_MODE | known::HARDWARE_TABLET_MODE,
+            state_flags: state::HARDWARE_TABLET_MODE,
             capability_flags: caps::DIRECT_TOUCH | caps::KEYBOARD,
         };
-        assert!(!environment.should_auto_show_input_panel()); // touch laptop
+        assert_eq!(environment.hardware_tablet_mode(), Some(true));
+        assert!(!environment.should_auto_show_input_panel()); // desktop on a folded device
         environment.state_flags = state::TABLET_MODE;
-        assert!(environment.should_auto_show_input_panel()); // folded internal keyboard
+        assert_eq!(environment.hardware_tablet_mode(), Some(false));
+        assert!(environment.should_auto_show_input_panel()); // tablet on an unfolded device
+        environment.known_flags = known::TABLET_MODE;
+        assert_eq!(environment.hardware_tablet_mode(), None);
+        assert!(environment.should_auto_show_input_panel());
         environment.capability_flags |= caps::EXTERNAL_KEYBOARD;
         assert!(!environment.should_auto_show_input_panel());
         environment.capability_flags &= !caps::EXTERNAL_KEYBOARD;
-        assert!(environment.should_auto_show_input_panel()); // external keyboard detached
+        assert!(environment.should_auto_show_input_panel());
+        environment.capability_flags &= !caps::DIRECT_TOUCH;
+        assert!(!environment.should_auto_show_input_panel());
+        environment.capability_flags |= caps::DIRECT_TOUCH;
         environment.known_flags = 0;
-        assert!(!environment.should_auto_show_input_panel()); // unknown posture
+        assert!(!environment.should_auto_show_input_panel());
     }
 
     #[test]
     fn input_environment_helpers_distinguish_unknown_state() {
         let environment = InputEnvironment {
             generation: 9,
-            known_flags: sws_protocol::input_environment_known_flags::TABLET_MODE
-                | sws_protocol::input_environment_known_flags::WINDOWING_MODE
-                | sws_protocol::input_environment_known_flags::TABLET_MODE_OVERRIDE_ACTIVE
-                | sws_protocol::input_environment_known_flags::WINDOWING_MODE_OVERRIDE_ACTIVE,
-            state_flags: sws_protocol::input_environment_state_flags::TABLET_MODE
-                | sws_protocol::input_environment_state_flags::FOCUSED_WINDOWING
-                | sws_protocol::input_environment_state_flags::TABLET_MODE_OVERRIDE_ACTIVE,
+            known_flags: sws_protocol::input_environment_known_flags::TABLET_MODE,
+            state_flags: sws_protocol::input_environment_state_flags::TABLET_MODE,
             capability_flags: sws_protocol::input_environment_capability_flags::DIRECT_TOUCH
                 | sws_protocol::input_environment_capability_flags::KEYBOARD,
         };
 
         assert_eq!(environment.tablet_mode(), Some(true));
         assert_eq!(environment.lid_closed(), None);
-        assert_eq!(
-            environment.windowing_mode(),
-            Some(sws_protocol::WindowingMode::Focused)
-        );
-        assert_eq!(environment.tablet_mode_override_active(), Some(true));
-        assert_eq!(environment.windowing_mode_override_active(), Some(false));
         assert!(environment.has_direct_touch());
         assert!(!environment.has_fine_pointer());
         assert!(environment.has_keyboard());

@@ -356,6 +356,18 @@ impl MappedTarget {
         self.tracked_submission
     }
 
+    pub(crate) fn drain_output_presents(&mut self, index: usize) -> Result<(), &'static str> {
+        // A just-attached output may not have any GPU resources or worker yet.
+        if let Some(queue) = self
+            .surfaces
+            .get_mut(index)
+            .and_then(|s| s.presentation.as_mut())
+        {
+            queue.drain()?;
+        }
+        Ok(())
+    }
+
     /// Test display capacity and exact image retirement before constructing
     /// another frame. A busy display must not hold the compositor/input loop.
     pub(crate) fn try_acquire_render_target(&mut self) -> Result<bool, &'static str> {

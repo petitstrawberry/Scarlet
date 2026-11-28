@@ -597,7 +597,6 @@ pub(super) struct WindowCreationTarget {
     pub workarea: Option<(i32, i32, u32, u32)>,
     pub placement: protocol::WindowPlacement,
     pub activated: bool,
-    pub focused: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -605,56 +604,7 @@ struct WindowCreationEnvironment {
     screen_width: u32,
     screen_height: u32,
     workarea: Option<(i32, i32, u32, u32)>,
-    windowing_mode: protocol::WindowingMode,
-}
-
-impl WindowCreationEnvironment {
-    const fn initial() -> Self {
-        Self {
-            screen_width: 1,
-            screen_height: 1,
-            workarea: None,
-            windowing_mode: protocol::WindowingMode::Freeform,
-        }
-    }
-}
-
-static WINDOW_CREATION_ENVIRONMENT: Mutex<WindowCreationEnvironment> =
-    Mutex::new(WindowCreationEnvironment::initial());
-
-/// Publish the compositor state used for atomic initial window configuration.
-///
-/// # Arguments
-///
-/// * `screen_width` - Current physical output width.
-/// * `screen_height` - Current physical output height.
-/// * `workarea` - Current managed workarea, when a shell reserved one.
-/// * `windowing_mode` - Effective system-wide windowing policy.
-///
-/// # Returns
-///
-/// This function does not return a value.
-pub fn set_window_creation_environment(
-    screen_width: u32,
-    screen_height: u32,
-    workarea: Option<(i32, i32, u32, u32)>,
-    windowing_mode: protocol::WindowingMode,
-) {
-    *WINDOW_CREATION_ENVIRONMENT
-        .lock()
-        .expect("SWS window-creation environment mutex poisoned") = WindowCreationEnvironment {
-        screen_width: screen_width.max(1),
-        screen_height: screen_height.max(1),
-        workarea,
-        windowing_mode,
-    };
-}
-
-fn set_pending_window_creation_workarea(x: i32, y: i32, width: u32, height: u32) {
-    WINDOW_CREATION_ENVIRONMENT
-        .lock()
-        .expect("SWS window-creation environment mutex poisoned")
-        .workarea = Some((x, y, width.max(1), height.max(1)));
+    tablet: bool,
 }
 
 fn configured_initial_surface_extent(
@@ -670,7 +620,7 @@ fn configured_initial_surface_extent(
     let (mut width, mut height) = limits.clamp(requested_width, requested_height);
     let tablet_workspace_root = window_type == protocol::window_types::NORMAL
         && resizable
-        && environment.windowing_mode == protocol::WindowingMode::Focused
+        && environment.tablet
         && limits.max_width == 0
         && limits.max_height == 0;
     if tablet_workspace_root {
@@ -706,7 +656,6 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::CURSOR_THEMES
         | protocol::capabilities::INPUT_ENVIRONMENT
         | protocol::capabilities::WINDOW_GEOMETRY
-        | protocol::capabilities::SYSTEM_MODE_OVERRIDES
         | protocol::capabilities::CONFIGURED_WINDOW_CREATION
         | protocol::capabilities::WORKSPACE_SHELL
         | protocol::capabilities::FRAME_CALLBACKS
@@ -719,7 +668,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::TEXT_INPUT_DISMISS
         | protocol::capabilities::SURFACE_SCENES
         | protocol::capabilities::TEXT_CLIPBOARD
-        | protocol::capabilities::FULL_APP_MENUS;
+        | protocol::capabilities::FULL_APP_MENUS
+        | protocol::capabilities::OUTPUT_ROLES;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE
             | protocol::capabilities::EXTENSION_GPU_BUFFERS;
@@ -878,6 +828,9 @@ static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>>
 ///
 /// Keeping this separate from the general client registry preserves protocol
 /// compatibility with clients that predate message type 35.
+// Serialize publication from capability readers and the compositor. Take each
+// projected snapshot while holding this lock so older events cannot queue last.
+static INPUT_ENVIRONMENT_DELIVERY: Mutex<()> = Mutex::new(());
 static INPUT_ENVIRONMENT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
 /// Connection holding the exclusive system-shell workspace-control role.
@@ -910,7 +863,24 @@ fn control_backlight(percent: Option<u8>) -> Result<u8, u32> {
     })
 }
 
-static OUTPUT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+// Connections opt into the role-aware wire format with Get or Apply.
+static OUTPUT_SUBSCRIBERS: Mutex<BTreeMap<usize, bool>> = Mutex::new(BTreeMap::new());
+
+pub(super) fn output_event_payload(
+    client: usize,
+    event: &protocol::outputs::OutputEvent,
+) -> Vec<u8> {
+    if OUTPUT_SUBSCRIBERS
+        .lock()
+        .expect("output subscribers")
+        .get(&client)
+        == Some(&true)
+    {
+        protocol::outputs::encode_event(event)
+    } else {
+        protocol::outputs::encode_legacy_event(event)
+    }
+}
 static OUTPUT_CONTEXTS: Mutex<BTreeMap<usize, protocol::outputs::OutputContext>> =
     Mutex::new(BTreeMap::new());
 pub(super) fn client_output_context(client: usize) -> Option<protocol::outputs::OutputContext> {
@@ -946,14 +916,19 @@ pub(super) fn publish_output_event(event: protocol::outputs::OutputEvent) {
         .lock()
         .expect("output subscribers")
         .iter()
-        .copied()
+        .map(|(&client, &roles)| (client, roles))
         .collect();
     let payload = protocol::outputs::encode_event(&event);
-    for client in clients {
+    let legacy = protocol::outputs::encode_legacy_event(&event);
+    for (client, roles) in clients {
         send_message_to_client(
             client,
             protocol::server_msg::OUTPUT_CONTROL,
-            payload.clone(),
+            if roles {
+                payload.clone()
+            } else {
+                legacy.clone()
+            },
         );
     }
 }
@@ -1012,6 +987,7 @@ fn subscribe_input_environment(client_id: usize) {
 }
 
 fn unsubscribe_input_environment(client_id: usize) {
+    input_environment::forget_client(client_id);
     OUTPUT_SUBSCRIBERS
         .lock()
         .expect("output subscribers")
@@ -1487,13 +1463,11 @@ fn input_environment_frame(snapshot: Snapshot) -> PendingServerFrame {
     }
 }
 
-/// Broadcast one complete input-environment snapshot to subscribed clients.
-///
-/// # Arguments
-///
-/// * `snapshot` - Authoritative snapshot produced by an effective state change.
-pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
-    let frame = input_environment_frame(snapshot);
+/// Publish the current output projection to each subscribed connection.
+pub fn broadcast_input_environment_changed() {
+    let _delivery = INPUT_ENVIRONMENT_DELIVERY
+        .lock()
+        .expect("input environment delivery");
     let client_ids: Vec<usize> = INPUT_ENVIRONMENT_SUBSCRIBERS
         .lock()
         .expect("SWS input-environment subscriber mutex poisoned")
@@ -1501,7 +1475,23 @@ pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
         .copied()
         .collect();
     for client_id in client_ids {
-        send_message_to_client(client_id, frame.msg_type, frame.payload.clone());
+        let frame = input_environment_frame(input_environment::client_snapshot(client_id));
+        send_message_to_client(client_id, frame.msg_type, frame.payload);
+    }
+}
+
+pub(super) fn project_client_input_environment(client: usize, output: u32) {
+    let _delivery = INPUT_ENVIRONMENT_DELIVERY
+        .lock()
+        .expect("input environment delivery");
+    if let Some(snapshot) = input_environment::set_client_output(client, output)
+        && INPUT_ENVIRONMENT_SUBSCRIBERS
+            .lock()
+            .expect("input environment subscribers")
+            .contains(&client)
+    {
+        let frame = input_environment_frame(snapshot);
+        send_message_to_client(client, frame.msg_type, frame.payload);
     }
 }
 
@@ -1551,21 +1541,13 @@ fn update_input_panel_context(context: Option<&TextInputContext>) {
             content_purpose: context.current.content_purpose,
         }
     });
-    let snapshot = {
-        let mut panel = INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
-        if !panel.update(state) {
-            return;
-        }
-        *panel
-    };
-    if let Some((client_id, _)) = snapshot.provider {
-        send_message_to_client(
-            client_id,
-            protocol::server_msg::INPUT_PANEL_CONTEXT,
-            snapshot.provider_context().encode(),
-        );
+    if INPUT_PANEL
+        .lock()
+        .expect("SWS input panel mutex poisoned")
+        .update(state)
+    {
+        push_ipc_event(IpcEvent::PublishInputPanelContext);
     }
-    push_ipc_event(IpcEvent::InputPanelChanged);
 }
 pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, valid: bool) {
     let accepted = valid
@@ -1580,13 +1562,7 @@ pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, va
         u32::from(accepted).to_le_bytes().to_vec(),
     );
     if accepted {
-        let snapshot = input_panel_state();
-        send_message_to_client(
-            client_id,
-            protocol::server_msg::INPUT_PANEL_CONTEXT,
-            snapshot.provider_context().encode(),
-        );
-        push_ipc_event(IpcEvent::InputPanelChanged);
+        push_ipc_event(IpcEvent::PublishInputPanelContext);
     }
 }
 pub(super) fn unregister_input_panel(client_id: usize) {
@@ -3150,11 +3126,7 @@ fn client_thread_main(
                         workarea: creation
                             .workarea
                             .map(|(_, _, width, height)| (0, 0, pixels(width), pixels(height))),
-                        windowing_mode: if creation.focused {
-                            protocol::WindowingMode::Focused
-                        } else {
-                            protocol::WindowingMode::Freeform
-                        },
+                        tablet: creation.context.tablet,
                     };
                     let Some(extent) = configured_initial_surface_extent(
                         width,
@@ -4220,7 +4192,6 @@ fn client_thread_main(
                     "[ClientThread {}] SetWorkarea: x={}, y={}, width={}, height={}",
                     client_id, x, y, width, height
                 );
-                set_pending_window_creation_workarea(x, y, width, height);
                 push_ipc_event(IpcEvent::SetWorkarea {
                     x,
                     y,
@@ -4359,7 +4330,9 @@ fn client_thread_main(
                 // delivered as a later notification, so no transition can be
                 // missed between query and subscription.
                 subscribe_input_environment(client_id);
-                let payload = input_environment::protocol_payload(input_environment::snapshot());
+                let payload = input_environment::protocol_payload(
+                    input_environment::client_snapshot(client_id),
+                );
                 if let Err(error) = write_frame_response(
                     &mut stream_writer,
                     protocol::server_msg::INPUT_ENVIRONMENT_CHANGED,
@@ -4372,22 +4345,6 @@ fn client_thread_main(
                     );
                     break;
                 }
-            }
-            Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode }) => {
-                subscribe_input_environment(client_id);
-                push_ipc_event(IpcEvent::SetTabletModeOverride {
-                    client_id,
-                    request_id,
-                    tablet_mode,
-                });
-            }
-            Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode }) => {
-                subscribe_input_environment(client_id);
-                push_ipc_event(IpcEvent::SetWindowingModeOverride {
-                    client_id,
-                    request_id,
-                    windowing_mode,
-                });
             }
             Ok(ClientMessageRef::RegisterSystemShell { full_app_menus }) => {
                 if claim_system_shell(client_id, full_app_menus) {
@@ -4410,10 +4367,14 @@ fn client_thread_main(
                     Ok(OutputRequest::GetBacklight) => None,
                     Ok(OutputRequest::SetBacklight(percent)) => Some(percent),
                     Ok(command) => {
+                        let modern =
+                            matches!(command, OutputRequest::Get | OutputRequest::Apply(_));
                         OUTPUT_SUBSCRIBERS
                             .lock()
                             .expect("output subscribers")
-                            .insert(client_id);
+                            .entry(client_id)
+                            .and_modify(|roles| *roles |= modern)
+                            .or_insert(modern);
                         push_ipc_event(IpcEvent::OutputControl {
                             client_id,
                             request_id,
@@ -4776,20 +4737,13 @@ fn client_thread_main(
                             context.client_id == client_id && context.enabled
                         }) && input_panel_state().context.context_id == context_id
                         {
-                            let (provider, delivered) = {
-                                let mut panel =
-                                    INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
-                                let Some(delivered) = panel.request_show(context_id) else {
-                                    continue;
-                                };
-                                (panel.provider, delivered)
-                            };
-                            if let Some((provider, _)) = provider {
-                                send_message_to_client(
-                                    provider,
-                                    protocol::server_msg::INPUT_PANEL_CONTEXT,
-                                    delivered.encode(),
-                                );
+                            if INPUT_PANEL
+                                .lock()
+                                .expect("SWS input panel mutex poisoned")
+                                .request_show(context_id)
+                                .is_some()
+                            {
+                                push_ipc_event(IpcEvent::PublishInputPanelContext);
                             }
                         }
                     }
@@ -5033,6 +4987,7 @@ pub enum IpcEvent {
         request_id: u8,
     },
     InputPanelChanged,
+    PublishInputPanelContext,
     InputPanelDismiss {
         client_id: usize,
         context_id: u32,
@@ -5454,20 +5409,6 @@ pub enum IpcEvent {
         target_app_id: Vec<u8>,
     },
 
-    /// Set or clear the system-wide tablet posture override.
-    SetTabletModeOverride {
-        client_id: usize,
-        request_id: u8,
-        tablet_mode: Option<bool>,
-    },
-
-    /// Set or clear the system-wide windowing-policy override.
-    SetWindowingModeOverride {
-        client_id: usize,
-        request_id: u8,
-        windowing_mode: Option<protocol::WindowingMode>,
-    },
-
     /// Query active application metadata, respecting the receiver's menu limit.
     GetActiveApp {
         client_id: usize,
@@ -5526,7 +5467,7 @@ mod tests {
             screen_width: 1920,
             screen_height: 1080,
             workarea: Some((0, 40, 1920, 1040)),
-            windowing_mode: protocol::WindowingMode::Focused,
+            tablet: true,
         };
         assert_eq!(
             configured_initial_surface_extent(
@@ -5547,7 +5488,7 @@ mod tests {
             screen_width: 2160,
             screen_height: 1440,
             workarea: Some((0, 64, 2160, 1376)),
-            windowing_mode: protocol::WindowingMode::Focused,
+            tablet: true,
         };
         let configuration = protocol::InitialWindowConfiguration {
             size_limits: protocol::WindowSizeLimits {
@@ -5583,7 +5524,7 @@ mod tests {
             screen_width: 1920,
             screen_height: 1080,
             workarea: Some((0, 40, 1920, 1040)),
-            windowing_mode: protocol::WindowingMode::Freeform,
+            tablet: false,
         };
         assert_eq!(
             configured_initial_surface_extent(
@@ -5597,7 +5538,7 @@ mod tests {
             Some((320, 240))
         );
 
-        environment.windowing_mode = protocol::WindowingMode::Focused;
+        environment.tablet = true;
         let mut finite = configuration();
         finite.size_limits.max_width = 900;
         finite.size_limits.max_height = 700;
@@ -5668,12 +5609,7 @@ mod input_environment_tests {
         unsubscribe_input_environment(legacy_client);
         subscribe_input_environment(subscribed_client);
 
-        broadcast_input_environment_changed(Snapshot {
-            generation: 10,
-            known_flags: 1,
-            state_flags: 1,
-            capability_flags: 0,
-        });
+        broadcast_input_environment_changed();
 
         let mut pending = PENDING_CLIENT_RESPONSES.lock().expect("SWS mutex poisoned");
         assert!(pending.get(&legacy_client).is_some_and(Vec::is_empty));

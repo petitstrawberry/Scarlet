@@ -63,6 +63,29 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// Whether output transactions can set mirror and disabled roles.
+    pub const fn supports_output_roles(self) -> bool {
+        self.capabilities & protocol::capabilities::OUTPUT_ROLES != 0
+    }
+
+    fn configure_outputs_request(
+        self,
+        transaction: protocol::outputs::OutputTransaction,
+    ) -> Result<protocol::outputs::OutputRequest, Error> {
+        use protocol::outputs::{OutputRequest, OutputRole};
+        if self.supports_output_roles() {
+            return Ok(OutputRequest::Apply(transaction));
+        }
+        if transaction
+            .configuration
+            .iter()
+            .any(|c| c.role != OutputRole::Extend)
+        {
+            return Err(Error::OutputRolesUnsupported);
+        }
+        Ok(OutputRequest::ApplyLegacy(transaction))
+    }
+
     /// Whether the server supports explicit pointer lock and relative motion.
     ///
     /// # Returns
@@ -118,15 +141,6 @@ impl Capabilities {
     /// Whether an owned surface can receive native direct-touch frames.
     pub const fn supports_touch_input(self) -> bool {
         self.capabilities & protocol::capabilities::TOUCH_INPUT != 0
-    }
-
-    /// Whether the server accepts system-wide tablet and windowing overrides.
-    ///
-    /// # Returns
-    ///
-    /// `true` when the mode-override setters may be requested.
-    pub const fn supports_system_mode_overrides(self) -> bool {
-        self.capabilities & protocol::capabilities::SYSTEM_MODE_OVERRIDES != 0
     }
 
     /// Whether SWS can configure initial size before allocating the first buffer.
@@ -3386,26 +3400,6 @@ fn input_environment_event(
     })
 }
 
-fn input_environment_from_server_message(
-    message: ServerMessage,
-) -> Result<InputEnvironment, Error> {
-    match message {
-        ServerMessage::InputEnvironmentChanged {
-            generation,
-            known_flags,
-            state_flags,
-            capability_flags,
-        } => Ok(InputEnvironment {
-            generation,
-            known_flags,
-            state_flags,
-            capability_flags,
-        }),
-        ServerMessage::Error { code } => Err(Error::ServerError(code)),
-        _ => Err(Error::InvalidResponse),
-    }
-}
-
 fn decode_workspace_response(
     response: Response,
     expected: ServerMessage,
@@ -3421,6 +3415,49 @@ fn decode_workspace_response(
 #[cfg(test)]
 mod pointer_lock_tests {
     use super::*;
+
+    #[test]
+    fn output_role_negotiation_preserves_explicit_role_changes() {
+        use protocol::outputs::{
+            OutputConfiguration, OutputExperience, OutputRequest, OutputRole, OutputTransaction,
+        };
+        let mut server = Capabilities {
+            protocol_version: protocol::SWS_PROTOCOL_VERSION,
+            capabilities: protocol::capabilities::OUTPUT_MANAGEMENT,
+            compositor_epoch: 1,
+            compositor_backend: protocol::compositor_backends::CPU,
+        };
+        let mut tx = OutputTransaction {
+            base_generation: 1,
+            configuration: vec![OutputConfiguration {
+                id: 7,
+                x: 0,
+                y: 0,
+                scale_milli: 1000,
+                experience: OutputExperience::Auto,
+                role: OutputRole::Extend,
+            }],
+        };
+        assert_eq!(
+            server.configure_outputs_request(tx.clone()),
+            Ok(OutputRequest::ApplyLegacy(tx.clone()))
+        );
+        for role in [OutputRole::Mirror, OutputRole::Disabled] {
+            tx.configuration[0].role = role;
+            assert_eq!(
+                server.configure_outputs_request(tx.clone()),
+                Err(Error::OutputRolesUnsupported)
+            );
+        }
+        server.capabilities |= protocol::capabilities::OUTPUT_ROLES;
+        for role in [OutputRole::Extend, OutputRole::Mirror, OutputRole::Disabled] {
+            tx.configuration[0].role = role;
+            assert_eq!(
+                server.configure_outputs_request(tx.clone()),
+                Ok(OutputRequest::Apply(tx.clone()))
+            );
+        }
+    }
 
     #[test]
     fn scene_releases_remain_available_to_the_resource_owner() {
@@ -3542,19 +3579,6 @@ mod pointer_lock_tests {
         assert!(!capabilities.supports_input_environment());
         capabilities.capabilities |= protocol::capabilities::INPUT_ENVIRONMENT;
         assert!(capabilities.supports_input_environment());
-    }
-
-    #[test]
-    fn capability_reports_system_mode_override_support() {
-        let mut capabilities = Capabilities {
-            protocol_version: protocol::SWS_PROTOCOL_VERSION,
-            capabilities: 0,
-            compositor_epoch: 1,
-            compositor_backend: protocol::compositor_backends::CPU,
-        };
-        assert!(!capabilities.supports_system_mode_overrides());
-        capabilities.capabilities |= protocol::capabilities::SYSTEM_MODE_OVERRIDES;
-        assert!(capabilities.supports_system_mode_overrides());
     }
 
     #[test]
@@ -3699,52 +3723,6 @@ impl Connection {
         }
     }
 
-    /// Set or clear the system-wide tablet-mode override.
-    ///
-    /// This affects the compositor, desktop shell, and every subscribed
-    /// application. Clearing the override immediately resumes the most recent
-    /// hardware posture sampled by SWS.
-    ///
-    /// # Arguments
-    ///
-    /// * `tablet_mode` - Forced posture, or `None` to resume hardware detection.
-    ///
-    /// # Returns
-    ///
-    /// The resulting complete system input-environment snapshot.
-    pub fn set_tablet_mode_override(
-        &self,
-        tablet_mode: Option<bool>,
-    ) -> Result<InputEnvironment, Error> {
-        if !self.get_capabilities()?.supports_system_mode_overrides() {
-            return Err(Error::SystemModeOverrideUnsupported);
-        }
-        let payload = protocol::payload_set_tablet_mode_override(tablet_mode);
-        let response = self.request(protocol::client_msg::SET_TABLET_MODE_OVERRIDE, &payload)?;
-        input_environment_from_server_message(response.message())
-    }
-
-    /// Set or clear the system-wide windowing-policy override.
-    ///
-    /// # Arguments
-    ///
-    /// * `windowing_mode` - Forced policy, or `None` to derive policy from posture.
-    ///
-    /// # Returns
-    ///
-    /// The resulting complete system input-environment snapshot.
-    pub fn set_windowing_mode_override(
-        &self,
-        windowing_mode: Option<protocol::WindowingMode>,
-    ) -> Result<InputEnvironment, Error> {
-        if !self.get_capabilities()?.supports_system_mode_overrides() {
-            return Err(Error::SystemModeOverrideUnsupported);
-        }
-        let payload = protocol::payload_set_windowing_mode_override(windowing_mode);
-        let response = self.request(protocol::client_msg::SET_WINDOWING_MODE_OVERRIDE, &payload)?;
-        input_environment_from_server_message(response.message())
-    }
-
     /// Claim the exclusive system-shell role and obtain the live workspace state.
     ///
     /// Only one live SWS connection may own this role. The role is released
@@ -3791,8 +3769,15 @@ impl Connection {
     }
 
     pub fn outputs(&self) -> Result<protocol::outputs::OutputSnapshot, Error> {
-        match self.output_request(protocol::outputs::OutputRequest::Get)? {
-            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
+        use protocol::outputs::OutputRequest;
+        let request = if self.get_capabilities()?.supports_output_roles() {
+            OutputRequest::Get
+        } else {
+            OutputRequest::GetLegacy
+        };
+        match self.output_request(request)? {
+            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot),
+            _ => Err(Error::InvalidResponse),
         }
     }
     pub fn output_modes(&self, output: u32) -> Result<Vec<protocol::outputs::OutputMode>, Error> {
@@ -3804,9 +3789,16 @@ impl Connection {
     pub fn set_output_mode(&self, output: u32, mode: protocol::outputs::OutputMode) -> Result<(), Error> {
         self.output_request(protocol::outputs::OutputRequest::SetMode { output, mode }).map(|_| ())
     }
-    pub fn configure_outputs(&self, transaction: protocol::outputs::OutputTransaction) -> Result<protocol::outputs::OutputSnapshot, Error> {
-        match self.output_request(protocol::outputs::OutputRequest::Apply(transaction))? {
-            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot), _ => Err(Error::InvalidResponse),
+    pub fn configure_outputs(
+        &self,
+        transaction: protocol::outputs::OutputTransaction,
+    ) -> Result<protocol::outputs::OutputSnapshot, Error> {
+        let request = self
+            .get_capabilities()?
+            .configure_outputs_request(transaction)?;
+        match self.output_request(request)? {
+            protocol::outputs::OutputEvent::Snapshot(snapshot) => Ok(snapshot),
+            _ => Err(Error::InvalidResponse),
         }
     }
     pub fn output_context(&self, output: u32) -> Result<protocol::outputs::OutputContext, Error> {

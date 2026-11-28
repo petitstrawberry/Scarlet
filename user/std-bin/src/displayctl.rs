@@ -1,12 +1,11 @@
 //! Command-line control for Scarlet displays.
 //!
-//! `info` lists every display endpoint and its connector; `get`/`set` control
-//! the backlight through the display endpoint or the desktop compositor.
+//! Inspect display endpoints, control the backlight, and configure per-output
+//! Experience through the same SWS transaction as Settings.
 
 use std::process::ExitCode;
 
-#[cfg(target_os = "scarlet")]
-use std::env;
+use clap::{Parser, Subcommand};
 
 #[cfg(target_os = "scarlet")]
 use framebuffer::{
@@ -14,14 +13,38 @@ use framebuffer::{
     DISPLAY_CONNECTOR_KIND_VIRTUAL, DisplayControl, DisplayOutputInfo,
 };
 
+#[path = "displayctl/experience.rs"]
+mod experience;
+
+#[derive(Parser)]
+#[command(
+    name = "displayctl",
+    version,
+    about = "Inspect displays and configure brightness and display experience"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List physical display endpoints and connectors.
+    Info,
+    /// Read the primary display's brightness.
+    Get,
+    /// Set the primary display's brightness (0 through 100).
+    Set {
+        #[arg(value_parser = parse_percent)]
+        percent: u8,
+    },
+    #[command(flatten)]
+    Session(experience::Command),
+}
+
 /// Highest `/dev/displayN` index `info` probes.
 #[cfg(target_os = "scarlet")]
 const DISPLAY_SCAN_LIMIT: usize = 16;
-
-#[cfg(target_os = "scarlet")]
-fn usage() {
-    eprintln!("usage: displayctl <info|get|set <0..100>>");
-}
 
 #[cfg(target_os = "scarlet")]
 fn backlight(percent: Option<u8>) -> Result<u8, String> {
@@ -122,62 +145,25 @@ fn parse_percent(value: &str) -> Result<u8, &'static str> {
     Ok(percent)
 }
 
-#[cfg(not(target_os = "scarlet"))]
 fn main() -> ExitCode {
-    eprintln!("displayctl: this utility requires Scarlet OS");
-    ExitCode::from(1)
-}
-
-#[cfg(target_os = "scarlet")]
-fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let Some(command) = args.next() else {
-        usage();
-        return ExitCode::from(2);
-    };
-
-    match command.as_str() {
-        "info" if args.next().is_none() => print_info(),
-        "get" if args.next().is_none() => match backlight(None) {
-            Ok(percent) => {
-                println!("brightness={percent}%");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("displayctl: failed to read brightness: {error:?}");
-                ExitCode::from(1)
-            }
-        },
-        "set" => {
-            let Some(value) = args.next() else {
-                usage();
-                return ExitCode::from(2);
-            };
-            if args.next().is_some() {
-                usage();
-                return ExitCode::from(2);
-            }
-            let percent = match parse_percent(&value) {
-                Ok(percent) => percent,
-                Err(message) => {
-                    eprintln!("displayctl: {message}");
-                    return ExitCode::from(2);
-                }
-            };
-            match backlight(Some(percent)) {
-                Ok(percent) => {
-                    println!("brightness={percent}%");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("displayctl: failed to set brightness: {error:?}");
-                    ExitCode::from(1)
-                }
-            }
+    let result = match Cli::parse().command {
+        Command::Session(command) => experience::run(command),
+        #[cfg(target_os = "scarlet")]
+        Command::Info => return print_info(),
+        #[cfg(target_os = "scarlet")]
+        Command::Get => backlight(None).map(|value| println!("brightness={value}%")),
+        #[cfg(target_os = "scarlet")]
+        Command::Set { percent } => {
+            backlight(Some(percent)).map(|value| println!("brightness={value}%"))
         }
-        _ => {
-            usage();
-            ExitCode::from(2)
+        #[cfg(not(target_os = "scarlet"))]
+        _ => Err("this utility requires Scarlet OS".into()),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("displayctl: {error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -185,6 +171,21 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::parse_percent;
+
+    #[test]
+    fn only_experience_can_select_a_display_policy() {
+        use super::Cli;
+        use clap::Parser;
+        for (command, value) in [
+            ("posture", "tablet"),
+            ("windowing", "focused"),
+            ("experience", "laptop"),
+            ("experience", "freeform"),
+            ("experience", "focused"),
+        ] {
+            assert!(Cli::try_parse_from(["displayctl", command, value]).is_err());
+        }
+    }
 
     #[test]
     fn brightness_percent_accepts_only_the_supported_range() {

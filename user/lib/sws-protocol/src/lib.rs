@@ -71,6 +71,8 @@ pub mod capabilities {
     pub const OUTPUT_MANAGEMENT: u64 = 1 << 21;
     /// The desktop compositor brokers backlight reads and writes.
     pub const BACKLIGHT_CONTROL: u64 = 1 << 22;
+    /// Role-aware output snapshots and transactions (output requests 11 and 12).
+    pub const OUTPUT_ROLES: u64 = 1 << 23;
     /// Shared SGFX images may be registered and committed without CPU copies.
     pub const SGFX_SHARED_IMAGE: u64 = 1 << 0;
     /// Focused windows may capture raw relative pointer motion.
@@ -83,8 +85,7 @@ pub mod capabilities {
     pub const INPUT_ENVIRONMENT: u64 = 1 << 4;
     /// Clients may distinguish visible window geometry from surface bounds.
     pub const WINDOW_GEOMETRY: u64 = 1 << 5;
-    /// Trusted user-space tools may override system-wide tablet and windowing modes.
-    pub const SYSTEM_MODE_OVERRIDES: u64 = 1 << 6;
+    // Bit 6 is retired.
     /// Window creation may atomically negotiate initial size, limits, and geometry.
     pub const CONFIGURED_WINDOW_CREATION: u64 = 1 << 7;
     /// An exclusive system shell may manage generation-checked workspaces.
@@ -132,16 +133,13 @@ pub mod extension_commit_flags {
 /// A bit in [`input_environment_state_flags`] is meaningful only when its
 /// matching bit is set here.
 pub mod input_environment_known_flags {
-    /// Whether the tablet-mode state is known.
+    /// Whether the effective output Experience is known.
     pub const TABLET_MODE: u32 = 1 << 0;
     /// Whether the lid-closed state is known.
     pub const LID_CLOSED: u32 = 1 << 1;
-    /// Whether the current windowing mode is known.
-    pub const WINDOWING_MODE: u32 = 1 << 2;
-    /// Whether the tablet-mode override state is known.
-    pub const TABLET_MODE_OVERRIDE_ACTIVE: u32 = 1 << 3;
-    /// Whether the windowing-mode override state is known.
-    pub const WINDOWING_MODE_OVERRIDE_ACTIVE: u32 = 1 << 4;
+    // Bits 2–4 are retired.
+    /// Whether the physical `SW_TABLET_MODE` switch state is known.
+    pub const HARDWARE_TABLET_MODE: u32 = 1 << 5;
 }
 
 /// Current input-environment state bits.
@@ -149,55 +147,13 @@ pub mod input_environment_known_flags {
 /// Each bit is meaningful only when the corresponding bit is set in
 /// [`input_environment_known_flags`].
 pub mod input_environment_state_flags {
-    /// The device is currently in tablet mode.
+    /// The selected output uses tablet presentation.
     pub const TABLET_MODE: u32 = 1 << 0;
     /// The device lid is currently closed.
     pub const LID_CLOSED: u32 = 1 << 1;
-    /// Focused windowing is active. When clear, freeform windowing is active.
-    pub const FOCUSED_WINDOWING: u32 = 1 << 2;
-    /// A system-wide tablet-mode override is active.
-    pub const TABLET_MODE_OVERRIDE_ACTIVE: u32 = 1 << 3;
-    /// A system-wide windowing-mode override is active.
-    pub const WINDOWING_MODE_OVERRIDE_ACTIVE: u32 = 1 << 4;
-}
-
-/// System-wide window-management presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(u32)]
-pub enum WindowingMode {
-    /// Conventional independently positioned and sized windows.
-    #[default]
-    Freeform = 0,
-    /// Tablet-oriented focused windows, with explicit split/multitasking affordances.
-    Focused = 1,
-}
-
-impl WindowingMode {
-    /// Decode a stable wire value.
-    ///
-    /// # Arguments
-    ///
-    /// * `raw` - Numeric protocol value.
-    ///
-    /// # Returns
-    ///
-    /// The matching windowing mode, or `None` for an unknown value.
-    pub const fn from_raw(raw: u32) -> Option<Self> {
-        match raw {
-            0 => Some(Self::Freeform),
-            1 => Some(Self::Focused),
-            _ => None,
-        }
-    }
-
-    /// Return the stable wire value.
-    ///
-    /// # Returns
-    ///
-    /// The numeric protocol representation.
-    pub const fn as_raw(self) -> u32 {
-        self as u32
-    }
+    // Bits 2–4 are retired.
+    /// The physical `SW_TABLET_MODE` switch is on, independently of the output Experience.
+    pub const HARDWARE_TABLET_MODE: u32 = 1 << 5;
 }
 
 /// Input-device capabilities reported by the input environment.
@@ -462,10 +418,7 @@ pub mod client_msg {
     pub const GET_INPUT_ENVIRONMENT: u32 = 45;
     /// Set the visible window geometry inside the complete surface bounds.
     pub const SET_WINDOW_GEOMETRY: u32 = 46;
-    /// Set or clear the system-wide tablet-mode override.
-    pub const SET_TABLET_MODE_OVERRIDE: u32 = 47;
-    /// Set or clear the system-wide windowing-mode override.
-    pub const SET_WINDOWING_MODE_OVERRIDE: u32 = 48;
+    // Client request IDs 47 and 48 are retired.
     /// Create a window after applying compositor policy and client size constraints.
     pub const CREATE_WINDOW_CONFIGURED: u32 = 49;
 
@@ -1568,18 +1521,6 @@ pub enum ClientMessageRef<'a> {
 
     /// Query the current input environment snapshot.
     GetInputEnvironment {},
-
-    /// Set or clear the system-wide tablet-mode override.
-    SetTabletModeOverride {
-        /// `None` restores hardware-driven posture.
-        tablet_mode: Option<bool>,
-    },
-
-    /// Set or clear the system-wide windowing-mode override.
-    SetWindowingModeOverride {
-        /// `None` restores posture-derived windowing policy.
-        windowing_mode: Option<WindowingMode>,
-    },
 
     /// Claim the exclusive system-shell workspace-control role.
     RegisterSystemShell {
@@ -2839,30 +2780,6 @@ pub fn parse_client_message<'a>(
                 window_id: read_u32(payload, 0)?,
                 enabled: enabled != 0,
             })
-        }
-        client_msg::SET_TABLET_MODE_OVERRIDE => {
-            if payload.len() != 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let tablet_mode = match read_u32(payload, 0)? {
-                u32::MAX => None,
-                0 => Some(false),
-                1 => Some(true),
-                _ => return Err(ProtocolError::MalformedPayload),
-            };
-            Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode })
-        }
-        client_msg::SET_WINDOWING_MODE_OVERRIDE => {
-            if payload.len() != 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let raw = read_u32(payload, 0)?;
-            let windowing_mode = if raw == u32::MAX {
-                None
-            } else {
-                Some(WindowingMode::from_raw(raw).ok_or(ProtocolError::MalformedPayload)?)
-            };
-            Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode })
         }
         client_msg::REGISTER_SYSTEM_SHELL => {
             let full_app_menus = match payload {
@@ -5272,39 +5189,6 @@ pub fn payload_input_environment_changed(
     payload
 }
 
-/// Build payload for client->server `SET_TABLET_MODE_OVERRIDE`.
-///
-/// # Arguments
-///
-/// * `tablet_mode` - Forced posture, or `None` to resume hardware detection.
-///
-/// # Returns
-///
-/// A fixed-width override payload.
-pub fn payload_set_tablet_mode_override(tablet_mode: Option<bool>) -> [u8; 4] {
-    let raw = match tablet_mode {
-        None => u32::MAX,
-        Some(false) => 0,
-        Some(true) => 1,
-    };
-    raw.to_le_bytes()
-}
-
-/// Build payload for client->server `SET_WINDOWING_MODE_OVERRIDE`.
-///
-/// # Arguments
-///
-/// * `windowing_mode` - Forced policy, or `None` to resume posture-derived policy.
-///
-/// # Returns
-///
-/// A fixed-width override payload.
-pub fn payload_set_windowing_mode_override(windowing_mode: Option<WindowingMode>) -> [u8; 4] {
-    windowing_mode
-        .map_or(u32::MAX, WindowingMode::as_raw)
-        .to_le_bytes()
-}
-
 /// Build payload for client->server `SET_WINDOW_TYPE`.
 pub fn payload_set_window_type(window_id: u32, window_type: u32) -> [u8; 8] {
     let mut payload = [0u8; 8];
@@ -5963,8 +5847,8 @@ mod tests {
     use super::{
         CURSOR_THEME_PATH_MAX_BYTES, ClientMessageRef, CursorIcon, ExtensionDamageRect,
         InitialWindowConfiguration, InputEnvironment, MessageHeader, ProtocolError, ServerMessage,
-        WindowGeometry, WindowGeometryInsets, WindowPlacement, WindowSizeLimits, WindowingMode,
-        client_msg, encode_routed_frame, error_codes, input_environment_capability_flags,
+        WindowGeometry, WindowGeometryInsets, WindowPlacement, WindowSizeLimits, client_msg,
+        encode_routed_frame, error_codes, input_environment_capability_flags,
         input_environment_known_flags, input_environment_state_flags, parse_client_message,
         parse_extension_damage_rects, parse_server_message, payload_activation_token,
         payload_create_window_configured, payload_create_window_with_placement,
@@ -5976,8 +5860,7 @@ mod tests {
         payload_extension_shm_pool_state, payload_frame_done, payload_input_environment_changed,
         payload_pointer_lock_changed, payload_request_activation_token, payload_request_frame,
         payload_set_cursor_icon, payload_set_cursor_theme, payload_set_fullscreen,
-        payload_set_pointer_lock, payload_set_tablet_mode_override, payload_set_window_geometry,
-        payload_set_windowing_mode_override, payload_unset_fullscreen,
+        payload_set_pointer_lock, payload_set_window_geometry, payload_unset_fullscreen,
         payload_window_created_configured, payload_window_state_changed, server_msg,
         window_placement, window_state,
     };
@@ -6627,7 +6510,8 @@ mod tests {
         let environment = InputEnvironment {
             generation: 0x0102_0304,
             known_flags: input_environment_known_flags::TABLET_MODE
-                | input_environment_known_flags::LID_CLOSED,
+                | input_environment_known_flags::LID_CLOSED
+                | input_environment_known_flags::HARDWARE_TABLET_MODE,
             state_flags: input_environment_state_flags::TABLET_MODE,
             capability_flags: input_environment_capability_flags::DIRECT_TOUCH
                 | input_environment_capability_flags::KEYBOARD
@@ -6641,8 +6525,9 @@ mod tests {
         );
         assert_eq!(payload.len(), 16);
         assert_eq!(&payload[0..4], &environment.generation.to_le_bytes());
-        assert_eq!(&payload[4..8], &environment.known_flags.to_le_bytes());
-        assert_eq!(&payload[8..12], &environment.state_flags.to_le_bytes());
+        // All three states are known. The output uses Tablet on an unfolded device.
+        assert_eq!(&payload[4..8], &[0x23, 0, 0, 0]);
+        assert_eq!(&payload[8..12], &[0x01, 0, 0, 0]);
         assert_eq!(
             &payload[12..16],
             &environment.capability_flags.to_le_bytes()
@@ -6659,35 +6544,15 @@ mod tests {
     }
 
     #[test]
-    fn system_mode_override_requests_round_trip_and_reject_unknown_values() {
-        for tablet_mode in [None, Some(false), Some(true)] {
-            let payload = payload_set_tablet_mode_override(tablet_mode);
-            assert_eq!(
-                parse_client_message(client_msg::SET_TABLET_MODE_OVERRIDE, &payload),
-                Ok(ClientMessageRef::SetTabletModeOverride { tablet_mode })
-            );
+    fn retired_override_requests_are_unknown_for_all_former_settings() {
+        for request_id in [47, 48] {
+            for value in [0, 1, u32::MAX] {
+                assert_eq!(
+                    parse_client_message(request_id, &value.to_le_bytes()),
+                    Err(ProtocolError::UnknownMessageType),
+                );
+            }
         }
-
-        for windowing_mode in [
-            None,
-            Some(WindowingMode::Freeform),
-            Some(WindowingMode::Focused),
-        ] {
-            let payload = payload_set_windowing_mode_override(windowing_mode);
-            assert_eq!(
-                parse_client_message(client_msg::SET_WINDOWING_MODE_OVERRIDE, &payload),
-                Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode })
-            );
-        }
-
-        assert_eq!(
-            parse_client_message(client_msg::SET_TABLET_MODE_OVERRIDE, &2u32.to_le_bytes()),
-            Err(ProtocolError::MalformedPayload)
-        );
-        assert_eq!(
-            parse_client_message(client_msg::SET_WINDOWING_MODE_OVERRIDE, &2u32.to_le_bytes()),
-            Err(ProtocolError::MalformedPayload)
-        );
     }
 
     #[test]

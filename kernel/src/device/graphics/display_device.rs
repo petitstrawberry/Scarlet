@@ -973,7 +973,8 @@ impl DisplayCharDevice {
     }
 
     fn present_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
-        let (completion, legacy, region) = {
+        let connector = self.fb_resource.connector_index;
+        let (device, exact_backing, config, physical_addr, region) = {
             // Ownership acquisition and transfer form one nonpreemptible step.
             // The existing framebuffer snapshot is synchronous; the prepared
             // presentation wait happens only after this guard is released.
@@ -985,8 +986,14 @@ impl DisplayCharDevice {
             let graphics_device = device
                 .as_graphics_device()
                 .ok_or("Display source device is not graphics-capable")?;
-            let connector = self.fb_resource.connector_index;
-            let (config, physical_addr) = graphics_device.connector_framebuffer_info(connector)?;
+            let exact_backing = graphics_device.connector_mapping_device(connector)?;
+            let (config, physical_addr) = match &exact_backing {
+                Some(backing) => backing
+                    .as_graphics_device()
+                    .ok_or("Invalid display backing device")?
+                    .get_framebuffer_info()?,
+                None => graphics_device.connector_framebuffer_info(connector)?,
+            };
             if physical_addr == 0 {
                 return Err("Invalid display backing address");
             }
@@ -999,27 +1006,29 @@ impl DisplayCharDevice {
             );
             let completion = graphics_device.begin_connector_framebuffer_present(
                 connector,
-                config,
+                config.clone(),
                 physical_addr,
                 region,
-                PresentationOwners::new(Arc::clone(&device)),
+                PresentationOwners::new((Arc::clone(&device), exact_backing.clone())),
             )?;
             if let Some(completion) = completion {
-                drop(device);
-                (Some(completion), None, region)
-            } else {
-                (None, Some(device), region)
+                drop((device, exact_backing));
+                drop(_handoff);
+                return completion.wait();
             }
+            (device, exact_backing, config, physical_addr, region)
         };
-        if let Some(completion) = completion {
-            completion.wait()
-        } else {
-            let _transaction = crate::task::kernel_transaction()?;
-            legacy
-                .expect("legacy framebuffer presentation")
+        let _transaction = crate::task::kernel_transaction()?;
+        match exact_backing {
+            // Hotplug may have replaced the connector since the handoff.
+            Some(backing) => backing
+                .as_graphics_device()
+                .ok_or("Invalid display backing device")?
+                .present_framebuffer_region(&config, physical_addr, region),
+            None => device
                 .as_graphics_device()
                 .ok_or("Display source device is not graphics-capable")?
-                .present_connector_framebuffer_region(self.fb_resource.connector_index, region)
+                .present_connector_framebuffer_region(connector, region),
         }
     }
 }
@@ -1313,8 +1322,9 @@ mod tests {
         Device, DeviceType,
         graphics::{
             FramebufferConfig, GenericGraphicsDevice, GraphicsDevice, PixelFormat,
+            PresentationOwners, PresentationWait,
             manager::FramebufferResource,
-            output::{ConnectorInfo, ConnectorKind},
+            output::{ConnectorInfo, ConnectorKind, DisplayRegion},
         },
         manager::DeviceManager,
     };
@@ -1330,6 +1340,7 @@ mod tests {
     struct TestBrightnessGraphicsDevice {
         brightness: AtomicU8,
         backing: IrqRwSpinLock<Option<Arc<dyn Device>>>,
+        last_present: IrqRwSpinLock<Option<(FramebufferConfig, u64, DisplayRegion)>>,
     }
 
     impl TestBrightnessGraphicsDevice {
@@ -1337,6 +1348,7 @@ mod tests {
             Self {
                 brightness: AtomicU8::new(brightness),
                 backing: IrqRwSpinLock::new(None),
+                last_present: IrqRwSpinLock::new(None),
             }
         }
     }
@@ -1421,11 +1433,28 @@ mod tests {
 
         fn present_framebuffer_region(
             &self,
-            _config: &FramebufferConfig,
-            _physical_addr: u64,
-            _region: crate::device::graphics::output::DisplayRegion,
+            config: &FramebufferConfig,
+            physical_addr: u64,
+            region: DisplayRegion,
         ) -> Result<(), &'static str> {
+            *self.last_present.write() = Some((config.clone(), physical_addr, region));
             Ok(())
+        }
+
+        fn begin_connector_framebuffer_present(
+            &self,
+            connector: u32,
+            config: FramebufferConfig,
+            physical_addr: u64,
+            region: DisplayRegion,
+            owners: PresentationOwners,
+        ) -> Result<Option<alloc::boxed::Box<dyn PresentationWait>>, &'static str> {
+            if connector == 0 {
+                return self.begin_framebuffer_present(config, physical_addr, region, owners);
+            }
+            // Simulate unplugging the secondary after the snapshot, before fallback.
+            self.backing.write().take();
+            Ok(None)
         }
 
         fn init_graphics(&self) -> Result<(), &'static str> {
@@ -1489,6 +1518,29 @@ mod tests {
         assert!(first_weak.upgrade().is_some());
         drop(owner);
         assert!(first_weak.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn secondary_cpu_present_uses_snapshot_after_unplug() {
+        let manager = DeviceManager::new_for_test();
+        let source = Arc::new(TestBrightnessGraphicsDevice::new(42));
+        let backing = Arc::new(TestBrightnessGraphicsDevice::new(42));
+        *source.backing.write() = Some(backing.clone());
+        let id = manager.register_device_with_name("hotplug".to_string(), source.clone());
+        let resource = Arc::new(FramebufferResource::new_connector(id, "fb1".to_string(), 1));
+        let display = DisplayCharDevice::new_with_device_manager(resource, &manager);
+
+        display
+            .present_region(DisplayRegion::new(0, 0, 8, 8))
+            .unwrap();
+
+        assert!(source.backing.read().is_none());
+        assert!(source.last_present.read().is_none());
+        let (config, address, region) = backing.last_present.write().take().unwrap();
+        assert_eq!((config.width, config.height, config.stride), (1, 1, 4));
+        assert_eq!(config.format, PixelFormat::XRGB8888);
+        assert_eq!(address, 0x1000);
+        assert_eq!(region, DisplayRegion::new(0, 0, 1, 1));
     }
 
     #[test_case]
